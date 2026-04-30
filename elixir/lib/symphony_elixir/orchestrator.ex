@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Notifications.Telegram
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -345,6 +346,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
+    maybe_notify_human_review_transition(state, issue)
+
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
@@ -367,6 +370,22 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp maybe_notify_human_review_transition(%State{} = state, %Issue{id: issue_id, state: state_name} = issue)
+       when is_binary(issue_id) and is_binary(state_name) do
+    case Map.get(state.running, issue_id) do
+      %{issue: %Issue{state: previous_state}} ->
+        if normalize_issue_state(state_name) == "human review" and
+             normalize_issue_state(previous_state || "") != "human review" do
+          Telegram.notify_human_review(issue)
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp maybe_notify_human_review_transition(_state, _issue), do: :ok
 
   defp reconcile_missing_running_issue_ids(%State{} = state, requested_issue_ids, issues)
        when is_list(requested_issue_ids) and is_list(issues) do

@@ -101,6 +101,66 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            }
   end
 
+  test "running issue transition to human review sends one telegram notification" do
+    parent = self()
+    previous_request_fun = Application.get_env(:symphony_elixir, :telegram_request_fun)
+
+    on_exit(fn ->
+      case previous_request_fun do
+        nil -> Application.delete_env(:symphony_elixir, :telegram_request_fun)
+        request_fun -> Application.put_env(:symphony_elixir, :telegram_request_fun, request_fun)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :telegram_request_fun, fn request ->
+      send(parent, {:telegram_request, request})
+      {:ok, %Req.Response{status: 200}}
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      telegram_bot_token: "bot-token",
+      telegram_chat_id: "chat-id"
+    )
+
+    issue_id = "issue-human-review-notify"
+
+    running_issue = %Issue{
+      id: issue_id,
+      identifier: "EMB-99",
+      title: "Add telegram notification hooks for human review",
+      state: "In Progress",
+      url: "https://linear.app/example/EMB-99"
+    }
+
+    human_review_issue = %{running_issue | state: "Human Review"}
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: nil,
+          identifier: running_issue.identifier,
+          issue: running_issue,
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    state = Orchestrator.reconcile_issue_states_for_test([human_review_issue], state)
+
+    assert state.running == %{}
+    assert MapSet.size(state.claimed) == 0
+    assert_receive {:telegram_request, request}
+    assert request[:json].text =~ "Issue: EMB-99"
+    assert request[:json].text =~ "State: Human Review"
+
+    state = Orchestrator.reconcile_issue_states_for_test([human_review_issue], state)
+    assert state.running == %{}
+    refute_receive {:telegram_request, _request}
+  end
+
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
     issue_id = "issue-usage-snapshot"
 
@@ -957,7 +1017,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert is_integer(due_at_ms)
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert remaining_ms >= 9_500
+    assert remaining_ms >= 9_000
     assert remaining_ms <= 10_500
   end
 

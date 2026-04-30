@@ -119,6 +119,10 @@ defmodule SymphonyElixir.TestSupport do
           hook_after_run: nil,
           hook_before_remove: nil,
           hook_timeout_ms: 60_000,
+          telegram_endpoint: nil,
+          telegram_bot_token: nil,
+          telegram_chat_id: nil,
+          telegram_events: nil,
           observability_enabled: true,
           observability_refresh_ms: 1_000,
           observability_render_interval_ms: 16,
@@ -156,6 +160,10 @@ defmodule SymphonyElixir.TestSupport do
     hook_after_run = Keyword.get(config, :hook_after_run)
     hook_before_remove = Keyword.get(config, :hook_before_remove)
     hook_timeout_ms = Keyword.get(config, :hook_timeout_ms)
+    telegram_endpoint = Keyword.get(config, :telegram_endpoint)
+    telegram_bot_token = Keyword.get(config, :telegram_bot_token)
+    telegram_chat_id = Keyword.get(config, :telegram_chat_id)
+    telegram_events = Keyword.get(config, :telegram_events)
     observability_enabled = Keyword.get(config, :observability_enabled)
     observability_refresh_ms = Keyword.get(config, :observability_refresh_ms)
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
@@ -193,6 +201,7 @@ defmodule SymphonyElixir.TestSupport do
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
+        notifications_yaml(telegram_endpoint, telegram_bot_token, telegram_chat_id, telegram_events),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
         "---",
@@ -286,5 +295,20 @@ defmodule SymphonyElixir.TestSupport do
       |> Enum.map_join("\n", &("    " <> &1))
 
     "  #{name}: |\n#{indented}"
+  end
+
+  defp notifications_yaml(nil, nil, nil, nil), do: nil
+
+  defp notifications_yaml(endpoint, bot_token, chat_id, events) do
+    [
+      "notifications:",
+      "  telegram:",
+      endpoint && "    endpoint: #{yaml_value(endpoint)}",
+      bot_token && "    bot_token: #{yaml_value(bot_token)}",
+      chat_id && "    chat_id: #{yaml_value(chat_id)}",
+      events && "    events: #{yaml_value(events)}"
+    ]
+    |> Enum.reject(&(&1 in [nil, false]))
+    |> Enum.join("\n")
   end
 end

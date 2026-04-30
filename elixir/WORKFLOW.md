@@ -15,6 +15,12 @@ tracker:
     - Done
 polling:
   interval_ms: 5000
+notifications:
+  telegram:
+    bot_token: $TELEGRAM_BOT_TOKEN
+    chat_id: $TELEGRAM_CHAT_ID
+    events:
+      - human_review
 workspace:
   root: ~/code/symphony-workspaces
 hooks:

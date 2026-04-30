@@ -917,6 +917,45 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.command == "#{codex_bin} app-server"
   end
 
+  test "telegram notification config resolves env-backed secrets" do
+    bot_token_env_var = "SYMP_TELEGRAM_BOT_TOKEN_#{System.unique_integer([:positive])}"
+    chat_id_env_var = "SYMP_TELEGRAM_CHAT_ID_#{System.unique_integer([:positive])}"
+
+    previous_bot_token = System.get_env(bot_token_env_var)
+    previous_chat_id = System.get_env(chat_id_env_var)
+
+    System.put_env(bot_token_env_var, "bot-token")
+    System.put_env(chat_id_env_var, "chat-id")
+
+    on_exit(fn ->
+      restore_env(bot_token_env_var, previous_bot_token)
+      restore_env(chat_id_env_var, previous_chat_id)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      telegram_endpoint: "https://telegram.example.test/",
+      telegram_bot_token: "$#{bot_token_env_var}",
+      telegram_chat_id: "$#{chat_id_env_var}",
+      telegram_events: ["human_review"]
+    )
+
+    config = Config.settings!()
+    assert config.notifications.telegram.endpoint == "https://telegram.example.test"
+    assert config.notifications.telegram.bot_token == "bot-token"
+    assert config.notifications.telegram.chat_id == "chat-id"
+    assert config.notifications.telegram.events == ["human_review"]
+  end
+
+  test "blank telegram endpoint falls back to default endpoint" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      telegram_endpoint: "",
+      telegram_bot_token: "bot-token",
+      telegram_chat_id: "chat-id"
+    )
+
+    assert Config.settings!().notifications.telegram.endpoint == "https://api.telegram.org"
+  end
+
   test "config no longer resolves legacy env: references" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
     api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"
