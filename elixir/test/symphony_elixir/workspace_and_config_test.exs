@@ -89,6 +89,61 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "before_run hook receives issue metadata for reused workspaces" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-before-run-hook-env-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      counter = Path.join(test_root, "before_run.count")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "printf '%s\n' cloned > README.md",
+        hook_before_run: """
+        printf '%s\n' "$SYMPHONY_ISSUE_IDENTIFIER" > before_run_issue_identifier.txt
+        printf '%s\n' "$SYMPHONY_ISSUE_REPOSITORY" > before_run_repository.txt
+        printf '%s\n' "$SYMPHONY_ISSUE_REPOSITORY_SOURCE" > before_run_repository_source.txt
+        printf '%s\n' "$SYMPHONY_EXPECTED_BRANCH" > before_run_expected_branch.txt
+        printf 'call\n' >> "#{counter}"
+        """
+      )
+
+      issue = %Issue{
+        id: "issue-before-run-env",
+        identifier: "EMB-93",
+        title: "Implement Symphony multi-agent handoff flow",
+        state: "Agent Review",
+        repository_source: "linear_label",
+        custom_fields: %{"Repository" => "EmberAGI/scaling-octo-engine"}
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert :ok = Workspace.run_before_run_hook(workspace, issue)
+
+      File.write!(Path.join(workspace, "local-progress.txt"), "review notes\n")
+
+      assert {:ok, ^workspace} = Workspace.create_for_issue(issue)
+      assert :ok = Workspace.run_before_run_hook(workspace, issue)
+
+      assert File.read!(Path.join(workspace, "README.md")) == "cloned\n"
+      assert File.read!(Path.join(workspace, "local-progress.txt")) == "review notes\n"
+      assert File.read!(Path.join(workspace, "before_run_issue_identifier.txt")) == "EMB-93\n"
+      assert File.read!(Path.join(workspace, "before_run_repository.txt")) == "EmberAGI/scaling-octo-engine\n"
+      assert File.read!(Path.join(workspace, "before_run_repository_source.txt")) == "linear_label\n"
+
+      assert File.read!(Path.join(workspace, "before_run_expected_branch.txt")) ==
+               "agent/emb-93-implement-symphony-multi-agent-handoff-flow\n"
+
+      assert length(String.split(String.trim(File.read!(counter)), "\n")) == 2
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace path is deterministic per issue identifier" do
     workspace_root =
       Path.join(
