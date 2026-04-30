@@ -53,6 +53,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         workspace_root: workspace_root,
         hook_after_create: """
         printf '%s\n' "$SYMPHONY_ISSUE_IDENTIFIER" > issue_identifier.txt
+        printf '%s\n' "$SYMPHONY_ISSUE_REPOSITORY" > repository_shortcut.txt
         printf '%s\n' "$SYMPHONY_ISSUE_CUSTOM_FIELD_REPOSITORY" > repository.txt
         printf '%s\n' "$SYMPHONY_EXPECTED_BRANCH" > expected_branch.txt
         printf '%s\n' "$SYMPHONY_ISSUE_CUSTOM_FIELDS_JSON" > custom_fields.json
@@ -64,13 +65,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         identifier: "EMB-93",
         title: "Implement Symphony multi-agent handoff flow",
         state: "Todo",
-        branch_name: nil,
+        branch_name: "sebastianvarela/emb-93-linear-generated-branch",
         url: "https://linear.app/example/EMB-93",
         custom_fields: %{"Repository" => "EmberAGI/scaling-octo-engine"}
       }
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       assert File.read!(Path.join(workspace, "issue_identifier.txt")) == "EMB-93\n"
+      assert File.read!(Path.join(workspace, "repository_shortcut.txt")) == "EmberAGI/scaling-octo-engine\n"
       assert File.read!(Path.join(workspace, "repository.txt")) == "EmberAGI/scaling-octo-engine\n"
 
       assert File.read!(Path.join(workspace, "expected_branch.txt")) ==
@@ -471,17 +473,21 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
 
     graphql_fun = fn query, variables ->
-      send(self(), {:fetch_issue_states_page, query, variables})
+      if query =~ "SymphonyLinearIssueCustomFieldSupport" do
+        {:ok, %{"data" => %{"__type" => %{"fields" => [%{"name" => "customFieldValues"}]}}}}
+      else
+        send(self(), {:fetch_issue_states_page, query, variables})
 
-      body = %{
-        "data" => %{
-          "issues" => %{
-            "nodes" => Enum.map(variables.ids, raw_issue)
+        body = %{
+          "data" => %{
+            "issues" => %{
+              "nodes" => Enum.map(variables.ids, raw_issue)
+            }
           }
         }
-      }
 
-      {:ok, body}
+        {:ok, body}
+      end
     end
 
     assert {:ok, issues} = Client.fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun)
@@ -494,6 +500,42 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert query =~ "customField"
 
     assert_receive {:fetch_issue_states_page, ^query, %{ids: ^second_batch_ids, first: 5, relationFirst: 50}}
+  end
+
+  test "linear client omits custom field values when current schema does not expose them" do
+    issue_ids = ["issue-1"]
+
+    graphql_fun = fn query, variables ->
+      if query =~ "SymphonyLinearIssueCustomFieldSupport" do
+        {:ok, %{"data" => %{"__type" => %{"fields" => [%{"name" => "id"}, %{"name" => "title"}]}}}}
+      else
+        send(self(), {:fetch_issue_states_without_custom_fields, query, variables})
+
+        {:ok,
+         %{
+           "data" => %{
+             "issues" => %{
+               "nodes" => [
+                 %{
+                   "id" => "issue-1",
+                   "identifier" => "MT-1",
+                   "title" => "Issue 1",
+                   "state" => %{"name" => "Todo"},
+                   "labels" => %{"nodes" => []},
+                   "inverseRelations" => %{"nodes" => []}
+                 }
+               ]
+             }
+           }
+         }}
+      end
+    end
+
+    assert {:ok, [%Issue{identifier: "MT-1"}]} = Client.fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun)
+
+    assert_receive {:fetch_issue_states_without_custom_fields, query, %{ids: ^issue_ids}}
+    assert query =~ "SymphonyLinearIssuesById"
+    refute query =~ "customFieldValues"
   end
 
   test "linear client logs response bodies for non-200 graphql responses" do

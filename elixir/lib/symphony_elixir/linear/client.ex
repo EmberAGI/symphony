@@ -9,6 +9,16 @@ defmodule SymphonyElixir.Linear.Client do
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
 
+  @issue_custom_field_values_supported_query """
+  query SymphonyLinearIssueCustomFieldSupport {
+    __type(name: "Issue") {
+      fields {
+        name
+      }
+    }
+  }
+  """
+
   @query """
   query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
     issues(filter: {project: {slugId: {eq: $projectSlug}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
@@ -31,14 +41,7 @@ defmodule SymphonyElixir.Linear.Client do
             name
           }
         }
-        customFieldValues {
-          nodes {
-            value
-            customField {
-              name
-            }
-          }
-        }
+        __CUSTOM_FIELD_VALUES__
         inverseRelations(first: $relationFirst) {
           nodes {
             type
@@ -84,14 +87,7 @@ defmodule SymphonyElixir.Linear.Client do
             name
           }
         }
-        customFieldValues {
-          nodes {
-            value
-            customField {
-              name
-            }
-          }
-        }
+        __CUSTOM_FIELD_VALUES__
         inverseRelations(first: $relationFirst) {
           nodes {
             type
@@ -109,6 +105,17 @@ defmodule SymphonyElixir.Linear.Client do
       }
     }
   }
+  """
+
+  @custom_field_values_selection """
+        customFieldValues {
+          nodes {
+            value
+            customField {
+              name
+            }
+          }
+        }
   """
 
   @viewer_query """
@@ -253,12 +260,13 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp do_fetch_by_states(project_slug, state_names, assignee_filter) do
-    do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [])
+    query = linear_poll_query(&graphql/2)
+    do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [], query)
   end
 
-  defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, after_cursor, acc_issues) do
+  defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, after_cursor, acc_issues, query) do
     with {:ok, body} <-
-           graphql(@query, %{
+           graphql(query, %{
              projectSlug: project_slug,
              stateNames: state_names,
              first: @issue_page_size,
@@ -270,7 +278,7 @@ defmodule SymphonyElixir.Linear.Client do
 
       case next_page_cursor(page_info) do
         {:ok, next_cursor} ->
-          do_fetch_by_states_page(project_slug, state_names, assignee_filter, next_cursor, updated_acc)
+          do_fetch_by_states_page(project_slug, state_names, assignee_filter, next_cursor, updated_acc, query)
 
         :done ->
           {:ok, finalize_paginated_issues(updated_acc)}
@@ -294,20 +302,21 @@ defmodule SymphonyElixir.Linear.Client do
   defp do_fetch_issue_states(ids, assignee_filter, graphql_fun)
        when is_list(ids) and is_function(graphql_fun, 2) do
     issue_order_index = issue_order_index(ids)
-    do_fetch_issue_states_page(ids, assignee_filter, graphql_fun, [], issue_order_index)
+    query = linear_issues_by_id_query(graphql_fun)
+    do_fetch_issue_states_page(ids, assignee_filter, graphql_fun, [], issue_order_index, query)
   end
 
-  defp do_fetch_issue_states_page([], _assignee_filter, _graphql_fun, acc_issues, issue_order_index) do
+  defp do_fetch_issue_states_page([], _assignee_filter, _graphql_fun, acc_issues, issue_order_index, _query) do
     acc_issues
     |> finalize_paginated_issues()
     |> sort_issues_by_requested_ids(issue_order_index)
     |> then(&{:ok, &1})
   end
 
-  defp do_fetch_issue_states_page(ids, assignee_filter, graphql_fun, acc_issues, issue_order_index) do
+  defp do_fetch_issue_states_page(ids, assignee_filter, graphql_fun, acc_issues, issue_order_index, query) do
     {batch_ids, rest_ids} = Enum.split(ids, @issue_page_size)
 
-    case graphql_fun.(@query_by_ids, %{
+    case graphql_fun.(query, %{
            ids: batch_ids,
            first: length(batch_ids),
            relationFirst: @issue_page_size
@@ -315,7 +324,7 @@ defmodule SymphonyElixir.Linear.Client do
       {:ok, body} ->
         with {:ok, issues} <- decode_linear_response(body, assignee_filter) do
           updated_acc = prepend_page_issues(issues, acc_issues)
-          do_fetch_issue_states_page(rest_ids, assignee_filter, graphql_fun, updated_acc, issue_order_index)
+          do_fetch_issue_states_page(rest_ids, assignee_filter, graphql_fun, updated_acc, issue_order_index, query)
         end
 
       {:error, reason} ->
@@ -337,6 +346,33 @@ defmodule SymphonyElixir.Linear.Client do
       %Issue{id: issue_id} -> Map.get(issue_order_index, issue_id, fallback_index)
       _ -> fallback_index
     end)
+  end
+
+  defp linear_poll_query(graphql_fun), do: query_with_optional_custom_field_values(@query, graphql_fun)
+
+  defp linear_issues_by_id_query(graphql_fun), do: query_with_optional_custom_field_values(@query_by_ids, graphql_fun)
+
+  defp query_with_optional_custom_field_values(query, graphql_fun) do
+    selection =
+      case issue_custom_field_values_supported?(graphql_fun) do
+        true -> @custom_field_values_selection
+        false -> ""
+      end
+
+    String.replace(query, "__CUSTOM_FIELD_VALUES__", selection)
+  end
+
+  defp issue_custom_field_values_supported?(graphql_fun) when is_function(graphql_fun, 2) do
+    case graphql_fun.(@issue_custom_field_values_supported_query, %{}) do
+      {:ok, %{"data" => %{"__type" => %{"fields" => fields}}}} when is_list(fields) ->
+        Enum.any?(fields, fn
+          %{"name" => "customFieldValues"} -> true
+          _ -> false
+        end)
+
+      _ ->
+        false
+    end
   end
 
   defp build_graphql_payload(query, variables, operation_name) do

@@ -481,7 +481,7 @@ defmodule SymphonyElixir.Workspace do
       issue_branch_name: branch_name,
       issue_url: Map.get(issue, :url) || Map.get(issue, "url"),
       custom_fields: custom_fields,
-      expected_branch: branch_name || expected_branch_name(identifier, title)
+      expected_branch: expected_branch_name(identifier, title)
     }
   end
 
@@ -531,8 +531,15 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp custom_field_env(custom_fields) when is_map(custom_fields) do
-    Enum.map(custom_fields, fn {key, value} ->
-      {"SYMPHONY_ISSUE_CUSTOM_FIELD_#{env_key(key)}", value}
+    custom_fields
+    |> Enum.flat_map(fn {key, value} ->
+      field_key = env_key(key)
+      field_env = {"SYMPHONY_ISSUE_CUSTOM_FIELD_#{field_key}", value}
+
+      case field_key do
+        "REPOSITORY" -> [field_env, {"SYMPHONY_ISSUE_REPOSITORY", value}]
+        _ -> [field_env]
+      end
     end)
   end
 
