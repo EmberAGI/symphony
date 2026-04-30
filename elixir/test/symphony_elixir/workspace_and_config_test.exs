@@ -928,7 +928,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     System.put_env(bot_token_env_var, "bot-token")
     System.put_env(chat_id_env_var, "chat-id")
-    System.put_env(thread_id_env_var, "1")
+    System.put_env(thread_id_env_var, "42")
 
     on_exit(fn ->
       restore_env(bot_token_env_var, previous_bot_token)
@@ -948,7 +948,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.notifications.telegram.endpoint == "https://telegram.example.test"
     assert config.notifications.telegram.bot_token == "bot-token"
     assert config.notifications.telegram.chat_id == "chat-id"
-    assert config.notifications.telegram.message_thread_id == "1"
+    assert config.notifications.telegram.message_thread_id == "42"
     assert config.notifications.telegram.events == ["human_review", "agent_failed"]
   end
 

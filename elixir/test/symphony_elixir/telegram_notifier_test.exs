@@ -93,7 +93,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
       telegram_endpoint: "https://telegram.example.test",
       telegram_bot_token: "bot-token",
       telegram_chat_id: "chat-id",
-      telegram_message_thread_id: "1"
+      telegram_message_thread_id: "42"
     )
 
     issue = %Issue{
@@ -114,7 +114,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
     assert_receive {:telegram_request, request}
     assert request[:url] == "https://telegram.example.test/botbot-token/sendMessage"
     assert request[:json].chat_id == "chat-id"
-    assert request[:json].message_thread_id == 1
+    assert request[:json].message_thread_id == 42
     assert request[:json].disable_web_page_preview == true
 
     assert request[:json].text =~ "Issue: EMB-99"
@@ -156,7 +156,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
       telegram_endpoint: "https://telegram.example.test",
       telegram_bot_token: "bot-token",
       telegram_chat_id: "chat-id",
-      telegram_message_thread_id: "1",
+      telegram_message_thread_id: "42",
       telegram_events: ["human_review", "agent_failed"]
     )
 
@@ -177,7 +177,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
 
     assert_receive {:telegram_request, request}
     assert request[:json].chat_id == "chat-id"
-    assert request[:json].message_thread_id == 1
+    assert request[:json].message_thread_id == 42
     assert request[:json].text =~ "Symphony agent failed"
     assert request[:json].text =~ "Issue: EMB-99"
     assert request[:json].text =~ "Title: Add telegram notification hooks for human review"
@@ -193,6 +193,34 @@ defmodule SymphonyElixir.TelegramNotifierTest do
       telegram_bot_token: "bot-token",
       telegram_chat_id: "chat-id",
       telegram_message_thread_id: "not-a-thread"
+    )
+
+    issue = %Issue{
+      identifier: "EMB-99",
+      title: "Add telegram notification hooks for human review",
+      state: "Human Review",
+      url: "https://linear.app/example/EMB-99"
+    }
+
+    assert :ok =
+             Telegram.notify_human_review(issue,
+               request_fun: fn request ->
+                 send(parent, {:telegram_request, request})
+                 {:ok, %Req.Response{status: 200}}
+               end
+             )
+
+    assert_receive {:telegram_request, request}
+    refute Map.has_key?(request[:json], :message_thread_id)
+  end
+
+  test "general telegram topic id is omitted" do
+    parent = self()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      telegram_bot_token: "bot-token",
+      telegram_chat_id: "chat-id",
+      telegram_message_thread_id: "1"
     )
 
     issue = %Issue{

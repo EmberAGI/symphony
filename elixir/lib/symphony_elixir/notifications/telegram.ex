@@ -96,7 +96,7 @@ defmodule SymphonyElixir.Notifications.Telegram do
 
   defp maybe_put_message_thread_id(json, message_thread_id) when is_binary(message_thread_id) do
     case Integer.parse(String.trim(message_thread_id)) do
-      {thread_id, ""} when thread_id > 0 -> Map.put(json, :message_thread_id, thread_id)
+      {thread_id, ""} when thread_id > 1 -> Map.put(json, :message_thread_id, thread_id)
       _ -> json
     end
   end
