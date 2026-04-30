@@ -16,7 +16,7 @@ defmodule SymphonyElixir.Workspace do
     issue_context = issue_context(issue_or_identifier)
 
     try do
-      safe_id = safe_identifier(issue_context.issue_identifier)
+      safe_id = safe_workspace_identifier(issue_context)
 
       with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
            :ok <- validate_workspace_path(workspace, worker_host),
@@ -131,8 +131,11 @@ defmodule SymphonyElixir.Workspace do
   def remove_issue_workspaces(identifier), do: remove_issue_workspaces(identifier, nil)
 
   @spec remove_issue_workspaces(term(), worker_host()) :: :ok
-  def remove_issue_workspaces(identifier, worker_host) when is_binary(identifier) and is_binary(worker_host) do
-    safe_id = safe_identifier(identifier)
+  def remove_issue_workspaces(%{} = issue_or_identifier, worker_host) when is_binary(worker_host) do
+    safe_id =
+      issue_or_identifier
+      |> issue_context()
+      |> safe_workspace_identifier()
 
     case workspace_path_for_issue(safe_id, worker_host) do
       {:ok, workspace} -> remove(workspace, worker_host)
@@ -142,8 +145,24 @@ defmodule SymphonyElixir.Workspace do
     :ok
   end
 
-  def remove_issue_workspaces(identifier, nil) when is_binary(identifier) do
-    safe_id = safe_identifier(identifier)
+  def remove_issue_workspaces(issue_or_identifier, worker_host)
+      when is_binary(issue_or_identifier) and is_binary(worker_host) do
+    safe_id =
+      issue_or_identifier
+      |> issue_context()
+      |> safe_workspace_identifier()
+
+    case workspace_path_for_issue(safe_id, worker_host) do
+      {:ok, workspace} -> remove(workspace, worker_host)
+      {:error, _reason} -> :ok
+    end
+
+    :ok
+  end
+
+  def remove_issue_workspaces(%{} = issue_or_identifier, nil) do
+    issue_context = issue_context(issue_or_identifier)
+    safe_id = safe_workspace_identifier(issue_context)
 
     case Config.settings!().worker.ssh_hosts do
       [] ->
@@ -153,7 +172,25 @@ defmodule SymphonyElixir.Workspace do
         end
 
       worker_hosts ->
-        Enum.each(worker_hosts, &remove_issue_workspaces(identifier, &1))
+        Enum.each(worker_hosts, &remove_issue_workspaces(issue_or_identifier, &1))
+    end
+
+    :ok
+  end
+
+  def remove_issue_workspaces(issue_or_identifier, nil) when is_binary(issue_or_identifier) do
+    issue_context = issue_context(issue_or_identifier)
+    safe_id = safe_workspace_identifier(issue_context)
+
+    case Config.settings!().worker.ssh_hosts do
+      [] ->
+        case workspace_path_for_issue(safe_id, nil) do
+          {:ok, workspace} -> remove(workspace, nil)
+          {:error, _reason} -> :ok
+        end
+
+      worker_hosts ->
+        Enum.each(worker_hosts, &remove_issue_workspaces(issue_or_identifier, &1))
     end
 
     :ok
@@ -206,6 +243,28 @@ defmodule SymphonyElixir.Workspace do
   defp safe_identifier(identifier) do
     String.replace(identifier || "issue", ~r/[^a-zA-Z0-9._-]/, "_")
   end
+
+  defp safe_workspace_identifier(issue_context) do
+    issue_id = safe_identifier(issue_context.issue_identifier)
+
+    case repository_workspace_suffix(issue_context) do
+      nil -> issue_id
+      suffix -> "#{issue_id}-#{suffix}"
+    end
+  end
+
+  defp repository_workspace_suffix(%{custom_fields: %{"Repository" => repository}})
+       when is_binary(repository) do
+    repository
+    |> String.split("/", parts: 2)
+    |> List.last()
+    |> case do
+      "" -> nil
+      value -> safe_identifier(value)
+    end
+  end
+
+  defp repository_workspace_suffix(_issue_context), do: nil
 
   defp maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
     hooks = Config.settings!().hooks
@@ -298,7 +357,11 @@ defmodule SymphonyElixir.Workspace do
 
     task =
       Task.async(fn ->
-        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
+        System.cmd("sh", ["-lc", command],
+          cd: workspace,
+          stderr_to_stdout: true,
+          env: hook_env(issue_context)
+        )
       end)
 
     case Task.yield(task, timeout_ms) do
@@ -319,7 +382,15 @@ defmodule SymphonyElixir.Workspace do
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host}")
 
-    case run_remote_command(worker_host, "cd #{shell_escape(workspace)} && #{command}", timeout_ms) do
+    script =
+      [
+        hook_env_exports(issue_context),
+        "cd #{shell_escape(workspace)}",
+        command
+      ]
+      |> Enum.join("\n")
+
+    case run_remote_command(worker_host, script, timeout_ms) do
       {:ok, cmd_result} ->
         handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
 
@@ -456,26 +527,129 @@ defmodule SymphonyElixir.Workspace do
   defp worker_host_for_log(nil), do: "local"
   defp worker_host_for_log(worker_host), do: worker_host
 
-  defp issue_context(%{id: issue_id, identifier: identifier}) do
+  defp issue_context(%{id: issue_id, identifier: identifier} = issue) do
+    custom_fields = Map.get(issue, :custom_fields) || Map.get(issue, "custom_fields") || %{}
+    title = Map.get(issue, :title) || Map.get(issue, "title")
+    branch_name = Map.get(issue, :branch_name) || Map.get(issue, "branch_name") || Map.get(issue, "branchName")
+
     %{
       issue_id: issue_id,
-      issue_identifier: identifier || "issue"
+      issue_identifier: identifier || "issue",
+      issue_title: title,
+      issue_state: Map.get(issue, :state) || Map.get(issue, "state"),
+      issue_branch_name: branch_name,
+      issue_url: Map.get(issue, :url) || Map.get(issue, "url"),
+      custom_fields: custom_fields,
+      repository_source: Map.get(issue, :repository_source) || Map.get(issue, "repository_source"),
+      expected_branch: expected_branch_name(identifier, title)
     }
   end
 
   defp issue_context(identifier) when is_binary(identifier) do
     %{
       issue_id: nil,
-      issue_identifier: identifier
+      issue_identifier: identifier,
+      issue_title: nil,
+      issue_state: nil,
+      issue_branch_name: nil,
+      issue_url: nil,
+      custom_fields: %{},
+      repository_source: nil,
+      expected_branch: expected_branch_name(identifier, nil)
     }
   end
 
   defp issue_context(_identifier) do
     %{
       issue_id: nil,
-      issue_identifier: "issue"
+      issue_identifier: "issue",
+      issue_title: nil,
+      issue_state: nil,
+      issue_branch_name: nil,
+      issue_url: nil,
+      custom_fields: %{},
+      repository_source: nil,
+      expected_branch: expected_branch_name("issue", nil)
     }
   end
+
+  defp hook_env(issue_context) do
+    base_env = [
+      {"SYMPHONY_ISSUE_ID", issue_context.issue_id},
+      {"SYMPHONY_ISSUE_IDENTIFIER", issue_context.issue_identifier},
+      {"SYMPHONY_ISSUE_TITLE", Map.get(issue_context, :issue_title)},
+      {"SYMPHONY_ISSUE_STATE", Map.get(issue_context, :issue_state)},
+      {"SYMPHONY_ISSUE_BRANCH_NAME", Map.get(issue_context, :issue_branch_name)},
+      {"SYMPHONY_ISSUE_URL", Map.get(issue_context, :issue_url)},
+      {"SYMPHONY_ISSUE_REPOSITORY_SOURCE", Map.get(issue_context, :repository_source)},
+      {"SYMPHONY_EXPECTED_BRANCH", Map.get(issue_context, :expected_branch)},
+      {"SYMPHONY_ISSUE_CUSTOM_FIELDS_JSON", Jason.encode!(Map.get(issue_context, :custom_fields, %{}))}
+    ]
+
+    Map.get(issue_context, :custom_fields, %{})
+    |> custom_field_env()
+    |> Enum.concat(base_env)
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Enum.map(fn {key, value} -> {key, env_value(value)} end)
+  end
+
+  defp custom_field_env(custom_fields) when is_map(custom_fields) do
+    custom_fields
+    |> Enum.flat_map(fn {key, value} ->
+      field_key = env_key(key)
+      field_env = {"SYMPHONY_ISSUE_CUSTOM_FIELD_#{field_key}", value}
+
+      case field_key do
+        "REPOSITORY" -> [field_env, {"SYMPHONY_ISSUE_REPOSITORY", value}]
+        _ -> [field_env]
+      end
+    end)
+  end
+
+  defp custom_field_env(_custom_fields), do: []
+
+  defp hook_env_exports(issue_context) do
+    issue_context
+    |> hook_env()
+    |> Enum.map(fn {key, value} -> "export #{key}=#{shell_escape(value)}" end)
+    |> Enum.join("\n")
+  end
+
+  defp expected_branch_name(identifier, title) do
+    issue_slug =
+      identifier
+      |> to_string()
+      |> String.downcase()
+      |> slugify()
+
+    title_slug = slugify(title || "")
+
+    case title_slug do
+      "" -> "agent/#{issue_slug}"
+      slug -> "agent/#{issue_slug}-#{slug}"
+    end
+  end
+
+  defp slugify(value) do
+    value
+    |> to_string()
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9]+/, "-")
+    |> String.trim("-")
+  end
+
+  defp env_key(value) do
+    value
+    |> to_string()
+    |> String.upcase()
+    |> String.replace(~r/[^A-Z0-9]+/, "_")
+    |> String.trim("_")
+  end
+
+  defp env_value(value) when is_binary(value), do: value
+  defp env_value(value) when is_atom(value), do: Atom.to_string(value)
+  defp env_value(value) when is_integer(value) or is_float(value) or is_boolean(value), do: to_string(value)
+  defp env_value(value), do: Jason.encode!(value)
 
   defp issue_log_context(%{issue_id: issue_id, issue_identifier: issue_identifier}) do
     "issue_id=#{issue_id || "n/a"} issue_identifier=#{issue_identifier || "issue"}"

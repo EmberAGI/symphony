@@ -4,6 +4,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Linear.Issue
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -40,6 +41,110 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "after_create hook receives issue metadata environment" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-hook-env-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: """
+        printf '%s\n' "$SYMPHONY_ISSUE_IDENTIFIER" > issue_identifier.txt
+        printf '%s\n' "$SYMPHONY_ISSUE_REPOSITORY" > repository_shortcut.txt
+        printf '%s\n' "$SYMPHONY_ISSUE_CUSTOM_FIELD_REPOSITORY" > repository.txt
+        printf '%s\n' "$SYMPHONY_ISSUE_REPOSITORY_SOURCE" > repository_source.txt
+        printf '%s\n' "$SYMPHONY_EXPECTED_BRANCH" > expected_branch.txt
+        printf '%s\n' "$SYMPHONY_ISSUE_CUSTOM_FIELDS_JSON" > custom_fields.json
+        """
+      )
+
+      issue = %Issue{
+        id: "issue-hook-env",
+        identifier: "EMB-93",
+        title: "Implement Symphony multi-agent handoff flow",
+        state: "Todo",
+        branch_name: "sebastianvarela/emb-93-linear-generated-branch",
+        url: "https://linear.app/example/EMB-93",
+        repository_source: "linear_custom_field",
+        custom_fields: %{"Repository" => "EmberAGI/scaling-octo-engine"}
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert Path.basename(workspace) == "EMB-93-scaling-octo-engine"
+      assert File.read!(Path.join(workspace, "issue_identifier.txt")) == "EMB-93\n"
+      assert File.read!(Path.join(workspace, "repository_shortcut.txt")) == "EmberAGI/scaling-octo-engine\n"
+      assert File.read!(Path.join(workspace, "repository.txt")) == "EmberAGI/scaling-octo-engine\n"
+      assert File.read!(Path.join(workspace, "repository_source.txt")) == "linear_custom_field\n"
+
+      assert File.read!(Path.join(workspace, "expected_branch.txt")) ==
+               "agent/emb-93-implement-symphony-multi-agent-handoff-flow\n"
+
+      assert Jason.decode!(File.read!(Path.join(workspace, "custom_fields.json"))) == %{
+               "Repository" => "EmberAGI/scaling-octo-engine"
+             }
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "before_run hook receives issue metadata for reused workspaces" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-before-run-hook-env-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      counter = Path.join(test_root, "before_run.count")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "printf '%s\n' cloned > README.md",
+        hook_before_run: """
+        printf '%s\n' "$SYMPHONY_ISSUE_IDENTIFIER" > before_run_issue_identifier.txt
+        printf '%s\n' "$SYMPHONY_ISSUE_REPOSITORY" > before_run_repository.txt
+        printf '%s\n' "$SYMPHONY_ISSUE_REPOSITORY_SOURCE" > before_run_repository_source.txt
+        printf '%s\n' "$SYMPHONY_EXPECTED_BRANCH" > before_run_expected_branch.txt
+        printf 'call\n' >> "#{counter}"
+        """
+      )
+
+      issue = %Issue{
+        id: "issue-before-run-env",
+        identifier: "EMB-93",
+        title: "Implement Symphony multi-agent handoff flow",
+        state: "Agent Review",
+        repository_source: "linear_label",
+        custom_fields: %{"Repository" => "EmberAGI/scaling-octo-engine"}
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert :ok = Workspace.run_before_run_hook(workspace, issue)
+
+      File.write!(Path.join(workspace, "local-progress.txt"), "review notes\n")
+
+      assert {:ok, ^workspace} = Workspace.create_for_issue(issue)
+      assert :ok = Workspace.run_before_run_hook(workspace, issue)
+
+      assert File.read!(Path.join(workspace, "README.md")) == "cloned\n"
+      assert File.read!(Path.join(workspace, "local-progress.txt")) == "review notes\n"
+      assert File.read!(Path.join(workspace, "before_run_issue_identifier.txt")) == "EMB-93\n"
+      assert File.read!(Path.join(workspace, "before_run_repository.txt")) == "EmberAGI/scaling-octo-engine\n"
+      assert File.read!(Path.join(workspace, "before_run_repository_source.txt")) == "linear_label\n"
+
+      assert File.read!(Path.join(workspace, "before_run_expected_branch.txt")) ==
+               "agent/emb-93-implement-symphony-multi-agent-handoff-flow\n"
+
+      assert length(String.split(String.trim(File.read!(counter)), "\n")) == 2
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace path is deterministic per issue identifier" do
     workspace_root =
       Path.join(
@@ -54,6 +159,33 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert first_workspace == second_workspace
     assert Path.basename(first_workspace) == "MT_Det"
+  end
+
+  test "workspace path is deterministic per issue repository metadata" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-repository-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-repository-workspace",
+        identifier: "EMB-93",
+        title: "Repository-scoped workspace",
+        custom_fields: %{"Repository" => "EmberAGI/scaling-octo-engine"}
+      }
+
+      assert {:ok, first_workspace} = Workspace.create_for_issue(issue)
+      assert {:ok, second_workspace} = Workspace.create_for_issue(issue)
+
+      assert first_workspace == second_workspace
+      assert Path.basename(first_workspace) == "EMB-93-scaling-octo-engine"
+    after
+      File.rm_rf(workspace_root)
+    end
   end
 
   test "workspace reuses existing issue directory without deleting local changes" do
@@ -279,6 +411,38 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace cleanup uses repository-scoped issue directory" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-repository-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      target_workspace = Path.join(workspace_root, "EMB-93-scaling-octo-engine")
+      legacy_workspace = Path.join(workspace_root, "EMB-93")
+
+      File.mkdir_p!(target_workspace)
+      File.mkdir_p!(legacy_workspace)
+      File.write!(Path.join(target_workspace, "marker.txt"), "stale")
+      File.write!(Path.join(legacy_workspace, "marker.txt"), "legacy")
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-repository-cleanup",
+        identifier: "EMB-93",
+        custom_fields: %{"Repository" => "EmberAGI/scaling-octo-engine"}
+      }
+
+      assert :ok = Workspace.remove_issue_workspaces(issue)
+      refute File.exists?(target_workspace)
+      assert File.exists?(legacy_workspace)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace cleanup handles missing workspace root" do
     missing_root =
       Path.join(
@@ -371,6 +535,27 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute issue.assigned_to_worker
   end
 
+  test "linear client normalizes custom field values from fetched issue payloads" do
+    raw_issue = %{
+      "id" => "issue-93",
+      "identifier" => "EMB-93",
+      "title" => "Bootstrap from repository field",
+      "state" => %{"name" => "Todo"},
+      "customFieldValues" => %{
+        "nodes" => [
+          %{
+            "value" => "EmberAGI/scaling-octo-engine",
+            "customField" => %{"name" => "Repository"}
+          }
+        ]
+      }
+    }
+
+    issue = Client.normalize_issue_for_test(raw_issue)
+
+    assert issue.custom_fields == %{"Repository" => "EmberAGI/scaling-octo-engine"}
+  end
+
   test "linear client pagination merge helper preserves issue ordering" do
     issue_page_1 = [
       %Issue{id: "issue-1", identifier: "MT-1"},
@@ -406,17 +591,21 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
 
     graphql_fun = fn query, variables ->
-      send(self(), {:fetch_issue_states_page, query, variables})
+      if query =~ "SymphonyLinearIssueCustomFieldSupport" do
+        {:ok, %{"data" => %{"__type" => %{"fields" => [%{"name" => "customFieldValues"}]}}}}
+      else
+        send(self(), {:fetch_issue_states_page, query, variables})
 
-      body = %{
-        "data" => %{
-          "issues" => %{
-            "nodes" => Enum.map(variables.ids, raw_issue)
+        body = %{
+          "data" => %{
+            "issues" => %{
+              "nodes" => Enum.map(variables.ids, raw_issue)
+            }
           }
         }
-      }
 
-      {:ok, body}
+        {:ok, body}
+      end
     end
 
     assert {:ok, issues} = Client.fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun)
@@ -425,8 +614,138 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert_receive {:fetch_issue_states_page, query, %{ids: ^first_batch_ids, first: 50, relationFirst: 50}}
     assert query =~ "SymphonyLinearIssuesById"
+    assert query =~ "customFieldValues"
+    assert query =~ "customField"
 
     assert_receive {:fetch_issue_states_page, ^query, %{ids: ^second_batch_ids, first: 5, relationFirst: 50}}
+  end
+
+  test "linear client omits custom field values when current schema does not expose them" do
+    issue_ids = ["issue-1"]
+
+    graphql_fun = fn query, variables ->
+      if query =~ "SymphonyLinearIssueCustomFieldSupport" do
+        {:ok, %{"data" => %{"__type" => %{"fields" => [%{"name" => "id"}, %{"name" => "title"}]}}}}
+      else
+        send(self(), {:fetch_issue_states_without_custom_fields, query, variables})
+
+        {:ok,
+         %{
+           "data" => %{
+             "issues" => %{
+               "nodes" => [
+                 %{
+                   "id" => "issue-1",
+                   "identifier" => "MT-1",
+                   "title" => "Issue 1",
+                   "state" => %{"name" => "Todo"},
+                   "labels" => %{"nodes" => []},
+                   "inverseRelations" => %{"nodes" => []}
+                 }
+               ]
+             }
+           }
+         }}
+      end
+    end
+
+    assert {:ok, [%Issue{identifier: "MT-1"}]} = Client.fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun)
+
+    assert_receive {:fetch_issue_states_without_custom_fields, query, %{ids: ^issue_ids}}
+    assert query =~ "SymphonyLinearIssuesById"
+    refute query =~ "customFieldValues"
+  end
+
+  test "linear client leaves repository empty when custom fields and allowlisted labels are absent" do
+    issue_ids = ["issue-93"]
+    candidates = [%{"repositoryFullName" => "EmberAGI/scaling-octo-engine", "hostname" => "github.com"}]
+
+    graphql_fun = fn query, variables ->
+      cond do
+        query =~ "SymphonyLinearIssueCustomFieldSupport" ->
+          {:ok, %{"data" => %{"__type" => %{"fields" => [%{"name" => "id"}, %{"name" => "title"}]}}}}
+
+        query =~ "SymphonyLinearIssueRepositorySuggestions" ->
+          send(self(), {:unexpected_repository_suggestion_query, variables})
+          {:ok, %{"data" => %{"issueRepositorySuggestions" => %{"suggestions" => []}}}}
+
+        true ->
+          send(self(), {:fetch_issue_states_without_repository_metadata, query, variables})
+
+          {:ok,
+           %{
+             "data" => %{
+               "issues" => %{
+                 "nodes" => [
+                   %{
+                     "id" => "issue-93",
+                     "identifier" => "EMB-93",
+                     "title" => "Bootstrap rejects missing explicit repository metadata",
+                     "state" => %{"name" => "Todo"},
+                     "labels" => %{"nodes" => []},
+                     "inverseRelations" => %{"nodes" => []}
+                   }
+                 ]
+               }
+             }
+           }}
+      end
+    end
+
+    assert {:ok, [%Issue{} = issue]} = Client.fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun, candidates)
+
+    assert issue.custom_fields == %{}
+    assert issue.repository_source == nil
+
+    assert_receive {:fetch_issue_states_without_repository_metadata, query, %{ids: ^issue_ids}}
+    refute query =~ "customFieldValues"
+    refute_received {:unexpected_repository_suggestion_query, _variables}
+  end
+
+  test "linear client accepts allowlisted repository metadata from issue labels" do
+    issue_ids = ["issue-93"]
+    candidates = [%{"repositoryFullName" => "EmberAGI/scaling-octo-engine", "hostname" => "github.com"}]
+
+    graphql_fun = fn query, variables ->
+      cond do
+        query =~ "SymphonyLinearIssueCustomFieldSupport" ->
+          {:ok, %{"data" => %{"__type" => %{"fields" => [%{"name" => "id"}, %{"name" => "title"}]}}}}
+
+        query =~ "SymphonyLinearIssueRepositorySuggestions" ->
+          send(self(), :unexpected_repository_suggestion_query)
+          {:ok, %{"data" => %{"issueRepositorySuggestions" => %{"suggestions" => []}}}}
+
+        true ->
+          send(self(), {:fetch_issue_states_for_repository_label, query, variables})
+
+          {:ok,
+           %{
+             "data" => %{
+               "issues" => %{
+                 "nodes" => [
+                   %{
+                     "id" => "issue-93",
+                     "identifier" => "EMB-93",
+                     "title" => "Bootstrap from repository label",
+                     "state" => %{"name" => "Todo"},
+                     "labels" => %{"nodes" => [%{"name" => "repo:EmberAGI/scaling-octo-engine"}]},
+                     "inverseRelations" => %{"nodes" => []}
+                   }
+                 ]
+               }
+             }
+           }}
+      end
+    end
+
+    assert {:ok, [%Issue{} = issue]} = Client.fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun, candidates)
+
+    assert issue.custom_fields == %{"Repository" => "EmberAGI/scaling-octo-engine"}
+    assert issue.repository_source == "linear_label"
+
+    assert_receive {:fetch_issue_states_for_repository_label, query, %{ids: ^issue_ids}}
+    refute query =~ "customFieldValues"
+    refute_received :unexpected_repository_suggestion_query
   end
 
   test "linear client logs response bodies for non-200 graphql responses" do
