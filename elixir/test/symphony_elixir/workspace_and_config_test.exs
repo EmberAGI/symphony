@@ -73,6 +73,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       }
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert Path.basename(workspace) == "EMB-93-scaling-octo-engine"
       assert File.read!(Path.join(workspace, "issue_identifier.txt")) == "EMB-93\n"
       assert File.read!(Path.join(workspace, "repository_shortcut.txt")) == "EmberAGI/scaling-octo-engine\n"
       assert File.read!(Path.join(workspace, "repository.txt")) == "EmberAGI/scaling-octo-engine\n"
@@ -158,6 +159,33 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert first_workspace == second_workspace
     assert Path.basename(first_workspace) == "MT_Det"
+  end
+
+  test "workspace path is deterministic per issue repository metadata" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-repository-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-repository-workspace",
+        identifier: "EMB-93",
+        title: "Repository-scoped workspace",
+        custom_fields: %{"Repository" => "EmberAGI/scaling-octo-engine"}
+      }
+
+      assert {:ok, first_workspace} = Workspace.create_for_issue(issue)
+      assert {:ok, second_workspace} = Workspace.create_for_issue(issue)
+
+      assert first_workspace == second_workspace
+      assert Path.basename(first_workspace) == "EMB-93-scaling-octo-engine"
+    after
+      File.rm_rf(workspace_root)
+    end
   end
 
   test "workspace reuses existing issue directory without deleting local changes" do
@@ -378,6 +406,38 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert :ok = Workspace.remove_issue_workspaces("S_1")
       refute File.exists?(target_workspace)
       assert File.exists?(untouched_workspace)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace cleanup uses repository-scoped issue directory" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-repository-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      target_workspace = Path.join(workspace_root, "EMB-93-scaling-octo-engine")
+      legacy_workspace = Path.join(workspace_root, "EMB-93")
+
+      File.mkdir_p!(target_workspace)
+      File.mkdir_p!(legacy_workspace)
+      File.write!(Path.join(target_workspace, "marker.txt"), "stale")
+      File.write!(Path.join(legacy_workspace, "marker.txt"), "legacy")
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-repository-cleanup",
+        identifier: "EMB-93",
+        custom_fields: %{"Repository" => "EmberAGI/scaling-octo-engine"}
+      }
+
+      assert :ok = Workspace.remove_issue_workspaces(issue)
+      refute File.exists?(target_workspace)
+      assert File.exists?(legacy_workspace)
     after
       File.rm_rf(workspace_root)
     end
