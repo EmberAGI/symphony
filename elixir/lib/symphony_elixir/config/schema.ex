@@ -238,12 +238,13 @@ defmodule SymphonyElixir.Config.Schema do
         field(:endpoint, :string, default: "https://api.telegram.org")
         field(:bot_token, :string)
         field(:chat_id, :string)
+        field(:message_thread_id, :string)
         field(:events, {:array, :string}, default: ["human_review"])
       end
 
       @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
       def changeset(schema, attrs) do
-        cast(schema, attrs, [:endpoint, :bot_token, :chat_id, :events], empty_values: [])
+        cast(schema, attrs, [:endpoint, :bot_token, :chat_id, :message_thread_id, :events], empty_values: [])
       end
     end
 
@@ -437,6 +438,10 @@ defmodule SymphonyElixir.Config.Schema do
       | endpoint: normalize_endpoint(telegram.endpoint, "https://api.telegram.org"),
         bot_token: resolve_secret_setting(telegram.bot_token, System.get_env("TELEGRAM_BOT_TOKEN")),
         chat_id: resolve_secret_setting(telegram.chat_id, System.get_env("TELEGRAM_CHAT_ID")),
+        message_thread_id:
+          telegram.message_thread_id
+          |> resolve_secret_setting(System.get_env("TELEGRAM_MESSAGE_THREAD_ID"))
+          |> normalize_optional_integer_string(),
         events: normalize_notification_events(telegram.events)
     }
   end
@@ -455,6 +460,18 @@ defmodule SymphonyElixir.Config.Schema do
     |> Enum.map(&to_string/1)
     |> Enum.map(&String.trim/1)
     |> Enum.reject(&(&1 == ""))
+  end
+
+  defp normalize_optional_integer_string(nil), do: nil
+
+  defp normalize_optional_integer_string(value) do
+    value
+    |> to_string()
+    |> String.trim()
+    |> case do
+      "" -> nil
+      value -> value
+    end
   end
 
   defp normalize_keys(value) when is_map(value) do

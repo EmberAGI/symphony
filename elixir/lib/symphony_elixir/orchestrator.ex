@@ -146,6 +146,7 @@ defmodule SymphonyElixir.Orchestrator do
 
             _ ->
               Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+              maybe_notify_agent_failed(running_entry, reason)
 
               next_attempt = next_retry_attempt_from_running(running_entry)
 
@@ -387,6 +388,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_notify_human_review_transition(_state, _issue), do: :ok
 
+  defp maybe_notify_agent_failed(%{issue: %Issue{} = issue}, reason) do
+    Telegram.notify_agent_failed(issue, reason)
+  end
+
+  defp maybe_notify_agent_failed(_running_entry, _reason), do: :ok
+
   defp reconcile_missing_running_issue_ids(%State{} = state, requested_issue_ids, issues)
        when is_list(requested_issue_ids) and is_list(issues) do
     visible_issue_ids =
@@ -491,6 +498,7 @@ defmodule SymphonyElixir.Orchestrator do
       session_id = running_entry_session_id(running_entry)
 
       Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; restarting with backoff")
+      maybe_notify_agent_failed(running_entry, "stalled for #{elapsed_ms}ms without codex activity")
 
       next_attempt = next_retry_attempt_from_running(running_entry)
 
@@ -751,6 +759,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
+        Telegram.notify_agent_failed(issue, reason)
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
         schedule_issue_retry(state, issue.id, next_attempt, %{

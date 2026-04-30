@@ -19,8 +19,10 @@ notifications:
   telegram:
     bot_token: $TELEGRAM_BOT_TOKEN
     chat_id: $TELEGRAM_CHAT_ID
+    message_thread_id: $TELEGRAM_MESSAGE_THREAD_ID
     events:
       - human_review
+      - agent_failed
 workspace:
   root: ~/code/symphony-workspaces
 hooks:

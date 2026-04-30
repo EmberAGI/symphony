@@ -161,6 +161,68 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute_receive {:telegram_request, _request}
   end
 
+  test "agent task failure sends one telegram notification before retry" do
+    parent = self()
+    previous_request_fun = Application.get_env(:symphony_elixir, :telegram_request_fun)
+
+    on_exit(fn ->
+      case previous_request_fun do
+        nil -> Application.delete_env(:symphony_elixir, :telegram_request_fun)
+        request_fun -> Application.put_env(:symphony_elixir, :telegram_request_fun, request_fun)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :telegram_request_fun, fn request ->
+      send(parent, {:telegram_request, request})
+      {:ok, %Req.Response{status: 200}}
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      telegram_bot_token: "bot-token",
+      telegram_chat_id: "chat-id",
+      telegram_events: ["human_review", "agent_failed"]
+    )
+
+    issue_id = "issue-agent-failed-notify"
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "EMB-99",
+      title: "Add telegram notification hooks for human review",
+      state: "In Progress",
+      url: "https://linear.app/example/EMB-99"
+    }
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: issue,
+          started_at: DateTime.utc_now(),
+          retry_attempt: 0
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), :timeout}, state)
+    assert state.running == %{}
+    assert MapSet.member?(state.claimed, issue_id)
+    assert Map.has_key?(state.retry_attempts, issue_id)
+
+    assert_receive {:telegram_request, request}
+    assert request[:json].text =~ "Symphony agent failed"
+    assert request[:json].text =~ "Issue: EMB-99"
+    assert request[:json].text =~ "State: In Progress"
+    assert request[:json].text =~ "Reason: :timeout"
+  end
+
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
     issue_id = "issue-usage-snapshot"
 

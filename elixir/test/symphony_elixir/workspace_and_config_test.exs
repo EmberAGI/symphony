@@ -920,30 +920,36 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   test "telegram notification config resolves env-backed secrets" do
     bot_token_env_var = "SYMP_TELEGRAM_BOT_TOKEN_#{System.unique_integer([:positive])}"
     chat_id_env_var = "SYMP_TELEGRAM_CHAT_ID_#{System.unique_integer([:positive])}"
+    thread_id_env_var = "SYMP_TELEGRAM_THREAD_ID_#{System.unique_integer([:positive])}"
 
     previous_bot_token = System.get_env(bot_token_env_var)
     previous_chat_id = System.get_env(chat_id_env_var)
+    previous_thread_id = System.get_env(thread_id_env_var)
 
     System.put_env(bot_token_env_var, "bot-token")
     System.put_env(chat_id_env_var, "chat-id")
+    System.put_env(thread_id_env_var, "1")
 
     on_exit(fn ->
       restore_env(bot_token_env_var, previous_bot_token)
       restore_env(chat_id_env_var, previous_chat_id)
+      restore_env(thread_id_env_var, previous_thread_id)
     end)
 
     write_workflow_file!(Workflow.workflow_file_path(),
       telegram_endpoint: "https://telegram.example.test/",
       telegram_bot_token: "$#{bot_token_env_var}",
       telegram_chat_id: "$#{chat_id_env_var}",
-      telegram_events: ["human_review"]
+      telegram_message_thread_id: "$#{thread_id_env_var}",
+      telegram_events: ["human_review", "agent_failed"]
     )
 
     config = Config.settings!()
     assert config.notifications.telegram.endpoint == "https://telegram.example.test"
     assert config.notifications.telegram.bot_token == "bot-token"
     assert config.notifications.telegram.chat_id == "chat-id"
-    assert config.notifications.telegram.events == ["human_review"]
+    assert config.notifications.telegram.message_thread_id == "1"
+    assert config.notifications.telegram.events == ["human_review", "agent_failed"]
   end
 
   test "blank telegram endpoint falls back to default endpoint" do
@@ -954,6 +960,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     )
 
     assert Config.settings!().notifications.telegram.endpoint == "https://api.telegram.org"
+  end
+
+  test "blank telegram message thread id is ignored" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      telegram_bot_token: "bot-token",
+      telegram_chat_id: "chat-id",
+      telegram_message_thread_id: "   "
+    )
+
+    assert Config.settings!().notifications.telegram.message_thread_id == nil
   end
 
   test "config no longer resolves legacy env: references" do
