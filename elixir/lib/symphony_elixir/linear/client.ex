@@ -31,6 +31,14 @@ defmodule SymphonyElixir.Linear.Client do
             name
           }
         }
+        customFieldValues {
+          nodes {
+            value
+            customField {
+              name
+            }
+          }
+        }
         inverseRelations(first: $relationFirst) {
           nodes {
             type
@@ -74,6 +82,14 @@ defmodule SymphonyElixir.Linear.Client do
         labels {
           nodes {
             name
+          }
+        }
+        customFieldValues {
+          nodes {
+            value
+            customField {
+              name
+            }
           }
         }
         inverseRelations(first: $relationFirst) {

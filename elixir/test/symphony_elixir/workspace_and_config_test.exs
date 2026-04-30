@@ -415,6 +415,27 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute issue.assigned_to_worker
   end
 
+  test "linear client normalizes custom field values from fetched issue payloads" do
+    raw_issue = %{
+      "id" => "issue-93",
+      "identifier" => "EMB-93",
+      "title" => "Bootstrap from repository field",
+      "state" => %{"name" => "Todo"},
+      "customFieldValues" => %{
+        "nodes" => [
+          %{
+            "value" => "EmberAGI/scaling-octo-engine",
+            "customField" => %{"name" => "Repository"}
+          }
+        ]
+      }
+    }
+
+    issue = Client.normalize_issue_for_test(raw_issue)
+
+    assert issue.custom_fields == %{"Repository" => "EmberAGI/scaling-octo-engine"}
+  end
+
   test "linear client pagination merge helper preserves issue ordering" do
     issue_page_1 = [
       %Issue{id: "issue-1", identifier: "MT-1"},
@@ -469,6 +490,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert_receive {:fetch_issue_states_page, query, %{ids: ^first_batch_ids, first: 50, relationFirst: 50}}
     assert query =~ "SymphonyLinearIssuesById"
+    assert query =~ "customFieldValues"
+    assert query =~ "customField"
 
     assert_receive {:fetch_issue_states_page, ^query, %{ids: ^second_batch_ids, first: 5, relationFirst: 50}}
   end
