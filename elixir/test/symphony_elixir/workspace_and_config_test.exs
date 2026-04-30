@@ -541,7 +541,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute query =~ "customFieldValues"
   end
 
-  test "linear client falls back to issue repository suggestions when custom fields are unavailable" do
+  test "linear client leaves repository empty when custom fields and allowlisted labels are absent" do
     issue_ids = ["issue-93"]
     candidates = [%{"repositoryFullName" => "EmberAGI/scaling-octo-engine", "hostname" => "github.com"}]
 
@@ -551,25 +551,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
           {:ok, %{"data" => %{"__type" => %{"fields" => [%{"name" => "id"}, %{"name" => "title"}]}}}}
 
         query =~ "SymphonyLinearIssueRepositorySuggestions" ->
-          send(self(), {:repository_suggestion_query, variables})
-
-          {:ok,
-           %{
-             "data" => %{
-               "issueRepositorySuggestions" => %{
-                 "suggestions" => [
-                   %{
-                     "repositoryFullName" => "EmberAGI/scaling-octo-engine",
-                     "hostname" => "github.com",
-                     "confidence" => 0.95
-                   }
-                 ]
-               }
-             }
-           }}
+          send(self(), {:unexpected_repository_suggestion_query, variables})
+          {:ok, %{"data" => %{"issueRepositorySuggestions" => %{"suggestions" => []}}}}
 
         true ->
-          send(self(), {:fetch_issue_states_for_repository_suggestions, query, variables})
+          send(self(), {:fetch_issue_states_without_repository_metadata, query, variables})
 
           {:ok,
            %{
@@ -579,7 +565,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                    %{
                      "id" => "issue-93",
                      "identifier" => "EMB-93",
-                     "title" => "Bootstrap from repository suggestion",
+                     "title" => "Bootstrap rejects missing explicit repository metadata",
                      "state" => %{"name" => "Todo"},
                      "labels" => %{"nodes" => []},
                      "inverseRelations" => %{"nodes" => []}
@@ -593,13 +579,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert {:ok, [%Issue{} = issue]} = Client.fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun, candidates)
 
-    assert issue.custom_fields == %{"Repository" => "EmberAGI/scaling-octo-engine"}
-    assert issue.repository_source == "linear_repository_suggestions"
+    assert issue.custom_fields == %{}
+    assert issue.repository_source == nil
 
-    assert_receive {:fetch_issue_states_for_repository_suggestions, query, %{ids: ^issue_ids}}
+    assert_receive {:fetch_issue_states_without_repository_metadata, query, %{ids: ^issue_ids}}
     refute query =~ "customFieldValues"
-
-    assert_receive {:repository_suggestion_query, %{issueId: "issue-93", candidateRepositories: ^candidates}}
+    refute_received {:unexpected_repository_suggestion_query, _variables}
   end
 
   test "linear client accepts allowlisted repository metadata from issue labels" do

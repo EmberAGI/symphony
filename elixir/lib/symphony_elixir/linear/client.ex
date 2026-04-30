@@ -8,8 +8,6 @@ defmodule SymphonyElixir.Linear.Client do
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
-  @repository_suggestion_confidence 0.9
-
   @issue_custom_field_values_supported_query """
   query SymphonyLinearIssueCustomFieldSupport {
     __type(name: "Issue") {
@@ -123,18 +121,6 @@ defmodule SymphonyElixir.Linear.Client do
   query SymphonyLinearViewer {
     viewer {
       id
-    }
-  }
-  """
-
-  @repository_suggestions_query """
-  query SymphonyLinearIssueRepositorySuggestions($issueId: String!, $candidateRepositories: [CandidateRepository!]!) {
-    issueRepositorySuggestions(issueId: $issueId, candidateRepositories: $candidateRepositories) {
-      suggestions {
-        repositoryFullName
-        hostname
-        confidence
-      }
     }
   }
   """
@@ -506,7 +492,7 @@ defmodule SymphonyElixir.Linear.Client do
   defp decode_linear_response(
          %{"data" => %{"issues" => %{"nodes" => nodes}}},
          assignee_filter,
-         graphql_fun,
+         _graphql_fun,
          repository_candidates
        ) do
     issues =
@@ -514,7 +500,6 @@ defmodule SymphonyElixir.Linear.Client do
       |> Enum.map(&normalize_issue(&1, assignee_filter))
       |> Enum.reject(&is_nil(&1))
       |> maybe_enrich_repository_labels(repository_candidates)
-      |> maybe_enrich_repository_suggestions(graphql_fun, repository_candidates)
 
     {:ok, issues}
   end
@@ -711,13 +696,6 @@ defmodule SymphonyElixir.Linear.Client do
     end)
   end
 
-  defp maybe_enrich_repository_suggestions(issues, graphql_fun, repository_candidates)
-       when is_function(graphql_fun, 2) and is_list(repository_candidates) and repository_candidates != [] do
-    Enum.map(issues, &maybe_enrich_repository_suggestion(&1, graphql_fun, repository_candidates))
-  end
-
-  defp maybe_enrich_repository_suggestions(issues, _graphql_fun, _repository_candidates), do: issues
-
   defp maybe_enrich_repository_labels(issues, repository_candidates)
        when is_list(issues) and is_list(repository_candidates) and repository_candidates != [] do
     repository_by_label =
@@ -770,56 +748,6 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp repository_label_key(_value), do: ""
-
-  defp maybe_enrich_repository_suggestion(%Issue{id: issue_id, custom_fields: custom_fields} = issue, graphql_fun, candidates)
-       when is_binary(issue_id) and is_map(custom_fields) do
-    if Map.has_key?(custom_fields, "Repository") do
-      issue
-    else
-      case fetch_repository_suggestion(issue_id, graphql_fun, candidates) do
-        {:ok, repository} ->
-          %Issue{
-            issue
-            | custom_fields: Map.put(custom_fields, "Repository", repository),
-              repository_source: "linear_repository_suggestions"
-          }
-
-        :none ->
-          issue
-      end
-    end
-  end
-
-  defp maybe_enrich_repository_suggestion(issue, _graphql_fun, _candidates), do: issue
-
-  defp fetch_repository_suggestion(issue_id, graphql_fun, candidates) do
-    case graphql_fun.(@repository_suggestions_query, %{issueId: issue_id, candidateRepositories: candidates}) do
-      {:ok, %{"data" => %{"issueRepositorySuggestions" => %{"suggestions" => suggestions}}}}
-      when is_list(suggestions) ->
-        select_repository_suggestion(suggestions)
-
-      _ ->
-        :none
-    end
-  end
-
-  defp select_repository_suggestion(suggestions) when is_list(suggestions) do
-    matches =
-      suggestions
-      |> Enum.filter(fn
-        %{"repositoryFullName" => repository, "confidence" => confidence}
-        when is_binary(repository) and is_number(confidence) ->
-          confidence >= @repository_suggestion_confidence
-
-        _ ->
-          false
-      end)
-
-    case matches do
-      [%{"repositoryFullName" => repository}] -> {:ok, repository}
-      _ -> :none
-    end
-  end
 
   defp repository_candidates do
     "SYMPHONY_LINEAR_REPOSITORY_CANDIDATES_JSON"
