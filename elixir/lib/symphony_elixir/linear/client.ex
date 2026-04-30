@@ -459,6 +459,7 @@ defmodule SymphonyElixir.Linear.Client do
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
       blocked_by: extract_blockers(issue),
+      custom_fields: extract_custom_fields(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
       created_at: parse_datetime(issue["createdAt"]),
@@ -546,6 +547,34 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp extract_labels(_), do: []
+
+  defp extract_custom_fields(%{"customFields" => %{"nodes" => fields}}) when is_list(fields) do
+    fields_to_map(fields)
+  end
+
+  defp extract_custom_fields(%{"customFieldValues" => %{"nodes" => fields}}) when is_list(fields) do
+    fields_to_map(fields)
+  end
+
+  defp extract_custom_fields(%{"custom_fields" => custom_fields}) when is_map(custom_fields) do
+    custom_fields
+  end
+
+  defp extract_custom_fields(_), do: %{}
+
+  defp fields_to_map(fields) when is_list(fields) do
+    fields
+    |> Enum.reduce(%{}, fn
+      %{"name" => name, "value" => value}, acc when is_binary(name) ->
+        Map.put(acc, name, value)
+
+      %{"customField" => %{"name" => name}, "value" => value}, acc when is_binary(name) ->
+        Map.put(acc, name, value)
+
+      _field, acc ->
+        acc
+    end)
+  end
 
   defp extract_blockers(%{"inverseRelations" => %{"nodes" => inverse_relations}})
        when is_list(inverse_relations) do

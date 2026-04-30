@@ -298,7 +298,11 @@ defmodule SymphonyElixir.Workspace do
 
     task =
       Task.async(fn ->
-        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
+        System.cmd("sh", ["-lc", command],
+          cd: workspace,
+          stderr_to_stdout: true,
+          env: hook_env(issue_context)
+        )
       end)
 
     case Task.yield(task, timeout_ms) do
@@ -319,7 +323,15 @@ defmodule SymphonyElixir.Workspace do
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host}")
 
-    case run_remote_command(worker_host, "cd #{shell_escape(workspace)} && #{command}", timeout_ms) do
+    script =
+      [
+        hook_env_exports(issue_context),
+        "cd #{shell_escape(workspace)}",
+        command
+      ]
+      |> Enum.join("\n")
+
+    case run_remote_command(worker_host, script, timeout_ms) do
       {:ok, cmd_result} ->
         handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
 
@@ -456,26 +468,118 @@ defmodule SymphonyElixir.Workspace do
   defp worker_host_for_log(nil), do: "local"
   defp worker_host_for_log(worker_host), do: worker_host
 
-  defp issue_context(%{id: issue_id, identifier: identifier}) do
+  defp issue_context(%{id: issue_id, identifier: identifier} = issue) do
+    custom_fields = Map.get(issue, :custom_fields) || Map.get(issue, "custom_fields") || %{}
+    title = Map.get(issue, :title) || Map.get(issue, "title")
+    branch_name = Map.get(issue, :branch_name) || Map.get(issue, "branch_name") || Map.get(issue, "branchName")
+
     %{
       issue_id: issue_id,
-      issue_identifier: identifier || "issue"
+      issue_identifier: identifier || "issue",
+      issue_title: title,
+      issue_state: Map.get(issue, :state) || Map.get(issue, "state"),
+      issue_branch_name: branch_name,
+      issue_url: Map.get(issue, :url) || Map.get(issue, "url"),
+      custom_fields: custom_fields,
+      expected_branch: branch_name || expected_branch_name(identifier, title)
     }
   end
 
   defp issue_context(identifier) when is_binary(identifier) do
     %{
       issue_id: nil,
-      issue_identifier: identifier
+      issue_identifier: identifier,
+      issue_title: nil,
+      issue_state: nil,
+      issue_branch_name: nil,
+      issue_url: nil,
+      custom_fields: %{},
+      expected_branch: expected_branch_name(identifier, nil)
     }
   end
 
   defp issue_context(_identifier) do
     %{
       issue_id: nil,
-      issue_identifier: "issue"
+      issue_identifier: "issue",
+      issue_title: nil,
+      issue_state: nil,
+      issue_branch_name: nil,
+      issue_url: nil,
+      custom_fields: %{},
+      expected_branch: expected_branch_name("issue", nil)
     }
   end
+
+  defp hook_env(issue_context) do
+    base_env = [
+      {"SYMPHONY_ISSUE_ID", issue_context.issue_id},
+      {"SYMPHONY_ISSUE_IDENTIFIER", issue_context.issue_identifier},
+      {"SYMPHONY_ISSUE_TITLE", Map.get(issue_context, :issue_title)},
+      {"SYMPHONY_ISSUE_STATE", Map.get(issue_context, :issue_state)},
+      {"SYMPHONY_ISSUE_BRANCH_NAME", Map.get(issue_context, :issue_branch_name)},
+      {"SYMPHONY_ISSUE_URL", Map.get(issue_context, :issue_url)},
+      {"SYMPHONY_EXPECTED_BRANCH", Map.get(issue_context, :expected_branch)},
+      {"SYMPHONY_ISSUE_CUSTOM_FIELDS_JSON", Jason.encode!(Map.get(issue_context, :custom_fields, %{}))}
+    ]
+
+    Map.get(issue_context, :custom_fields, %{})
+    |> custom_field_env()
+    |> Enum.concat(base_env)
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Enum.map(fn {key, value} -> {key, env_value(value)} end)
+  end
+
+  defp custom_field_env(custom_fields) when is_map(custom_fields) do
+    Enum.map(custom_fields, fn {key, value} ->
+      {"SYMPHONY_ISSUE_CUSTOM_FIELD_#{env_key(key)}", value}
+    end)
+  end
+
+  defp custom_field_env(_custom_fields), do: []
+
+  defp hook_env_exports(issue_context) do
+    issue_context
+    |> hook_env()
+    |> Enum.map(fn {key, value} -> "export #{key}=#{shell_escape(value)}" end)
+    |> Enum.join("\n")
+  end
+
+  defp expected_branch_name(identifier, title) do
+    issue_slug =
+      identifier
+      |> to_string()
+      |> String.downcase()
+      |> slugify()
+
+    title_slug = slugify(title || "")
+
+    case title_slug do
+      "" -> "agent/#{issue_slug}"
+      slug -> "agent/#{issue_slug}-#{slug}"
+    end
+  end
+
+  defp slugify(value) do
+    value
+    |> to_string()
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9]+/, "-")
+    |> String.trim("-")
+  end
+
+  defp env_key(value) do
+    value
+    |> to_string()
+    |> String.upcase()
+    |> String.replace(~r/[^A-Z0-9]+/, "_")
+    |> String.trim("_")
+  end
+
+  defp env_value(value) when is_binary(value), do: value
+  defp env_value(value) when is_atom(value), do: Atom.to_string(value)
+  defp env_value(value) when is_integer(value) or is_float(value) or is_boolean(value), do: to_string(value)
+  defp env_value(value), do: Jason.encode!(value)
 
   defp issue_log_context(%{issue_id: issue_id, issue_identifier: issue_identifier}) do
     "issue_id=#{issue_id || "n/a"} issue_identifier=#{issue_identifier || "issue"}"

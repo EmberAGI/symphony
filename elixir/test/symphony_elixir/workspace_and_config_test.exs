@@ -4,6 +4,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Linear.Issue
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -37,6 +38,49 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert File.read!(Path.join([workspace, "keep", "file.txt"])) == "keep me"
     after
       File.rm_rf(test_root)
+    end
+  end
+
+  test "after_create hook receives issue metadata environment" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-hook-env-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: """
+        printf '%s\n' "$SYMPHONY_ISSUE_IDENTIFIER" > issue_identifier.txt
+        printf '%s\n' "$SYMPHONY_ISSUE_CUSTOM_FIELD_REPOSITORY" > repository.txt
+        printf '%s\n' "$SYMPHONY_EXPECTED_BRANCH" > expected_branch.txt
+        printf '%s\n' "$SYMPHONY_ISSUE_CUSTOM_FIELDS_JSON" > custom_fields.json
+        """
+      )
+
+      issue = %Issue{
+        id: "issue-hook-env",
+        identifier: "EMB-93",
+        title: "Implement Symphony multi-agent handoff flow",
+        state: "Todo",
+        branch_name: nil,
+        url: "https://linear.app/example/EMB-93",
+        custom_fields: %{"Repository" => "EmberAGI/scaling-octo-engine"}
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert File.read!(Path.join(workspace, "issue_identifier.txt")) == "EMB-93\n"
+      assert File.read!(Path.join(workspace, "repository.txt")) == "EmberAGI/scaling-octo-engine\n"
+
+      assert File.read!(Path.join(workspace, "expected_branch.txt")) ==
+               "agent/emb-93-implement-symphony-multi-agent-handoff-flow\n"
+
+      assert Jason.decode!(File.read!(Path.join(workspace, "custom_fields.json"))) == %{
+               "Repository" => "EmberAGI/scaling-octo-engine"
+             }
+    after
+      File.rm_rf(workspace_root)
     end
   end
 
