@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Linear.Client do
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
+  @repository_suggestion_confidence 0.9
 
   @issue_custom_field_values_supported_query """
   query SymphonyLinearIssueCustomFieldSupport {
@@ -122,6 +123,18 @@ defmodule SymphonyElixir.Linear.Client do
   query SymphonyLinearViewer {
     viewer {
       id
+    }
+  }
+  """
+
+  @repository_suggestions_query """
+  query SymphonyLinearIssueRepositorySuggestions($issueId: String!, $candidateRepositories: [CandidateRepository!]!) {
+    issueRepositorySuggestions(issueId: $issueId, candidateRepositories: $candidateRepositories) {
+      suggestions {
+        repositoryFullName
+        hostname
+        confidence
+      }
     }
   }
   """
@@ -248,6 +261,17 @@ defmodule SymphonyElixir.Linear.Client do
           {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun)
       when is_list(issue_ids) and is_function(graphql_fun, 2) do
+    fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun, [])
+  end
+
+  @doc false
+  @spec fetch_issue_states_by_ids_for_test(
+          [String.t()],
+          (String.t(), map() -> {:ok, map()} | {:error, term()}),
+          [map()]
+        ) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun, repository_candidates)
+      when is_list(issue_ids) and is_function(graphql_fun, 2) and is_list(repository_candidates) do
     ids = Enum.uniq(issue_ids)
 
     case ids do
@@ -255,7 +279,7 @@ defmodule SymphonyElixir.Linear.Client do
         {:ok, []}
 
       ids ->
-        do_fetch_issue_states(ids, nil, graphql_fun)
+        do_fetch_issue_states(ids, nil, graphql_fun, repository_candidates)
     end
   end
 
@@ -273,7 +297,7 @@ defmodule SymphonyElixir.Linear.Client do
              relationFirst: @issue_page_size,
              after: after_cursor
            }),
-         {:ok, issues, page_info} <- decode_linear_page_response(body, assignee_filter) do
+         {:ok, issues, page_info} <- decode_linear_page_response(body, assignee_filter, &graphql/2, repository_candidates()) do
       updated_acc = prepend_page_issues(issues, acc_issues)
 
       case next_page_cursor(page_info) do
@@ -296,24 +320,40 @@ defmodule SymphonyElixir.Linear.Client do
   defp finalize_paginated_issues(acc_issues) when is_list(acc_issues), do: Enum.reverse(acc_issues)
 
   defp do_fetch_issue_states(ids, assignee_filter) do
-    do_fetch_issue_states(ids, assignee_filter, &graphql/2)
+    do_fetch_issue_states(ids, assignee_filter, &graphql/2, repository_candidates())
   end
 
-  defp do_fetch_issue_states(ids, assignee_filter, graphql_fun)
+  defp do_fetch_issue_states(ids, assignee_filter, graphql_fun, repository_candidates)
        when is_list(ids) and is_function(graphql_fun, 2) do
     issue_order_index = issue_order_index(ids)
     query = linear_issues_by_id_query(graphql_fun)
-    do_fetch_issue_states_page(ids, assignee_filter, graphql_fun, [], issue_order_index, query)
+    do_fetch_issue_states_page(ids, assignee_filter, graphql_fun, repository_candidates, [], issue_order_index, query)
   end
 
-  defp do_fetch_issue_states_page([], _assignee_filter, _graphql_fun, acc_issues, issue_order_index, _query) do
+  defp do_fetch_issue_states_page(
+         [],
+         _assignee_filter,
+         _graphql_fun,
+         _repository_candidates,
+         acc_issues,
+         issue_order_index,
+         _query
+       ) do
     acc_issues
     |> finalize_paginated_issues()
     |> sort_issues_by_requested_ids(issue_order_index)
     |> then(&{:ok, &1})
   end
 
-  defp do_fetch_issue_states_page(ids, assignee_filter, graphql_fun, acc_issues, issue_order_index, query) do
+  defp do_fetch_issue_states_page(
+         ids,
+         assignee_filter,
+         graphql_fun,
+         repository_candidates,
+         acc_issues,
+         issue_order_index,
+         query
+       ) do
     {batch_ids, rest_ids} = Enum.split(ids, @issue_page_size)
 
     case graphql_fun.(query, %{
@@ -322,9 +362,18 @@ defmodule SymphonyElixir.Linear.Client do
            relationFirst: @issue_page_size
          }) do
       {:ok, body} ->
-        with {:ok, issues} <- decode_linear_response(body, assignee_filter) do
+        with {:ok, issues} <- decode_linear_response(body, assignee_filter, graphql_fun, repository_candidates) do
           updated_acc = prepend_page_issues(issues, acc_issues)
-          do_fetch_issue_states_page(rest_ids, assignee_filter, graphql_fun, updated_acc, issue_order_index, query)
+
+          do_fetch_issue_states_page(
+            rest_ids,
+            assignee_filter,
+            graphql_fun,
+            repository_candidates,
+            updated_acc,
+            issue_order_index,
+            query
+          )
         end
 
       {:error, reason} ->
@@ -454,20 +503,26 @@ defmodule SymphonyElixir.Linear.Client do
     )
   end
 
-  defp decode_linear_response(%{"data" => %{"issues" => %{"nodes" => nodes}}}, assignee_filter) do
+  defp decode_linear_response(
+         %{"data" => %{"issues" => %{"nodes" => nodes}}},
+         assignee_filter,
+         graphql_fun,
+         repository_candidates
+       ) do
     issues =
       nodes
       |> Enum.map(&normalize_issue(&1, assignee_filter))
       |> Enum.reject(&is_nil(&1))
+      |> maybe_enrich_repository_suggestions(graphql_fun, repository_candidates)
 
     {:ok, issues}
   end
 
-  defp decode_linear_response(%{"errors" => errors}, _assignee_filter) do
+  defp decode_linear_response(%{"errors" => errors}, _assignee_filter, _graphql_fun, _repository_candidates) do
     {:error, {:linear_graphql_errors, errors}}
   end
 
-  defp decode_linear_response(_unknown, _assignee_filter) do
+  defp decode_linear_response(_unknown, _assignee_filter, _graphql_fun, _repository_candidates) do
     {:error, :linear_unknown_payload}
   end
 
@@ -480,14 +535,20 @@ defmodule SymphonyElixir.Linear.Client do
              }
            }
          },
-         assignee_filter
+         assignee_filter,
+         graphql_fun,
+         repository_candidates
        ) do
-    with {:ok, issues} <- decode_linear_response(%{"data" => %{"issues" => %{"nodes" => nodes}}}, assignee_filter) do
+    with {:ok, issues} <-
+           decode_linear_response(
+             %{"data" => %{"issues" => %{"nodes" => nodes}}},
+             assignee_filter,
+             graphql_fun,
+             repository_candidates
+           ) do
       {:ok, issues, %{has_next_page: has_next_page == true, end_cursor: end_cursor}}
     end
   end
-
-  defp decode_linear_page_response(response, assignee_filter), do: decode_linear_response(response, assignee_filter)
 
   defp next_page_cursor(%{has_next_page: true, end_cursor: end_cursor})
        when is_binary(end_cursor) and byte_size(end_cursor) > 0 do
@@ -512,6 +573,7 @@ defmodule SymphonyElixir.Linear.Client do
       assignee_id: assignee_field(assignee, "id"),
       blocked_by: extract_blockers(issue),
       custom_fields: extract_custom_fields(issue),
+      repository_source: repository_source(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
       created_at: parse_datetime(issue["createdAt"]),
@@ -614,6 +676,26 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp extract_custom_fields(_), do: %{}
 
+  defp repository_source(%{"customFieldValues" => %{"nodes" => fields}}) when is_list(fields) do
+    if repository_field_present?(fields), do: "linear_custom_field", else: nil
+  end
+
+  defp repository_source(%{"customFields" => %{"nodes" => fields}}) when is_list(fields) do
+    if repository_field_present?(fields), do: "linear_custom_field", else: nil
+  end
+
+  defp repository_source(%{"custom_fields" => custom_fields}) when is_map(custom_fields) do
+    if Map.has_key?(custom_fields, "Repository"), do: "linear_custom_field", else: nil
+  end
+
+  defp repository_source(_issue), do: nil
+
+  defp repository_field_present?(fields) when is_list(fields) do
+    fields
+    |> fields_to_map()
+    |> Map.has_key?("Repository")
+  end
+
   defp fields_to_map(fields) when is_list(fields) do
     fields
     |> Enum.reduce(%{}, fn
@@ -627,6 +709,97 @@ defmodule SymphonyElixir.Linear.Client do
         acc
     end)
   end
+
+  defp maybe_enrich_repository_suggestions(issues, graphql_fun, repository_candidates)
+       when is_function(graphql_fun, 2) and is_list(repository_candidates) and repository_candidates != [] do
+    Enum.map(issues, &maybe_enrich_repository_suggestion(&1, graphql_fun, repository_candidates))
+  end
+
+  defp maybe_enrich_repository_suggestions(issues, _graphql_fun, _repository_candidates), do: issues
+
+  defp maybe_enrich_repository_suggestion(%Issue{id: issue_id, custom_fields: custom_fields} = issue, graphql_fun, candidates)
+       when is_binary(issue_id) and is_map(custom_fields) do
+    if Map.has_key?(custom_fields, "Repository") do
+      issue
+    else
+      case fetch_repository_suggestion(issue_id, graphql_fun, candidates) do
+        {:ok, repository} ->
+          %Issue{
+            issue
+            | custom_fields: Map.put(custom_fields, "Repository", repository),
+              repository_source: "linear_repository_suggestions"
+          }
+
+        :none ->
+          issue
+      end
+    end
+  end
+
+  defp maybe_enrich_repository_suggestion(issue, _graphql_fun, _candidates), do: issue
+
+  defp fetch_repository_suggestion(issue_id, graphql_fun, candidates) do
+    case graphql_fun.(@repository_suggestions_query, %{issueId: issue_id, candidateRepositories: candidates}) do
+      {:ok, %{"data" => %{"issueRepositorySuggestions" => %{"suggestions" => suggestions}}}}
+      when is_list(suggestions) ->
+        select_repository_suggestion(suggestions)
+
+      _ ->
+        :none
+    end
+  end
+
+  defp select_repository_suggestion(suggestions) when is_list(suggestions) do
+    matches =
+      suggestions
+      |> Enum.filter(fn
+        %{"repositoryFullName" => repository, "confidence" => confidence}
+        when is_binary(repository) and is_number(confidence) ->
+          confidence >= @repository_suggestion_confidence
+
+        _ ->
+          false
+      end)
+
+    case matches do
+      [%{"repositoryFullName" => repository}] -> {:ok, repository}
+      _ -> :none
+    end
+  end
+
+  defp repository_candidates do
+    "SYMPHONY_LINEAR_REPOSITORY_CANDIDATES_JSON"
+    |> System.get_env()
+    |> parse_repository_candidates()
+  end
+
+  defp parse_repository_candidates(nil), do: []
+  defp parse_repository_candidates(""), do: []
+
+  defp parse_repository_candidates(value) when is_binary(value) do
+    case Jason.decode(value) do
+      {:ok, decoded} -> normalize_repository_candidates(decoded)
+      {:error, _reason} -> []
+    end
+  end
+
+  defp normalize_repository_candidates(candidates) when is_list(candidates) do
+    candidates
+    |> Enum.flat_map(&normalize_repository_candidate/1)
+  end
+
+  defp normalize_repository_candidates(_candidates), do: []
+
+  defp normalize_repository_candidate(%{"repositoryFullName" => repository, "hostname" => hostname})
+       when is_binary(repository) and is_binary(hostname) do
+    [%{"repositoryFullName" => repository, "hostname" => hostname}]
+  end
+
+  defp normalize_repository_candidate(repository) when is_binary(repository) do
+    [%{"repositoryFullName" => repository, "hostname" => "github.com"}]
+  end
+
+  defp normalize_repository_candidate(_candidate), do: []
 
   defp extract_blockers(%{"inverseRelations" => %{"nodes" => inverse_relations}})
        when is_list(inverse_relations) do

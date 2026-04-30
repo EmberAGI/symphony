@@ -481,6 +481,7 @@ defmodule SymphonyElixir.Workspace do
       issue_branch_name: branch_name,
       issue_url: Map.get(issue, :url) || Map.get(issue, "url"),
       custom_fields: custom_fields,
+      repository_source: Map.get(issue, :repository_source) || Map.get(issue, "repository_source"),
       expected_branch: expected_branch_name(identifier, title)
     }
   end
@@ -494,6 +495,7 @@ defmodule SymphonyElixir.Workspace do
       issue_branch_name: nil,
       issue_url: nil,
       custom_fields: %{},
+      repository_source: nil,
       expected_branch: expected_branch_name(identifier, nil)
     }
   end
@@ -507,6 +509,7 @@ defmodule SymphonyElixir.Workspace do
       issue_branch_name: nil,
       issue_url: nil,
       custom_fields: %{},
+      repository_source: nil,
       expected_branch: expected_branch_name("issue", nil)
     }
   end
@@ -519,6 +522,7 @@ defmodule SymphonyElixir.Workspace do
       {"SYMPHONY_ISSUE_STATE", Map.get(issue_context, :issue_state)},
       {"SYMPHONY_ISSUE_BRANCH_NAME", Map.get(issue_context, :issue_branch_name)},
       {"SYMPHONY_ISSUE_URL", Map.get(issue_context, :issue_url)},
+      {"SYMPHONY_ISSUE_REPOSITORY_SOURCE", Map.get(issue_context, :repository_source)},
       {"SYMPHONY_EXPECTED_BRANCH", Map.get(issue_context, :expected_branch)},
       {"SYMPHONY_ISSUE_CUSTOM_FIELDS_JSON", Jason.encode!(Map.get(issue_context, :custom_fields, %{}))}
     ]

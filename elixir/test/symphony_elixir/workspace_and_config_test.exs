@@ -55,6 +55,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         printf '%s\n' "$SYMPHONY_ISSUE_IDENTIFIER" > issue_identifier.txt
         printf '%s\n' "$SYMPHONY_ISSUE_REPOSITORY" > repository_shortcut.txt
         printf '%s\n' "$SYMPHONY_ISSUE_CUSTOM_FIELD_REPOSITORY" > repository.txt
+        printf '%s\n' "$SYMPHONY_ISSUE_REPOSITORY_SOURCE" > repository_source.txt
         printf '%s\n' "$SYMPHONY_EXPECTED_BRANCH" > expected_branch.txt
         printf '%s\n' "$SYMPHONY_ISSUE_CUSTOM_FIELDS_JSON" > custom_fields.json
         """
@@ -67,6 +68,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         state: "Todo",
         branch_name: "sebastianvarela/emb-93-linear-generated-branch",
         url: "https://linear.app/example/EMB-93",
+        repository_source: "linear_custom_field",
         custom_fields: %{"Repository" => "EmberAGI/scaling-octo-engine"}
       }
 
@@ -74,6 +76,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert File.read!(Path.join(workspace, "issue_identifier.txt")) == "EMB-93\n"
       assert File.read!(Path.join(workspace, "repository_shortcut.txt")) == "EmberAGI/scaling-octo-engine\n"
       assert File.read!(Path.join(workspace, "repository.txt")) == "EmberAGI/scaling-octo-engine\n"
+      assert File.read!(Path.join(workspace, "repository_source.txt")) == "linear_custom_field\n"
 
       assert File.read!(Path.join(workspace, "expected_branch.txt")) ==
                "agent/emb-93-implement-symphony-multi-agent-handoff-flow\n"
@@ -536,6 +539,67 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert_receive {:fetch_issue_states_without_custom_fields, query, %{ids: ^issue_ids}}
     assert query =~ "SymphonyLinearIssuesById"
     refute query =~ "customFieldValues"
+  end
+
+  test "linear client falls back to issue repository suggestions when custom fields are unavailable" do
+    issue_ids = ["issue-93"]
+    candidates = [%{"repositoryFullName" => "EmberAGI/scaling-octo-engine", "hostname" => "github.com"}]
+
+    graphql_fun = fn query, variables ->
+      cond do
+        query =~ "SymphonyLinearIssueCustomFieldSupport" ->
+          {:ok, %{"data" => %{"__type" => %{"fields" => [%{"name" => "id"}, %{"name" => "title"}]}}}}
+
+        query =~ "SymphonyLinearIssueRepositorySuggestions" ->
+          send(self(), {:repository_suggestion_query, variables})
+
+          {:ok,
+           %{
+             "data" => %{
+               "issueRepositorySuggestions" => %{
+                 "suggestions" => [
+                   %{
+                     "repositoryFullName" => "EmberAGI/scaling-octo-engine",
+                     "hostname" => "github.com",
+                     "confidence" => 0.95
+                   }
+                 ]
+               }
+             }
+           }}
+
+        true ->
+          send(self(), {:fetch_issue_states_for_repository_suggestions, query, variables})
+
+          {:ok,
+           %{
+             "data" => %{
+               "issues" => %{
+                 "nodes" => [
+                   %{
+                     "id" => "issue-93",
+                     "identifier" => "EMB-93",
+                     "title" => "Bootstrap from repository suggestion",
+                     "state" => %{"name" => "Todo"},
+                     "labels" => %{"nodes" => []},
+                     "inverseRelations" => %{"nodes" => []}
+                   }
+                 ]
+               }
+             }
+           }}
+      end
+    end
+
+    assert {:ok, [%Issue{} = issue]} = Client.fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun, candidates)
+
+    assert issue.custom_fields == %{"Repository" => "EmberAGI/scaling-octo-engine"}
+    assert issue.repository_source == "linear_repository_suggestions"
+
+    assert_receive {:fetch_issue_states_for_repository_suggestions, query, %{ids: ^issue_ids}}
+    refute query =~ "customFieldValues"
+
+    assert_receive {:repository_suggestion_query, %{issueId: "issue-93", candidateRepositories: ^candidates}}
   end
 
   test "linear client logs response bodies for non-200 graphql responses" do
