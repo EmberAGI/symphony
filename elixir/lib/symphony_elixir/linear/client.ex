@@ -513,6 +513,7 @@ defmodule SymphonyElixir.Linear.Client do
       nodes
       |> Enum.map(&normalize_issue(&1, assignee_filter))
       |> Enum.reject(&is_nil(&1))
+      |> maybe_enrich_repository_labels(repository_candidates)
       |> maybe_enrich_repository_suggestions(graphql_fun, repository_candidates)
 
     {:ok, issues}
@@ -716,6 +717,59 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp maybe_enrich_repository_suggestions(issues, _graphql_fun, _repository_candidates), do: issues
+
+  defp maybe_enrich_repository_labels(issues, repository_candidates)
+       when is_list(issues) and is_list(repository_candidates) and repository_candidates != [] do
+    repository_by_label =
+      Enum.reduce(repository_candidates, %{}, fn
+        %{"repositoryFullName" => repository}, acc when is_binary(repository) ->
+          label_key = repository_label_key(repository)
+
+          acc
+          |> Map.put(label_key, repository)
+          |> Map.put("repo:" <> label_key, repository)
+          |> Map.put("repository:" <> label_key, repository)
+
+        _candidate, acc ->
+          acc
+      end)
+
+    Enum.map(issues, &maybe_enrich_repository_label(&1, repository_by_label))
+  end
+
+  defp maybe_enrich_repository_labels(issues, _repository_candidates), do: issues
+
+  defp maybe_enrich_repository_label(%Issue{custom_fields: custom_fields, labels: labels} = issue, repository_by_label)
+       when is_map(custom_fields) and is_list(labels) and is_map(repository_by_label) do
+    if Map.has_key?(custom_fields, "Repository") do
+      issue
+    else
+      labels
+      |> Enum.map(&repository_label_key/1)
+      |> Enum.find_value(&Map.get(repository_by_label, &1))
+      |> case do
+        nil ->
+          issue
+
+        repository ->
+          %Issue{
+            issue
+            | custom_fields: Map.put(custom_fields, "Repository", repository),
+              repository_source: "linear_label"
+          }
+      end
+    end
+  end
+
+  defp maybe_enrich_repository_label(issue, _repository_by_label), do: issue
+
+  defp repository_label_key(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp repository_label_key(_value), do: ""
 
   defp maybe_enrich_repository_suggestion(%Issue{id: issue_id, custom_fields: custom_fields} = issue, graphql_fun, candidates)
        when is_binary(issue_id) and is_map(custom_fields) do

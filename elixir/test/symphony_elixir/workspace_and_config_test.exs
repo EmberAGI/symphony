@@ -602,6 +602,52 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert_receive {:repository_suggestion_query, %{issueId: "issue-93", candidateRepositories: ^candidates}}
   end
 
+  test "linear client accepts allowlisted repository metadata from issue labels" do
+    issue_ids = ["issue-93"]
+    candidates = [%{"repositoryFullName" => "EmberAGI/scaling-octo-engine", "hostname" => "github.com"}]
+
+    graphql_fun = fn query, variables ->
+      cond do
+        query =~ "SymphonyLinearIssueCustomFieldSupport" ->
+          {:ok, %{"data" => %{"__type" => %{"fields" => [%{"name" => "id"}, %{"name" => "title"}]}}}}
+
+        query =~ "SymphonyLinearIssueRepositorySuggestions" ->
+          send(self(), :unexpected_repository_suggestion_query)
+          {:ok, %{"data" => %{"issueRepositorySuggestions" => %{"suggestions" => []}}}}
+
+        true ->
+          send(self(), {:fetch_issue_states_for_repository_label, query, variables})
+
+          {:ok,
+           %{
+             "data" => %{
+               "issues" => %{
+                 "nodes" => [
+                   %{
+                     "id" => "issue-93",
+                     "identifier" => "EMB-93",
+                     "title" => "Bootstrap from repository label",
+                     "state" => %{"name" => "Todo"},
+                     "labels" => %{"nodes" => [%{"name" => "repo:EmberAGI/scaling-octo-engine"}]},
+                     "inverseRelations" => %{"nodes" => []}
+                   }
+                 ]
+               }
+             }
+           }}
+      end
+    end
+
+    assert {:ok, [%Issue{} = issue]} = Client.fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun, candidates)
+
+    assert issue.custom_fields == %{"Repository" => "EmberAGI/scaling-octo-engine"}
+    assert issue.repository_source == "linear_label"
+
+    assert_receive {:fetch_issue_states_for_repository_label, query, %{ids: ^issue_ids}}
+    refute query =~ "customFieldValues"
+    refute_received :unexpected_repository_suggestion_query
+  end
+
   test "linear client logs response bodies for non-200 graphql responses" do
     log =
       ExUnit.CaptureLog.capture_log(fn ->
