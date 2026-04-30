@@ -221,6 +221,45 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Notifications do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+
+    defmodule Telegram do
+      @moduledoc false
+      use Ecto.Schema
+      import Ecto.Changeset
+
+      @primary_key false
+      embedded_schema do
+        field(:endpoint, :string, default: "https://api.telegram.org")
+        field(:bot_token, :string)
+        field(:chat_id, :string)
+        field(:message_thread_id, :string)
+        field(:events, {:array, :string}, default: ["human_review"])
+      end
+
+      @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+      def changeset(schema, attrs) do
+        cast(schema, attrs, [:endpoint, :bot_token, :chat_id, :message_thread_id, :events], empty_values: [])
+      end
+    end
+
+    embedded_schema do
+      embeds_one(:telegram, Telegram, on_replace: :update, defaults_to_struct: true)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [])
+      |> cast_embed(:telegram, with: &Telegram.changeset/2)
+    end
+  end
+
   defmodule Observability do
     @moduledoc false
     use Ecto.Schema
@@ -269,6 +308,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:notifications, Notifications, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
   end
@@ -361,6 +401,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
+    |> cast_embed(:notifications, with: &Notifications.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
   end
@@ -383,7 +424,54 @@ defmodule SymphonyElixir.Config.Schema do
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex}
+    notifications = %{
+      settings.notifications
+      | telegram: finalize_telegram_settings(settings.notifications.telegram)
+    }
+
+    %{settings | tracker: tracker, workspace: workspace, codex: codex, notifications: notifications}
+  end
+
+  defp finalize_telegram_settings(telegram) do
+    %{
+      telegram
+      | endpoint: normalize_endpoint(telegram.endpoint, "https://api.telegram.org"),
+        bot_token: resolve_secret_setting(telegram.bot_token, System.get_env("TELEGRAM_BOT_TOKEN")),
+        chat_id: resolve_secret_setting(telegram.chat_id, System.get_env("TELEGRAM_CHAT_ID")),
+        message_thread_id:
+          telegram.message_thread_id
+          |> resolve_secret_setting(System.get_env("TELEGRAM_MESSAGE_THREAD_ID"))
+          |> normalize_optional_integer_string(),
+        events: normalize_notification_events(telegram.events)
+    }
+  end
+
+  defp normalize_endpoint(value, default) when is_binary(value) do
+    value
+    |> String.trim()
+    |> case do
+      "" -> default
+      endpoint -> String.trim_trailing(endpoint, "/")
+    end
+  end
+
+  defp normalize_notification_events(events) when is_list(events) do
+    events
+    |> Enum.map(&to_string/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp normalize_optional_integer_string(nil), do: nil
+
+  defp normalize_optional_integer_string(value) do
+    value
+    |> to_string()
+    |> String.trim()
+    |> case do
+      "" -> nil
+      value -> value
+    end
   end
 
   defp normalize_keys(value) when is_map(value) do
