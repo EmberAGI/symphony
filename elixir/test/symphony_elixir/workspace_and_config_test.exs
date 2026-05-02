@@ -478,6 +478,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       "title" => "Blocked todo",
       "description" => "Needs dependency",
       "priority" => 2,
+      "sortOrder" => -2000.5,
       "state" => %{"name" => "Todo"},
       "branchName" => "mt-1",
       "url" => "https://example.org/issues/MT-1",
@@ -514,6 +515,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.blocked_by == [%{id: "issue-2", identifier: "MT-2", state: "In Progress"}]
     assert issue.labels == ["backend"]
     assert issue.priority == 2
+    assert issue.sort_order == -2000.5
     assert issue.state == "Todo"
     assert issue.assignee_id == "user-1"
     assert issue.assigned_to_worker
@@ -614,6 +616,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert_receive {:fetch_issue_states_page, query, %{ids: ^first_batch_ids, first: 50, relationFirst: 50}}
     assert query =~ "SymphonyLinearIssuesById"
+    assert query =~ "sortOrder"
     assert query =~ "customFieldValues"
     assert query =~ "customField"
 
@@ -777,7 +780,58 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert log =~ "Variable \\\"$ids\\\" got invalid value"
   end
 
-  test "orchestrator sorts dispatch by priority then oldest created_at" do
+  test "orchestrator sorts dispatch by sort_order before fallback fields" do
+    earlier_ordered_issue = %Issue{
+      id: "issue-early",
+      identifier: "MT-210",
+      title: "Earlier manual order",
+      state: "Merging",
+      priority: 4,
+      sort_order: -20_000,
+      created_at: ~U[2026-01-03 00:00:00Z]
+    }
+
+    later_ordered_issue = %Issue{
+      id: "issue-late",
+      identifier: "MT-211",
+      title: "Later manual order",
+      state: "Merging",
+      priority: 1,
+      sort_order: -10_000,
+      created_at: ~U[2026-01-01 00:00:00Z]
+    }
+
+    unordered_high_priority_issue = %Issue{
+      id: "issue-unordered",
+      identifier: "MT-209",
+      title: "Unordered high priority",
+      state: "Merging",
+      priority: 1,
+      created_at: ~U[2025-12-01 00:00:00Z]
+    }
+
+    malformed_sort_order_issue = %Issue{
+      id: "issue-malformed",
+      identifier: "MT-208",
+      title: "Malformed manual order",
+      state: "Merging",
+      priority: 1,
+      sort_order: "not-a-number",
+      created_at: ~U[2025-11-01 00:00:00Z]
+    }
+
+    sorted =
+      Orchestrator.sort_issues_for_dispatch_for_test([
+        malformed_sort_order_issue,
+        unordered_high_priority_issue,
+        later_ordered_issue,
+        earlier_ordered_issue
+      ])
+
+    assert Enum.map(sorted, & &1.identifier) == ["MT-210", "MT-211", "MT-208", "MT-209"]
+  end
+
+  test "orchestrator uses deterministic fallback only within unordered issues" do
     issue_same_priority_older = %Issue{
       id: "issue-old-high",
       identifier: "MT-200",

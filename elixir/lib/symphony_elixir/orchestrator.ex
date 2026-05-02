@@ -535,12 +535,33 @@ defmodule SymphonyElixir.Orchestrator do
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
     Enum.sort_by(issues, fn
       %Issue{} = issue ->
-        {priority_rank(issue.priority), issue_created_at_sort_key(issue), issue.identifier || issue.id || ""}
+        {
+          sort_order_rank(issue),
+          issue_sort_order_sort_key(issue),
+          priority_rank(issue.priority),
+          issue_created_at_sort_key(issue),
+          issue.identifier || issue.id || ""
+        }
 
       _ ->
-        {priority_rank(nil), issue_created_at_sort_key(nil), ""}
+        {
+          sort_order_rank(nil),
+          issue_sort_order_sort_key(nil),
+          priority_rank(nil),
+          issue_created_at_sort_key(nil),
+          ""
+        }
     end)
   end
+
+  defp sort_order_rank(%Issue{sort_order: sort_order}) when is_number(sort_order), do: 0
+  defp sort_order_rank(_issue), do: 1
+
+  defp issue_sort_order_sort_key(%Issue{sort_order: sort_order}) when is_number(sort_order) do
+    sort_order
+  end
+
+  defp issue_sort_order_sort_key(_issue), do: 0
 
   defp priority_rank(priority) when is_integer(priority) and priority in 1..4, do: priority
   defp priority_rank(_priority), do: 5

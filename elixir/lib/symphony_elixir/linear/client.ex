@@ -27,6 +27,7 @@ defmodule SymphonyElixir.Linear.Client do
         title
         description
         priority
+        sortOrder
         state {
           name
         }
@@ -73,6 +74,7 @@ defmodule SymphonyElixir.Linear.Client do
         title
         description
         priority
+        sortOrder
         state {
           name
         }
@@ -283,7 +285,8 @@ defmodule SymphonyElixir.Linear.Client do
              relationFirst: @issue_page_size,
              after: after_cursor
            }),
-         {:ok, issues, page_info} <- decode_linear_page_response(body, assignee_filter, &graphql/2, repository_candidates()) do
+         {:ok, issues, page_info} <-
+           decode_linear_page_response(body, assignee_filter, &graphql/2, repository_candidates()) do
       updated_acc = prepend_page_issues(issues, acc_issues)
 
       case next_page_cursor(page_info) do
@@ -553,6 +556,7 @@ defmodule SymphonyElixir.Linear.Client do
       title: issue["title"],
       description: issue["description"],
       priority: parse_priority(issue["priority"]),
+      sort_order: parse_sort_order(issue["sortOrder"]),
       state: get_in(issue, ["state", "name"]),
       branch_name: issue["branchName"],
       url: issue["url"],
@@ -819,4 +823,9 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp parse_priority(priority) when is_integer(priority), do: priority
   defp parse_priority(_priority), do: nil
+
+  defp parse_sort_order(sort_order) when is_integer(sort_order) or is_float(sort_order),
+    do: sort_order
+
+  defp parse_sort_order(_sort_order), do: nil
 end
