@@ -22,7 +22,7 @@ notifications:
     # Optional forum topic id. Omit this, or set it to 1, for Telegram's General topic.
     message_thread_id: $TELEGRAM_MESSAGE_THREAD_ID
     events:
-      - human_review
+      - human_escalation
       - agent_failed
 workspace:
   root: ~/code/symphony-workspaces

@@ -239,7 +239,7 @@ defmodule SymphonyElixir.Config.Schema do
         field(:bot_token, :string)
         field(:chat_id, :string)
         field(:message_thread_id, :string)
-        field(:events, {:array, :string}, default: ["human_review"])
+        field(:events, {:array, :string}, default: ["human_escalation"])
       end
 
       @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()

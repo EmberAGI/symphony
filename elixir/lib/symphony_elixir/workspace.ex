@@ -529,18 +529,17 @@ defmodule SymphonyElixir.Workspace do
 
   defp issue_context(%{id: issue_id, identifier: identifier} = issue) do
     custom_fields = Map.get(issue, :custom_fields) || Map.get(issue, "custom_fields") || %{}
-    title = Map.get(issue, :title) || Map.get(issue, "title")
-    branch_name = Map.get(issue, :branch_name) || Map.get(issue, "branch_name") || Map.get(issue, "branchName")
+    title = issue_value(issue, :title)
 
     %{
       issue_id: issue_id,
       issue_identifier: identifier || "issue",
       issue_title: title,
-      issue_state: Map.get(issue, :state) || Map.get(issue, "state"),
-      issue_branch_name: branch_name,
-      issue_url: Map.get(issue, :url) || Map.get(issue, "url"),
+      issue_state: issue_value(issue, :state),
+      issue_branch_name: issue_branch_name(issue),
+      issue_url: issue_value(issue, :url),
       custom_fields: custom_fields,
-      repository_source: Map.get(issue, :repository_source) || Map.get(issue, "repository_source"),
+      repository_source: issue_value(issue, :repository_source),
       expected_branch: expected_branch_name(identifier, title)
     }
   end
@@ -611,8 +610,13 @@ defmodule SymphonyElixir.Workspace do
   defp hook_env_exports(issue_context) do
     issue_context
     |> hook_env()
-    |> Enum.map(fn {key, value} -> "export #{key}=#{shell_escape(value)}" end)
-    |> Enum.join("\n")
+    |> Enum.map_join("\n", fn {key, value} -> "export #{key}=#{shell_escape(value)}" end)
+  end
+
+  defp issue_value(issue, key), do: Map.get(issue, key) || Map.get(issue, to_string(key))
+
+  defp issue_branch_name(issue) do
+    issue_value(issue, :branch_name) || Map.get(issue, "branchName")
   end
 
   defp expected_branch_name(identifier, title) do

@@ -1179,6 +1179,7 @@ Additional normalization details:
 - `labels` -> lowercase strings
 - `blocked_by` -> derived from inverse relations where relation type is `blocks`
 - `priority` -> integer only (non-integers become null)
+- `sort_order` -> numeric Linear `sortOrder` only (non-numeric values become null)
 - `created_at` and `updated_at` -> parse ISO-8601 timestamps
 
 ### 11.4 Error Handling Contract
@@ -1334,6 +1335,13 @@ Rate-limit tracking:
 
 - Track the latest rate-limit payload seen in any agent update.
 - Any human-readable presentation of rate-limit data is implementation-defined.
+
+### 13.6 Human Attention Notifications
+
+Human attention notifications are OPTIONAL, but when implemented for Linear they MUST be driven by
+an explicit `Human Escalation` label on the issue. A transition to a handoff state such as
+`Human Review` MAY stop or release a running agent, but MUST NOT be the notification trigger by
+itself.
 
 ### 13.6 Humanized Agent Event Summaries (OPTIONAL)
 
@@ -2038,6 +2046,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   not affect correctness
 - If humanized event summaries are implemented, they cover key wrapper/agent event classes without
   changing orchestrator behavior
+- Human attention notifications, when implemented, are triggered by the `Human Escalation` label
+  rather than by `Human Review` state transitions alone
 
 ### 17.7 CLI and Host Lifecycle
 

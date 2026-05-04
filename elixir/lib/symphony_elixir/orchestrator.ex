@@ -347,7 +347,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
-    maybe_notify_human_review_transition(state, issue)
+    maybe_notify_human_escalation_label(state, issue)
 
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
@@ -372,13 +372,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp reconcile_issue_state(_issue, state, _active_states, _terminal_states), do: state
 
-  defp maybe_notify_human_review_transition(%State{} = state, %Issue{id: issue_id, state: state_name} = issue)
-       when is_binary(issue_id) and is_binary(state_name) do
+  defp maybe_notify_human_escalation_label(%State{} = state, %Issue{id: issue_id} = issue)
+       when is_binary(issue_id) do
     case Map.get(state.running, issue_id) do
-      %{issue: %Issue{state: previous_state}} ->
-        if normalize_issue_state(state_name) == "human review" and
-             normalize_issue_state(previous_state || "") != "human review" do
-          Telegram.notify_human_review(issue)
+      %{issue: %Issue{} = previous_issue} ->
+        if human_escalation_label?(issue) and !human_escalation_label?(previous_issue) do
+          Telegram.notify_human_escalation(issue)
         end
 
       _ ->
@@ -386,7 +385,16 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp maybe_notify_human_review_transition(_state, _issue), do: :ok
+  defp maybe_notify_human_escalation_label(_state, _issue), do: :ok
+
+  defp human_escalation_label?(%Issue{labels: labels}) when is_list(labels) do
+    Enum.any?(labels, &(normalize_label(&1) == "human escalation"))
+  end
+
+  defp human_escalation_label?(_issue), do: false
+
+  defp normalize_label(label) when is_binary(label), do: String.downcase(String.trim(label))
+  defp normalize_label(_label), do: ""
 
   defp maybe_notify_agent_failed(%{issue: %Issue{} = issue}, reason) do
     Telegram.notify_agent_failed(issue, reason)

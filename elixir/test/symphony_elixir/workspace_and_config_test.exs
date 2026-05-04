@@ -1314,7 +1314,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       telegram_bot_token: "$#{bot_token_env_var}",
       telegram_chat_id: "$#{chat_id_env_var}",
       telegram_message_thread_id: "$#{thread_id_env_var}",
-      telegram_events: ["human_review", "agent_failed"]
+      telegram_events: ["human_escalation", "agent_failed"]
     )
 
     config = Config.settings!()
@@ -1322,7 +1322,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.notifications.telegram.bot_token == "bot-token"
     assert config.notifications.telegram.chat_id == "chat-id"
     assert config.notifications.telegram.message_thread_id == "42"
-    assert config.notifications.telegram.events == ["human_review", "agent_failed"]
+    assert config.notifications.telegram.events == ["human_escalation", "agent_failed"]
   end
 
   test "blank telegram endpoint falls back to default endpoint" do
