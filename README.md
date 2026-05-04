@@ -10,6 +10,11 @@ _In this [demo video](.github/media/symphony-demo.mp4), Symphony monitors a Line
 > [!WARNING]
 > Symphony is a low-key engineering preview for testing in trusted environments.
 
+## Specifications
+
+Canonical specifications for this fork live under [`spec/`](spec/). Start with
+[`spec/index.md`](spec/index.md).
+
 ## Running Symphony
 
 ### Requirements
@@ -22,8 +27,7 @@ moving from managing coding agents to managing work that needs to get done.
 
 Tell your favorite coding agent to build Symphony in a programming language of your choice:
 
-> Implement Symphony according to the following spec:
-> https://github.com/openai/symphony/blob/main/SPEC.md
+> Implement Symphony according to `spec/index.md` and the canonical specs it links.
 
 ### Option 2. Use our experimental reference implementation
 

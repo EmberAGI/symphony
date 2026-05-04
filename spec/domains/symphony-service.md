@@ -101,7 +101,7 @@ Important boundary:
 6. `Agent Runner`
    - Creates workspace.
    - Builds prompt from issue + workflow template.
-   - Launches the configured coding-agent runtime adapter.
+   - Launches the coding agent app-server client.
    - Streams agent updates back to the orchestrator.
 
 7. `Status Surface` (OPTIONAL)
@@ -127,7 +127,7 @@ Symphony is easiest to port when kept in these layers:
    - Polling loop, issue eligibility, concurrency, retries, reconciliation.
 
 4. `Execution Layer` (workspace + agent subprocess)
-   - Filesystem lifecycle, workspace preparation, coding-agent runtime protocol.
+   - Filesystem lifecycle, workspace preparation, coding-agent protocol.
 
 5. `Integration Layer` (Linear adapter)
    - API calls and normalization for tracker data.
@@ -140,7 +140,7 @@ Symphony is easiest to port when kept in these layers:
 - Issue tracker API (Linear for `tracker.kind: linear` in this specification version).
 - Local filesystem for workspaces and logs.
 - OPTIONAL workspace population tooling (for example Git CLI, if used).
-- Coding-agent executable or adapter process for the configured runtime provider.
+- Coding-agent executable that supports the targeted Codex app-server mode.
 - Host environment authentication for the issue tracker and coding agent.
 
 ## 4. Core Domain Model
@@ -228,20 +228,16 @@ State tracked while a coding-agent subprocess is running.
 
 Fields:
 
-- `session_id` (string)
-  - Stable Symphony session identifier. For Codex app-server, `<thread_id>-<turn_id>` remains the
-    backward-compatible shape.
-- `runtime` (string)
-  - Provider name such as `codex`, `claude_code`, or `pi`.
-- `provider_session_id` (string or null)
-- `provider_turn_id` (string or null)
-- `worker_pid` (string or null)
-- `last_runtime_event` (string/enum or null)
-- `last_runtime_timestamp` (timestamp or null)
-- `last_runtime_message` (summarized payload)
-- `usage_input_tokens` (integer)
-- `usage_output_tokens` (integer)
-- `usage_total_tokens` (integer)
+- `session_id` (string, `<thread_id>-<turn_id>`)
+- `thread_id` (string)
+- `turn_id` (string)
+- `codex_app_server_pid` (string or null)
+- `last_codex_event` (string/enum or null)
+- `last_codex_timestamp` (timestamp or null)
+- `last_codex_message` (summarized payload)
+- `codex_input_tokens` (integer)
+- `codex_output_tokens` (integer)
+- `codex_total_tokens` (integer)
 - `last_reported_input_tokens` (integer)
 - `last_reported_output_tokens` (integer)
 - `last_reported_total_tokens` (integer)
@@ -273,8 +269,8 @@ Fields:
 - `claimed` (set of issue IDs reserved/running/retrying)
 - `retry_attempts` (map `issue_id -> RetryEntry`)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
-- `runtime_totals` (aggregate usage + runtime seconds)
-- `runtime_rate_limits` (latest rate-limit snapshot from runtime events, when available)
+- `codex_totals` (aggregate tokens + runtime seconds)
+- `codex_rate_limits` (latest rate-limit snapshot from agent events)
 
 ### 4.2 Stable Identifiers and Normalization Rules
 
@@ -428,46 +424,7 @@ Fields:
   - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
 
-#### 5.3.6 `agent_runtime` (object)
-
-The `agent_runtime` object selects the coding-agent provider and declares the provider-neutral
-runtime contract that the `Agent Runner` uses.
-
-Fields:
-
-- `provider` (string)
-  - Default: `codex`.
-  - Required supported values for the Octo multi-runtime profile: `codex`, `claude_code`, and `pi`.
-  - Unknown provider values fail configuration validation.
-- `command` (string or list of strings)
-  - Default: provider-specific. For `codex`, default `codex app-server`.
-  - Launches the provider executable or adapter process in the workspace.
-  - String commands MAY be launched through `bash -lc`; list commands SHOULD be launched without
-    shell interpolation when the implementation supports it.
-- `env` (map string -> string)
-  - Optional provider-specific environment additions.
-  - Secrets SHOULD be referenced by environment variable name or runtime secret provider rather than
-    embedded in workflow source.
-- `permission_policy` (map)
-  - Provider-neutral wrapper for approval, sandbox, and user-input policy. Providers map this to
-    their native mechanisms.
-- `tool_bundle` (list of strings or objects)
-  - Declares the runtime-native tools or extensions that MUST be available to the session.
-- `artifact_policy` (map)
-  - Declares whether the adapter should collect logs, transcripts, proof files, session exports, or
-    other artifacts.
-- `capabilities` (map)
-  - Declares provider capabilities such as `streaming`, `cancellation`, `resume`, `tool_execution`,
-    `usage_reporting`, and `artifact_export`.
-
-Provider adapters MUST document the exact native protocol and config keys they accept. The
-provider-neutral `agent_runtime` contract does not replace provider-specific settings; it gives the
-orchestrator a stable shape for launch, lifecycle, tools, events, artifacts, and validation.
-
-#### 5.3.7 `codex` (object)
-
-The existing `codex` object remains supported for backward compatibility and as the default
-provider-specific config for `agent_runtime.provider: codex`.
+#### 5.3.6 `codex` (object)
 
 Fields:
 
@@ -826,9 +783,9 @@ Reconciliation runs every tick and has two parts.
 Part A: Stall detection
 
 - For each running issue, compute `elapsed_ms` since:
-  - `last_runtime_timestamp` if any event has been seen, else
+  - `last_codex_timestamp` if any event has been seen, else
   - `started_at`
-- If `elapsed_ms > provider stall timeout`, terminate the worker and queue a retry.
+- If `elapsed_ms > codex.stall_timeout_ms`, terminate the worker and queue a retry.
 - If `stall_timeout_ms <= 0`, skip stall detection entirely.
 
 Part B: Tracker state refresh
@@ -946,113 +903,79 @@ Invariant 3: Workspace key is sanitized.
 - Only `[A-Za-z0-9._-]` allowed in workspace directory names.
 - Replace all other characters with `_`.
 
-## 10. Agent Runtime Protocol (Coding Agent Integration)
+## 10. Agent Runner Protocol (Coding Agent Integration)
 
-This section defines Symphony's language-neutral responsibilities when integrating coding-agent
-runtime providers. A runtime provider can be a native app-server, an adapter process, or a JSONL RPC
-client. Symphony owns orchestration behavior, workspace selection, prompt construction,
-continuation handling, tool availability, event normalization, artifact collection, and
-observability extraction. Provider-specific protocols remain the source of truth for native message
-payloads, transport framing, and method names.
-
-Required Octo multi-runtime providers:
-
-- `codex`: the existing reference runtime using the targeted Codex app-server protocol.
-- `claude_code`: a first-party Symphony adapter around Claude Code. The adapter MAY use an
-  app-server-compatible shim, MCP/helper bridge, or another documented transport, but Symphony's
-  internal contract is the provider-neutral adapter contract in this section.
-- `pi`: a native Pi JSONL RPC adapter. The Pi RPC documentation is the source of truth for native
-  commands, responses, and streamed events.
+This section defines Symphony's language-neutral responsibilities when integrating a Codex
+app-server. The Codex app-server protocol for the targeted Codex version is the source of truth for
+protocol schemas, message payloads, transport framing, and method names.
 
 Protocol source of truth:
 
-- Implementations MUST send native messages that are valid for the targeted provider version.
-- Implementations MUST consult the targeted provider documentation, generated schema, or source
-  contract instead of treating this specification as a provider protocol schema.
-- If this specification appears to conflict with the targeted provider protocol, the provider
-  protocol controls provider message shape and transport behavior.
+- Implementations MUST send messages that are valid for the targeted Codex app-server version.
+- Implementations MUST consult the targeted Codex app-server documentation or generated schema
+  instead of treating this specification as a protocol schema.
+- If this specification appears to conflict with the targeted Codex app-server protocol, the Codex
+  protocol controls protocol shape and transport behavior.
 - Symphony-specific requirements in this section still control orchestration behavior, workspace
-  selection, prompt construction, continuation handling, skills/tools, event normalization,
-  artifact collection, and observability extraction.
+  selection, prompt construction, continuation handling, and observability extraction.
 
-### 10.1 Runtime Adapter Interface
-
-Each runtime provider MUST implement a provider-neutral adapter with these logical operations:
-
-- `start_session(workspace, issue, prompt, config, tools)`: start or resume a provider session in the
-  per-issue workspace and make declared tools available.
-- `run_turn(session, input, continuation)`: run the initial prompt turn or a continuation turn.
-- `send_followup(session, input)`: send provider-native follow-up input when supported.
-- `cancel(session, reason)`: request cancellation of the active turn or session.
-- `stop_session(session)`: stop the provider process and release runtime resources.
-- `normalize_event(provider_event)`: map provider-native events into Symphony runtime events.
-- `collect_artifacts(session)`: collect provider transcripts, proof files, exports, logs, or other
-  declared artifacts.
-
-Adapters MAY expose these operations through modules, processes, callbacks, or another
-implementation-specific structure. They MUST preserve the behavior and error semantics above.
-
-### 10.2 Launch Contract
+### 10.1 Launch Contract
 
 Subprocess launch parameters:
 
-- Command: `agent_runtime.command`, falling back to provider-specific config such as
-  `codex.command`.
-- Invocation: implementation-defined, but string commands MAY use `bash -lc <command>` for
-  backward compatibility.
+- Command: `codex.command`
+- Invocation: `bash -lc <codex.command>`
 - Working directory: workspace path
-- Transport/framing: the protocol transport required by the targeted provider version
+- Transport/framing: the protocol transport required by the targeted Codex app-server version
 
 Notes:
 
-- The default provider is `codex` and the default Codex command is `codex app-server`.
-- Approval policy, sandbox policy, cwd, prompt input, and tool declarations are supplied using
-  fields supported by the targeted provider version.
-- Provider adapters MUST run inside or be explicitly bound to the selected per-issue workspace.
+- The default command is `codex app-server`.
+- Approval policy, sandbox policy, cwd, prompt input, and OPTIONAL tool declarations are supplied
+  using fields supported by the targeted Codex app-server version.
 
 RECOMMENDED additional process settings:
 
 - Max line size: 10 MB (for safe buffering)
 
-### 10.3 Session Startup Responsibilities
+### 10.2 Session Startup Responsibilities
 
-Codex reference: https://developers.openai.com/codex/app-server/
+Reference: https://developers.openai.com/codex/app-server/
 
-Startup MUST follow the targeted provider contract. Symphony additionally requires the adapter to:
+Startup MUST follow the targeted Codex app-server contract. Symphony additionally requires the
+client to:
 
-- Start the provider subprocess or adapter process in the per-issue workspace.
-- Initialize the provider session using the targeted provider protocol.
-- Create or resume a coding-agent session according to the targeted protocol.
+- Start the app-server subprocess in the per-issue workspace.
+- Initialize the app-server session using the targeted Codex app-server protocol.
+- Create or resume a coding-agent thread according to the targeted protocol.
 - Supply the absolute per-issue workspace path as the thread/turn working directory wherever the
   targeted protocol accepts cwd.
 - Start the first turn with the rendered issue prompt.
-- Start later in-worker continuation turns on the same live session with continuation guidance
-  rather than resending the original issue prompt.
+- Start later in-worker continuation turns on the same live thread with continuation guidance rather
+  than resending the original issue prompt.
 - Supply the implementation's documented approval and sandbox policy using fields supported by the
   targeted protocol.
 - Include issue-identifying metadata, such as `<issue.identifier>: <issue.title>`, when the targeted
   protocol supports turn or session titles.
-- Materialize or translate the workflow role skills required for the runtime.
-- Advertise implemented runtime-native tools using the targeted protocol.
+- Advertise implemented client-side tools using the targeted protocol.
 
 Session identifiers:
 
-- Extract the provider session/thread identity and turn identity when available.
-- Emit a stable `session_id`. For Codex app-server, use `<thread_id>-<turn_id>` for backward
-  compatibility.
-- Reuse the same live provider session for all continuation turns inside one worker run when the
-  provider supports continuation.
+- Extract `thread_id` from the thread identity returned by the targeted Codex app-server protocol.
+- Extract `turn_id` from each turn identity returned by the targeted Codex app-server protocol.
+- Emit `session_id = "<thread_id>-<turn_id>"`
+- Reuse the same `thread_id` for all continuation turns inside one worker run
 
-### 10.4 Streaming Turn Processing
+### 10.3 Streaming Turn Processing
 
-The adapter processes provider updates according to the targeted provider protocol until the active
-turn terminates.
+The client processes app-server updates according to the targeted Codex app-server protocol until
+the active turn terminates.
 
 Completion conditions:
 
-- Targeted-provider turn completion signal -> success
-- Targeted-provider turn failure signal -> failure
-- Targeted-provider turn cancellation signal -> failure
+- Targeted-protocol turn completion signal -> success
+- Targeted-protocol turn failure signal -> failure
+- Targeted-protocol turn cancellation signal -> failure
 - turn timeout (`turn_timeout_ms`) -> failure
 - subprocess exit -> failure
 
@@ -1060,53 +983,42 @@ Continuation processing:
 
 - If the worker decides to continue after a successful turn, it SHOULD start another turn on the same
   live thread using the targeted protocol.
-- The provider subprocess SHOULD remain alive across those continuation turns and be stopped only
-  when the worker run is ending, when the provider supports a persistent session.
+- The app-server subprocess SHOULD remain alive across those continuation turns and be stopped only
+  when the worker run is ending.
 
 Transport handling requirements:
 
-- Follow the transport and framing rules of the targeted provider version.
+- Follow the transport and framing rules of the targeted Codex app-server version.
 - For stdio-based transports, keep protocol stream handling separate from diagnostic stderr
   handling unless the targeted protocol specifies otherwise.
 
-### 10.5 Emitted Runtime Events (Upstream to Orchestrator)
+### 10.4 Emitted Runtime Events (Upstream to Orchestrator)
 
-The runtime adapter emits structured events to the orchestrator callback. Each event SHOULD
+The app-server client emits structured events to the orchestrator callback. Each event SHOULD
 include:
 
 - `event` (enum/string)
 - `timestamp` (UTC timestamp)
-- `runtime` (provider name)
-- `worker_pid` (if available)
+- `codex_app_server_pid` (if available)
 - OPTIONAL `usage` map (token counts)
 - payload fields as needed
-
-For backward compatibility, implementations MAY still emit provider-specific process fields such as
-`codex_app_server_pid`, but shared orchestration and status code SHOULD prefer provider-neutral
-fields such as `runtime`, `worker_pid`, and `session_id`.
 
 Important emitted events include, for example:
 
 - `session_started`
 - `startup_failed`
-- `text_delta`
-- `tool_started`
-- `tool_finished`
-- `tool_failed`
 - `turn_completed`
 - `turn_failed`
 - `turn_cancelled`
 - `turn_ended_with_error`
 - `turn_input_required`
-- `usage_updated`
-- `artifact_available`
 - `approval_auto_approved`
 - `unsupported_tool_call`
 - `notification`
 - `other_message`
 - `malformed`
 
-### 10.6 Approval, Tool Calls, Skills, and User Input Policy
+### 10.5 Approval, Tool Calls, and User Input Policy
 
 Approval, sandbox, and user-input behavior is implementation-defined.
 
@@ -1124,18 +1036,6 @@ Example high-trust behavior:
 - Auto-approve file-change approvals for the session.
 - Treat user-input-required turns as hard failure.
 
-Skills and tool availability:
-
-- Runtime adapters MUST materialize or translate the workflow skills required by the role/session
-  before the first turn starts.
-- Runtime adapters MUST expose declared tools through controlled runtime-native mechanisms rather
-  than by leaking raw credentials or secret-bearing instructions into prompts.
-- A runtime provider MUST NOT be enabled for unattended Octo use until required skills load,
-  required tools execute, tool failures normalize, and secret-handling checks pass.
-- The Octo minimum tool bundle includes Linear GraphQL access, workpad operations,
-  artifact/proof capture, repository status, and PR status unless the deployment documents a
-  narrower role-specific bundle.
-
 Unsupported dynamic tool calls:
 
 - Supported dynamic tool calls that are explicitly implemented and advertised by the runtime SHOULD
@@ -1144,13 +1044,12 @@ Unsupported dynamic tool calls:
   using the targeted protocol and continue the session.
 - This prevents the session from stalling on unsupported tool execution paths.
 
-Runtime-native tool extension:
+Optional client-side tool extension:
 
-- An implementation MAY expose a limited set of client-side or runtime-native tools to the provider
-  session.
+- An implementation MAY expose a limited set of client-side tools to the app-server session.
 - Current standardized optional tool: `linear_graphql`.
-- If implemented, supported tools SHOULD be advertised to the provider session during startup using
-  the protocol mechanism supported by the targeted provider version.
+- If implemented, supported tools SHOULD be advertised to the app-server session during startup
+  using the protocol mechanism supported by the targeted Codex app-server version.
 - Unsupported tool names SHOULD still return a failure result using the targeted protocol and
   continue the session.
 
@@ -1195,13 +1094,13 @@ User-input-required policy:
   through an approved operator channel, or auto-resolve it according to its documented policy.
 - The example high-trust behavior above fails user-input-required turns immediately.
 
-### 10.7 Timeouts and Error Mapping
+### 10.6 Timeouts and Error Mapping
 
 Timeouts:
 
-- Provider-specific read timeout: request/response timeout during startup and sync requests.
-- Provider-specific turn timeout: total turn stream timeout.
-- Provider-specific stall timeout: enforced by orchestrator based on event inactivity.
+- `codex.read_timeout_ms`: request/response timeout during startup and sync requests
+- `codex.turn_timeout_ms`: total turn stream timeout
+- `codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
 
 Error mapping (RECOMMENDED normalized categories):
 
@@ -1209,55 +1108,22 @@ Error mapping (RECOMMENDED normalized categories):
 - `invalid_workspace_cwd`
 - `response_timeout`
 - `turn_timeout`
-- `provider_exit`
+- `port_exit`
 - `response_error`
 - `turn_failed`
 - `turn_cancelled`
 - `turn_input_required`
-- `tool_failed`
-- `artifact_collection_failed`
 
-### 10.8 Provider-Specific Requirements
+### 10.7 Agent Runner Contract
 
-Codex requirements:
-
-- Preserve current `codex app-server` behavior as the reference runtime.
-- Preserve existing `codex` workflow config compatibility.
-- Use Codex dynamic tools for runtime-native tool exposure where supported.
-
-Claude Code requirements:
-
-- Use a first-party Symphony adapter or shim that separates server logic, transport, session
-  lifecycle, cancellation, and tool bridging.
-- Capture and resume provider session identity when the provider supports it.
-- Normalize Claude Code text, tool, failure, usage, permission, and input-required events into the
-  event vocabulary above.
-- Validate local Claude CLI authentication and startup prerequisites before dispatch.
-
-Pi requirements:
-
-- Use native Pi JSONL RPC as the source of truth for provider commands, responses, and streamed
-  events.
-- Map Pi commands such as `prompt`, `abort`, `get_state`, `set_session_name`,
-  `set_auto_retry`, `set_auto_compaction`, `get_last_assistant_text`, `get_session_stats`, and
-  `export_html` where supported.
-- Disable or explicitly control Pi auto-retry and auto-compaction until Symphony/Octo owns retry and
-  handoff behavior for the worker session.
-- Use an explicit worker extension bundle for skills/tools; do not rely on ambient local Pi
-  extensions or themes in unattended sessions.
-- Convert unattended Pi UI/input requests into normalized input-required events and the deployment's
-  human-escalation path.
-
-### 10.9 Agent Runner Contract
-
-The `Agent Runner` wraps workspace + prompt + runtime adapter.
+The `Agent Runner` wraps workspace + prompt + app-server client.
 
 Behavior:
 
 1. Create/reuse workspace for issue.
 2. Build prompt from workflow template.
-3. Start runtime session.
-4. Forward normalized runtime events to orchestrator.
+3. Start app-server session.
+4. Forward app-server events to orchestrator.
 5. On any error, fail the worker attempt (the orchestrator will retry).
 
 Note:
@@ -1415,7 +1281,7 @@ SHOULD return:
 - `running` (list of running session rows)
 - each running row SHOULD include `turn_count`
 - `retrying` (list of retry queue rows)
-- `runtime_totals`
+- `codex_totals`
   - `input_tokens`
   - `output_tokens`
   - `total_tokens`
@@ -1557,7 +1423,7 @@ Minimum endpoints:
           "error": "no available orchestrator slots"
         }
       ],
-      "runtime_totals": {
+      "codex_totals": {
         "input_tokens": 5000,
         "output_tokens": 2400,
         "total_tokens": 7400,
@@ -1824,8 +1690,8 @@ function start_service():
     claimed: set(),
     retry_attempts: {},
     completed: set(),
-    runtime_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-    runtime_rate_limits: null
+    codex_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+    codex_rate_limits: null
   }
 
   validation = validate_dispatch_config()
@@ -1917,14 +1783,13 @@ function dispatch_issue(issue, state, attempt):
     identifier: issue.identifier,
     issue,
     session_id: null,
-    runtime: config.agent_runtime.provider,
-    worker_pid: null,
-    last_runtime_message: null,
-    last_runtime_event: null,
-    last_runtime_timestamp: null,
-    usage_input_tokens: 0,
-    usage_output_tokens: 0,
-    usage_total_tokens: 0,
+    codex_app_server_pid: null,
+    last_codex_message: null,
+    last_codex_event: null,
+    last_codex_timestamp: null,
+    codex_input_tokens: 0,
+    codex_output_tokens: 0,
+    codex_total_tokens: 0,
     last_reported_input_tokens: 0,
     last_reported_output_tokens: 0,
     last_reported_total_tokens: 0,
@@ -2130,38 +1995,34 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   limits
 - If a snapshot API is implemented, timeout/unavailable cases are surfaced
 
-### 17.5 Coding-Agent Runtime Adapter
+### 17.5 Coding-Agent App-Server Client
 
-- Launch command uses workspace cwd and the configured `agent_runtime` provider command.
-- Session startup follows the targeted provider protocol.
-- Provider identity/capability payloads are valid when the targeted provider protocol requires them.
-- Policy-related startup payloads use the implementation's documented approval/sandbox settings.
-- Provider session and turn identities exposed by the targeted protocol are extracted and used to
-  emit `session_started`.
+- Launch command uses workspace cwd and invokes `bash -lc <codex.command>`
+- Session startup follows the targeted Codex app-server protocol.
+- Client identity/capability payloads are valid when the targeted Codex app-server protocol requires
+  them.
+- Policy-related startup payloads use the implementation's documented approval/sandbox settings
+- Thread and turn identities exposed by the targeted protocol are extracted and used to emit
+  `session_started`
 - Request/response read timeout is enforced
 - Turn timeout is enforced
 - Transport framing required by the targeted protocol is handled correctly
 - For stdio-based transports, diagnostic stderr handling is kept separate from the protocol stream
 - Command/file-change approvals are handled according to the implementation's documented policy
-- Unsupported dynamic or runtime-native tool calls are rejected without stalling the session
+- Unsupported dynamic tool calls are rejected without stalling the session
 - User input requests are handled according to the implementation's documented policy and do not
   stall indefinitely
 - Usage and rate-limit telemetry exposed by the targeted protocol is extracted
 - Approval, user-input-required, usage, and rate-limit signals are interpreted according to the
   targeted protocol
-- Required role skills are materialized or translated before the first turn starts.
-- If client-side or runtime-native tools are implemented, session startup advertises the supported
-  tool specs using the targeted provider protocol.
+- If client-side tools are implemented, session startup advertises the supported tool specs
+  using the targeted app-server protocol
 - If the `linear_graphql` client-side tool extension is implemented:
   - the tool is advertised to the session
   - valid `query` / `variables` inputs execute against configured Linear auth
   - top-level GraphQL `errors` produce `success=false` while preserving the GraphQL body
   - invalid arguments, missing auth, and transport failures return structured failure payloads
   - unsupported tool names still fail without stalling the session
-- Octo-compatible runtimes pass smoke or contract checks proving required skills load, required
-  tools execute, tool failures normalize, and secrets are not exposed through prompts or logs.
-- The multi-runtime profile validates at least one real mixed-runtime execution with Codex, Claude
-  Code, and Pi adapters available and roles assigned to different runtimes.
 
 ### 17.6 Observability
 
@@ -2203,7 +2064,6 @@ Use the same validation profiles as Section 17:
 - Section 18.1 = `Core Conformance`
 - Section 18.2 = `Extension Conformance`
 - Section 18.3 = `Real Integration Profile`
-- Section 18.4 = `Octo Multi-Runtime Profile`
 
 ### 18.1 REQUIRED for Conformance
 
@@ -2216,7 +2076,7 @@ Use the same validation profiles as Section 17:
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
-- Coding-agent runtime adapter with provider-neutral lifecycle and event normalization
+- Coding-agent app-server subprocess client with JSON line protocol
 - Codex launch command config (`codex.command`, default `codex app-server`)
 - Strict prompt rendering with `issue` and `attempt` variables
 - Exponential retry queue with continuation retries after normal exit
@@ -2245,23 +2105,6 @@ Use the same validation profiles as Section 17:
 - Verify hook execution and workflow path resolution on the target host OS/shell environment.
 - If the OPTIONAL HTTP server is shipped, verify the configured port behavior and loopback/default
   bind expectations on the target environment.
-
-### 18.4 Octo Multi-Runtime Profile
-
-The Octo multi-runtime profile is REQUIRED for deployments that claim support for running Octo with
-Codex, Claude Code, and Pi.
-
-- `agent_runtime.provider` supports `codex`, `claude_code`, and `pi`.
-- Codex remains backward compatible with the existing `codex app-server` reference path.
-- Claude Code runs as an unattended Symphony role runtime through the first-party adapter.
-- Pi runs as an unattended Symphony role runtime through native JSONL RPC.
-- Role skills load or translate correctly for each enabled runtime.
-- Required Octo tools execute through runtime-native mechanisms for each enabled runtime.
-- Tool failures, cancellation, input-required cases, artifacts/proof, and usage/status reporting are
-  normalized across providers.
-- Provider credentials and tracker tokens are not exposed through prompts or logs.
-- At least one real mixed-runtime Octo execution is validated with roles assigned to different
-  runtimes.
 
 ## Appendix A. SSH Worker Extension (OPTIONAL)
 
