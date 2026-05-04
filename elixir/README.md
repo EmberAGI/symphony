@@ -1,11 +1,13 @@
 # Symphony Elixir
 
 This directory contains the current Elixir/OTP implementation of Symphony, based on
-[`SPEC.md`](../SPEC.md) at the repository root.
+the canonical specs under [`../spec/`](../spec/). Start with
+[`../spec/index.md`](../spec/index.md) and the service spec at
+[`../spec/domains/symphony-service.md`](../spec/domains/symphony-service.md).
 
 > [!WARNING]
 > Symphony Elixir is prototype software intended for evaluation only and is presented as-is.
-> We recommend implementing your own hardened version based on `SPEC.md`.
+> We recommend implementing your own hardened version based on the canonical specs under `spec/`.
 
 ## Screenshot
 

@@ -1,0 +1,25 @@
+# Spec Index
+
+Canonical specs are organized by durable product or system area. Linear issue
+IDs belong in references and decision logs, not canonical filenames.
+
+Use this index when deciding where durable behavior belongs. `spec/` and
+`spec/adr/` are the source-of-truth layer for agents and reviewers.
+
+## Domains
+
+- [Symphony Service](./domains/symphony-service.md): Language-agnostic service
+  specification for the workflow loader, config layer, tracker integration,
+  orchestrator, workspace manager, agent runner, observability, validation, and
+  optional worker extensions.
+- [Agent Runtime](./domains/agent-runtime.md): Provider-neutral coding-agent
+  runtime contract, runtime selection, Codex/Claude Code/Pi adapter
+  requirements, runtime-native skills and tools, normalized events, artifacts,
+  and Octo mixed-runtime validation.
+
+## ADRs
+
+ADRs live under `spec/adr/` and are created lazily when a decision is hard to
+reverse, surprising without context, and the result of a real trade-off.
+
+- [0001: Provider-Neutral Agent Runtimes](./adr/0001-provider-neutral-agent-runtimes.md)
