@@ -4,9 +4,9 @@ How to deepen a cluster of shallow modules safely, given its dependencies.
 Assumes the vocabulary in [LANGUAGE.md](LANGUAGE.md): **module**,
 **interface**, **seam**, and **adapter**.
 
-For Agent QA, apply this only to implementation-touched files selected by the
-recorded diff basis. Use it to explain a bounded architecture request or to
-verify one that already has the `Architectural suggestions` marker.
+Apply this only to implementation files selected by the invoking task or role
+workflow. Use it to explain a bounded architecture request or to verify one
+that already exists.
 
 ## Dependency Categories
 
@@ -64,10 +64,9 @@ external dependency as an injected port; tests provide a mock adapter.
   implementation. If a test has to change when the implementation changes, it
   is testing past the interface.
 
-## QA Use
+## Bounded Use
 
-Agent QA does not edit production implementation files while requesting
-architecture changes. When a deepening request is warranted, update relevant
-branch-local `spec/` files and include the requested testing strategy in the
-handoff. If the dependency strategy would create or change an ADR-worthy
-decision, route to `Human Escalation` with `spec/adr/` references instead.
+When a deepening request is warranted, include the requested testing strategy
+and the relevant durable context. If the dependency strategy would create or
+change an ADR-worthy decision, cite the relevant `spec/adr/` file or missing
+decision and route according to the invoking workflow.

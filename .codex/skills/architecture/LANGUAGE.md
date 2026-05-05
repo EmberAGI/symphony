@@ -1,6 +1,6 @@
 # Language
 
-Shared vocabulary for every architecture QA suggestion this skill makes. Use
+Shared vocabulary for architecture review and improvement suggestions. Use
 these terms exactly. Do not substitute "component," "service," "API," or
 "boundary"; consistent language is the point.
 
@@ -82,8 +82,8 @@ everywhere.
 - **"Boundary"** is overloaded with DDD's bounded context. Say **seam** or
   **interface**.
 
-## QA Use
+## Bounded Use
 
-Agent QA uses this language only for implementation-touched files in the
-current Linear issue. The terms help make short, concrete review requests; they
-do not authorize whole-repository architecture scouting.
+Use this language only for the bounded implementation files selected by the
+invoking task or role workflow. The terms help make short, concrete architecture
+requests; they do not authorize whole-repository architecture scouting.

@@ -6,10 +6,10 @@ than once. The first idea is unlikely to be the best.
 Uses the vocabulary in [LANGUAGE.md](LANGUAGE.md): **module**,
 **interface**, **seam**, **adapter**, and **leverage**.
 
-For Agent QA, this file is supporting evaluation guidance. QA may use it to
-explain why an implementation-touched interface is shallow, or to verify an
-implementer repair. QA should not run an open-ended design workshop, spawn
-design agents, or rewrite production code.
+This file is supporting evaluation guidance. Use it to explain why a selected
+interface is shallow, or to verify a bounded implementation repair. Do not run
+an open-ended design workshop, spawn design agents, or rewrite unrelated
+production code.
 
 ## Process
 
@@ -23,9 +23,9 @@ Before proposing a new interface, state the problem space for the candidate:
 - an illustrative code sketch only when it clarifies constraints. The sketch is
   not a production patch.
 
-For Octo/Symphony QA, keep this frame tied to the implementation-touched files
-and to durable context from `spec/`, `spec/adr/`, and relevant `CONTEXT.md`
-vocabulary.
+For Octo/Symphony work, keep this frame tied to the selected implementation
+files and to durable context from `spec/`, `spec/adr/`, and relevant
+`CONTEXT.md` vocabulary.
 
 ### 2. Compare Distinct Interface Shapes
 
@@ -56,9 +56,9 @@ Compare designs by **depth**, **locality**, and **seam placement**. Recommend
 the strongest direction in plain English. If the best direction combines parts
 of multiple designs, describe the hybrid and why it has more leverage.
 
-## QA Use
+## Bounded Use
 
-Agent QA emits at most one set of architectural suggestions per Linear issue.
-If the `Architectural suggestions` marker already exists, use this file only to
-verify the existing request and the implementer's response. Do not add another
-interface-design request.
+Use this file only within the bounded scope supplied by the invoking task or
+role workflow. If prior architecture requests already exist, use this file to
+verify that request and the implementation response before proposing any new
+interface-design direction allowed by the workflow.

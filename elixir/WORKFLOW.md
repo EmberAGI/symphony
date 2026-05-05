@@ -109,8 +109,8 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `push`: keep remote branch current and publish updates.
 - `pull`: keep branch updated with latest `origin/main` before handoff.
 - `land`: when ticket reaches `Merging`, explicitly open and follow `.codex/skills/land/SKILL.md`, which includes the `land` loop.
-- `qa-architecture`: required during Agent QA for a bounded architecture pass
-  over implementation-touched files only.
+- `architecture`: shared architecture vocabulary and bounded implementation
+  review guidance. Octo role workflows decide when and how to invoke it.
 
 ## Status map
 
@@ -123,8 +123,8 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
   QA gaps.
 - `Agent Review` -> implementation PR is ready for agent review; validate
   requested changes before returning work to QA.
-- `Agent QA` -> QA validation is underway; run the required bounded
-  architecture pass before QA handoff.
+- `Agent QA` -> QA validation is underway; follow the active Octo QA role
+  workflow before QA handoff.
 - `Human Review` -> PR is attached and validated; waiting on human approval.
 - `Merging` -> approved by human; execute the `land` skill flow (do not call `gh pr merge` directly).
 - `Rework` -> reviewer requested changes; planning + implementation required.
@@ -140,13 +140,12 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
      - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
    - `In Progress` -> continue execution flow from current scratchpad comment.
    - `Agent Fixes` -> continue the existing branch and PR as an incremental
-     feedback loop; use the QA handoff and QA-updated branch-local specs when
-     architectural suggestions are present.
-   - `Agent Review` -> run reviewer validation for the current PR, including
-     QA-requested architectural changes and related spec updates before moving
-     work back to QA.
-   - `Agent QA` -> run QA validation, including the required
-     `qa-architecture` skill, then hand off according to the QA result.
+     feedback loop; use the latest handoff trail and branch-local specs when
+     addressing requested changes.
+   - `Agent Review` -> run reviewer validation for the current PR before
+     moving work back to QA.
+   - `Agent QA` -> run QA validation according to the active Octo QA role
+     workflow, then hand off according to the QA result.
    - `Human Review` -> wait and poll for decision/review updates.
    - `Merging` -> on entry, open and follow `.codex/skills/land/SKILL.md`; do not call `gh pr merge` directly.
    - `Rework` -> run rework flow.
@@ -207,94 +206,23 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
 5. Re-run validation after feedback-driven changes and push updates.
 6. Repeat this sweep until there are no outstanding actionable comments.
 
-## Octo Agent QA/Review/Fixes architecture contract
+## Shared Architecture Skill Boundary
 
-This contract applies when the workflow is being run by Octo roles that use
-`Agent QA`, `Agent Review`, and `Agent Fixes`.
+The repository-local `.codex/skills/architecture/` directory is shared
+architecture guidance, not an Octo QA workflow definition. It preserves the
+localized module/interface/depth/seam/adapter vocabulary and bounded evaluation
+technique for roles that are explicitly told to use it.
 
-### Agent QA
+Octo role-specific obligations for Agent QA, reviewer validation, one-time
+architecture suggestion markers, handoff packet fields, role exposure, and
+operator/console loading are owned by the Octo workflow surface in
+`EmberAGI/scaling-octo-engine`. Symphony-local guidance must not copy that
+workflow contract or claim that the shared skill is automatically loaded by
+Octo QA roles.
 
-Agent QA must open and follow `.codex/skills/qa-architecture/SKILL.md` during
-QA. The architecture pass is limited to implementation-touched files for the
-current Linear issue.
-
-QA must record the diff basis before review. Prefer PR changed files when a PR
-exists; otherwise use the merge base between `HEAD` and the recorded issue
-branch base. If no explicit base is recorded, use `origin/main` and say so in
-the QA handoff.
-
-QA must use `spec/` and `spec/adr/` as durable context paths. `CONTEXT.md` may
-be read as useful domain vocabulary and naming context when present, but do not
-use `CONTEXT.md` or `docs/adr/` as canonical sources for Octo QA decisions.
-
-When QA needs handoff-artifact spec context for successful or failed handoff
-evidence, QA should read `spec/domains/symphony-handoff-artifacts.md`. Treat it
-as a Symphony-local consumer reference to Octo's source-of-truth contract, not
-as an independently maintained copy of Octo handoff-artifact policy.
-
-For a successful `Agent QA` to `Human Review` transition, QA must follow the
-Octo source-of-truth handoff-artifacts contract through the Symphony-local
-consumer reference. The `## Symphony Handoff` must include a
-`### Human Review Packet` with these sections: Review Focus, Executive Summary,
-Action Log, Validation Matrix, Artifact Index, Environment And Provenance,
-Known Limitations, and Merge Readiness. The Artifact Index is required even
-when no external artifact is useful; in that case it must say no external
-artifact was useful and give the rationale. Do not copy or redefine Octo's full
-handoff-artifact policy in Symphony.
-
-QA must filter the changed-file list to implementation code files. When no
-implementation-touched code files are in scope, record
-`Architecture QA: not applicable` with the diff basis. Do not scout the whole
-repository for architecture improvements.
-
-If QA fails because of architectural suggestions, the handoff must include this
-marker and fields:
-
-```md
-Architectural suggestions
-
-- Diff basis:
-- Changed files reviewed:
-- Relevant spec files updated:
-- Requested changes:
-```
-
-QA should update the relevant branch-local `spec/` files when requesting
-architecture changes. QA must not edit production implementation files.
-
-QA must route to `Human Escalation` when the requested architecture change is
-ADR-worthy, conflicts with an accepted ADR, or depends on missing operator
-intent. The handoff must cite the relevant `spec/adr/` file or missing ADR
-decision.
-
-QA may emit at most one set of architectural suggestions per Linear issue.
-Before adding suggestions, search the issue handoff trail and PR discussion for
-a counted marker: a prior failed Agent QA handoff containing a standalone
-`Architectural suggestions` block with the required diff basis, changed files
-reviewed, relevant spec files updated, and requested changes fields. Successful
-QA evidence such as `Architectural suggestions: none`, inline mentions,
-examples, and contract summaries do not consume the one allowed suggestion set.
-If a counted marker already exists, later QA passes verify those existing
-requests and do not add more suggestions.
-
-### Agent Review
-
-Agent Review must validate QA-requested architectural changes before moving
-work back to Agent QA. When a counted `Architectural suggestions` marker exists
-from a failed Agent QA handoff, reviewer validation must cover the requested
-implementation changes, related branch-local spec updates, and any referenced
-`spec/adr/` constraints.
-When QA or the handoff trail cites handoff-artifact spec requirements, reviewer
-validation should include `spec/domains/symphony-handoff-artifacts.md` as the
-local consumer reference and should not treat Symphony as the owner of Octo's
-full handoff-artifact policy.
-
-### Agent Fixes
-
-Agent Fixes work caused by architectural suggestions must use both the
-QA-updated branch-local specs and the QA handoff containing the
-counted `Architectural suggestions` marker. Preserve the existing branch, PR,
-workpad, and handoff trail while addressing the marked requests.
+The shared skill may use `CONTEXT.md` as vocabulary/context when present.
+Durable behavior and architecture authority remain in `spec/` and `spec/adr/`;
+`CONTEXT.md` and `docs/adr/` are not canonical durable sources.
 
 ## Blocked-access escape hatch (required behavior)
 
