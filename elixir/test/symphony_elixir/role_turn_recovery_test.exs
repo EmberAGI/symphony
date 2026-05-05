@@ -59,6 +59,58 @@ defmodule SymphonyElixir.RoleTurnRecoveryTest do
              RoleTurnRecovery.recovery_plan_for_test(issue, marker, @active_states, @terminal_states)
   end
 
+  test "live pending markers are skipped until the role turn becomes orphaned" do
+    recovery_dir =
+      Path.join(System.tmp_dir!(), "symphony-role-turn-recovery-live-#{System.unique_integer([:positive])}")
+
+    previous_recovery_dir = Application.get_env(:symphony_elixir, :role_turn_recovery_dir)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    Application.put_env(:symphony_elixir, :role_turn_recovery_dir, recovery_dir)
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    on_exit(fn ->
+      restore_app_env(:role_turn_recovery_dir, previous_recovery_dir)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      File.rm_rf(recovery_dir)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["In Progress", "Agent Fixes"],
+      tracker_terminal_states: ["Done"]
+    )
+
+    issue = %Issue{
+      id: "live-issue",
+      identifier: "EMB-LIVE",
+      title: "Long running role turn",
+      state: "In Progress",
+      branch_name: "agent/live-turn"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    assert :ok = RoleTurnRecovery.record_turn_start(issue)
+    marker_path = Path.join(recovery_dir, "live-issue.json")
+    assert File.exists?(marker_path)
+
+    assert :ok = RoleTurnRecovery.recover_pending_turns(@active_states, @terminal_states, [issue.id])
+
+    refute_receive {:memory_tracker_comment, _, _}, 50
+    refute_receive {:memory_tracker_state_update, _, _}, 50
+    assert File.exists?(marker_path)
+
+    assert :ok = RoleTurnRecovery.recover_pending_turns(@active_states, @terminal_states, [])
+
+    assert_receive {:memory_tracker_comment, "live-issue", body}
+    assert body =~ "symphony:aborted-role-turn-recovery"
+    assert_receive {:memory_tracker_state_update, "live-issue", "Agent Fixes"}
+    refute File.exists?(marker_path)
+  end
+
   test "role states recover visibly without routing implementation-started work back to Todo" do
     targets = %{
       "In Progress" => "Agent Fixes",
@@ -94,4 +146,7 @@ defmodule SymphonyElixir.RoleTurnRecoveryTest do
     assert :clear = RoleTurnRecovery.recovery_plan_for_test(done_issue, marker, @active_states, @terminal_states)
     assert :clear = RoleTurnRecovery.recovery_plan_for_test(blocked_issue, marker, @active_states, @terminal_states)
   end
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 end

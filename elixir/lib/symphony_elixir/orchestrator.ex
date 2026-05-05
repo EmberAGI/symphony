@@ -225,7 +225,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_dispatch(%State{} = state) do
-    RoleTurnRecovery.recover_pending_turns(active_state_set(), terminal_state_set())
+    RoleTurnRecovery.recover_pending_turns(active_state_set(), terminal_state_set(), Map.keys(state.running))
     state = reconcile_running_issues(state)
 
     with :ok <- Config.validate!(),

@@ -58,12 +58,22 @@ defmodule SymphonyElixir.RoleTurnRecovery do
   @spec recover_pending_turns(MapSet.t(), MapSet.t()) :: :ok
   def recover_pending_turns(active_states, terminal_states)
       when is_struct(active_states, MapSet) and is_struct(terminal_states, MapSet) do
-    markers = read_pending_markers()
-    issue_ids = Enum.flat_map(markers, &marker_issue_id/1)
-    recover_pending_issue_ids(issue_ids, markers, active_states, terminal_states)
+    recover_pending_turns(active_states, terminal_states, MapSet.new())
   end
 
   def recover_pending_turns(_active_states, _terminal_states), do: :ok
+
+  @spec recover_pending_turns(MapSet.t(), MapSet.t(), Enumerable.t()) :: :ok
+  def recover_pending_turns(active_states, terminal_states, live_issue_ids)
+      when is_struct(active_states, MapSet) and is_struct(terminal_states, MapSet) do
+    markers = read_pending_markers()
+    live_issue_ids = normalize_issue_id_set(live_issue_ids)
+    orphaned_markers = Enum.reject(markers, &live_marker?(&1, live_issue_ids))
+    issue_ids = Enum.flat_map(orphaned_markers, &marker_issue_id/1)
+    recover_pending_issue_ids(issue_ids, orphaned_markers, active_states, terminal_states)
+  end
+
+  def recover_pending_turns(_active_states, _terminal_states, _live_issue_ids), do: :ok
 
   defp recover_pending_issue_ids([], _markers, _active_states, _terminal_states), do: :ok
 
@@ -237,6 +247,20 @@ defmodule SymphonyElixir.RoleTurnRecovery do
     do: [issue_id]
 
   defp marker_issue_id(_marker), do: []
+
+  defp live_marker?(marker, live_issue_ids) do
+    marker
+    |> marker_issue_id()
+    |> Enum.any?(&MapSet.member?(live_issue_ids, &1))
+  end
+
+  defp normalize_issue_id_set(issue_ids) do
+    issue_ids
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> MapSet.new()
+  rescue
+    Protocol.UndefinedError -> MapSet.new()
+  end
 
   defp marker_path(issue_id) when is_binary(issue_id) do
     with {:ok, dir} <- marker_dir() do
