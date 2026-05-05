@@ -13,6 +13,9 @@ Source artifacts:
   `screenshot [path]`.
 - Repository workflow and QA contracts in `elixir/WORKFLOW.md` and
   `spec/domains/repository-quality-assurance.md`.
+- Symphony handoff artifact contract at
+  `/home/admin/scaling-octo-engine/spec/domains/symphony-handoff-artifacts.md`,
+  especially the successful QA-to-`Human Review` packet section requirements.
 
 The accepted local command surface is:
 

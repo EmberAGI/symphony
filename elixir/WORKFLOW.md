@@ -249,7 +249,19 @@ as the durable QA artifact store for Linear-backed Octo workflows.
 
 Before a successful QA handoff to `Human Review`, Agent QA must include
 browser validation evidence in the `### Human Review Packet` inside the
-`## Symphony Handoff` comment:
+`## Symphony Handoff` comment. The packet must keep the complete successful
+QA-to-`Human Review` section shape:
+
+- `Review Focus`;
+- `Executive Summary`;
+- `Action Log`;
+- `Validation Matrix`;
+- `Artifact Index`;
+- `Environment And Provenance`;
+- `Known Limitations`;
+- `Merge Readiness`.
+
+Browser evidence must then be represented inside that packet:
 
 - the `Validation Matrix` must connect each browser-facing acceptance check to
   the pages, states, flows, or fallback evidence QA reviewed;
