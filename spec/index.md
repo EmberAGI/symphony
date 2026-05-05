@@ -19,6 +19,9 @@ Use this index when deciding where durable behavior belongs. `spec/` and
 - [Repository Quality Assurance](./domains/repository-quality-assurance.md):
   Repository QA contract for bounded architecture review, reviewer validation,
   implementer fixes, and minimum acceptance coverage.
+- [Symphony Handoff Artifacts](./domains/symphony-handoff-artifacts.md):
+  Symphony-local consumer reference for Octo-owned handoff-artifact behavior,
+  including source-of-truth provenance, local deltas, and anti-fork guardrails.
 
 ## ADRs
 

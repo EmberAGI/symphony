@@ -5,6 +5,8 @@ defmodule SymphonyElixir.QaArchitectureContractTest do
   @skill_path Path.join(@repo_root, ".codex/skills/qa-architecture/SKILL.md")
   @workflow_path Path.join(@repo_root, "elixir/WORKFLOW.md")
   @spec_path Path.join(@repo_root, "spec/domains/repository-quality-assurance.md")
+  @handoff_spec_path Path.join(@repo_root, "spec/domains/symphony-handoff-artifacts.md")
+  @index_path Path.join(@repo_root, "spec/index.md")
 
   test "localized QA architecture skill exists in the shared role skill source" do
     skill = File.read!(@skill_path)
@@ -52,11 +54,30 @@ defmodule SymphonyElixir.QaArchitectureContractTest do
     spec = File.read!(@spec_path)
 
     assert spec =~ "Agent QA MUST run the repository-local `qa-architecture` skill"
+    assert spec =~ "thin Symphony-local handoff-artifacts consumer"
+    assert spec =~ "guards against silently forking the Octo contract"
     assert spec =~ "The pass is bounded to implementation-touched files"
     assert spec =~ "`CONTEXT.md` and `docs/adr/` MUST NOT be treated as canonical sources"
     assert spec =~ "QA MUST NOT use the architecture pass for whole-repository improvement scouting"
     assert spec =~ "QA may emit at most one set of architectural suggestions per Linear issue"
     assert spec =~ "Agent Review validates QA-requested architecture changes"
     assert spec =~ "Agent Fixes uses QA-updated specs and the QA handoff"
+  end
+
+  test "handoff artifacts spec is a thin local reference to Octo source" do
+    handoff_spec = File.read!(@handoff_spec_path)
+    workflow = File.read!(@workflow_path)
+    index = File.read!(@index_path)
+
+    assert handoff_spec =~ "EmberAGI/scaling-octo-engine"
+    assert handoff_spec =~ "spec/domains/symphony-handoff-artifacts.md"
+    assert handoff_spec =~ "No Symphony-specific local deltas are defined"
+    assert handoff_spec =~ "MUST NOT copy the full Octo contract"
+    assert handoff_spec =~ "The full Octo contract is not copied into this repository"
+    assert length(String.split(handoff_spec, "\n")) <= 90
+
+    assert index =~ "[Symphony Handoff Artifacts](./domains/symphony-handoff-artifacts.md)"
+    assert workflow =~ "QA should read `spec/domains/symphony-handoff-artifacts.md`"
+    assert workflow =~ "reviewer\nvalidation should include `spec/domains/symphony-handoff-artifacts.md`"
   end
 end

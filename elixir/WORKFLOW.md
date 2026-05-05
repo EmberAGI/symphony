@@ -226,6 +226,11 @@ the QA handoff.
 QA must use `spec/` and `spec/adr/` as durable context paths. Do not use
 `CONTEXT.md` or `docs/adr/` as canonical sources for Octo work.
 
+When QA needs handoff-artifact spec context for successful or failed handoff
+evidence, QA should read `spec/domains/symphony-handoff-artifacts.md`. Treat it
+as a Symphony-local consumer reference to Octo's source-of-truth contract, not
+as an independently maintained copy of Octo handoff-artifact policy.
+
 QA must filter the changed-file list to implementation code files. When no
 implementation-touched code files are in scope, record
 `Architecture QA: not applicable` with the diff basis. Do not scout the whole
@@ -262,6 +267,10 @@ Agent Review must validate QA-requested architectural changes before moving
 work back to Agent QA. When an `Architectural suggestions` marker exists,
 reviewer validation must cover the requested implementation changes, related
 branch-local spec updates, and any referenced `spec/adr/` constraints.
+When QA or the handoff trail cites handoff-artifact spec requirements, reviewer
+validation should include `spec/domains/symphony-handoff-artifacts.md` as the
+local consumer reference and should not treat Symphony as the owner of Octo's
+full handoff-artifact policy.
 
 ### Agent Fixes
 

@@ -22,6 +22,12 @@ Repository QA uses these branch-local durable sources as canonical context:
 `CONTEXT.md` and `docs/adr/` MUST NOT be treated as canonical sources for Octo
 QA work.
 
+When a QA, review, or handoff instruction requires handoff-artifact spec
+context, agents SHOULD read
+`spec/domains/symphony-handoff-artifacts.md`. That file is a Symphony-local
+consumer reference to Octo's source-of-truth handoff-artifacts contract, not a
+forked normative copy.
+
 ## Bounded Architecture QA
 
 Agent QA MUST run the repository-local `qa-architecture` skill during QA.
@@ -101,6 +107,9 @@ Repository changes that add or materially change QA architecture behavior MUST
 validate that:
 
 - Agent QA has access to the localized `qa-architecture` skill.
+- The repository includes a thin Symphony-local handoff-artifacts consumer
+  reference that identifies Octo's source-of-truth spec, records local deltas,
+  and guards against silently forking the Octo contract.
 - The skill and workflow enforce changed-file-only scope and require a recorded
   diff basis.
 - `spec/` and `spec/adr/` are canonical durable context paths.
@@ -123,4 +132,5 @@ validate that:
 
 - [Agent Runtime](./agent-runtime.md)
 - [Symphony Service](./symphony-service.md)
+- [Symphony Handoff Artifacts](./symphony-handoff-artifacts.md)
 - [ADR 0001: Provider-Neutral Agent Runtimes](../adr/0001-provider-neutral-agent-runtimes.md)
