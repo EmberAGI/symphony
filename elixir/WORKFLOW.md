@@ -109,6 +109,8 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `push`: keep remote branch current and publish updates.
 - `pull`: keep branch updated with latest `origin/main` before handoff.
 - `land`: when ticket reaches `Merging`, explicitly open and follow `.codex/skills/land/SKILL.md`, which includes the `land` loop.
+- `qa-architecture`: required during Agent QA for a bounded architecture pass
+  over implementation-touched files only.
 
 ## Status map
 
@@ -116,6 +118,13 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `Todo` -> queued; immediately transition to `In Progress` before active work.
   - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, address or explicitly push back, revalidate, return to `Human Review`).
 - `In Progress` -> implementation actively underway.
+- `Agent Fixes` -> incremental implementer feedback loop; preserve the
+  existing branch, PR, workpad, and handoff trail while addressing reviewer or
+  QA gaps.
+- `Agent Review` -> implementation PR is ready for agent review; validate
+  requested changes before returning work to QA.
+- `Agent QA` -> QA validation is underway; run the required bounded
+  architecture pass before QA handoff.
 - `Human Review` -> PR is attached and validated; waiting on human approval.
 - `Merging` -> approved by human; execute the `land` skill flow (do not call `gh pr merge` directly).
 - `Rework` -> reviewer requested changes; planning + implementation required.
@@ -130,6 +139,14 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
    - `Todo` -> immediately move to `In Progress`, then ensure bootstrap workpad comment exists (create if missing), then start execution flow.
      - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
    - `In Progress` -> continue execution flow from current scratchpad comment.
+   - `Agent Fixes` -> continue the existing branch and PR as an incremental
+     feedback loop; use the QA handoff and QA-updated branch-local specs when
+     architectural suggestions are present.
+   - `Agent Review` -> run reviewer validation for the current PR, including
+     QA-requested architectural changes and related spec updates before moving
+     work back to QA.
+   - `Agent QA` -> run QA validation, including the required
+     `qa-architecture` skill, then hand off according to the QA result.
    - `Human Review` -> wait and poll for decision/review updates.
    - `Merging` -> on entry, open and follow `.codex/skills/land/SKILL.md`; do not call `gh pr merge` directly.
    - `Rework` -> run rework flow.
@@ -189,6 +206,69 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
 4. Update the workpad plan/checklist to include each feedback item and its resolution status.
 5. Re-run validation after feedback-driven changes and push updates.
 6. Repeat this sweep until there are no outstanding actionable comments.
+
+## Octo Agent QA/Review/Fixes architecture contract
+
+This contract applies when the workflow is being run by Octo roles that use
+`Agent QA`, `Agent Review`, and `Agent Fixes`.
+
+### Agent QA
+
+Agent QA must open and follow `.codex/skills/qa-architecture/SKILL.md` during
+QA. The architecture pass is limited to implementation-touched files for the
+current Linear issue.
+
+QA must record the diff basis before review. Prefer PR changed files when a PR
+exists; otherwise use the merge base between `HEAD` and the recorded issue
+branch base. If no explicit base is recorded, use `origin/main` and say so in
+the QA handoff.
+
+QA must use `spec/` and `spec/adr/` as durable context paths. Do not use
+`CONTEXT.md` or `docs/adr/` as canonical sources for Octo work.
+
+QA must filter the changed-file list to implementation code files. When no
+implementation-touched code files are in scope, record
+`Architecture QA: not applicable` with the diff basis. Do not scout the whole
+repository for architecture improvements.
+
+If QA fails because of architectural suggestions, the handoff must include this
+marker and fields:
+
+```md
+Architectural suggestions
+
+- Diff basis:
+- Changed files reviewed:
+- Relevant spec files updated:
+- Requested changes:
+```
+
+QA should update the relevant branch-local `spec/` files when requesting
+architecture changes. QA must not edit production implementation files.
+
+QA must route to `Human Escalation` when the requested architecture change is
+ADR-worthy, conflicts with an accepted ADR, or depends on missing operator
+intent. The handoff must cite the relevant `spec/adr/` file or missing ADR
+decision.
+
+QA may emit at most one set of architectural suggestions per Linear issue.
+Before adding suggestions, search the issue handoff trail and PR discussion for
+the exact marker `Architectural suggestions`. If the marker already exists,
+later QA passes verify those existing requests and do not add more suggestions.
+
+### Agent Review
+
+Agent Review must validate QA-requested architectural changes before moving
+work back to Agent QA. When an `Architectural suggestions` marker exists,
+reviewer validation must cover the requested implementation changes, related
+branch-local spec updates, and any referenced `spec/adr/` constraints.
+
+### Agent Fixes
+
+Agent Fixes work caused by architectural suggestions must use both the
+QA-updated branch-local specs and the QA handoff containing the
+`Architectural suggestions` marker. Preserve the existing branch, PR, workpad,
+and handoff trail while addressing the marked requests.
 
 ## Blocked-access escape hatch (required behavior)
 

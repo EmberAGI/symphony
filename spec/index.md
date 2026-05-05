@@ -16,6 +16,9 @@ Use this index when deciding where durable behavior belongs. `spec/` and
   runtime contract, runtime selection, Codex/Claude Code/Pi adapter
   requirements, runtime-native skills and tools, normalized events, artifacts,
   and Octo mixed-runtime validation.
+- [Repository Quality Assurance](./domains/repository-quality-assurance.md):
+  Repository QA contract for bounded architecture review, reviewer validation,
+  implementer fixes, and minimum acceptance coverage.
 
 ## ADRs
 

@@ -45,10 +45,8 @@ defmodule SymphonyElixir.RoleTurnRecovery do
 
   @spec clear_turn(String.t()) :: :ok
   def clear_turn(issue_id) when is_binary(issue_id) do
-    case marker_path(issue_id) do
-      {:ok, path} -> File.rm(path)
-      {:error, _reason} -> :ok
-    end
+    {:ok, path} = marker_path(issue_id)
+    File.rm(path)
 
     :ok
   end
@@ -243,6 +241,7 @@ defmodule SymphonyElixir.RoleTurnRecovery do
     end
   end
 
+  @spec marker_issue_id(marker()) :: [String.t()]
   defp marker_issue_id(%{"issue_id" => issue_id}) when is_binary(issue_id) and issue_id != "",
     do: [issue_id]
 
@@ -251,7 +250,7 @@ defmodule SymphonyElixir.RoleTurnRecovery do
   defp live_marker?(marker, live_issue_ids) do
     marker
     |> marker_issue_id()
-    |> Enum.any?(&MapSet.member?(live_issue_ids, &1))
+    |> Enum.any?(&Enum.member?(live_issue_ids, &1))
   end
 
   defp normalize_issue_id_set(issue_ids) do
