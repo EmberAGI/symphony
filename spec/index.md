@@ -16,6 +16,9 @@ Use this index when deciding where durable behavior belongs. `spec/` and
   runtime contract, runtime selection, Codex/Claude Code/Pi adapter
   requirements, runtime-native skills and tools, normalized events, artifacts,
   and Octo mixed-runtime validation.
+- [Repository Quality Assurance](./domains/repository-quality-assurance.md):
+  Repo-level minimum acceptance suite for durable behavior changes, including
+  shared role skill source and role exposure validation.
 
 ## ADRs
 
