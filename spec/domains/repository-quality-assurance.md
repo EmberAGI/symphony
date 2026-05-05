@@ -63,6 +63,19 @@ Agent QA browser-facing validation should record:
 - the QA artifacts generated and where they were attached in Linear;
 - any fallback chosen and the reason for that fallback.
 
+When Agent QA successfully moves a Linear-backed issue to Human Review, that
+record must appear in the Human Review Packet inside the `## Symphony Handoff`
+comment. Browser-facing checks belong in the packet's validation matrix, mapped
+to the issue acceptance criteria or repo-level minimum acceptance results they
+support. Browser evidence belongs in the packet's artifact index, with each
+Linear attachment or Linear comment location named and described.
+
+If Agent QA creates no external browser artifact, the artifact index is still
+required. It must state that no browser artifact was useful or possible and
+give the rationale, such as no browser-facing acceptance surface, no usable
+local browser, blocked headless execution, sandbox launch restrictions, or a
+desired Browser Use path that required a forbidden key or hosted service.
+
 Allowed local no-key paths include:
 
 - existing repository Playwright or browser test tooling;
@@ -92,6 +105,9 @@ validate all of the following before handoff:
 - Browser Use remains QA-only and was not promoted to a general role skill;
 - QA guidance requires useful artifacts to be attached to Linear for
   Linear-backed workflows;
+- successful Agent QA handoffs to Human Review require browser evidence or a
+  browser-not-applicable rationale in the Human Review Packet's Artifact Index,
+  and browser-facing checks in the Validation Matrix;
 - fallback paths cover no local browser, blocked headless execution, and
   key-requiring agent-mode features;
 - operational readiness behavior is explicit: blocked local execution falls

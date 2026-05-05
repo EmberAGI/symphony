@@ -234,8 +234,21 @@ form-flow notes, command output, logs, or short recordings. Do not rely on a
 local file path, GitHub comment, object store, or any other non-Linear location
 as the durable QA artifact store for Linear-backed Octo workflows.
 
-Before handoff, Agent QA validation notes must state which browser path was
-used, which pages/states/flows were checked, where Linear artifacts were
+Before a successful QA handoff to `Human Review`, Agent QA must include
+browser validation evidence in the `### Human Review Packet` inside the
+`## Symphony Handoff` comment:
+
+- the `Validation Matrix` must connect each browser-facing acceptance check to
+  the pages, states, flows, or fallback evidence QA reviewed;
+- the `Artifact Index` must list every Linear-attached browser artifact by
+  name, describe what it shows, and point to its Linear attachment/comment
+  location;
+- when no external browser artifact was useful or possible, the `Artifact
+  Index` must explicitly say so and give the no-browser, blocked-headless,
+  non-browser-issue, or forbidden-key rationale.
+
+Before any QA handoff, Agent QA validation notes must state which browser path
+was used, which pages/states/flows were checked, where Linear artifacts were
 attached, or why browser automation was not applicable. If no local browser is
 available, headless execution is blocked, sandbox policy prevents launch, or a
 desired feature requires a forbidden key, record the fallback chosen and the
