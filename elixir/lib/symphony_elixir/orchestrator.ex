@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, RoleTurnRecovery, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Notifications.Telegram
 
@@ -134,6 +134,7 @@ defmodule SymphonyElixir.Orchestrator do
           case reason do
             :normal ->
               Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+              RoleTurnRecovery.clear_turn(issue_id)
 
               state
               |> complete_issue(issue_id)
@@ -224,6 +225,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_dispatch(%State{} = state) do
+    RoleTurnRecovery.recover_pending_turns(active_state_set(), terminal_state_set())
     state = reconcile_running_issues(state)
 
     with :ok <- Config.validate!(),
@@ -467,6 +469,8 @@ defmodule SymphonyElixir.Orchestrator do
         if is_reference(ref) do
           Process.demonitor(ref, [:flush])
         end
+
+        RoleTurnRecovery.clear_turn(issue_id)
 
         %{
           state
@@ -748,6 +752,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+    record_pending_turn_start(issue, worker_host)
+
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
            AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
          end) do
@@ -789,6 +795,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
+        RoleTurnRecovery.clear_turn(issue.id)
         Telegram.notify_agent_failed(issue, reason)
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
@@ -797,6 +804,16 @@ defmodule SymphonyElixir.Orchestrator do
           error: "failed to spawn agent: #{inspect(reason)}",
           worker_host: worker_host
         })
+    end
+  end
+
+  defp record_pending_turn_start(%Issue{} = issue, worker_host) do
+    case RoleTurnRecovery.record_turn_start(issue, worker_host: worker_host) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to record pending role turn for #{issue_context(issue)}: #{inspect(reason)}")
     end
   end
 

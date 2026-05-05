@@ -19,7 +19,7 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   @query """
-  query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
+  query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $commentFirst: Int!, $attachmentFirst: Int!, $after: String) {
     issues(filter: {project: {slugId: {eq: $projectSlug}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
       nodes {
         id
@@ -39,6 +39,22 @@ defmodule SymphonyElixir.Linear.Client do
         labels {
           nodes {
             name
+          }
+        }
+        comments(first: $commentFirst) {
+          nodes {
+            id
+            body
+            createdAt
+            updatedAt
+          }
+        }
+        attachments(first: $attachmentFirst) {
+          nodes {
+            id
+            title
+            url
+            sourceType
           }
         }
         __CUSTOM_FIELD_VALUES__
@@ -66,7 +82,7 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   @query_by_ids """
-  query SymphonyLinearIssuesById($ids: [ID!]!, $first: Int!, $relationFirst: Int!) {
+  query SymphonyLinearIssuesById($ids: [ID!]!, $first: Int!, $relationFirst: Int!, $commentFirst: Int!, $attachmentFirst: Int!) {
     issues(filter: {id: {in: $ids}}, first: $first) {
       nodes {
         id
@@ -86,6 +102,22 @@ defmodule SymphonyElixir.Linear.Client do
         labels {
           nodes {
             name
+          }
+        }
+        comments(first: $commentFirst) {
+          nodes {
+            id
+            body
+            createdAt
+            updatedAt
+          }
+        }
+        attachments(first: $attachmentFirst) {
+          nodes {
+            id
+            title
+            url
+            sourceType
           }
         }
         __CUSTOM_FIELD_VALUES__
@@ -283,6 +315,8 @@ defmodule SymphonyElixir.Linear.Client do
              stateNames: state_names,
              first: @issue_page_size,
              relationFirst: @issue_page_size,
+             commentFirst: @issue_page_size,
+             attachmentFirst: @issue_page_size,
              after: after_cursor
            }),
          {:ok, issues, page_info} <-
@@ -348,7 +382,9 @@ defmodule SymphonyElixir.Linear.Client do
     case graphql_fun.(query, %{
            ids: batch_ids,
            first: length(batch_ids),
-           relationFirst: @issue_page_size
+           relationFirst: @issue_page_size,
+           commentFirst: @issue_page_size,
+           attachmentFirst: @issue_page_size
          }) do
       {:ok, body} ->
         with {:ok, issues} <- decode_linear_response(body, assignee_filter, graphql_fun, repository_candidates) do
@@ -562,6 +598,8 @@ defmodule SymphonyElixir.Linear.Client do
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
       blocked_by: extract_blockers(issue),
+      comments: extract_comments(issue),
+      attachments: extract_attachments(issue),
       custom_fields: extract_custom_fields(issue),
       repository_source: repository_source(issue),
       labels: extract_labels(issue),
@@ -651,6 +689,42 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp extract_labels(_), do: []
+
+  defp extract_comments(%{"comments" => %{"nodes" => comments}}) when is_list(comments) do
+    Enum.map(comments, fn
+      %{} = comment ->
+        %{
+          id: comment["id"],
+          body: comment["body"],
+          created_at: parse_datetime(comment["createdAt"]),
+          updated_at: parse_datetime(comment["updatedAt"])
+        }
+
+      _ ->
+        %{}
+    end)
+  end
+
+  defp extract_comments(%{"comments" => comments}) when is_list(comments), do: comments
+  defp extract_comments(_), do: []
+
+  defp extract_attachments(%{"attachments" => %{"nodes" => attachments}}) when is_list(attachments) do
+    Enum.map(attachments, fn
+      %{} = attachment ->
+        %{
+          id: attachment["id"],
+          title: attachment["title"],
+          url: attachment["url"],
+          source_type: attachment["sourceType"]
+        }
+
+      _ ->
+        %{}
+    end)
+  end
+
+  defp extract_attachments(%{"attachments" => attachments}) when is_list(attachments), do: attachments
+  defp extract_attachments(_), do: []
 
   defp extract_custom_fields(%{"customFields" => %{"nodes" => fields}}) when is_list(fields) do
     fields_to_map(fields)

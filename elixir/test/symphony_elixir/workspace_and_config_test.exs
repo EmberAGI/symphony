@@ -614,13 +614,28 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Enum.map(issues, & &1.id) == issue_ids
 
-    assert_receive {:fetch_issue_states_page, query, %{ids: ^first_batch_ids, first: 50, relationFirst: 50}}
+    assert_receive {:fetch_issue_states_page, query,
+                    %{
+                      ids: ^first_batch_ids,
+                      first: 50,
+                      relationFirst: 50,
+                      commentFirst: 50,
+                      attachmentFirst: 50
+                    }}
+
     assert query =~ "SymphonyLinearIssuesById"
     assert query =~ "sortOrder"
     assert query =~ "customFieldValues"
     assert query =~ "customField"
 
-    assert_receive {:fetch_issue_states_page, ^query, %{ids: ^second_batch_ids, first: 5, relationFirst: 50}}
+    assert_receive {:fetch_issue_states_page, ^query,
+                    %{
+                      ids: ^second_batch_ids,
+                      first: 5,
+                      relationFirst: 50,
+                      commentFirst: 50,
+                      attachmentFirst: 50
+                    }}
   end
 
   test "linear client omits custom field values when current schema does not expose them" do

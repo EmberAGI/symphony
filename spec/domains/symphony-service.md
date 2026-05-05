@@ -693,6 +693,14 @@ Distinct terminal reasons are important because retry logic and logs differ.
 - `claimed` and `running` checks are REQUIRED before launching any worker.
 - Reconciliation runs before dispatch on every tick.
 - Restart recovery is tracker-driven and filesystem-driven (without a durable orchestrator DB).
+- Before dispatch, the orchestrator records a pending-turn / pending role-turn marker on local filesystem storage
+  keyed by issue and role. Normal worker completion, terminal cleanup, or explicit state departure
+  clears that marker.
+- If a later poll finds a pending marker without a live worker, the orchestrator treats it as an
+  aborted role turn and must recover idempotently: write one tracker-visible recovery note, preserve
+  existing branch, Codex Workpad, Symphony Handoff, and PR context, and route `In Progress` work to `Agent Fixes` or another explicit non-`Todo`
+  implementation continuation state. Repeated detection of the same marker must not duplicate
+  comments or create conflicting transitions.
 - Startup terminal cleanup removes stale workspaces for issues already in terminal states.
 
 ## 8. Polling, Scheduling, and Reconciliation
@@ -706,12 +714,13 @@ The effective poll interval SHOULD be updated when workflow config changes are r
 
 Tick sequence:
 
-1. Reconcile running issues.
-2. Run dispatch preflight validation.
-3. Fetch candidate issues from tracker using active states.
-4. Sort issues by dispatch priority.
-5. Dispatch eligible issues while slots remain.
-6. Notify observability/status consumers of state changes.
+1. Recover orphaned pending role-turn markers into tracker-visible notes or routes.
+2. Reconcile running issues.
+3. Run dispatch preflight validation.
+4. Fetch candidate issues from tracker using active states.
+5. Sort issues by dispatch priority.
+6. Dispatch eligible issues while slots remain.
+7. Notify observability/status consumers of state changes.
 
 If per-tick validation fails, dispatch is skipped for that tick, but reconciliation still happens
 first.
@@ -1203,10 +1212,13 @@ Orchestrator behavior on tracker errors:
 
 ### 11.5 Tracker Writes (Important Boundary)
 
-Symphony does not require first-class tracker write APIs in the orchestrator.
+Symphony keeps tracker writes narrow inside the orchestrator.
 
 - Ticket mutations (state transitions, comments, PR metadata) are typically handled by the coding
   agent using tools defined by the workflow prompt.
+- The orchestrator may create a tracker-visible recovery note and perform the associated safe state
+  update when an orphaned pending role-turn marker proves that a role had already started and then
+  disappeared before a final handoff.
 - The service remains a scheduler/runner and tracker reader.
 - Workflow-specific success often means "reached the next handoff state" (for example
   `Human Review`) rather than tracker terminal state `Done`.
@@ -1593,6 +1605,11 @@ After restart:
 - No retry timers are restored from prior process memory.
 - No running sessions are assumed recoverable.
 - Service recovers by:
+  - reading pending-turn / pending role-turn markers left by interrupted workers
+  - refreshing those issues from the tracker
+  - writing at most one visible recovery note per aborted role-state episode
+  - routing implementation-started `In Progress` work to `Agent Fixes` or the configured
+    implementation-continuation state instead of treating it as fresh `Todo`
   - startup terminal workspace cleanup
   - fresh polling of active issues
   - re-dispatching eligible work
