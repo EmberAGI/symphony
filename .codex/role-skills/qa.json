@@ -1,0 +1,32 @@
+{
+  "role": "qa",
+  "default_exposure": "agent-qa-only",
+  "source_issue": "EMB-187",
+  "skills": [
+    {
+      "name": "browser-use",
+      "path": "../skills/browser-use",
+      "source": "EMB-187 operator Browser Use CLI guidance",
+      "use_when": [
+        "active Symphony role is Agent QA",
+        "owning issue has browser-facing acceptance criteria or QA evidence would materially benefit from browser runtime checks, screenshots, page-state inspection, form-flow verification, or manual acceptance support",
+        "local Browser Use CLI or local stdio MCP can run without Browser Use Cloud, hosted browser infrastructure, BROWSER_USE_API_KEY, LLM provider keys, or new operator-provisioned secrets"
+      ],
+      "do_not_use_when": [
+        "active Symphony role is implementer, reviewer, landing, backlog processor, or operator",
+        "the desired Browser Use mode requires Browser Use Cloud, a hosted browser service, BROWSER_USE_API_KEY, OpenAI, Anthropic, Google, or another LLM provider key",
+        "no local browser or local Browser Use tooling is available and existing Playwright/browser tooling or manual inspection is sufficient"
+      ]
+    }
+  ],
+  "octo_authority_boundaries": [
+    "Linear repository metadata remains the repository source of truth",
+    "work must stay on the issue branch",
+    "role workflow state transitions remain authoritative",
+    "PR ownership and issue linkage remain authoritative",
+    "the mutable Codex Workpad and immutable Symphony Handoff trail remain authoritative",
+    "validation requirements from the issue, specs, ADRs, workpad, and handoff remain authoritative",
+    "durable QA artifacts for Linear-backed workflows must be attached to Linear",
+    "Human Escalation routing remains authoritative when required browser-facing acceptance cannot be verified through a no-key local path"
+  ]
+}

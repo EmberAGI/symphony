@@ -1,35 +1,44 @@
 # Repository Quality Assurance
 
-## Intended behavior
+## Intended Behavior
 
-Repository QA workflows give Agent QA enough evidence-gathering capability to
-validate issue-appropriate runtime, UI, and browser-facing behavior without
-adding external hosted browser services or new operator-provisioned API secrets.
+Repository changes must carry enough local evidence for reviewers and role
+agents to verify durable behavior without rediscovering the acceptance bar from
+individual Linear issues.
 
-Browser Use is an optional Agent QA capability only. It is not a general
-Symphony role skill, not a requirement for implementer/reviewer/landing roles,
-and not a release gate for non-browser issues.
+This domain is the repo-level minimum acceptance suite for implementation work.
+When a branch adds, changes, removes, or materially changes durable behavior,
+the branch must update this file or record a defensible no-change rationale in
+the Codex Workpad and final Symphony Handoff.
 
-## Domain concepts
+Agent QA workflows may use browser-facing evidence gathering when it materially
+improves issue verification, but that capability must stay local, optional,
+QA-only, and free of external hosted-browser or provider-key dependencies.
+
+## Domain Concepts
 
 **Agent QA**: The Symphony role responsible for verifying that an implementation
 meets the owning issue's acceptance criteria before the work is treated as
 ready for human/operator review.
 
 **Browser Use**: A QA-owned browser-facing validation capability. In this
-domain, the name means local, deterministic browser inspection or automation
-that can collect useful evidence without external provider keys. It does not
-mean Browser Use Cloud, a hosted browser service, or an autonomous LLM browser
-agent that requires an OpenAI, Anthropic, Google, or similar provider key.
+domain, the name means local browser inspection or automation that can collect
+useful evidence without external provider keys. It includes Browser Use CLI
+commands such as `browser-use open`, `browser-use state`, `browser-use click`,
+`browser-use type`, and `browser-use screenshot`, or local stdio MCP launched
+with `uvx --from 'browser-use[cli]' browser-use --mcp`, when those paths run
+against a local browser session without cloud services. It does not mean
+Browser Use Cloud, a hosted browser service, or an autonomous LLM browser agent
+that requires an OpenAI, Anthropic, Google, or similar provider key.
 
 **QA artifact**: Evidence generated during QA, such as screenshots, page-state
 summaries, form-flow notes, command output, logs, or short recordings.
 
-## Rules and invariants
+## Rules And Invariants
 
-- Browser Use may be exposed only to Agent QA guidance and QA acceptance
-  workflows. Other Symphony roles must not gain it as a general-purpose role
-  skill through this contract.
+- Browser Use may be exposed only to Agent QA guidance, the Agent QA role-skill
+  manifest, and QA acceptance workflows. Other Symphony roles must not gain it
+  as a general-purpose role skill through this contract.
 - Browser Use must remain optional and issue-appropriate. Agent QA should use
   it when browser-facing validation, screenshots, page-state inspection,
   form-flow verification, or manual acceptance evidence materially improves QA.
@@ -52,13 +61,13 @@ summaries, form-flow notes, command output, logs, or short recordings.
   feature needs a forbidden key, Agent QA must use the documented fallback path
   instead of silently weakening validation.
 
-## Interfaces/contracts
+## Interfaces And Contracts
 
 Agent QA browser-facing validation should record:
 
 - why browser automation was relevant or why it was not applicable;
-- the local tool path used, such as an existing Playwright setup, a browser CLI,
-  a local no-key Browser Use controller, or manual inspection;
+- the local tool path used, such as Browser Use CLI, local Browser Use stdio
+  MCP, existing Playwright/browser tooling, or manual inspection;
 - the pages, states, or flows inspected;
 - the QA artifacts generated and where they were attached in Linear;
 - any fallback chosen and the reason for that fallback.
@@ -73,16 +82,21 @@ Linear attachment or Linear comment location named and described.
 If Agent QA creates no external browser artifact, the artifact index is still
 required. It must state that no browser artifact was useful or possible and
 give the rationale, such as no browser-facing acceptance surface, no usable
-local browser, blocked headless execution, sandbox launch restrictions, or a
-desired Browser Use path that required a forbidden key or hosted service.
+local browser, blocked headless execution, sandbox launch restrictions, missing
+local Browser Use CLI/MCP tooling, or a desired Browser Use path that required
+a forbidden key or hosted service.
 
 Allowed local no-key paths include:
 
+- Browser Use CLI commands against a local browser session, including
+  `browser-use open`, `browser-use state`, `browser-use click`,
+  `browser-use type`, and `browser-use screenshot`;
+- local Browser Use stdio MCP launched with
+  `uvx --from 'browser-use[cli]' browser-use --mcp` when it does not request a
+  hosted browser service, `BROWSER_USE_API_KEY`, or an LLM provider key;
 - existing repository Playwright or browser test tooling;
 - deterministic local browser CLI automation when a browser binary is already
   available in the role environment;
-- local Browser Use primitives that do not request hosted browser services and
-  do not request an LLM provider key;
 - ordinary manual inspection with concise evidence notes when automation is not
   available or not worth the operational cost.
 
@@ -96,30 +110,57 @@ Fallback outcomes include:
 - Human Escalation when browser-facing acceptance is required and all no-key
   local paths are blocked.
 
-## Minimum acceptance suite
+## Minimum Acceptance Suite
 
-Changes that add, remove, or materially change Agent QA browser capability must
-validate all of the following before handoff:
+| Change Surface | Required Invariants | Minimum Local Validation | Escalation Route |
+| --- | --- | --- | --- |
+| Agent QA browser capability, Browser Use CLI/MCP guidance, or browser evidence workflow | Browser Use remains optional, issue-appropriate, QA-only, and exposed only through Agent QA guidance or the Agent QA role manifest. Guidance must not introduce Browser Use Cloud, hosted browser infrastructure, `BROWSER_USE_API_KEY`, OpenAI/Anthropic/Google provider keys, or new operator-provisioned secrets. QA artifacts for Linear-backed workflows must be attached to Linear, successful Agent QA handoffs to Human Review must include browser evidence or a browser-not-applicable rationale in the Human Review Packet Artifact Index, and browser-facing checks must be represented in the Validation Matrix. Fallbacks must cover missing local Browser Use CLI/MCP tooling, no local browser, blocked headless execution, and key-requiring agent-mode features. | Targeted inspection proving the Browser Use skill is exposed only to Agent QA, no forbidden key or hosted service requirement was introduced, artifact handling still points to Linear, and fallback behavior is documented. Attempt at least one safe local smoke check when a usable browser and local Browser Use path exist, or record a concrete environment-based not-applicable rationale. Run broader repo tests when code behavior is touched. | `Agent Fixes` for implementation or validation gaps. `Human Escalation` when browser-facing acceptance is required and every no-key local path is blocked, or when required source artifacts are missing, unreadable, conflicting, or require operator-provisioned access. |
+| Shared Symphony role skills, role skill manifests, or `CODEX_HOME` skill materialization source | Shared skill directories remain complete, locally committed, discoverable by the intended role, and isolated from roles that should not receive them. Upstream-derived skills must name their source artifacts, keep internal links local, document omitted upstream siblings when only part of an upstream pack is localized, and preserve Octo workflow authority for Linear repository metadata, issue branches, state transitions, PR ownership, Codex Workpad, Symphony Handoff, validation, and `Human Escalation` routing. Skill guidance must not impose language, package-manager, frontend, or workflow conventions on unrelated repositories or issues without durable repository or issue signals. | Targeted inspection or tests proving every manifest path resolves, every exposed skill has a `SKILL.md`, full upstream directories named by the issue are present, internal Markdown links resolve to committed local files, implementer-only skills are absent from non-implementer manifests by default, activation conditions are documented, and Octo workflow-boundary language remains present. Run broader repo tests when code behavior is touched. | `Agent Fixes` for implementation or validation gaps. `Human Escalation` when required upstream source artifacts are missing, unreadable, conflicting, or require operator-provisioned access. |
 
-- no external API-key or hosted-browser requirement was introduced;
-- Browser Use remains QA-only and was not promoted to a general role skill;
-- QA guidance requires useful artifacts to be attached to Linear for
-  Linear-backed workflows;
-- successful Agent QA handoffs to Human Review require browser evidence or a
-  browser-not-applicable rationale in the Human Review Packet's Artifact Index,
-  and browser-facing checks in the Validation Matrix;
-- fallback paths cover no local browser, blocked headless execution, and
-  key-requiring agent-mode features;
-- operational readiness behavior is explicit: blocked local execution falls
-  back to manual inspection, existing browser tooling, not-applicable rationale,
-  or Human Escalation;
-- at least one safe local smoke check was attempted, or a concrete
-  environment-based not-applicable rationale was recorded.
+## EMB-187 Agent QA Browser Use
 
-## Edge cases
+EMB-187 exposes a local Browser Use skill only for Agent QA through
+`.codex/role-skills/qa.json` and `.codex/skills/browser-use/`.
+
+Agent QA may use the skill only when browser-facing validation, screenshots,
+page-state inspection, form-flow verification, or manual acceptance evidence is
+relevant to the owning issue. Preferred no-key paths are Browser Use CLI
+commands against a local browser session and local stdio MCP via
+`uvx --from 'browser-use[cli]' browser-use --mcp`.
+
+Provider-keyed autonomous Browser Use agent modes and Browser Use Cloud remain
+outside this issue's accepted contract.
+
+## EMB-186 Implementer Skill Pack
+
+EMB-186 localizes upstream-derived implementer role skills under
+`.codex/skills/` and describes default role exposure in
+`.codex/role-skills/implementer.json`.
+
+The localized skill pack must include:
+
+- Matt Pocock `tdd` from `mattpocock/skills@b843cb5`.
+- Anthropic `frontend-design` from `anthropics/skills@d230a6d`.
+- Son of Anton `.rulesync` skills `nodejs`, `pnpm-patching`, `pnpm`,
+  `python`, and `typescript` from `EmberAGI/son-of-anton@faf1d5a`.
+
+The implementer manifest must expose these skills only to the implementer role
+by default. Reviewer, QA, landing, and backlog-processor exposure requires a
+future issue that updates the role contract and validation.
+
+TDD is mandatory for EMB-97 child work that names TDD and for future issues
+that explicitly ask for TDD, red-green-refactor, test-first implementation, or
+integration-test-first development. Frontend and language/package-manager
+skills must activate only from durable issue or repository signals and must not
+override existing product specs, ADRs, framework conventions, component
+libraries, accessibility requirements, or package-manager choices.
+
+## Edge Cases
 
 - Browser binary is missing.
 - Browser binary exists but cannot start in the role sandbox.
+- Browser Use CLI or `uvx` is not installed.
+- Local Browser Use stdio MCP starts but cannot connect to a local browser.
 - Headless mode is blocked by display, sandbox, or dependency constraints.
 - The issue needs authentication or third-party data that Agent QA cannot
   access.
@@ -138,19 +179,15 @@ validate all of the following before handoff:
 - Do not store durable QA proof only in local files, GitHub comments, object
   stores, or other non-Linear locations for Linear-backed Octo workflows.
 
-## Open questions about system behavior
+## Open Questions About System Behavior
 
 None for EMB-187 intake. If a future Browser Use integration cannot provide
 useful local no-key behavior, that limitation should be routed as Human
 Escalation or a separate design issue rather than weakening the no-key
 contract.
 
-## Decision log or links to ADRs
+## References
 
-- EMB-187: Agent QA may use Browser Use only as an optional local/no-key
-  evidence capture capability. Provider-keyed autonomous agent modes and hosted
-  browser services are outside this issue's accepted contract.
-
-## References to source issues
-
+- [Agent Runtime](./agent-runtime.md)
+- [Provider-Neutral Agent Runtimes ADR](../adr/0001-provider-neutral-agent-runtimes.md)
 - [EMB-187: Add no-key Browser Use capability for Agent QA](https://linear.app/emberai/issue/EMB-187/add-no-key-browser-use-capability-for-agent-qa)

@@ -17,9 +17,9 @@ Use this index when deciding where durable behavior belongs. `spec/` and
   requirements, runtime-native skills and tools, normalized events, artifacts,
   and Octo mixed-runtime validation.
 - [Repository Quality Assurance](./domains/repository-quality-assurance.md):
-  Minimum acceptance suite for repository QA workflows, including Agent QA
-  browser-facing validation, evidence capture, artifact handling, and fallback
-  behavior.
+  Repo-level minimum acceptance suite for durable behavior changes, including
+  shared role skill exposure, Agent QA browser-facing validation, evidence
+  capture, artifact handling, and fallback behavior.
 
 ## ADRs
 

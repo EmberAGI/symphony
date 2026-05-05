@@ -250,7 +250,7 @@ defmodule SymphonyElixir.RoleTurnRecovery do
   defp live_marker?(marker, live_issue_ids) do
     marker
     |> marker_issue_id()
-    |> Enum.any?(&(&1 in live_issue_ids))
+    |> Enum.any?(&Enum.member?(live_issue_ids, &1))
   end
 
   @spec normalize_issue_id_list(Enumerable.t()) :: [String.t()]

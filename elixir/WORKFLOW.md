@@ -216,15 +216,25 @@ automation or inspection that runs without Browser Use Cloud, hosted browser
 infrastructure, `BROWSER_USE_API_KEY`, OpenAI/Anthropic/Google provider keys, or
 any new operator-provisioned API secret.
 
+The preferred local Browser Use path is the Agent QA-only `browser-use` skill
+from `.codex/role-skills/qa.json`. When local prerequisites are present, Agent
+QA may use Browser Use CLI commands such as `browser-use open`,
+`browser-use state`, `browser-use click`, `browser-use type`, and
+`browser-use screenshot` against a local browser session. Local stdio MCP is an
+acceptable fallback or alternate path when launched with
+`uvx --from 'browser-use[cli]' browser-use --mcp` and used only for local,
+no-key browser inspection.
+
 When a Browser Use agent-mode feature or installed library path requires an LLM
 provider key or hosted browser service, Agent QA must not add or request that
 secret. Use one of these fallbacks instead:
 
+- Browser Use CLI/local stdio MCP only when it runs locally with no key;
 - existing repository Playwright/browser tooling;
 - deterministic local browser CLI automation if a browser is already available;
 - ordinary manual inspection with concise evidence notes;
 - a not-applicable rationale when the issue has no browser-facing acceptance
-  surface or the role environment has no usable browser;
+  surface or the role environment has no usable browser or Browser Use CLI/MCP;
 - `Human Escalation` when browser-facing acceptance is required and every
   no-key local path is blocked.
 
