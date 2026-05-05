@@ -73,14 +73,22 @@ Architecture findings must be tied to implementation-touched files.
 
 Agent QA may emit at most one set of architectural suggestions per Linear issue.
 Before adding suggestions, QA MUST check the issue handoff trail and PR
-discussion for this exact marker:
+discussion for a counted marker: a prior failed Agent QA handoff containing a
+standalone block headed by this exact marker:
 
 ```text
 Architectural suggestions
 ```
 
-If the marker already exists, later QA passes MUST verify the existing marked
-requests and MUST NOT add more architecture suggestions for that Linear issue.
+The counted marker MUST include the required failed architecture QA fields:
+diff basis, changed files reviewed, relevant spec files updated, and requested
+changes. Successful QA evidence such as `Architectural suggestions: none`,
+inline mentions, examples, and contract summaries MUST NOT consume the one
+allowed suggestion set.
+
+If a counted marker already exists, later QA passes MUST verify the existing
+marked requests and MUST NOT add more architecture suggestions for that Linear
+issue.
 
 When architecture causes QA failure, the handoff MUST include:
 
@@ -181,7 +189,8 @@ validate that:
   architecture changes.
 - ADR-worthy or ADR-conflicting requests route to `Human Escalation` with
   `spec/adr/` references.
-- Agent QA emits at most one set of architectural suggestions per Linear issue.
+- Agent QA emits at most one set of architectural suggestions per Linear issue,
+  and only a prior failed-QA architecture-suggestions block consumes that set.
 - Agent Review validates QA-requested architecture changes and related spec
   updates before moving work back to QA.
 - Agent Fixes uses QA-updated specs and the QA handoff when addressing

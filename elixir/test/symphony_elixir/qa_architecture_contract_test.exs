@@ -70,13 +70,58 @@ defmodule SymphonyElixir.QaArchitectureContractTest do
 
     assert skill =~ "Agent QA may emit at most one set of architectural suggestions per Linear"
     assert skill =~ "issue"
+    assert skill =~ "counted marker"
+    assert skill =~ "failed Agent QA handoff"
     assert skill =~ "Architectural suggestions"
     assert skill =~ "- Diff basis:"
     assert skill =~ "- Changed files reviewed:"
     assert skill =~ "- Relevant spec files updated:"
     assert skill =~ "- Requested changes:"
+    assert skill =~ "Architectural suggestions: none"
+    assert skill =~ "summaries that describe the marker"
     assert skill =~ "do not add new"
     assert skill =~ "architecture suggestions"
+  end
+
+  test "one-time marker ignores successful QA evidence and contract mentions" do
+    successful_qa_handoff = """
+    ## Symphony Handoff
+
+    - From status: Agent QA
+    - To status: Human Review
+    - Validation: Architecture QA passed; Architectural suggestions: none.
+    """
+
+    contract_summary = """
+    The workflow says failed handoffs include `Architectural suggestions`.
+
+    ```md
+    Architectural suggestions
+
+    - Diff basis:
+    - Changed files reviewed:
+    - Relevant spec files updated:
+    - Requested changes:
+    ```
+    """
+
+    failed_qa_handoff = """
+    ## Symphony Handoff
+
+    - From status: Agent QA
+    - To status: Agent Fixes
+
+    Architectural suggestions
+
+    - Diff basis: PR #4 changed files
+    - Changed files reviewed: lib/example.ex
+    - Relevant spec files updated: spec/domains/repository-quality-assurance.md
+    - Requested changes: Deepen the touched module interface.
+    """
+
+    refute counted_architecture_suggestions_marker?(successful_qa_handoff)
+    refute counted_architecture_suggestions_marker?(contract_summary)
+    assert counted_architecture_suggestions_marker?(failed_qa_handoff)
   end
 
   test "workflow requires QA skill and reviewer and implementer architecture checks" do
@@ -90,7 +135,8 @@ defmodule SymphonyElixir.QaArchitectureContractTest do
     assert workflow =~ "Agent Review must validate QA-requested architectural changes"
     assert workflow =~ "Agent Fixes work caused by architectural suggestions must use both"
     assert workflow =~ "QA-updated branch-local specs"
-    assert workflow =~ "the exact marker `Architectural suggestions`"
+    assert workflow =~ "counted marker"
+    assert workflow =~ "Successful\nQA evidence such as `Architectural suggestions: none`"
   end
 
   test "repository QA spec defines minimum acceptance suite" do
@@ -106,6 +152,8 @@ defmodule SymphonyElixir.QaArchitectureContractTest do
     assert spec =~ "`CONTEXT.md` and `docs/adr/` MUST NOT be treated as canonical sources"
     assert spec =~ "QA MUST NOT use the architecture pass for whole-repository improvement scouting"
     assert spec =~ "QA may emit at most one set of architectural suggestions per Linear issue"
+    assert spec =~ "Successful QA evidence such as `Architectural suggestions: none`"
+    assert spec =~ "MUST NOT consume the one\nallowed suggestion set"
     assert spec =~ "Agent Review validates QA-requested architecture changes"
     assert spec =~ "Agent Fixes uses QA-updated specs and the QA handoff"
   end
@@ -152,5 +200,19 @@ defmodule SymphonyElixir.QaArchitectureContractTest do
     assert workflow =~ "Do not copy or redefine Octo's full\nhandoff-artifact policy in Symphony"
     assert spec =~ "Successful `Agent QA` to `Human Review` handoffs MUST"
     assert spec =~ "mandatory Artifact Index"
+  end
+
+  defp counted_architecture_suggestions_marker?(body) do
+    failed_qa_handoff? =
+      body =~ "- From status: Agent QA" and
+        body =~ "- To status: Agent Fixes"
+
+    has_standalone_marker_block? =
+      Regex.match?(
+        ~r/^Architectural suggestions\n\n- Diff basis:\s*\S.*\n- Changed files reviewed:\s*\S.*\n- Relevant spec files updated:\s*\S.*\n- Requested changes:\s*\S/m,
+        body
+      )
+
+    failed_qa_handoff? and has_standalone_marker_block?
   end
 end

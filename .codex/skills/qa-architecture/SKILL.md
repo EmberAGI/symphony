@@ -154,13 +154,22 @@ Agent QA may emit at most one set of architectural suggestions per Linear
 issue.
 
 Before adding suggestions, search the Linear issue handoff trail and PR
-discussion for the exact marker:
+discussion for a counted marker: a prior failed Agent QA handoff containing a
+standalone block headed by the exact marker and the required architecture
+failure fields:
 
 ```text
 Architectural suggestions
 ```
 
-If the marker already exists for this Linear issue, do not add new
+The counted marker must belong to an actual failed architecture-suggestions
+handoff block. Do not treat these as consuming the one allowed suggestion set:
+
+- `Architectural suggestions: none` in a successful QA handoff;
+- inline mentions, examples, or contract text that quote the marker;
+- summaries that describe the marker without requesting architecture changes.
+
+If a counted marker already exists for this Linear issue, do not add new
 architecture suggestions. Later QA passes only verify whether the existing
 marked requests were addressed.
 

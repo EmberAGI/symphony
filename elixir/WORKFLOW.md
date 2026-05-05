@@ -269,15 +269,21 @@ decision.
 
 QA may emit at most one set of architectural suggestions per Linear issue.
 Before adding suggestions, search the issue handoff trail and PR discussion for
-the exact marker `Architectural suggestions`. If the marker already exists,
-later QA passes verify those existing requests and do not add more suggestions.
+a counted marker: a prior failed Agent QA handoff containing a standalone
+`Architectural suggestions` block with the required diff basis, changed files
+reviewed, relevant spec files updated, and requested changes fields. Successful
+QA evidence such as `Architectural suggestions: none`, inline mentions,
+examples, and contract summaries do not consume the one allowed suggestion set.
+If a counted marker already exists, later QA passes verify those existing
+requests and do not add more suggestions.
 
 ### Agent Review
 
 Agent Review must validate QA-requested architectural changes before moving
-work back to Agent QA. When an `Architectural suggestions` marker exists,
-reviewer validation must cover the requested implementation changes, related
-branch-local spec updates, and any referenced `spec/adr/` constraints.
+work back to Agent QA. When a counted `Architectural suggestions` marker exists
+from a failed Agent QA handoff, reviewer validation must cover the requested
+implementation changes, related branch-local spec updates, and any referenced
+`spec/adr/` constraints.
 When QA or the handoff trail cites handoff-artifact spec requirements, reviewer
 validation should include `spec/domains/symphony-handoff-artifacts.md` as the
 local consumer reference and should not treat Symphony as the owner of Octo's
@@ -287,8 +293,8 @@ full handoff-artifact policy.
 
 Agent Fixes work caused by architectural suggestions must use both the
 QA-updated branch-local specs and the QA handoff containing the
-`Architectural suggestions` marker. Preserve the existing branch, PR, workpad,
-and handoff trail while addressing the marked requests.
+counted `Architectural suggestions` marker. Preserve the existing branch, PR,
+workpad, and handoff trail while addressing the marked requests.
 
 ## Blocked-access escape hatch (required behavior)
 
