@@ -223,8 +223,9 @@ exists; otherwise use the merge base between `HEAD` and the recorded issue
 branch base. If no explicit base is recorded, use `origin/main` and say so in
 the QA handoff.
 
-QA must use `spec/` and `spec/adr/` as durable context paths. Do not use
-`CONTEXT.md` or `docs/adr/` as canonical sources for Octo work.
+QA must use `spec/` and `spec/adr/` as durable context paths. `CONTEXT.md` may
+be read as useful domain vocabulary and naming context when present, but do not
+use `CONTEXT.md` or `docs/adr/` as canonical sources for Octo QA decisions.
 
 When QA needs handoff-artifact spec context for successful or failed handoff
 evidence, QA should read `spec/domains/symphony-handoff-artifacts.md`. Treat it

@@ -30,8 +30,10 @@ Repository QA uses these branch-local durable sources as canonical context:
 - `spec/`
 - `spec/adr/`
 
+`CONTEXT.md` MAY be used as domain vocabulary and contextual naming guidance
+when present. `spec/` and `spec/adr/` remain the durable QA authority.
 `CONTEXT.md` and `docs/adr/` MUST NOT be treated as canonical sources for Octo
-QA work.
+QA decisions.
 
 When a QA, review, or handoff instruction requires handoff-artifact spec
 context, agents SHOULD read
@@ -48,6 +50,9 @@ was useful for the issue.
 ## Bounded Architecture QA
 
 Agent QA MUST run the repository-local `qa-architecture` skill during QA.
+The localized skill directory MUST preserve complete upstream-derived support files
+needed for the architecture vocabulary and deepening process:
+`LANGUAGE.md`, `DEEPENING.md`, and `INTERFACE-DESIGN.md`.
 
 The pass is bounded to implementation-touched files for the current Linear
 issue. QA MUST record the diff basis used to select files. Valid bases include:
@@ -154,6 +159,9 @@ Repository changes that add or materially change QA architecture behavior MUST
 validate that:
 
 - Agent QA has access to the localized `qa-architecture` skill.
+- The localized `qa-architecture` skill directory includes complete
+  upstream-derived support files for language, deepening, and interface-design
+  guidance.
 - The repository includes a thin Symphony-local handoff-artifacts consumer
   reference that identifies Octo's source-of-truth spec, records local deltas,
   and guards against silently forking the Octo contract.
@@ -162,7 +170,8 @@ validate that:
   Octo handoff-artifacts contract in Symphony.
 - The skill and workflow enforce changed-file-only scope and require a recorded
   diff basis.
-- `spec/` and `spec/adr/` are canonical durable context paths.
+- `CONTEXT.md` can be preserved as useful domain vocabulary, while `spec/` and
+  `spec/adr/` are canonical durable context paths.
 - QA records not-applicable when no implementation-touched code files are in
   scope.
 - QA failure handoffs caused by architecture include the `Architectural

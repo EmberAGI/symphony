@@ -7,19 +7,62 @@ defmodule SymphonyElixir.QaArchitectureContractTest do
   @spec_path Path.join(@repo_root, "spec/domains/repository-quality-assurance.md")
   @handoff_spec_path Path.join(@repo_root, "spec/domains/symphony-handoff-artifacts.md")
   @index_path Path.join(@repo_root, "spec/index.md")
+  @qa_skill_files ~w(DEEPENING.md INTERFACE-DESIGN.md LANGUAGE.md SKILL.md)
 
   test "localized QA architecture skill exists in the shared role skill source" do
     skill = File.read!(@skill_path)
 
+    assert @repo_root
+           |> Path.join(".codex/skills/qa-architecture")
+           |> File.ls!()
+           |> Enum.sort() == @qa_skill_files
+
     assert skill =~ "name: qa-architecture"
     assert skill =~ "implementation-touched files"
+    assert skill =~ "deepening opportunities"
+    assert skill =~ "LANGUAGE.md"
+    assert skill =~ "DEEPENING.md"
+    assert skill =~ "INTERFACE-DESIGN.md"
     assert skill =~ "PR changed files"
     assert skill =~ "merge base"
     assert skill =~ "origin/main"
     assert skill =~ "Architecture QA: not applicable"
+    assert skill =~ "`CONTEXT.md`, when"
+    assert skill =~ "is useful domain vocabulary"
     assert skill =~ "Do not use `CONTEXT.md` or `docs/adr/` as canonical sources"
     assert skill =~ "Do not inventory"
     assert skill =~ "the rest of the repository"
+  end
+
+  test "localized support files preserve upstream architecture vocabulary" do
+    language = File.read!(Path.join(Path.dirname(@skill_path), "LANGUAGE.md"))
+    deepening = File.read!(Path.join(Path.dirname(@skill_path), "DEEPENING.md"))
+    interface_design = File.read!(Path.join(Path.dirname(@skill_path), "INTERFACE-DESIGN.md"))
+
+    assert language =~ "Module"
+    assert language =~ "Interface"
+    assert language =~ "Depth"
+    assert language =~ "Seam"
+    assert language =~ "Adapter"
+    assert language =~ "Leverage"
+    assert language =~ "Locality"
+    assert language =~ "The deletion test"
+    assert language =~ "The interface is the test surface"
+    assert language =~ "implementation-touched files"
+
+    assert deepening =~ "Dependency Categories"
+    assert deepening =~ "In-Process"
+    assert deepening =~ "Local-Substitutable"
+    assert deepening =~ "Remote But Owned"
+    assert deepening =~ "True External"
+    assert deepening =~ "One adapter means a hypothetical seam"
+    assert deepening =~ "QA does not edit production implementation files"
+
+    assert interface_design =~ "design it more\nthan once"
+    assert interface_design =~ "Minimize the interface"
+    assert interface_design =~ "Optimize for the common caller"
+    assert interface_design =~ "Design around adapters"
+    assert interface_design =~ "QA should not run an open-ended design workshop"
   end
 
   test "QA handoff contract records architecture suggestions once" do
@@ -54,9 +97,12 @@ defmodule SymphonyElixir.QaArchitectureContractTest do
     spec = File.read!(@spec_path)
 
     assert spec =~ "Agent QA MUST run the repository-local `qa-architecture` skill"
+    assert spec =~ "complete upstream-derived support files"
+    assert spec =~ "`LANGUAGE.md`, `DEEPENING.md`, and `INTERFACE-DESIGN.md`"
     assert spec =~ "thin Symphony-local handoff-artifacts consumer"
     assert spec =~ "guards against silently forking the Octo contract"
     assert spec =~ "The pass is bounded to implementation-touched files"
+    assert spec =~ "`CONTEXT.md` MAY be used as domain vocabulary"
     assert spec =~ "`CONTEXT.md` and `docs/adr/` MUST NOT be treated as canonical sources"
     assert spec =~ "QA MUST NOT use the architecture pass for whole-repository improvement scouting"
     assert spec =~ "QA may emit at most one set of architectural suggestions per Linear issue"
