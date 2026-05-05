@@ -6,15 +6,20 @@ defmodule SymphonyElixir.TelegramNotifierTest do
   test "missing telegram config is a no-op" do
     parent = self()
 
+    write_workflow_file!(Workflow.workflow_file_path(),
+      telegram_bot_token: "",
+      telegram_chat_id: ""
+    )
+
     issue = %Issue{
       identifier: "EMB-99",
-      title: "Add telegram notification hooks for human review",
+      title: "Add telegram notification hooks for human escalation",
       state: "Human Review",
       url: "https://linear.app/example/EMB-99"
     }
 
     assert :ok =
-             Telegram.notify_human_review(issue,
+             Telegram.notify_human_escalation(issue,
                request_fun: fn request ->
                  send(parent, {:telegram_request, request})
                  {:ok, %Req.Response{status: 200}}
@@ -24,7 +29,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
     refute_receive {:telegram_request, _request}
   end
 
-  test "telegram event filters can disable human review sends" do
+  test "telegram event filters can disable human escalation sends" do
     parent = self()
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -35,13 +40,13 @@ defmodule SymphonyElixir.TelegramNotifierTest do
 
     issue = %Issue{
       identifier: "EMB-99",
-      title: "Add telegram notification hooks for human review",
+      title: "Add telegram notification hooks for human escalation",
       state: "Human Review",
       url: "https://linear.app/example/EMB-99"
     }
 
     assert :ok =
-             Telegram.notify_human_review(issue,
+             Telegram.notify_human_escalation(issue,
                request_fun: fn request ->
                  send(parent, {:telegram_request, request})
                  {:ok, %Req.Response{status: 200}}
@@ -54,17 +59,20 @@ defmodule SymphonyElixir.TelegramNotifierTest do
   test "incomplete telegram config is a no-op" do
     parent = self()
 
-    write_workflow_file!(Workflow.workflow_file_path(), telegram_bot_token: "bot-token")
+    write_workflow_file!(Workflow.workflow_file_path(),
+      telegram_bot_token: "bot-token",
+      telegram_chat_id: ""
+    )
 
     issue = %Issue{
       identifier: "EMB-99",
-      title: "Add telegram notification hooks for human review",
+      title: "Add telegram notification hooks for human escalation",
       state: "Human Review",
       url: "https://linear.app/example/EMB-99"
     }
 
     assert :ok =
-             Telegram.notify_human_review(issue,
+             Telegram.notify_human_escalation(issue,
                request_fun: fn request ->
                  send(parent, {:telegram_request, request})
                  {:ok, %Req.Response{status: 200}}
@@ -81,12 +89,12 @@ defmodule SymphonyElixir.TelegramNotifierTest do
     )
 
     assert :ok =
-             Telegram.notify_human_review(:not_an_issue,
+             Telegram.notify_human_escalation(:not_an_issue,
                request_fun: fn _request -> flunk("request function should not be called") end
              )
   end
 
-  test "successful telegram send includes issue context" do
+  test "successful human escalation telegram send includes issue context" do
     parent = self()
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -98,13 +106,13 @@ defmodule SymphonyElixir.TelegramNotifierTest do
 
     issue = %Issue{
       identifier: "EMB-99",
-      title: "Add telegram notification hooks for human review",
+      title: "Add telegram notification hooks for human escalation",
       state: "Human Review",
       url: "https://linear.app/example/EMB-99"
     }
 
     assert :ok =
-             Telegram.notify_human_review(issue,
+             Telegram.notify_human_escalation(issue,
                request_fun: fn request ->
                  send(parent, {:telegram_request, request})
                  {:ok, %Req.Response{status: 200}}
@@ -118,9 +126,65 @@ defmodule SymphonyElixir.TelegramNotifierTest do
     assert request[:json].disable_web_page_preview == true
 
     assert request[:json].text =~ "Issue: EMB-99"
-    assert request[:json].text =~ "Title: Add telegram notification hooks for human review"
+    assert request[:json].text =~ "Title: Add telegram notification hooks for human escalation"
     assert request[:json].text =~ "State: Human Review"
     assert request[:json].text =~ "URL: https://linear.app/example/EMB-99"
+  end
+
+  test "missing telegram message thread id is omitted" do
+    parent = self()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      telegram_bot_token: "bot-token",
+      telegram_chat_id: "chat-id",
+      telegram_message_thread_id: ""
+    )
+
+    issue = %Issue{
+      identifier: "EMB-99",
+      title: "Add telegram notification hooks for human escalation",
+      state: "Human Review",
+      url: "https://linear.app/example/EMB-99"
+    }
+
+    assert :ok =
+             Telegram.notify_human_escalation(issue,
+               request_fun: fn request ->
+                 send(parent, {:telegram_request, request})
+                 {:ok, %Req.Response{status: 200}}
+               end
+             )
+
+    assert_receive {:telegram_request, request}
+    refute Map.has_key?(request[:json], :message_thread_id)
+  end
+
+  test "legacy human review event still enables human escalation send" do
+    parent = self()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      telegram_bot_token: "bot-token",
+      telegram_chat_id: "chat-id",
+      telegram_events: ["human_review"]
+    )
+
+    issue = %Issue{
+      identifier: "EMB-99",
+      title: "Add telegram notification hooks for human escalation",
+      state: "Human Review",
+      url: "https://linear.app/example/EMB-99"
+    }
+
+    assert :ok =
+             Telegram.notify_human_review(issue,
+               request_fun: fn request ->
+                 send(parent, {:telegram_request, request})
+                 {:ok, %Req.Response{status: 200}}
+               end
+             )
+
+    assert_receive {:telegram_request, request}
+    assert request[:json].text =~ "Symphony needs human escalation"
   end
 
   test "agent failure notification is disabled unless the event is configured" do
@@ -133,7 +197,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
 
     issue = %Issue{
       identifier: "EMB-99",
-      title: "Add telegram notification hooks for human review",
+      title: "Add telegram notification hooks for human escalation",
       state: "In Progress",
       url: "https://linear.app/example/EMB-99"
     }
@@ -157,12 +221,12 @@ defmodule SymphonyElixir.TelegramNotifierTest do
       telegram_bot_token: "bot-token",
       telegram_chat_id: "chat-id",
       telegram_message_thread_id: "42",
-      telegram_events: ["human_review", "agent_failed"]
+      telegram_events: ["human_escalation", "agent_failed"]
     )
 
     issue = %Issue{
       identifier: "EMB-99",
-      title: "Add telegram notification hooks for human review",
+      title: "Add telegram notification hooks for human escalation",
       state: "In Progress",
       url: "https://linear.app/example/EMB-99"
     }
@@ -180,7 +244,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
     assert request[:json].message_thread_id == 42
     assert request[:json].text =~ "Symphony agent failed"
     assert request[:json].text =~ "Issue: EMB-99"
-    assert request[:json].text =~ "Title: Add telegram notification hooks for human review"
+    assert request[:json].text =~ "Title: Add telegram notification hooks for human escalation"
     assert request[:json].text =~ "State: In Progress"
     assert request[:json].text =~ "URL: https://linear.app/example/EMB-99"
     assert request[:json].text =~ "Reason: :timeout"
@@ -197,13 +261,13 @@ defmodule SymphonyElixir.TelegramNotifierTest do
 
     issue = %Issue{
       identifier: "EMB-99",
-      title: "Add telegram notification hooks for human review",
+      title: "Add telegram notification hooks for human escalation",
       state: "Human Review",
       url: "https://linear.app/example/EMB-99"
     }
 
     assert :ok =
-             Telegram.notify_human_review(issue,
+             Telegram.notify_human_escalation(issue,
                request_fun: fn request ->
                  send(parent, {:telegram_request, request})
                  {:ok, %Req.Response{status: 200}}
@@ -225,13 +289,13 @@ defmodule SymphonyElixir.TelegramNotifierTest do
 
     issue = %Issue{
       identifier: "EMB-99",
-      title: "Add telegram notification hooks for human review",
+      title: "Add telegram notification hooks for human escalation",
       state: "Human Review",
       url: "https://linear.app/example/EMB-99"
     }
 
     assert :ok =
-             Telegram.notify_human_review(issue,
+             Telegram.notify_human_escalation(issue,
                request_fun: fn request ->
                  send(parent, {:telegram_request, request})
                  {:ok, %Req.Response{status: 200}}
@@ -253,7 +317,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
 
     issue = %Issue{
       identifier: "EMB-99",
-      title: "Add telegram notification hooks for human review",
+      title: "Add telegram notification hooks for human escalation",
       state: "In Progress",
       url: "https://linear.app/example/EMB-99"
     }
@@ -279,7 +343,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
 
     issue = %Issue{
       identifier: "EMB-99",
-      title: "Add telegram notification hooks for human review",
+      title: "Add telegram notification hooks for human escalation",
       state: "Human Review",
       url: "https://linear.app/example/EMB-99"
     }
@@ -287,7 +351,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
     log =
       capture_log(fn ->
         assert :ok =
-                 Telegram.notify_human_review(issue,
+                 Telegram.notify_human_escalation(issue,
                    request_fun: fn _request -> {:error, :timeout} end
                  )
       end)
@@ -303,7 +367,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
 
     issue = %Issue{
       identifier: "EMB-99",
-      title: "Add telegram notification hooks for human review",
+      title: "Add telegram notification hooks for human escalation",
       state: "Human Review",
       url: "https://linear.app/example/EMB-99"
     }
@@ -311,7 +375,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
     binary_log =
       capture_log(fn ->
         assert :ok =
-                 Telegram.notify_human_review(issue,
+                 Telegram.notify_human_escalation(issue,
                    request_fun: fn _request -> {:error, "temporary failure"} end
                  )
       end)
@@ -319,7 +383,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
     struct_log =
       capture_log(fn ->
         assert :ok =
-                 Telegram.notify_human_review(issue,
+                 Telegram.notify_human_escalation(issue,
                    request_fun: fn _request -> {:error, %RuntimeError{message: "hidden details"}} end
                  )
       end)
@@ -327,7 +391,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
     fallback_log =
       capture_log(fn ->
         assert :ok =
-                 Telegram.notify_human_review(issue,
+                 Telegram.notify_human_escalation(issue,
                    request_fun: fn _request -> {:error, %{reason: "hidden details"}} end
                  )
       end)
@@ -345,7 +409,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
 
     issue = %Issue{
       identifier: "EMB-99",
-      title: "Add telegram notification hooks for human review",
+      title: "Add telegram notification hooks for human escalation",
       state: "Human Review",
       url: "https://linear.app/example/EMB-99"
     }
@@ -353,7 +417,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
     log =
       capture_log(fn ->
         assert :ok =
-                 Telegram.notify_human_review(issue,
+                 Telegram.notify_human_escalation(issue,
                    request_fun: fn _request -> {:ok, %Req.Response{status: 500}} end
                  )
       end)
@@ -369,7 +433,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
 
     issue = %Issue{
       identifier: "EMB-99",
-      title: "Add telegram notification hooks for human review",
+      title: "Add telegram notification hooks for human escalation",
       state: "Human Review",
       url: "https://linear.app/example/EMB-99"
     }
@@ -377,7 +441,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
     log =
       capture_log(fn ->
         assert :ok =
-                 Telegram.notify_human_review(issue,
+                 Telegram.notify_human_escalation(issue,
                    request_fun: fn _request -> :unexpected end
                  )
       end)
@@ -393,7 +457,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
 
     issue = %Issue{
       identifier: "EMB-99",
-      title: "Add telegram notification hooks for human review",
+      title: "Add telegram notification hooks for human escalation",
       state: "Human Review",
       url: "https://linear.app/example/EMB-99"
     }
@@ -401,7 +465,7 @@ defmodule SymphonyElixir.TelegramNotifierTest do
     log =
       capture_log(fn ->
         assert :ok =
-                 Telegram.notify_human_review(issue,
+                 Telegram.notify_human_escalation(issue,
                    request_fun: fn _request -> raise RuntimeError, "hidden details" end
                  )
       end)

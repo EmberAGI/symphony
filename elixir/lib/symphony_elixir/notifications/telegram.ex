@@ -8,18 +8,22 @@ defmodule SymphonyElixir.Notifications.Telegram do
   alias SymphonyElixir.Config
   alias SymphonyElixir.Linear.Issue
 
-  @human_review_event "human_review"
+  @human_escalation_event "human_escalation"
+  @legacy_human_review_event "human_review"
   @agent_failed_event "agent_failed"
 
-  @spec notify_human_review(term(), keyword()) :: :ok
-  def notify_human_review(issue, opts \\ []) do
+  @spec notify_human_escalation(term(), keyword()) :: :ok
+  def notify_human_escalation(issue, opts \\ []) do
     with %Issue{} = issue <- issue,
-         {:ok, settings} <- enabled_settings(@human_review_event) do
-      send_message(settings, human_review_message(issue), opts)
+         {:ok, settings} <- enabled_settings([@human_escalation_event, @legacy_human_review_event]) do
+      send_message(settings, human_escalation_message(issue), opts)
     else
       _ -> :ok
     end
   end
+
+  @spec notify_human_review(term(), keyword()) :: :ok
+  def notify_human_review(issue, opts \\ []), do: notify_human_escalation(issue, opts)
 
   @spec notify_agent_failed(term(), term(), keyword()) :: :ok
   def notify_agent_failed(issue, reason, opts \\ []) do
@@ -35,11 +39,13 @@ defmodule SymphonyElixir.Notifications.Telegram do
     Config.settings!().notifications.telegram
   end
 
-  defp enabled_settings(event) do
-    with %{bot_token: bot_token, chat_id: chat_id, events: events} = settings <- telegram_settings(),
+  defp enabled_settings(event) when is_binary(event), do: enabled_settings([event])
+
+  defp enabled_settings(desired_events) when is_list(desired_events) do
+    with %{bot_token: bot_token, chat_id: chat_id, events: configured_events} = settings <- telegram_settings(),
          true <- configured?(bot_token),
          true <- configured?(chat_id),
-         true <- event in events do
+         true <- Enum.any?(desired_events, &(&1 in configured_events)) do
       {:ok, settings}
     else
       _ -> :disabled
@@ -101,9 +107,9 @@ defmodule SymphonyElixir.Notifications.Telegram do
     end
   end
 
-  defp human_review_message(%Issue{} = issue) do
+  defp human_escalation_message(%Issue{} = issue) do
     [
-      "Symphony needs human review",
+      "Symphony needs human escalation",
       "Issue: #{issue.identifier}",
       "Title: #{issue.title}",
       "State: #{issue.state}",

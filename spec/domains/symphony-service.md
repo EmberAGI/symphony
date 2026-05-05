@@ -160,7 +160,9 @@ Fields:
 - `title` (string)
 - `description` (string or null)
 - `priority` (integer or null)
-  - Lower numbers are higher priority in dispatch sorting.
+  - Lower numbers are higher priority in fallback dispatch sorting.
+- `sort_order` (number or null)
+  - Linear manual queue ordering. Lower numbers dispatch first when present.
 - `state` (string)
   - Current tracker state name.
 - `branch_name` (string or null)
@@ -729,9 +731,10 @@ An issue is dispatch-eligible only if all are true:
 
 Sorting order (stable intent):
 
-1. `priority` ascending (1..4 are preferred; null/unknown sorts last)
-2. `created_at` oldest first
-3. `identifier` lexicographic tie-breaker
+1. `sort_order` ascending, with null/unknown values sorted after readable values
+2. `priority` ascending (1..4 are preferred; null/unknown sorts last) within unordered groups only
+3. `created_at` oldest first within unordered groups only
+4. `identifier` lexicographic tie-breaker
 
 ### 8.3 Concurrency Control
 
@@ -1176,6 +1179,7 @@ Additional normalization details:
 - `labels` -> lowercase strings
 - `blocked_by` -> derived from inverse relations where relation type is `blocks`
 - `priority` -> integer only (non-integers become null)
+- `sort_order` -> numeric Linear `sortOrder` only (non-numeric values become null)
 - `created_at` and `updated_at` -> parse ISO-8601 timestamps
 
 ### 11.4 Error Handling Contract
@@ -1331,6 +1335,13 @@ Rate-limit tracking:
 
 - Track the latest rate-limit payload seen in any agent update.
 - Any human-readable presentation of rate-limit data is implementation-defined.
+
+### 13.6 Human Attention Notifications
+
+Human attention notifications are OPTIONAL, but when implemented for Linear they MUST be driven by
+an explicit `Human Escalation` label on the issue. A transition to a handoff state such as
+`Human Review` MAY stop or release a running agent, but MUST NOT be the notification trigger by
+itself.
 
 ### 13.6 Humanized Agent Event Summaries (OPTIONAL)
 
@@ -1967,6 +1978,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 ### 17.3 Issue Tracker Client
 
 - Candidate issue fetch uses active states and project slug
+- Candidate issue fetch and issue state refresh include Linear `sortOrder`
 - Linear query uses the specified project filter field (`slugId`)
 - Empty `fetch_issues_by_states([])` returns empty without API call
 - Pagination preserves order across multiple pages
@@ -1978,7 +1990,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
 
-- Dispatch sort order is priority then oldest creation time
+- Dispatch sort order is Linear `sortOrder`, with priority and oldest creation time only as unordered fallback
 - `Todo` issue with non-terminal blockers is not eligible
 - `Todo` issue with terminal blockers is eligible
 - Active-state issue refresh updates running entry state
@@ -2034,6 +2046,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   not affect correctness
 - If humanized event summaries are implemented, they cover key wrapper/agent event classes without
   changing orchestrator behavior
+- Human attention notifications, when implemented, are triggered by the `Human Escalation` label
+  rather than by `Human Review` state transitions alone
 
 ### 17.7 CLI and Host Lifecycle
 

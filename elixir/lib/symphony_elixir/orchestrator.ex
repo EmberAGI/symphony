@@ -347,7 +347,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
-    maybe_notify_human_review_transition(state, issue)
+    maybe_notify_human_escalation_label(state, issue)
 
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
@@ -372,13 +372,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp reconcile_issue_state(_issue, state, _active_states, _terminal_states), do: state
 
-  defp maybe_notify_human_review_transition(%State{} = state, %Issue{id: issue_id, state: state_name} = issue)
-       when is_binary(issue_id) and is_binary(state_name) do
+  defp maybe_notify_human_escalation_label(%State{} = state, %Issue{id: issue_id} = issue)
+       when is_binary(issue_id) do
     case Map.get(state.running, issue_id) do
-      %{issue: %Issue{state: previous_state}} ->
-        if normalize_issue_state(state_name) == "human review" and
-             normalize_issue_state(previous_state || "") != "human review" do
-          Telegram.notify_human_review(issue)
+      %{issue: %Issue{} = previous_issue} ->
+        if human_escalation_label?(issue) and !human_escalation_label?(previous_issue) do
+          Telegram.notify_human_escalation(issue)
         end
 
       _ ->
@@ -386,7 +385,16 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp maybe_notify_human_review_transition(_state, _issue), do: :ok
+  defp maybe_notify_human_escalation_label(_state, _issue), do: :ok
+
+  defp human_escalation_label?(%Issue{labels: labels}) when is_list(labels) do
+    Enum.any?(labels, &(normalize_label(&1) == "human escalation"))
+  end
+
+  defp human_escalation_label?(_issue), do: false
+
+  defp normalize_label(label) when is_binary(label), do: String.downcase(String.trim(label))
+  defp normalize_label(_label), do: ""
 
   defp maybe_notify_agent_failed(%{issue: %Issue{} = issue}, reason) do
     Telegram.notify_agent_failed(issue, reason)
@@ -562,12 +570,33 @@ defmodule SymphonyElixir.Orchestrator do
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
     Enum.sort_by(issues, fn
       %Issue{} = issue ->
-        {priority_rank(issue.priority), issue_created_at_sort_key(issue), issue.identifier || issue.id || ""}
+        {
+          sort_order_rank(issue),
+          issue_sort_order_sort_key(issue),
+          priority_rank(issue.priority),
+          issue_created_at_sort_key(issue),
+          issue.identifier || issue.id || ""
+        }
 
       _ ->
-        {priority_rank(nil), issue_created_at_sort_key(nil), ""}
+        {
+          sort_order_rank(nil),
+          issue_sort_order_sort_key(nil),
+          priority_rank(nil),
+          issue_created_at_sort_key(nil),
+          ""
+        }
     end)
   end
+
+  defp sort_order_rank(%Issue{sort_order: sort_order}) when is_number(sort_order), do: 0
+  defp sort_order_rank(_issue), do: 1
+
+  defp issue_sort_order_sort_key(%Issue{sort_order: sort_order}) when is_number(sort_order) do
+    sort_order
+  end
+
+  defp issue_sort_order_sort_key(_issue), do: 0
 
   defp priority_rank(priority) when is_integer(priority) and priority in 1..4, do: priority
   defp priority_rank(_priority), do: 5
