@@ -202,6 +202,45 @@ Use this only when completion is blocked by missing required tools or missing au
   - exact human action needed to unblock.
 - Keep the brief concise and action-oriented; do not add extra top-level comments outside the workpad.
 
+## Agent QA Browser Use capability (QA role only)
+
+This section applies only when the active role is Agent QA. It does not grant
+Browser Use as a general Symphony role skill to implementer, reviewer, landing,
+or operator roles.
+
+Agent QA may use Browser Use as an optional, issue-appropriate browser-facing
+evidence capability when UI/manual acceptance, browser runtime checks,
+screenshots, page-state inspection, or form-flow verification materially improve
+QA. In this workflow, Browser Use must mean local deterministic browser
+automation or inspection that runs without Browser Use Cloud, hosted browser
+infrastructure, `BROWSER_USE_API_KEY`, OpenAI/Anthropic/Google provider keys, or
+any new operator-provisioned API secret.
+
+When a Browser Use agent-mode feature or installed library path requires an LLM
+provider key or hosted browser service, Agent QA must not add or request that
+secret. Use one of these fallbacks instead:
+
+- existing repository Playwright/browser tooling;
+- deterministic local browser CLI automation if a browser is already available;
+- ordinary manual inspection with concise evidence notes;
+- a not-applicable rationale when the issue has no browser-facing acceptance
+  surface or the role environment has no usable browser;
+- `Human Escalation` when browser-facing acceptance is required and every
+  no-key local path is blocked.
+
+Agent QA must attach useful browser evidence to Linear when browser validation
+is performed. Acceptable evidence includes screenshots, page-state summaries,
+form-flow notes, command output, logs, or short recordings. Do not rely on a
+local file path, GitHub comment, object store, or any other non-Linear location
+as the durable QA artifact store for Linear-backed Octo workflows.
+
+Before handoff, Agent QA validation notes must state which browser path was
+used, which pages/states/flows were checked, where Linear artifacts were
+attached, or why browser automation was not applicable. If no local browser is
+available, headless execution is blocked, sandbox policy prevents launch, or a
+desired feature requires a forbidden key, record the fallback chosen and the
+reason.
+
 ## Step 2: Execution phase (Todo -> In Progress -> Human Review)
 
 1.  Determine current repo state (`branch`, `git status`, `HEAD`) and verify the kickoff `pull` sync result is already recorded in the workpad before implementation continues.
