@@ -24,12 +24,16 @@ ready for human/operator review.
 **Browser Use**: A QA-owned browser-facing validation capability. In this
 domain, the name means local browser inspection or automation that can collect
 useful evidence without external provider keys. It includes Browser Use CLI
-commands such as `browser-use open`, `browser-use state`, `browser-use click`,
-`browser-use type`, and `browser-use screenshot`, or local stdio MCP launched
-with `uvx --from 'browser-use[cli]' browser-use --mcp`, when those paths run
-against a local browser session without cloud services. It does not mean
-Browser Use Cloud, a hosted browser service, or an autonomous LLM browser agent
-that requires an OpenAI, Anthropic, Google, or similar provider key.
+commands such as `browser-use open`, `browser-use state`, `browser-use click
+<index>`, `browser-use type "text"`, `browser-use input <index> "text"`, and
+`browser-use screenshot`, or local stdio MCP launched with
+`uvx --from 'browser-use[cli]' browser-use --mcp`, when those paths run against
+a local browser session without cloud services. CLI interactions use numeric
+element indices from `browser-use state`; `input <index> "text"` is the
+click-and-type field-filling path, while `type "text"` is for an already
+focused field. It does not mean Browser Use Cloud, a hosted browser service, or
+an autonomous LLM browser agent that requires an OpenAI, Anthropic, Google, or
+similar provider key.
 
 **QA artifact**: Evidence generated during QA, such as screenshots, page-state
 summaries, form-flow notes, command output, logs, or short recordings.
@@ -89,8 +93,9 @@ a forbidden key or hosted service.
 Allowed local no-key paths include:
 
 - Browser Use CLI commands against a local browser session, including
-  `browser-use open`, `browser-use state`, `browser-use click`,
-  `browser-use type`, and `browser-use screenshot`;
+  `browser-use open`, `browser-use state`, `browser-use click <index>`,
+  `browser-use type "text"`, `browser-use input <index> "text"`, and
+  `browser-use screenshot`;
 - local Browser Use stdio MCP launched with
   `uvx --from 'browser-use[cli]' browser-use --mcp` when it does not request a
   hosted browser service, `BROWSER_USE_API_KEY`, or an LLM provider key;
@@ -127,6 +132,10 @@ page-state inspection, form-flow verification, or manual acceptance evidence is
 relevant to the owning issue. Preferred no-key paths are Browser Use CLI
 commands against a local browser session and local stdio MCP via
 `uvx --from 'browser-use[cli]' browser-use --mcp`.
+Browser Use CLI flows must derive numeric element indices from
+`browser-use state`; use `click <index>` for indexed clicks,
+`input <index> "text"` for field filling, and `type "text"` only after the
+target field is focused.
 
 Provider-keyed autonomous Browser Use agent modes and Browser Use Cloud remain
 outside this issue's accepted contract.

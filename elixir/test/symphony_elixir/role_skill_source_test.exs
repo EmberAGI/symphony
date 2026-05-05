@@ -43,11 +43,16 @@ defmodule SymphonyElixir.RoleSkillSourceTest do
     skill_body = File.read!(Path.join([skills_dir(), "browser-use", "SKILL.md"]))
     assert skill_body =~ "Agent QA"
     assert skill_body =~ "browser-use open"
+    assert skill_body =~ "browser-use click <index>"
+    assert skill_body =~ "browser-use input <index> \"text\""
+    assert skill_body =~ "browser-use type \"text\""
     assert skill_body =~ "browser-use screenshot"
     assert skill_body =~ "uvx --from 'browser-use[cli]' browser-use --mcp"
     assert skill_body =~ "BROWSER_USE_API_KEY"
     assert skill_body =~ "Browser Use Cloud"
     assert skill_body =~ "Human Escalation"
+    refute skill_body =~ "selector-or-description"
+    refute skill_body =~ "browser-use type <"
   end
 
   test "localized upstream directories include the complete requested file sets" do
@@ -114,6 +119,7 @@ defmodule SymphonyElixir.RoleSkillSourceTest do
     assert spec =~ ".codex/role-skills/implementer.json"
     assert spec =~ ".codex/role-skills/qa.json"
     assert spec =~ "Browser Use CLI"
+    assert spec =~ "browser-use input <index> \"text\""
     assert spec =~ "implementer role"
     assert spec =~ "internal Markdown links resolve"
     assert spec =~ "Octo workflow authority"

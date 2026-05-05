@@ -219,9 +219,12 @@ any new operator-provisioned API secret.
 The preferred local Browser Use path is the Agent QA-only `browser-use` skill
 from `.codex/role-skills/qa.json`. When local prerequisites are present, Agent
 QA may use Browser Use CLI commands such as `browser-use open`,
-`browser-use state`, `browser-use click`, `browser-use type`, and
-`browser-use screenshot` against a local browser session. Local stdio MCP is an
-acceptable fallback or alternate path when launched with
+`browser-use state`, `browser-use click <index>`, `browser-use type "text"`,
+`browser-use input <index> "text"`, and `browser-use screenshot` against a
+local browser session. QA should derive numeric element indices from
+`browser-use state`, use `input <index> "text"` for field filling, and reserve
+`type "text"` for an already focused field. Local stdio MCP is an acceptable
+fallback or alternate path when launched with
 `uvx --from 'browser-use[cli]' browser-use --mcp` and used only for local,
 no-key browser inspection.
 

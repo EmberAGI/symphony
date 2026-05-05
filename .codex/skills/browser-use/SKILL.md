@@ -40,14 +40,19 @@ local browser session:
 ```bash
 browser-use open <url>
 browser-use state
-browser-use click <selector-or-description>
-browser-use type <selector-or-description> <text>
+browser-use click <index>
+browser-use type "text"
+browser-use input <index> "text"
 browser-use screenshot <output-path>
 ```
 
 Use the smallest browser flow that validates the acceptance criterion. Prefer
 deterministic actions and record the page, state, form flow, command output, and
-artifact location in the QA handoff.
+artifact location in the QA handoff. Run `browser-use state` to get the current
+page's numbered element indices before interacting. Use `browser-use click
+<index>` for indexed elements, `browser-use input <index> "text"` for
+click-and-type field filling, and `browser-use type "text"` only when the target
+field is already focused.
 
 ## Local MCP Fallback
 
