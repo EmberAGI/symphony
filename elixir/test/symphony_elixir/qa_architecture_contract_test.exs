@@ -80,4 +80,31 @@ defmodule SymphonyElixir.QaArchitectureContractTest do
     assert workflow =~ "QA should read `spec/domains/symphony-handoff-artifacts.md`"
     assert workflow =~ "reviewer\nvalidation should include `spec/domains/symphony-handoff-artifacts.md`"
   end
+
+  test "successful QA handoffs require upstream packet sections and artifact index" do
+    handoff_spec = File.read!(@handoff_spec_path)
+    workflow = File.read!(@workflow_path)
+    spec = File.read!(@spec_path)
+
+    for required <- [
+          "Human Review Packet",
+          "Review Focus",
+          "Executive Summary",
+          "Action Log",
+          "Validation Matrix",
+          "Artifact Index",
+          "Environment And Provenance",
+          "Known Limitations",
+          "Merge Readiness"
+        ] do
+      assert workflow =~ required
+    end
+
+    assert handoff_spec =~ "MUST follow Octo's upstream handoff-artifacts contract"
+    assert handoff_spec =~ "The local workflow MUST NOT redefine that contract"
+    assert handoff_spec =~ "The Artifact Index is mandatory"
+    assert workflow =~ "Do not copy or redefine Octo's full\nhandoff-artifact policy in Symphony"
+    assert spec =~ "Successful `Agent QA` to `Human Review` handoffs MUST"
+    assert spec =~ "mandatory Artifact Index"
+  end
 end

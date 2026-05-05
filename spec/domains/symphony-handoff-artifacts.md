@@ -55,6 +55,19 @@ when a workflow requires handoff-artifact spec context. They SHOULD then follow:
 This file is intentionally limited to source identification, provenance, local
 delta tracking, and anti-fork guidance.
 
+## Successful QA Packets
+
+When an Octo-managed Symphony issue moves successfully from `Agent QA` to
+`Human Review`, QA MUST follow Octo's upstream handoff-artifacts contract for
+the human-review packet. The local workflow MUST NOT redefine that contract,
+but it MUST require these upstream packet sections by name: Review Focus,
+Executive Summary, Action Log, Validation Matrix, Artifact Index, Environment
+and Provenance, Known Limitations, and Merge Readiness.
+
+The Artifact Index is mandatory even when no external artifact is useful for
+the issue; in that case it states that no external artifact was useful and
+gives the rationale.
+
 ## Anti-Fork Guard
 
 Changes to this file MUST preserve all of the following unless an operator

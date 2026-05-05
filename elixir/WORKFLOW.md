@@ -231,6 +231,16 @@ evidence, QA should read `spec/domains/symphony-handoff-artifacts.md`. Treat it
 as a Symphony-local consumer reference to Octo's source-of-truth contract, not
 as an independently maintained copy of Octo handoff-artifact policy.
 
+For a successful `Agent QA` to `Human Review` transition, QA must follow the
+Octo source-of-truth handoff-artifacts contract through the Symphony-local
+consumer reference. The `## Symphony Handoff` must include a
+`### Human Review Packet` with these sections: Review Focus, Executive Summary,
+Action Log, Validation Matrix, Artifact Index, Environment And Provenance,
+Known Limitations, and Merge Readiness. The Artifact Index is required even
+when no external artifact is useful; in that case it must say no external
+artifact was useful and give the rationale. Do not copy or redefine Octo's full
+handoff-artifact policy in Symphony.
+
 QA must filter the changed-file list to implementation code files. When no
 implementation-touched code files are in scope, record
 `Architecture QA: not applicable` with the diff basis. Do not scout the whole

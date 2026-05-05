@@ -28,6 +28,12 @@ context, agents SHOULD read
 consumer reference to Octo's source-of-truth handoff-artifacts contract, not a
 forked normative copy.
 
+Successful `Agent QA` to `Human Review` handoffs MUST use that consumer
+reference to follow Octo's upstream human-review packet contract. The handoff
+MUST include the upstream packet sections by name, including a mandatory
+Artifact Index that either lists artifacts or states that no external artifact
+was useful for the issue.
+
 ## Bounded Architecture QA
 
 Agent QA MUST run the repository-local `qa-architecture` skill during QA.
@@ -110,6 +116,9 @@ validate that:
 - The repository includes a thin Symphony-local handoff-artifacts consumer
   reference that identifies Octo's source-of-truth spec, records local deltas,
   and guards against silently forking the Octo contract.
+- Successful QA-to-Human-Review guidance requires Octo's upstream human-review
+  packet sections and mandatory Artifact Index without redefining the full
+  Octo handoff-artifacts contract in Symphony.
 - The skill and workflow enforce changed-file-only scope and require a recorded
   diff basis.
 - `spec/` and `spec/adr/` are canonical durable context paths.
