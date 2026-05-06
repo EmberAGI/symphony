@@ -2,6 +2,7 @@ defmodule SymphonyElixir.RoleSkillSourceTest do
   use ExUnit.Case, async: true
 
   @localized_skills ~w(tdd frontend-design nodejs pnpm-patching pnpm python typescript)
+  @qa_skills ~w(browser-use)
   @tdd_files ~w(SKILL.md SOURCE.md LICENSE.txt deep-modules.md interface-design.md mocking.md refactoring.md tests.md)
   @frontend_design_files ~w(SKILL.md SOURCE.md LICENSE.txt)
   @son_of_anton_skills ~w(nodejs pnpm-patching pnpm python typescript)
@@ -21,6 +22,46 @@ defmodule SymphonyElixir.RoleSkillSourceTest do
       assert File.regular?(Path.join(skill_path, "SKILL.md"))
       assert File.regular?(Path.join(skill_path, "SOURCE.md"))
     end
+  end
+
+  test "qa manifest exposes browser-use only to Agent QA" do
+    manifest = read_manifest!("qa")
+
+    assert manifest["role"] == "qa"
+    assert manifest["default_exposure"] == "agent-qa-only"
+
+    skill_names = manifest["skills"] |> Enum.map(& &1["name"]) |> Enum.sort()
+    assert skill_names == @qa_skills
+
+    for skill <- manifest["skills"] do
+      skill_path = Path.expand(skill["path"], role_skills_dir())
+      assert File.dir?(skill_path), "#{skill["name"]} path must resolve"
+      assert File.regular?(Path.join(skill_path, "SKILL.md"))
+      assert File.regular?(Path.join(skill_path, "SOURCE.md"))
+    end
+
+    skill_body = File.read!(Path.join([skills_dir(), "browser-use", "SKILL.md"]))
+    assert skill_body =~ "Agent QA"
+    assert skill_body =~ "browser-use open"
+    assert skill_body =~ "browser-use click <index>"
+    assert skill_body =~ "browser-use input <index> \"text\""
+    assert skill_body =~ "browser-use type \"text\""
+    assert skill_body =~ "browser-use screenshot"
+    assert skill_body =~ "uvx --from 'browser-use[cli]' browser-use --mcp"
+    assert skill_body =~ "BROWSER_USE_API_KEY"
+    assert skill_body =~ "Browser Use Cloud"
+    assert skill_body =~ "Human Escalation"
+    assert skill_body =~ "### Human Review Packet"
+    assert skill_body =~ "Review Focus"
+    assert skill_body =~ "Executive Summary"
+    assert skill_body =~ "Action Log"
+    assert skill_body =~ "Validation Matrix"
+    assert skill_body =~ "Artifact Index"
+    assert skill_body =~ "Environment And Provenance"
+    assert skill_body =~ "Known Limitations"
+    assert skill_body =~ "Merge Readiness"
+    refute skill_body =~ "selector-or-description"
+    refute skill_body =~ "browser-use type <"
   end
 
   test "localized upstream directories include the complete requested file sets" do
@@ -85,6 +126,11 @@ defmodule SymphonyElixir.RoleSkillSourceTest do
 
     assert spec =~ "Shared Symphony role skills"
     assert spec =~ ".codex/role-skills/implementer.json"
+    assert spec =~ ".codex/role-skills/qa.json"
+    assert spec =~ "Browser Use CLI"
+    assert spec =~ "browser-use input <index> \"text\""
+    assert spec =~ "complete Human Review Packet section shape"
+    assert spec =~ "Environment And Provenance"
     assert spec =~ "implementer role"
     assert spec =~ "internal Markdown links resolve"
     assert spec =~ "Octo workflow authority"

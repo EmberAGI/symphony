@@ -25,6 +25,18 @@ No reviewer, QA, landing, or backlog-processor manifest should include these
 skills by default. If a future issue intentionally expands exposure, that issue
 must update this contract, the relevant wrapper manifest, and validation.
 
+## Agent QA
+
+[`qa.json`](qa.json) exposes the EMB-187 Browser Use skill to Agent QA only:
+
+- [`browser-use`](../skills/browser-use/SKILL.md)
+
+The skill is limited to issue-appropriate local browser evidence capture with
+Browser Use CLI commands or local stdio MCP. It must not require Browser Use
+Cloud, hosted browser infrastructure, `BROWSER_USE_API_KEY`, LLM provider keys,
+or new operator-provisioned secrets. Implementer, reviewer, landing, and
+backlog-processor manifests must not include this skill by default.
+
 ## Omitted Upstream Siblings
 
 EMB-186 intentionally localizes only the upstream directories named in the

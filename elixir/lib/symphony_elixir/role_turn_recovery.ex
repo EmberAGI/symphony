@@ -65,7 +65,7 @@ defmodule SymphonyElixir.RoleTurnRecovery do
   def recover_pending_turns(active_states, terminal_states, live_issue_ids)
       when is_struct(active_states, MapSet) and is_struct(terminal_states, MapSet) do
     markers = read_pending_markers()
-    live_issue_ids = normalize_issue_id_set(live_issue_ids)
+    live_issue_ids = normalize_issue_id_list(live_issue_ids)
     orphaned_markers = Enum.reject(markers, &live_marker?(&1, live_issue_ids))
     issue_ids = Enum.flat_map(orphaned_markers, &marker_issue_id/1)
     recover_pending_issue_ids(issue_ids, orphaned_markers, active_states, terminal_states)
@@ -247,18 +247,20 @@ defmodule SymphonyElixir.RoleTurnRecovery do
 
   defp marker_issue_id(_marker), do: []
 
+  @spec live_marker?(marker(), [String.t()]) :: boolean()
   defp live_marker?(marker, live_issue_ids) do
     marker
     |> marker_issue_id()
     |> Enum.any?(&Enum.member?(live_issue_ids, &1))
   end
 
-  defp normalize_issue_id_set(issue_ids) do
+  @spec normalize_issue_id_list(Enumerable.t()) :: [String.t()]
+  defp normalize_issue_id_list(issue_ids) do
     issue_ids
     |> Enum.filter(&(is_binary(&1) and &1 != ""))
-    |> MapSet.new()
+    |> Enum.uniq()
   rescue
-    Protocol.UndefinedError -> MapSet.new()
+    Protocol.UndefinedError -> []
   end
 
   defp marker_path(issue_id) when is_binary(issue_id) do

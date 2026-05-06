@@ -17,8 +17,11 @@ Use this index when deciding where durable behavior belongs. `spec/` and
   requirements, runtime-native skills and tools, normalized events, artifacts,
   and Octo mixed-runtime validation.
 - [Repository Quality Assurance](./domains/repository-quality-assurance.md):
-  Repo-level minimum acceptance suite for durable behavior changes, shared role
-  skill source validation, and Symphony/Octo workflow-boundary validation.
+  Repo-level minimum acceptance suite for durable behavior changes, including
+  shared role
+  skill source validation, Symphony/Octo workflow-boundary validation, Agent QA
+  browser-facing validation, evidence capture, artifact handling, and fallback
+  behavior.
 - [Symphony Handoff Artifacts](./domains/symphony-handoff-artifacts.md):
   Symphony-local consumer reference for Octo-owned handoff-artifact behavior,
   including source-of-truth provenance, local deltas, and anti-fork guardrails.

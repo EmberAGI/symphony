@@ -236,6 +236,83 @@ Use this only when completion is blocked by missing required tools or missing au
   - exact human action needed to unblock.
 - Keep the brief concise and action-oriented; do not add extra top-level comments outside the workpad.
 
+## Agent QA Browser Use capability (QA role only)
+
+This section applies only when the active role is Agent QA. It does not grant
+Browser Use as a general Symphony role skill to implementer, reviewer, landing,
+or operator roles.
+
+Agent QA may use Browser Use as an optional, issue-appropriate browser-facing
+evidence capability when UI/manual acceptance, browser runtime checks,
+screenshots, page-state inspection, or form-flow verification materially improve
+QA. In this workflow, Browser Use must mean local deterministic browser
+automation or inspection that runs without Browser Use Cloud, hosted browser
+infrastructure, `BROWSER_USE_API_KEY`, OpenAI/Anthropic/Google provider keys, or
+any new operator-provisioned API secret.
+
+The preferred local Browser Use path is the Agent QA-only `browser-use` skill
+from `.codex/role-skills/qa.json`. When local prerequisites are present, Agent
+QA may use Browser Use CLI commands such as `browser-use open`,
+`browser-use state`, `browser-use click <index>`, `browser-use type "text"`,
+`browser-use input <index> "text"`, and `browser-use screenshot` against a
+local browser session. QA should derive numeric element indices from
+`browser-use state`, use `input <index> "text"` for field filling, and reserve
+`type "text"` for an already focused field. Local stdio MCP is an acceptable
+fallback or alternate path when launched with
+`uvx --from 'browser-use[cli]' browser-use --mcp` and used only for local,
+no-key browser inspection.
+
+When a Browser Use agent-mode feature or installed library path requires an LLM
+provider key or hosted browser service, Agent QA must not add or request that
+secret. Use one of these fallbacks instead:
+
+- Browser Use CLI/local stdio MCP only when it runs locally with no key;
+- existing repository Playwright/browser tooling;
+- deterministic local browser CLI automation if a browser is already available;
+- ordinary manual inspection with concise evidence notes;
+- a not-applicable rationale when the issue has no browser-facing acceptance
+  surface or the role environment has no usable browser or Browser Use CLI/MCP;
+- `Human Escalation` when browser-facing acceptance is required and every
+  no-key local path is blocked.
+
+Agent QA must attach useful browser evidence to Linear when browser validation
+is performed. Acceptable evidence includes screenshots, page-state summaries,
+form-flow notes, command output, logs, or short recordings. Do not rely on a
+local file path, GitHub comment, object store, or any other non-Linear location
+as the durable QA artifact store for Linear-backed Octo workflows.
+
+Before a successful QA handoff to `Human Review`, Agent QA must include
+browser validation evidence in the `### Human Review Packet` inside the
+`## Symphony Handoff` comment. The packet must keep the complete successful
+QA-to-`Human Review` section shape:
+
+- `Review Focus`;
+- `Executive Summary`;
+- `Action Log`;
+- `Validation Matrix`;
+- `Artifact Index`;
+- `Environment And Provenance`;
+- `Known Limitations`;
+- `Merge Readiness`.
+
+Browser evidence must then be represented inside that packet:
+
+- the `Validation Matrix` must connect each browser-facing acceptance check to
+  the pages, states, flows, or fallback evidence QA reviewed;
+- the `Artifact Index` must list every Linear-attached browser artifact by
+  name, describe what it shows, and point to its Linear attachment/comment
+  location;
+- when no external browser artifact was useful or possible, the `Artifact
+  Index` must explicitly say so and give the no-browser, blocked-headless,
+  non-browser-issue, or forbidden-key rationale.
+
+Before any QA handoff, Agent QA validation notes must state which browser path
+was used, which pages/states/flows were checked, where Linear artifacts were
+attached, or why browser automation was not applicable. If no local browser is
+available, headless execution is blocked, sandbox policy prevents launch, or a
+desired feature requires a forbidden key, record the fallback chosen and the
+reason.
+
 ## Step 2: Execution phase (Todo -> In Progress -> Human Review)
 
 1.  Determine current repo state (`branch`, `git status`, `HEAD`) and verify the kickoff `pull` sync result is already recorded in the workpad before implementation continues.
