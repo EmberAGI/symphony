@@ -109,6 +109,8 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `push`: keep remote branch current and publish updates.
 - `pull`: keep branch updated with latest `origin/main` before handoff.
 - `land`: when ticket reaches `Merging`, explicitly open and follow `.codex/skills/land/SKILL.md`, which includes the `land` loop.
+- `architecture`: shared architecture vocabulary and bounded implementation
+  review guidance. Octo role workflows decide when and how to invoke it.
 
 ## Status map
 
@@ -116,6 +118,13 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `Todo` -> queued; immediately transition to `In Progress` before active work.
   - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, address or explicitly push back, revalidate, return to `Human Review`).
 - `In Progress` -> implementation actively underway.
+- `Agent Fixes` -> incremental implementer feedback loop; preserve the
+  existing branch, PR, workpad, and handoff trail while addressing reviewer or
+  QA gaps.
+- `Agent Review` -> implementation PR is ready for agent review; validate
+  requested changes before returning work to QA.
+- `Agent QA` -> QA validation is underway; follow the active Octo QA role
+  workflow before QA handoff.
 - `Human Review` -> PR is attached and validated; waiting on human approval.
 - `Merging` -> approved by human; execute the `land` skill flow (do not call `gh pr merge` directly).
 - `Rework` -> reviewer requested changes; planning + implementation required.
@@ -130,6 +139,13 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
    - `Todo` -> immediately move to `In Progress`, then ensure bootstrap workpad comment exists (create if missing), then start execution flow.
      - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
    - `In Progress` -> continue execution flow from current scratchpad comment.
+   - `Agent Fixes` -> continue the existing branch and PR as an incremental
+     feedback loop; use the latest handoff trail and branch-local specs when
+     addressing requested changes.
+   - `Agent Review` -> run reviewer validation for the current PR before
+     moving work back to QA.
+   - `Agent QA` -> run QA validation according to the active Octo QA role
+     workflow, then hand off according to the QA result.
    - `Human Review` -> wait and poll for decision/review updates.
    - `Merging` -> on entry, open and follow `.codex/skills/land/SKILL.md`; do not call `gh pr merge` directly.
    - `Rework` -> run rework flow.
@@ -189,6 +205,24 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
 4. Update the workpad plan/checklist to include each feedback item and its resolution status.
 5. Re-run validation after feedback-driven changes and push updates.
 6. Repeat this sweep until there are no outstanding actionable comments.
+
+## Shared Architecture Skill Boundary
+
+The repository-local `.codex/skills/architecture/` directory is shared
+architecture guidance, not an Octo QA workflow definition. It preserves the
+localized module/interface/depth/seam/adapter vocabulary and bounded evaluation
+technique for roles that are explicitly told to use it.
+
+Octo role-specific obligations for Agent QA, reviewer validation, one-time
+architecture suggestion markers, handoff packet fields, role exposure, and
+operator/console loading are owned by the Octo workflow surface in
+`EmberAGI/scaling-octo-engine`. Symphony-local guidance must not copy that
+workflow contract or claim that the shared skill is automatically loaded by
+Octo QA roles.
+
+The shared skill may use `CONTEXT.md` as vocabulary/context when present.
+Durable behavior and architecture authority remain in `spec/` and `spec/adr/`;
+`CONTEXT.md` and `docs/adr/` are not canonical durable sources.
 
 ## Blocked-access escape hatch (required behavior)
 

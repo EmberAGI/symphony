@@ -241,6 +241,7 @@ defmodule SymphonyElixir.RoleTurnRecovery do
     end
   end
 
+  @spec marker_issue_id(marker()) :: [String.t()]
   defp marker_issue_id(%{"issue_id" => issue_id}) when is_binary(issue_id) and issue_id != "",
     do: [issue_id]
 

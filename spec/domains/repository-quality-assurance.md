@@ -1,5 +1,17 @@
 # Repository Quality Assurance
 
+Status: Draft v1
+
+Purpose: Define the minimum repository QA contract for durable behavior
+changes, shared role skill source acceptance, and the boundary between
+Symphony-owned shared skill source and Octo-owned role workflow guidance.
+
+## Normative Language
+
+The key words `MUST`, `MUST NOT`, `REQUIRED`, `SHOULD`, `SHOULD NOT`,
+`RECOMMENDED`, `MAY`, and `OPTIONAL` in this document are to be interpreted as
+described in RFC 2119.
+
 ## Intended Behavior
 
 Repository changes must carry enough local evidence for reviewers and role
@@ -14,6 +26,25 @@ the Codex Workpad and final Symphony Handoff.
 Agent QA workflows may use browser-facing evidence gathering when it materially
 improves issue verification, but that capability must stay local, optional,
 QA-only, and free of external hosted-browser or provider-key dependencies.
+
+## Durable Sources
+
+Repository QA uses these branch-local durable sources as canonical context:
+
+- `spec/`
+- `spec/adr/`
+
+`CONTEXT.md` MAY be used as domain vocabulary and contextual naming guidance
+when present. `spec/` and `spec/adr/` remain the durable QA authority.
+`CONTEXT.md` and `docs/adr/` MUST NOT be treated as canonical sources for Octo
+QA decisions.
+
+When a QA, review, or handoff instruction requires handoff-artifact spec
+context, agents SHOULD read
+`spec/domains/symphony-handoff-artifacts.md`. That file is a Symphony-local
+consumer reference to Octo's source-of-truth handoff-artifacts contract, not a
+forked normative copy. The Octo workflow surface remains responsible for
+successful QA-to-Human-Review packet details.
 
 ## Domain Concepts
 
@@ -38,7 +69,39 @@ similar provider key.
 **QA artifact**: Evidence generated during QA, such as screenshots, page-state
 summaries, form-flow notes, command output, logs, or short recordings.
 
-## Rules And Invariants
+## Shared Architecture Skill Source
+
+The repository-local `.codex/skills/architecture/` directory is a neutral
+shared architecture skill source. It MUST preserve complete upstream-derived
+support files needed for architecture vocabulary and deepening:
+`LANGUAGE.md`, `DEEPENING.md`, and `INTERFACE-DESIGN.md`.
+
+The shared skill MUST remain reusable architecture guidance. It may describe
+bounded implementation-file evaluation, deepening opportunities, durable
+context usage, and architecture vocabulary, but it MUST NOT define Octo role workflow
+obligations such as Agent QA state routing, reviewer gates, handoff packet
+fields, one-time suggestion markers, PR metadata, workpad rules, or escalation
+labels.
+
+The shared skill MUST preserve the source distinction that `CONTEXT.md` is
+domain vocabulary/context when present, while `spec/` and `spec/adr/` remain
+canonical durable sources. `docs/adr/` is not a canonical durable source.
+
+## Octo QA Workflow Boundary
+
+Octo-specific requirements for when Agent QA uses the shared architecture
+skill, how changed-file-only scope is selected, how not-applicable evidence is
+recorded, how failed architecture handoffs are marked, how many suggestion sets
+may be emitted, how reviewer validation works, and how Agent Fixes consumes QA
+architecture feedback are owned by the canonical Octo workflow guidance in
+`EmberAGI/scaling-octo-engine`.
+
+Symphony MUST NOT claim that the shared `architecture` skill is automatically
+loaded by Octo QA, operator, or console agents. Integration work that exposes
+this shared skill to those surfaces must be tracked in the owning Octo issue
+and validated in the Octo repository.
+
+## Browser Use Rules And Invariants
 
 - Browser Use may be exposed only to Agent QA guidance, the Agent QA role-skill
   manifest, and QA acceptance workflows. Other Symphony roles must not gain it
@@ -46,8 +109,8 @@ summaries, form-flow notes, command output, logs, or short recordings.
 - Browser Use must remain optional and issue-appropriate. Agent QA should use
   it when browser-facing validation, screenshots, page-state inspection,
   form-flow verification, or manual acceptance evidence materially improves QA.
-- Browser Use must not require `BROWSER_USE_API_KEY`, Browser Use Cloud, hosted
-  browser infrastructure, or any new operator-provisioned API secret.
+- Browser Use must not require `BROWSER_USE_API_KEY`, Browser Use Cloud,
+  hosted browser infrastructure, or any new operator-provisioned API secret.
 - Browser Use guidance must not require OpenAI, Anthropic, Google, or other LLM
   provider keys for QA evidence capture.
 - If an installed Browser Use agent mode or library path requires an LLM
@@ -59,13 +122,13 @@ summaries, form-flow notes, command output, logs, or short recordings.
   Linear-backed Octo workflows, durable QA artifacts must be uploaded or
   attached to Linear, and agents must not rely on an untracked non-Linear
   artifact store as the durable evidence location.
-- Browser automation must respect the operational readiness posture of the
-  role environment. If no usable browser is available, headless execution is
-  blocked, dependencies are absent, sandbox policy prevents launch, or a desired
-  feature needs a forbidden key, Agent QA must use the documented fallback path
-  instead of silently weakening validation.
+- Browser automation must respect the operational readiness posture of the role
+  environment. If no usable browser is available, headless execution is
+  blocked, dependencies are absent, sandbox policy prevents launch, or a
+  desired feature needs a forbidden key, Agent QA must use the documented
+  fallback path instead of silently weakening validation.
 
-## Interfaces And Contracts
+## Browser Use Interfaces And Contracts
 
 Agent QA browser-facing validation should record:
 
@@ -118,12 +181,35 @@ Fallback outcomes include:
 - Human Escalation when browser-facing acceptance is required and all no-key
   local paths are blocked.
 
-## Minimum Acceptance Suite
+## Shared Role Skill Sources
 
 | Change Surface | Required Invariants | Minimum Local Validation | Escalation Route |
 | --- | --- | --- | --- |
 | Agent QA browser capability, Browser Use CLI/MCP guidance, or browser evidence workflow | Browser Use remains optional, issue-appropriate, QA-only, and exposed only through Agent QA guidance or the Agent QA role manifest. Guidance must not introduce Browser Use Cloud, hosted browser infrastructure, `BROWSER_USE_API_KEY`, OpenAI/Anthropic/Google provider keys, or new operator-provisioned secrets. QA artifacts for Linear-backed workflows must be attached to Linear, successful Agent QA handoffs to Human Review must include the complete Human Review Packet section shape, browser evidence or a browser-not-applicable rationale in the Artifact Index, and browser-facing checks in the Validation Matrix. Fallbacks must cover missing local Browser Use CLI/MCP tooling, no local browser, blocked headless execution, and key-requiring agent-mode features. | Targeted inspection proving the Browser Use skill is exposed only to Agent QA, no forbidden key or hosted service requirement was introduced, artifact handling still points to Linear, and fallback behavior is documented. Attempt at least one safe local smoke check when a usable browser and local Browser Use path exist, or record a concrete environment-based not-applicable rationale. Run broader repo tests when code behavior is touched. | `Agent Fixes` for implementation or validation gaps. `Human Escalation` when browser-facing acceptance is required and every no-key local path is blocked, or when required source artifacts are missing, unreadable, conflicting, or require operator-provisioned access. |
 | Shared Symphony role skills, role skill manifests, or `CODEX_HOME` skill materialization source | Shared skill directories remain complete, locally committed, discoverable by the intended role, and isolated from roles that should not receive them. Upstream-derived skills must name their source artifacts, keep internal links local, document omitted upstream siblings when only part of an upstream pack is localized, and preserve Octo workflow authority for Linear repository metadata, issue branches, state transitions, PR ownership, Codex Workpad, Symphony Handoff, validation, and `Human Escalation` routing. Skill guidance must not impose language, package-manager, frontend, or workflow conventions on unrelated repositories or issues without durable repository or issue signals. | Targeted inspection or tests proving every manifest path resolves, every exposed skill has a `SKILL.md`, full upstream directories named by the issue are present, internal Markdown links resolve to committed local files, implementer-only skills are absent from non-implementer manifests by default, activation conditions are documented, and Octo workflow-boundary language remains present. Run broader repo tests when code behavior is touched. | `Agent Fixes` for implementation or validation gaps. `Human Escalation` when required upstream source artifacts are missing, unreadable, conflicting, or require operator-provisioned access. |
+
+Repository changes that add or materially change shared architecture skill
+source behavior MUST validate that:
+
+- The localized shared skill is named `architecture`, not `qa-architecture`.
+- The localized `architecture` skill directory includes complete
+  upstream-derived support files for language, deepening, and interface-design
+  guidance.
+- The shared skill remains reusable architecture guidance and does not embed
+  Agent QA state routing, reviewer gates, handoff packet fields, one-time
+  suggestion marker rules, PR metadata, workpad rules, or escalation-label
+  policy.
+- `CONTEXT.md` can be preserved as useful domain vocabulary, while `spec/` and
+  `spec/adr/` are canonical durable context paths.
+- `docs/adr/` is not treated as a canonical durable source.
+- The repository includes a thin Symphony-local handoff-artifacts consumer
+  reference that identifies Octo's source-of-truth spec, records local deltas,
+  and guards against silently forking the Octo contract.
+- Symphony workflow/spec guidance records that Octo role exposure and
+  QA/reviewer/Agent Fixes architecture workflow behavior are owned by
+  `EmberAGI/scaling-octo-engine`.
+- Validation guards against reintroducing the QA-specific skill name or
+  embedding Octo QA workflow obligations in the shared skill.
 
 ## EMB-187 Agent QA Browser Use
 
@@ -179,8 +265,8 @@ libraries, accessibility requirements, or package-manager choices.
 - Browser Use agent mode is installed but refuses to run without an LLM
   provider key.
 - Screenshot or recording capture succeeds locally but upload to Linear fails.
-- Browser automation is irrelevant to the issue and would add noise rather
-  than evidence.
+- Browser automation is irrelevant to the issue and would add noise rather than
+  evidence.
 
 ## Constraints
 
@@ -201,5 +287,7 @@ contract.
 ## References
 
 - [Agent Runtime](./agent-runtime.md)
-- [Provider-Neutral Agent Runtimes ADR](../adr/0001-provider-neutral-agent-runtimes.md)
+- [Symphony Service](./symphony-service.md)
+- [Symphony Handoff Artifacts](./symphony-handoff-artifacts.md)
+- [ADR 0001: Provider-Neutral Agent Runtimes](../adr/0001-provider-neutral-agent-runtimes.md)
 - [EMB-187: Add no-key Browser Use capability for Agent QA](https://linear.app/emberai/issue/EMB-187/add-no-key-browser-use-capability-for-agent-qa)
