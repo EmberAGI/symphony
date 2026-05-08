@@ -91,7 +91,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - Keep ticket metadata current (state, acceptance criteria, links).
 - Treat the issue body, branch, PR, legacy read-only Workpad context, compact handoff trail, and optional observability artifacts as the source of truth for continuation.
 - Do not create or update Linear `## Codex Workpad` comments. Existing Workpads are historical context only.
-- Treat any ticket-authored `Validation`, `Test Plan`, or `Testing` section as non-negotiable acceptance input: execute it before considering the work complete and summarize the result in compact handoff `Observability` or linked evidence.
+- Treat any ticket-authored `Validation`, `Test Plan`, or `Testing` section as non-negotiable acceptance input: execute it before considering the work complete and summarize the result in compact handoff `Work done` or linked evidence.
 - When meaningful out-of-scope improvements are discovered during execution,
   file a separate Linear issue instead of expanding scope. The follow-up issue
   must include a clear title, description, and acceptance criteria, be placed in
@@ -175,8 +175,8 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
     - If changes touch app files or app behavior, include app-specific flow checks such as launch path, changed interaction path, and expected result path.
     - If the ticket description/comment context includes `Validation`, `Test Plan`, or `Testing` sections, treat those requirements as mandatory checks with no optional downgrade.
 6.  Run a principal-style self-review of the plan and refine it before editing.
-7.  Before implementing, capture a concrete reproduction signal in local validation notes, linked observability material, or the final compact handoff `Observability` field.
-8.  Run the `pull` skill to sync with latest `origin/main` before any code edits, then preserve the pull/sync result in local validation notes, linked observability material, or the final compact handoff `Observability` field.
+7.  Before implementing, capture a concrete reproduction signal in local validation notes, linked evidence, or the final compact handoff `Work done` field.
+8.  Run the `pull` skill to sync with latest `origin/main` before any code edits, then preserve the pull/sync result in local validation notes, linked evidence, or the final compact handoff `Work done` field.
     - Include a `pull skill evidence` note with:
       - merge source(s),
       - result (`clean` or `conflicts resolved`),
@@ -195,7 +195,7 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
 3. Treat every actionable reviewer comment (human or bot), including inline review comments, as blocking until one of these is true:
    - code/test/docs updated to address it, or
    - explicit, justified pushback reply is posted on that thread.
-4. Track each feedback item and its resolution status in local notes, commits, or linked observability material.
+4. Track each feedback item and its resolution status in local notes, commits, or linked evidence.
 5. Re-run validation after feedback-driven changes and push updates.
 6. Repeat this sweep until there are no outstanding actionable comments.
 
@@ -222,7 +222,7 @@ Durable behavior and architecture authority remain in `spec/` and `spec/adr/`;
 Use this only when completion is blocked by missing required tools or missing auth/permissions that cannot be resolved in-session.
 
 - GitHub is **not** a valid blocker by default. Always try fallback strategies first (alternate remote/auth mode, then continue publish/review flow).
-- Do not move to `Human Review` for GitHub access/auth until all fallback strategies have been attempted and documented in compact handoff `Observability` or linked evidence.
+- Do not move to `Human Review` for GitHub access/auth until all fallback strategies have been attempted and documented in compact handoff `Work done` or linked evidence.
 - If a non-GitHub required tool is missing, or required non-GitHub auth is unavailable, move the ticket to `Human Review` with a short blocker brief in the compact handoff that includes:
   - what is missing,
   - why it blocks required acceptance/validation,
@@ -278,7 +278,7 @@ Before a successful QA handoff to `Human Review`, Agent QA must keep the
 `## Symphony Handoff` compact. The successful QA handoff to `Human Review` must
 stay compact, use a tiny `Role note` review summary, put the human-review
 request in `Next action`, and point browser evidence or browser-not-applicable
-rationale to compact handoff `Observability` or approved Linear attachment
+rationale to compact handoff `Work done` or approved Linear attachment
 metadata.
 
 Before any QA handoff, Agent QA validation notes must state which browser path
@@ -290,7 +290,7 @@ reason.
 
 ## Step 2: Execution phase (Todo -> In Progress -> Human Review)
 
-1.  Determine current repo state (`branch`, `git status`, `HEAD`) and verify the kickoff `pull` sync result is captured in local validation notes, linked observability material, or the final compact handoff before implementation continues.
+1.  Determine current repo state (`branch`, `git status`, `HEAD`) and verify the kickoff `pull` sync result is captured in local validation notes, linked evidence, or the final compact handoff before implementation continues.
 2.  If current issue state is `Todo`, move it to `In Progress`; otherwise leave the current state unchanged.
 3.  Load existing legacy Workpad context only if present; do not mutate it.
 4.  Implement against the source artifacts and local plan:
@@ -301,7 +301,7 @@ reason.
     - Prefer a targeted proof that directly demonstrates the behavior you changed.
     - You may make temporary local proof edits to validate assumptions (for example: tweak a local build input for `make`, or hardcode a UI account / response path) when this increases confidence.
     - Revert every temporary proof edit before commit/push.
-    - Document these temporary proof steps and outcomes in local validation notes, linked observability material, or the compact handoff `Observability` field so reviewers can follow the evidence.
+    - Document these temporary proof steps and outcomes in local validation notes, linked evidence, or the compact handoff `Work done` field so reviewers can follow the evidence.
     - If app-touching, run `launch-app` validation and capture/upload media via `github-pr-media` before handoff.
 6.  Re-check all acceptance criteria and close any gaps.
 7.  Before every `git push` attempt, run the required validation for your scope and confirm it passes; if it fails, address issues and rerun until green, then commit and push changes.
@@ -313,13 +313,12 @@ reason.
     - `Work done`
     - `Role note`
     - `Next action`
-    - `Observability`
-    Detailed source artifacts, validation logs, screenshots, or checklist material belong in linked observability artifacts or approved Linear attachment metadata, not in the Linear handoff body.
+    Detailed source artifacts, validation logs, screenshots, or checklist material belong in linked evidence or approved Linear attachment metadata, not in the Linear handoff body.
 11. Before moving to `Human Review`, poll PR feedback and checks:
     - Read the PR `Manual QA Plan` comment (when present) and use it to sharpen UI/runtime test coverage for the current change.
     - Run the full PR feedback sweep protocol.
     - Confirm PR checks are passing (green) after the latest changes.
-    - Confirm every required ticket-provided validation/test-plan item is complete and cited in compact handoff `Observability` or linked evidence.
+    - Confirm every required ticket-provided validation/test-plan item is complete and cited in compact handoff `Work done` or linked evidence.
     - Repeat this check-address-verify loop until no outstanding comments remain and checks are fully passing.
     - Re-read the issue context before state transition so the compact handoff matches completed work.
 12. Only then move issue to `Human Review`.
@@ -351,7 +350,7 @@ reason.
 
 ## Completion bar before Human Review
 
-- Step 1/2 work is complete and accurately reflected in branch state, PR metadata, compact handoff `Observability`, and any linked evidence.
+- Step 1/2 work is complete and accurately reflected in branch state, PR metadata, compact handoff `Work done`, and any linked evidence.
 - Acceptance criteria and required ticket-provided validation items are complete.
 - Validation/tests are green for the latest commit.
 - PR feedback sweep is complete and no actionable comments remain.
@@ -389,5 +388,4 @@ Use this exact structure for new Linear transition comments:
 - Work done:
 - Role note:
 - Next action:
-- Observability:
 ````
