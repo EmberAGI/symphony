@@ -198,6 +198,24 @@ sources MUST validate that no `.codex/skills/linear/SKILL.md` file is present,
 that no role manifest exposes a shared skill named `linear`, and that unrelated
 shared skills remain present.
 
+Repository changes that add or materially change the shared `to-issues` skill
+source MUST validate that:
+
+- The localized shared skill directory `.codex/skills/to-issues/` resolves and
+  includes the complete upstream `skills/engineering/to-issues/` file set named
+  by the owning issue, plus local source attribution.
+- The localized skill keeps internal Markdown links local and resolvable.
+- The localized skill preserves the upstream breakdown technique: independently
+  grabbable tracer-bullet vertical slices, HITL/AFK classification, real
+  dependency-only blockers, and no parent issue closure merely because child
+  issues were created.
+- The localized skill records that repository metadata, Linear states, labels,
+  `sortOrder`, handoffs, parent/child issue creation, native relation policy,
+  validation, PR ownership, and Human Escalation routing remain owned by the
+  invoking Octo/Symphony workflow.
+- The skill is not exposed to unrelated roles by default unless a role manifest
+  explicitly scopes that exposure.
+
 Repository changes that add or materially change shared architecture skill
 source behavior MUST validate that:
 
