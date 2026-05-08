@@ -140,21 +140,19 @@ Agent QA browser-facing validation should record:
 - any fallback chosen and the reason for that fallback.
 
 When Agent QA successfully moves a Linear-backed issue to Human Review, that
-record must appear in the Human Review Packet inside the `## Symphony Handoff`
-comment. The packet must preserve the complete successful QA-to-`Human Review`
-section shape: Review Focus, Executive Summary, Action Log, Validation Matrix,
-Artifact Index, Environment And Provenance, Known Limitations, and Merge
-Readiness. Browser-facing checks belong in the packet's validation matrix,
-mapped to the issue acceptance criteria or repo-level minimum acceptance
-results they support. Browser evidence belongs in the packet's artifact index,
-with each Linear attachment or Linear comment location named and described.
+record must stay compact in the `## Symphony Handoff` comment. The handoff uses
+a tiny review summary in `Role note`; detailed browser checks, command
+evidence, artifact IDs, environment provenance, and limitations belong in
+compact handoff `Observability` or approved Linear attachment metadata.
+Browser-facing checks should be mapped to the issue acceptance criteria or
+repo-level minimum acceptance results they support.
 
-If Agent QA creates no external browser artifact, the artifact index is still
-required. It must state that no browser artifact was useful or possible and
-give the rationale, such as no browser-facing acceptance surface, no usable
-local browser, blocked headless execution, sandbox launch restrictions, missing
-local Browser Use CLI/MCP tooling, or a desired Browser Use path that required
-a forbidden key or hosted service.
+If Agent QA creates no external browser artifact, the compact evidence trail
+must state that no browser artifact was useful or possible and give the
+rationale, such as no browser-facing acceptance surface, no usable local
+browser, blocked headless execution, sandbox launch restrictions, missing local
+Browser Use CLI/MCP tooling, or a desired Browser Use path that required a
+forbidden key or hosted service.
 
 Allowed local no-key paths include:
 
@@ -185,7 +183,7 @@ Fallback outcomes include:
 
 | Change Surface | Required Invariants | Minimum Local Validation | Escalation Route |
 | --- | --- | --- | --- |
-| Agent QA browser capability, Browser Use CLI/MCP guidance, or browser evidence workflow | Browser Use remains optional, issue-appropriate, QA-only, and exposed only through Agent QA guidance or the Agent QA role manifest. Guidance must not introduce Browser Use Cloud, hosted browser infrastructure, `BROWSER_USE_API_KEY`, OpenAI/Anthropic/Google provider keys, or new operator-provisioned secrets. QA artifacts for Linear-backed workflows must be attached to Linear, successful Agent QA handoffs to Human Review must include the complete Human Review Packet section shape, browser evidence or a browser-not-applicable rationale in the Artifact Index, and browser-facing checks in the Validation Matrix. Fallbacks must cover missing local Browser Use CLI/MCP tooling, no local browser, blocked headless execution, and key-requiring agent-mode features. | Targeted inspection proving the Browser Use skill is exposed only to Agent QA, no forbidden key or hosted service requirement was introduced, artifact handling still points to Linear, and fallback behavior is documented. Attempt at least one safe local smoke check when a usable browser and local Browser Use path exist, or record a concrete environment-based not-applicable rationale. Run broader repo tests when code behavior is touched. | `Agent Fixes` for implementation or validation gaps. `Human Escalation` when browser-facing acceptance is required and every no-key local path is blocked, or when required source artifacts are missing, unreadable, conflicting, or require operator-provisioned access. |
+| Agent QA browser capability, Browser Use CLI/MCP guidance, or browser evidence workflow | Browser Use remains optional, issue-appropriate, QA-only, and exposed only through Agent QA guidance or the Agent QA role manifest. Guidance must not introduce Browser Use Cloud, hosted browser infrastructure, `BROWSER_USE_API_KEY`, OpenAI/Anthropic/Google provider keys, or new operator-provisioned secrets. QA artifacts for Linear-backed workflows must be attached to Linear; successful Agent QA handoffs to Human Review remain compact, use a tiny `Role note` review summary, and put browser evidence or browser-not-applicable rationale in compact handoff `Observability` or approved Linear attachment metadata. Fallbacks must cover missing local Browser Use CLI/MCP tooling, no local browser, blocked headless execution, and key-requiring agent-mode features. | Targeted inspection proving the Browser Use skill is exposed only to Agent QA, no forbidden key or hosted service requirement was introduced, artifact handling still points to Linear, compact `Observability` evidence replaces legacy packet requirements, and fallback behavior is documented. Attempt at least one safe local smoke check when a usable browser and local Browser Use path exist, or record a concrete environment-based not-applicable rationale. Run broader repo tests when code behavior is touched. | `Agent Fixes` for implementation or validation gaps. `Human Escalation` when browser-facing acceptance is required and every no-key local path is blocked, or when required source artifacts are missing, unreadable, conflicting, or require operator-provisioned access. |
 | Shared Symphony role skills, role skill manifests, or `CODEX_HOME` skill materialization source | Shared skill directories remain complete, locally committed, discoverable by the intended role, and isolated from roles that should not receive them. Upstream-derived skills must name their source artifacts, keep internal links local, document omitted upstream siblings when only part of an upstream pack is localized, and preserve Octo workflow authority for Linear repository metadata, issue branches, state transitions, PR ownership, Codex Workpad, Symphony Handoff, validation, and `Human Escalation` routing. Skill guidance must not impose language, package-manager, frontend, or workflow conventions on unrelated repositories or issues without durable repository or issue signals. | Targeted inspection or tests proving every manifest path resolves, every exposed skill has a `SKILL.md`, full upstream directories named by the issue are present, internal Markdown links resolve to committed local files, implementer-only skills are absent from non-implementer manifests by default, activation conditions are documented, and Octo workflow-boundary language remains present. Run broader repo tests when code behavior is touched. | `Agent Fixes` for implementation or validation gaps. `Human Escalation` when required upstream source artifacts are missing, unreadable, conflicting, or require operator-provisioned access. |
 
 Symphony MUST NOT expose a root shared skill named `linear` for raw Linear

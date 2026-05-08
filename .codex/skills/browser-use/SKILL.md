@@ -75,24 +75,18 @@ notes, command output, logs, and short recordings.
 Do not rely on local file paths, GitHub comments, object stores, or other
 non-Linear locations as the durable QA artifact store.
 
-Before moving to Human Review, the `## Symphony Handoff` must include a
-`### Human Review Packet` with the complete successful QA packet sections:
+Before moving to Human Review, the `## Symphony Handoff` remains compact. Use a
+tiny review summary in `Role note`, and put detailed browser command evidence,
+validation notes, artifact IDs, and environment provenance in compact handoff
+`Observability` or approved Linear attachment metadata.
 
-- `Review Focus`
-- `Executive Summary`
-- `Action Log`
-- `Validation Matrix`
-- `Artifact Index`
-- `Environment And Provenance`
-- `Known Limitations`
-- `Merge Readiness`
+Browser evidence must be easy to follow from that compact evidence trail:
 
-Browser evidence must then appear inside that packet:
-
-- browser-facing checks in the Validation Matrix;
-- every Linear-attached browser artifact in the Artifact Index;
-- a clear no-browser or no-artifact rationale when no external browser artifact
-  was useful or possible.
+- name browser-facing checks in `Observability`;
+- identify every Linear-attached browser artifact through approved Linear
+  attachment metadata;
+- include a clear no-browser or no-artifact rationale when no external browser
+  artifact was useful or possible.
 
 ## Fallbacks
 
