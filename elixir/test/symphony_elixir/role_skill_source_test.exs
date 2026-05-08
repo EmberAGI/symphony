@@ -63,6 +63,26 @@ defmodule SymphonyElixir.RoleSkillSourceTest do
     refute skill_body =~ "browser-use type <"
   end
 
+  test "root workflow uses compact handoffs and legacy read-only workpads" do
+    workflow = File.read!(Path.join(repo_root(), "WORKFLOW.md"))
+
+    assert workflow =~ "Do not create or update Linear `## Codex Workpad`"
+    assert workflow =~ "Existing Workpads remain legacy read-only context"
+    assert workflow =~ "## Symphony Handoff"
+    assert workflow =~ "- From -> To:"
+    assert workflow =~ "- Work done:"
+    assert workflow =~ "- Role note:"
+    assert workflow =~ "- Next action:"
+    assert workflow =~ "- Observability:"
+
+    refute workflow =~ "find/create `## Codex Workpad`"
+    refute workflow =~ "Create a new bootstrap `## Codex Workpad`"
+    refute workflow =~ "Use exactly one persistent workpad"
+    refute workflow =~ "## Workpad template"
+    refute workflow =~ "source of truth for progress"
+    refute workflow =~ "update the workpad"
+  end
+
   test "localized upstream directories include the complete requested file sets" do
     assert committed_files("tdd") == Enum.sort(@tdd_files)
     assert committed_files("frontend-design") == Enum.sort(@frontend_design_files)
