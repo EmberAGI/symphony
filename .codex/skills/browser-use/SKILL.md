@@ -76,13 +76,13 @@ Do not rely on local file paths, GitHub comments, object stores, or other
 non-Linear locations as the durable QA artifact store.
 
 Before moving to Human Review, the `## Symphony Handoff` remains compact. Use a
-tiny review summary in `Role note`, and put detailed browser command evidence,
-validation notes, artifact IDs, and environment provenance in compact handoff
-`Observability` or approved Linear attachment metadata.
+tiny review summary in `Role note`, summarize routing-critical browser checks in
+`Work done`, and put detailed browser command evidence, validation notes,
+artifact IDs, and environment provenance in approved Linear attachment metadata.
 
 Browser evidence must be easy to follow from that compact evidence trail:
 
-- name browser-facing checks in `Observability`;
+- summarize browser-facing checks in compact handoff `Work done`;
 - identify every Linear-attached browser artifact through approved Linear
   attachment metadata;
 - include a clear no-browser or no-artifact rationale when no external browser
