@@ -253,7 +253,7 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp repository_workspace_suffix(%{custom_fields: %{"Repository" => repository}})
+  defp repository_workspace_suffix(%{repository: repository})
        when is_binary(repository) do
     repository
     |> String.split("/", parts: 2)
@@ -528,7 +528,6 @@ defmodule SymphonyElixir.Workspace do
   defp worker_host_for_log(worker_host), do: worker_host
 
   defp issue_context(%{id: issue_id, identifier: identifier} = issue) do
-    custom_fields = Map.get(issue, :custom_fields) || Map.get(issue, "custom_fields") || %{}
     title = issue_value(issue, :title)
 
     %{
@@ -538,7 +537,7 @@ defmodule SymphonyElixir.Workspace do
       issue_state: issue_value(issue, :state),
       issue_branch_name: issue_branch_name(issue),
       issue_url: issue_value(issue, :url),
-      custom_fields: custom_fields,
+      repository: issue_value(issue, :repository),
       repository_source: issue_value(issue, :repository_source),
       expected_branch: expected_branch_name(identifier, title)
     }
@@ -552,7 +551,7 @@ defmodule SymphonyElixir.Workspace do
       issue_state: nil,
       issue_branch_name: nil,
       issue_url: nil,
-      custom_fields: %{},
+      repository: nil,
       repository_source: nil,
       expected_branch: expected_branch_name(identifier, nil)
     }
@@ -566,7 +565,7 @@ defmodule SymphonyElixir.Workspace do
       issue_state: nil,
       issue_branch_name: nil,
       issue_url: nil,
-      custom_fields: %{},
+      repository: nil,
       repository_source: nil,
       expected_branch: expected_branch_name("issue", nil)
     }
@@ -580,32 +579,15 @@ defmodule SymphonyElixir.Workspace do
       {"SYMPHONY_ISSUE_STATE", Map.get(issue_context, :issue_state)},
       {"SYMPHONY_ISSUE_BRANCH_NAME", Map.get(issue_context, :issue_branch_name)},
       {"SYMPHONY_ISSUE_URL", Map.get(issue_context, :issue_url)},
+      {"SYMPHONY_ISSUE_REPOSITORY", Map.get(issue_context, :repository)},
       {"SYMPHONY_ISSUE_REPOSITORY_SOURCE", Map.get(issue_context, :repository_source)},
-      {"SYMPHONY_EXPECTED_BRANCH", Map.get(issue_context, :expected_branch)},
-      {"SYMPHONY_ISSUE_CUSTOM_FIELDS_JSON", Jason.encode!(Map.get(issue_context, :custom_fields, %{}))}
+      {"SYMPHONY_EXPECTED_BRANCH", Map.get(issue_context, :expected_branch)}
     ]
 
-    Map.get(issue_context, :custom_fields, %{})
-    |> custom_field_env()
-    |> Enum.concat(base_env)
+    base_env
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Enum.map(fn {key, value} -> {key, env_value(value)} end)
   end
-
-  defp custom_field_env(custom_fields) when is_map(custom_fields) do
-    custom_fields
-    |> Enum.flat_map(fn {key, value} ->
-      field_key = env_key(key)
-      field_env = {"SYMPHONY_ISSUE_CUSTOM_FIELD_#{field_key}", value}
-
-      case field_key do
-        "REPOSITORY" -> [field_env, {"SYMPHONY_ISSUE_REPOSITORY", value}]
-        _ -> [field_env]
-      end
-    end)
-  end
-
-  defp custom_field_env(_custom_fields), do: []
 
   defp hook_env_exports(issue_context) do
     issue_context
@@ -640,14 +622,6 @@ defmodule SymphonyElixir.Workspace do
     |> String.downcase()
     |> String.replace(~r/[^a-z0-9]+/, "-")
     |> String.trim("-")
-  end
-
-  defp env_key(value) do
-    value
-    |> to_string()
-    |> String.upcase()
-    |> String.replace(~r/[^A-Z0-9]+/, "_")
-    |> String.trim("_")
   end
 
   defp env_value(value) when is_binary(value), do: value

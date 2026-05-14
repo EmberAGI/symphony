@@ -8,16 +8,6 @@ defmodule SymphonyElixir.Linear.Client do
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
-  @issue_custom_field_values_supported_query """
-  query SymphonyLinearIssueCustomFieldSupport {
-    __type(name: "Issue") {
-      fields {
-        name
-      }
-    }
-  }
-  """
-
   @query """
   query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $commentFirst: Int!, $attachmentFirst: Int!, $after: String) {
     issues(filter: {project: {slugId: {eq: $projectSlug}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
@@ -57,7 +47,6 @@ defmodule SymphonyElixir.Linear.Client do
             sourceType
           }
         }
-        __CUSTOM_FIELD_VALUES__
         inverseRelations(first: $relationFirst) {
           nodes {
             type
@@ -120,7 +109,6 @@ defmodule SymphonyElixir.Linear.Client do
             sourceType
           }
         }
-        __CUSTOM_FIELD_VALUES__
         inverseRelations(first: $relationFirst) {
           nodes {
             type
@@ -138,17 +126,6 @@ defmodule SymphonyElixir.Linear.Client do
       }
     }
   }
-  """
-
-  @custom_field_values_selection """
-        customFieldValues {
-          nodes {
-            value
-            customField {
-              name
-            }
-          }
-        }
   """
 
   @viewer_query """
@@ -299,7 +276,7 @@ defmodule SymphonyElixir.Linear.Client do
         {:ok, []}
 
       ids ->
-        do_fetch_issue_states(ids, nil, graphql_fun, repository_candidates)
+        do_fetch_issue_states(ids, nil, graphql_fun, [])
     end
   end
 
@@ -320,7 +297,7 @@ defmodule SymphonyElixir.Linear.Client do
              after: after_cursor
            }),
          {:ok, issues, page_info} <-
-           decode_linear_page_response(body, assignee_filter, &graphql/2, repository_candidates()) do
+           decode_linear_page_response(body, assignee_filter, &graphql/2, []) do
       updated_acc = prepend_page_issues(issues, acc_issues)
 
       case next_page_cursor(page_info) do
@@ -343,7 +320,7 @@ defmodule SymphonyElixir.Linear.Client do
   defp finalize_paginated_issues(acc_issues) when is_list(acc_issues), do: Enum.reverse(acc_issues)
 
   defp do_fetch_issue_states(ids, assignee_filter) do
-    do_fetch_issue_states(ids, assignee_filter, &graphql/2, repository_candidates())
+    do_fetch_issue_states(ids, assignee_filter, &graphql/2, [])
   end
 
   defp do_fetch_issue_states(ids, assignee_filter, graphql_fun, repository_candidates)
@@ -422,32 +399,9 @@ defmodule SymphonyElixir.Linear.Client do
     end)
   end
 
-  defp linear_poll_query(graphql_fun), do: query_with_optional_custom_field_values(@query, graphql_fun)
+  defp linear_poll_query(_graphql_fun), do: @query
 
-  defp linear_issues_by_id_query(graphql_fun), do: query_with_optional_custom_field_values(@query_by_ids, graphql_fun)
-
-  defp query_with_optional_custom_field_values(query, graphql_fun) do
-    selection =
-      case issue_custom_field_values_supported?(graphql_fun) do
-        true -> @custom_field_values_selection
-        false -> ""
-      end
-
-    String.replace(query, "__CUSTOM_FIELD_VALUES__", selection)
-  end
-
-  defp issue_custom_field_values_supported?(graphql_fun) when is_function(graphql_fun, 2) do
-    case graphql_fun.(@issue_custom_field_values_supported_query, %{}) do
-      {:ok, %{"data" => %{"__type" => %{"fields" => fields}}}} when is_list(fields) ->
-        Enum.any?(fields, fn
-          %{"name" => "customFieldValues"} -> true
-          _ -> false
-        end)
-
-      _ ->
-        false
-    end
-  end
+  defp linear_issues_by_id_query(_graphql_fun), do: @query_by_ids
 
   defp build_graphql_payload(query, variables, operation_name) do
     %{
@@ -532,13 +486,12 @@ defmodule SymphonyElixir.Linear.Client do
          %{"data" => %{"issues" => %{"nodes" => nodes}}},
          assignee_filter,
          _graphql_fun,
-         repository_candidates
+         _repository_candidates
        ) do
     issues =
       nodes
       |> Enum.map(&normalize_issue(&1, assignee_filter))
       |> Enum.reject(&is_nil(&1))
-      |> maybe_enrich_repository_labels(repository_candidates)
 
     {:ok, issues}
   end
@@ -600,7 +553,7 @@ defmodule SymphonyElixir.Linear.Client do
       blocked_by: extract_blockers(issue),
       comments: extract_comments(issue),
       attachments: extract_attachments(issue),
-      custom_fields: extract_custom_fields(issue),
+      repository: repository_from_labels(issue),
       repository_source: repository_source(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
@@ -726,140 +679,35 @@ defmodule SymphonyElixir.Linear.Client do
   defp extract_attachments(%{"attachments" => attachments}) when is_list(attachments), do: attachments
   defp extract_attachments(_), do: []
 
-  defp extract_custom_fields(%{"customFields" => %{"nodes" => fields}}) when is_list(fields) do
-    fields_to_map(fields)
+  defp repository_source(issue) when is_map(issue) do
+    if repository_from_labels(issue), do: "linear_label", else: nil
   end
 
-  defp extract_custom_fields(%{"customFieldValues" => %{"nodes" => fields}}) when is_list(fields) do
-    fields_to_map(fields)
-  end
-
-  defp extract_custom_fields(%{"custom_fields" => custom_fields}) when is_map(custom_fields) do
-    custom_fields
-  end
-
-  defp extract_custom_fields(_), do: %{}
-
-  defp repository_source(%{"customFieldValues" => %{"nodes" => fields}}) when is_list(fields) do
-    if repository_field_present?(fields), do: "linear_custom_field", else: nil
-  end
-
-  defp repository_source(%{"customFields" => %{"nodes" => fields}}) when is_list(fields) do
-    if repository_field_present?(fields), do: "linear_custom_field", else: nil
-  end
-
-  defp repository_source(%{"custom_fields" => custom_fields}) when is_map(custom_fields) do
-    if Map.has_key?(custom_fields, "Repository"), do: "linear_custom_field", else: nil
-  end
-
-  defp repository_source(_issue), do: nil
-
-  defp repository_field_present?(fields) when is_list(fields) do
-    fields
-    |> fields_to_map()
-    |> Map.has_key?("Repository")
-  end
-
-  defp fields_to_map(fields) when is_list(fields) do
-    fields
-    |> Enum.reduce(%{}, fn
-      %{"name" => name, "value" => value}, acc when is_binary(name) ->
-        Map.put(acc, name, value)
-
-      %{"customField" => %{"name" => name}, "value" => value}, acc when is_binary(name) ->
-        Map.put(acc, name, value)
-
-      _field, acc ->
-        acc
-    end)
-  end
-
-  defp maybe_enrich_repository_labels(issues, repository_candidates)
-       when is_list(issues) and is_list(repository_candidates) and repository_candidates != [] do
-    repository_by_label =
-      Enum.reduce(repository_candidates, %{}, fn
-        %{"repositoryFullName" => repository}, acc when is_binary(repository) ->
-          label_key = repository_label_key(repository)
-
-          acc
-          |> Map.put(label_key, repository)
-          |> Map.put("repo:" <> label_key, repository)
-          |> Map.put("repository:" <> label_key, repository)
-
-        _candidate, acc ->
-          acc
-      end)
-
-    Enum.map(issues, &maybe_enrich_repository_label(&1, repository_by_label))
-  end
-
-  defp maybe_enrich_repository_labels(issues, _repository_candidates), do: issues
-
-  defp maybe_enrich_repository_label(%Issue{custom_fields: custom_fields, labels: labels} = issue, repository_by_label)
-       when is_map(custom_fields) and is_list(labels) and is_map(repository_by_label) do
-    if Map.has_key?(custom_fields, "Repository") do
+  defp repository_from_labels(issue) when is_map(issue) do
+    values =
       issue
-    else
-      labels
-      |> Enum.map(&repository_label_key/1)
-      |> Enum.find_value(&Map.get(repository_by_label, &1))
-      |> case do
-        nil ->
-          issue
+      |> extract_labels()
+      |> Enum.filter(&String.starts_with?(&1, "repo:"))
+      |> Enum.map(&String.replace_prefix(&1, "repo:", ""))
 
-        repository ->
-          %Issue{
-            issue
-            | custom_fields: Map.put(custom_fields, "Repository", repository),
-              repository_source: "linear_label"
-          }
-      end
+    valid =
+      values
+      |> Enum.filter(&repository_value?/1)
+      |> Enum.uniq()
+
+    malformed = Enum.reject(values, &repository_value?/1)
+
+    case {valid, malformed} do
+      {[repository], []} -> repository
+      _ -> nil
     end
   end
 
-  defp maybe_enrich_repository_label(issue, _repository_by_label), do: issue
-
-  defp repository_label_key(value) when is_binary(value) do
-    value
-    |> String.trim()
-    |> String.downcase()
+  defp repository_value?(value) when is_binary(value) do
+    Regex.match?(~r/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, value)
   end
 
-  defp repository_label_key(_value), do: ""
-
-  defp repository_candidates do
-    "SYMPHONY_LINEAR_REPOSITORY_CANDIDATES_JSON"
-    |> System.get_env()
-    |> parse_repository_candidates()
-  end
-
-  defp parse_repository_candidates(nil), do: []
-  defp parse_repository_candidates(""), do: []
-
-  defp parse_repository_candidates(value) when is_binary(value) do
-    case Jason.decode(value) do
-      {:ok, decoded} -> normalize_repository_candidates(decoded)
-      {:error, _reason} -> []
-    end
-  end
-
-  defp normalize_repository_candidates(candidates) when is_list(candidates) do
-    candidates
-    |> Enum.flat_map(&normalize_repository_candidate/1)
-  end
-
-  defp normalize_repository_candidates(_candidates), do: []
-
-  defp normalize_repository_candidate(%{"repositoryFullName" => repository, "hostname" => hostname})
-       when is_binary(repository) and is_binary(hostname) do
-    [%{"repositoryFullName" => repository, "hostname" => hostname}]
-  end
-
-  defp normalize_repository_candidate(repository) when is_binary(repository) do
-    [%{"repositoryFullName" => repository, "hostname" => "github.com"}]
-  end
-
-  defp normalize_repository_candidate(_candidate), do: []
+  defp repository_value?(_value), do: false
 
   defp extract_blockers(%{"inverseRelations" => %{"nodes" => inverse_relations}})
        when is_list(inverse_relations) do
