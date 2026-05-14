@@ -530,7 +530,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute issue.assigned_to_worker
   end
 
-  test "linear client normalizes canonical repo labels from fetched issue payloads" do
+  test "linear client preserves canonical repo label repository casing from fetched issue payloads" do
     raw_issue = %{
       "id" => "issue-93",
       "identifier" => "EMB-93",
@@ -543,6 +543,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert issue.repository == "EmberAGI/scaling-octo-engine"
     assert issue.repository_source == "linear_label"
+    assert issue.labels == ["repo:emberagi/scaling-octo-engine"]
   end
 
   test "linear client pagination merge helper preserves issue ordering" do
@@ -692,7 +693,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   test "linear client rejects legacy repository label forms as metadata" do
     issue_ids = ["issue-93"]
 
-    for legacy_label <- ["EmberAGI/scaling-octo-engine", "repository:EmberAGI/scaling-octo-engine"] do
+    for legacy_label <- [
+          "EmberAGI/scaling-octo-engine",
+          "repository:EmberAGI/scaling-octo-engine",
+          "Repo:EmberAGI/scaling-octo-engine"
+        ] do
       graphql_fun = fn query, variables ->
         send(self(), {:fetch_issue_states_for_legacy_repository_label, query, variables})
 

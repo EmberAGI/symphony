@@ -636,12 +636,20 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp extract_labels(%{"labels" => %{"nodes" => labels}}) when is_list(labels) do
     labels
-    |> Enum.map(& &1["name"])
-    |> Enum.reject(&is_nil/1)
+    |> extract_label_names()
     |> Enum.map(&String.downcase/1)
   end
 
   defp extract_labels(_), do: []
+
+  defp extract_label_names(labels) when is_list(labels) do
+    labels
+    |> Enum.map(fn
+      %{} = label -> label["name"]
+      _ -> nil
+    end)
+    |> Enum.reject(&is_nil/1)
+  end
 
   defp extract_comments(%{"comments" => %{"nodes" => comments}}) when is_list(comments) do
     Enum.map(comments, fn
@@ -686,7 +694,11 @@ defmodule SymphonyElixir.Linear.Client do
   defp repository_from_labels(issue) when is_map(issue) do
     values =
       issue
-      |> extract_labels()
+      |> get_in(["labels", "nodes"])
+      |> case do
+        labels when is_list(labels) -> extract_label_names(labels)
+        _ -> []
+      end
       |> Enum.filter(&String.starts_with?(&1, "repo:"))
       |> Enum.map(&String.replace_prefix(&1, "repo:", ""))
 
