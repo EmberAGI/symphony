@@ -7,7 +7,16 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, RoleTurnRecovery, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{
+    AgentRunner,
+    Config,
+    ImplementationEffort,
+    RoleTurnRecovery,
+    StatusDashboard,
+    Tracker,
+    Workspace
+  }
+
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Notifications.Telegram
 
@@ -619,6 +628,7 @@ defmodule SymphonyElixir.Orchestrator do
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
+      valid_implementation_effort?(issue) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
@@ -672,6 +682,17 @@ defmodule SymphonyElixir.Orchestrator do
        do: assigned_to_worker
 
   defp issue_routable_to_worker?(_issue), do: true
+
+  defp valid_implementation_effort?(%Issue{} = issue) do
+    case ImplementationEffort.parse_labels(issue.labels) do
+      {:ok, _profile} ->
+        true
+
+      {:error, reason} ->
+        Logger.error("Skipping dispatch; invalid Implementation Effort labels for #{issue_context(issue)}: #{inspect(reason)}")
+        false
+    end
+  end
 
   defp todo_issue_blocked_by_non_terminal?(
          %Issue{state: issue_state, blocked_by: blockers},

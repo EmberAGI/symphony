@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}
+  alias SymphonyElixir.{Codex.DynamicTool, Config, ImplementationEffort, Linear.Issue, PathSafety, SSH}
 
   @initialize_id 1
   @thread_start_id 2
@@ -27,7 +27,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
-    with {:ok, session} <- start_session(workspace, opts) do
+    with {:ok, session} <- start_session(workspace, Keyword.put(opts, :issue, issue)) do
       try do
         run_turn(session, prompt, issue, opts)
       after
@@ -40,9 +40,13 @@ defmodule SymphonyElixir.Codex.AppServer do
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
 
+    issue = Keyword.get(opts, :issue)
+    role = Keyword.get(opts, :role, runtime_role())
+
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host) do
-      metadata = port_metadata(port, worker_host)
+         {:ok, launch} <- launch_config(issue, role),
+         {:ok, port} <- start_port(expanded_workspace, worker_host, launch.command) do
+      metadata = port_metadata(port, worker_host) |> Map.merge(launch.metadata)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
            {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
@@ -186,7 +190,14 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, nil) do
+  @doc false
+  @spec launch_command_for_test(Issue.t(), String.t() | nil) :: {:ok, {String.t(), map()}} | {:error, term()}
+  def launch_command_for_test(%Issue{} = issue, role) do
+    Config.settings!().codex.command
+    |> ImplementationEffort.command_for_issue(issue, role)
+  end
+
+  defp start_port(workspace, nil, command) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
@@ -199,7 +210,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             :binary,
             :exit_status,
             :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(Config.settings!().codex.command)],
+            args: [~c"-lc", String.to_charlist(command)],
             cd: String.to_charlist(workspace),
             line: @port_line_bytes
           ]
@@ -209,15 +220,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, worker_host) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace)
+  defp start_port(workspace, worker_host, command) when is_binary(worker_host) do
+    remote_command = remote_launch_command(workspace, command)
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
   end
 
-  defp remote_launch_command(workspace) when is_binary(workspace) do
+  defp remote_launch_command(workspace, command) when is_binary(workspace) and is_binary(command) do
     [
       "cd #{shell_escape(workspace)}",
-      "exec #{Config.settings!().codex.command}"
+      "exec #{command}"
     ]
     |> Enum.join(" && ")
   end
@@ -235,6 +246,29 @@ defmodule SymphonyElixir.Codex.AppServer do
     case worker_host do
       host when is_binary(host) -> Map.put(base_metadata, :worker_host, host)
       _ -> base_metadata
+    end
+  end
+
+  defp launch_config(issue, role) do
+    command = Config.settings!().codex.command
+
+    with {:ok, {command, profile}} <- ImplementationEffort.command_for_issue(command, issue, role) do
+      {:ok,
+       %{
+         command: command,
+         metadata: %{
+           implementation_effort: profile.effort,
+           implementation_effort_source: profile.source,
+           codex_reasoning_effort: profile.reasoning_effort
+         }
+       }}
+    end
+  end
+
+  defp runtime_role do
+    case System.get_env("SYMPHONY_ROLE") do
+      role when is_binary(role) and role != "" -> role
+      _ -> nil
     end
   end
 
