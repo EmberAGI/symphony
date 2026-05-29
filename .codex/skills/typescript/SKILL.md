@@ -39,8 +39,27 @@ state transitions, PR ownership, workpad, handoff, validation, and
 - Never use `any`.
 - Never use Zod `.passthrough()`.
 - Import and reuse existing interfaces and types instead of redefining them.
-- Validate external API inputs and outputs at application boundaries using Zod.
+- Validate external structured inputs and outputs at application boundaries
+  using the repo's established schema validation library. In TypeScript repos
+  that already use Zod, use Zod.
 - If relative imports are emitted into built JavaScript, keep the required `.js` extension in source imports.
+
+## External Structured Input Validation
+
+- Treat parsed config files, provider/API payloads, process/env-derived
+  structured config, persisted local files, and other untrusted or externally
+  supplied structured data as external boundaries.
+- Parse wire and file formats with a structured parser first, such as JSON,
+  TOML, YAML, CSV, or URL/form parsers. Treat the parsed result as `unknown`
+  until it is validated.
+- Validate the parsed value with the repo's established schema validation
+  library, then map the validated result to internal domain types or
+  env-shaped runtime config.
+- Do not hand-roll ad hoc shape checks when a schema library is already
+  established in the repo, unless the reason is documented in the code or
+  issue evidence.
+- Keep this boundary validation out of MSW handlers and mock loaders that
+  should replay recorded payloads unmodified.
 
 ## Testing Stack
 
