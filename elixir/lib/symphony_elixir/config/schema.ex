@@ -199,6 +199,91 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule ClaudeCode do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    # Models that cannot have thinking turned off (verified against Claude Code
+    # docs: Fable 5 is exempt from `MAX_THINKING_TOKENS=0`). Recorded so an
+    # unsupported no-thinking request fails closed at config validation rather
+    # than silently keeping thinking enabled at runtime.
+    @no_thinking_unsupported_model_substrings ["fable"]
+
+    # Effort levels accepted by `claude --effort` (verified via `claude --help`).
+    @supported_efforts ~w(low medium high xhigh max)
+
+    @primary_key false
+    embedded_schema do
+      field(:command, :string, default: "claude")
+      field(:model, :string)
+      field(:effort, :string)
+      field(:no_thinking, :boolean, default: false)
+      field(:permission_mode, :string, default: "bypassPermissions")
+      field(:turn_timeout_ms, :integer, default: 3_600_000)
+      field(:read_timeout_ms, :integer, default: 30_000)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [:command, :model, :effort, :no_thinking, :permission_mode, :turn_timeout_ms, :read_timeout_ms],
+        empty_values: []
+      )
+      |> validate_required([:command])
+      |> validate_number(:turn_timeout_ms, greater_than: 0)
+      |> validate_number(:read_timeout_ms, greater_than: 0)
+      |> validate_inclusion(:effort, @supported_efforts, message: "must be one of: #{Enum.join(@supported_efforts, ", ")}")
+      |> validate_no_thinking_supported()
+    end
+
+    # Fail closed at config validation time for unsupported model/no-thinking
+    # combinations (for example Fable 5 cannot disable thinking), per the
+    # agent-runtime spec invariant.
+    defp validate_no_thinking_supported(changeset) do
+      no_thinking = get_field(changeset, :no_thinking)
+      model = get_field(changeset, :model)
+
+      if no_thinking == true and is_binary(model) and no_thinking_unsupported_model?(model) do
+        add_error(
+          changeset,
+          :no_thinking,
+          "model #{model} does not support disabling thinking; set no_thinking: false or choose another model"
+        )
+      else
+        changeset
+      end
+    end
+
+    defp no_thinking_unsupported_model?(model) when is_binary(model) do
+      normalized = String.downcase(model)
+      Enum.any?(@no_thinking_unsupported_model_substrings, &String.contains?(normalized, &1))
+    end
+  end
+
+  defmodule AgentRuntime do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @supported_providers ~w(codex claude_code)
+
+    @primary_key false
+    embedded_schema do
+      field(:provider, :string, default: "codex")
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:provider], empty_values: [])
+      |> validate_required([:provider])
+      |> validate_inclusion(:provider, @supported_providers, message: "must be one of: #{Enum.join(@supported_providers, ", ")}")
+    end
+  end
+
   defmodule Hooks do
     @moduledoc false
     use Ecto.Schema
@@ -306,7 +391,9 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:agent_runtime, AgentRuntime, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:claude_code, ClaudeCode, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:notifications, Notifications, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
@@ -399,7 +486,9 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
+    |> cast_embed(:agent_runtime, with: &AgentRuntime.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
+    |> cast_embed(:claude_code, with: &ClaudeCode.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:notifications, with: &Notifications.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
