@@ -43,6 +43,24 @@ codex:
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspaceWrite
+# Runtime selection. Codex is the default and reference runtime; set the
+# provider to claude_code to run role turns through the first-party Claude Code
+# shim (claude-app-server) instead. Codex-backed workflows are unchanged when
+# this block is omitted.
+# agent_runtime:
+#   provider: claude_code
+# Claude Code shim configuration (used when agent_runtime.provider is
+# claude_code). Authentication is operator-managed Claude subscription OAuth on
+# the role host; no API key is read or stored here. Unattended runs use
+# bypassPermissions and must stay non-interactive (ADR 0002). no_thinking maps
+# to MAX_THINKING_TOKENS=0 (the verified Claude Code no-thinking invocation;
+# Fable 5 cannot disable thinking and is rejected at config validation).
+# claude_code:
+#   command: claude
+#   model: sonnet
+#   effort: high
+#   no_thinking: true
+#   permission_mode: bypassPermissions
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`

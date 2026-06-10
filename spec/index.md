@@ -32,3 +32,4 @@ ADRs live under `spec/adr/` and are created lazily when a decision is hard to
 reverse, surprising without context, and the result of a real trade-off.
 
 - [0001: Provider-Neutral Agent Runtimes](./adr/0001-provider-neutral-agent-runtimes.md)
+- [0002: Claude Code Unattended Runtime Authentication and Permission Posture](./adr/0002-claude-code-unattended-auth-and-permission-posture.md)

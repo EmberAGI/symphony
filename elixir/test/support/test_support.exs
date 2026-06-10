@@ -114,6 +114,14 @@ defmodule SymphonyElixir.TestSupport do
           codex_turn_timeout_ms: 3_600_000,
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
+          agent_runtime_provider: nil,
+          claude_code_command: nil,
+          claude_code_model: nil,
+          claude_code_effort: nil,
+          claude_code_no_thinking: nil,
+          claude_code_permission_mode: nil,
+          claude_code_turn_timeout_ms: nil,
+          claude_code_read_timeout_ms: nil,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -156,6 +164,14 @@ defmodule SymphonyElixir.TestSupport do
     codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
+    agent_runtime_provider = Keyword.get(config, :agent_runtime_provider)
+    claude_code_command = Keyword.get(config, :claude_code_command)
+    claude_code_model = Keyword.get(config, :claude_code_model)
+    claude_code_effort = Keyword.get(config, :claude_code_effort)
+    claude_code_no_thinking = Keyword.get(config, :claude_code_no_thinking)
+    claude_code_permission_mode = Keyword.get(config, :claude_code_permission_mode)
+    claude_code_turn_timeout_ms = Keyword.get(config, :claude_code_turn_timeout_ms)
+    claude_code_read_timeout_ms = Keyword.get(config, :claude_code_read_timeout_ms)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -202,6 +218,16 @@ defmodule SymphonyElixir.TestSupport do
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
+        agent_runtime_yaml(agent_runtime_provider),
+        claude_code_yaml(
+          claude_code_command,
+          claude_code_model,
+          claude_code_effort,
+          claude_code_no_thinking,
+          claude_code_permission_mode,
+          claude_code_turn_timeout_ms,
+          claude_code_read_timeout_ms
+        ),
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         notifications_yaml(
           telegram_endpoint,
@@ -241,6 +267,32 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp yaml_value(value), do: yaml_value(to_string(value))
+
+  defp agent_runtime_yaml(nil), do: nil
+
+  defp agent_runtime_yaml(provider) do
+    "agent_runtime:\n  provider: #{yaml_value(provider)}"
+  end
+
+  defp claude_code_yaml(nil, nil, nil, nil, nil, nil, nil), do: nil
+
+  defp claude_code_yaml(command, model, effort, no_thinking, permission_mode, turn_timeout_ms, read_timeout_ms) do
+    [
+      "claude_code:",
+      claude_code_entry("command", command),
+      claude_code_entry("model", model),
+      claude_code_entry("effort", effort),
+      claude_code_entry("no_thinking", no_thinking),
+      claude_code_entry("permission_mode", permission_mode),
+      claude_code_entry("turn_timeout_ms", turn_timeout_ms),
+      claude_code_entry("read_timeout_ms", read_timeout_ms)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+  end
+
+  defp claude_code_entry(_key, nil), do: nil
+  defp claude_code_entry(key, value), do: "  #{key}: #{yaml_value(value)}"
 
   defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
 

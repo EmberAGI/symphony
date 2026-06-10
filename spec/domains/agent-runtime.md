@@ -6,11 +6,13 @@ Symphony supports a provider-neutral coding-agent runtime layer so a deployment
 can run Codex, Claude Code, and Pi workers behind the same orchestrator,
 workspace, prompt, tool, artifact, and observability contracts.
 
-Codex remains the backward-compatible reference runtime. Claude Code and Pi are
-first-class runtime providers for Octo use: they must be able to run unattended
-Symphony role workflows, load or translate required role skills, execute
-required tools, normalize events and failures, collect artifacts/proof, and
-participate in a real mixed-runtime Octo workflow.
+Codex remains the backward-compatible reference runtime. Claude Code is the
+first non-Codex runtime provider being delivered (EMB-166 as re-scoped on
+2026-06-10): it must be able to run unattended Symphony role workflows, load or
+translate required role skills, execute required tools, normalize events and
+failures, and collect artifacts/proof. Pi (and other future harness CLIs such
+as Hermes) remain planned providers behind the same seam, but their adapters
+and the mixed-runtime validation profile are deferred to future issues.
 
 The runtime layer belongs in Symphony. Octo-specific workflow policy, Linear
 state semantics, repository routing, role ownership, and handoff expectations
@@ -48,7 +50,15 @@ turn failed, input required, usage updated, and artifact available.
 
 **Octo multi-runtime profile**: The conformance profile required for Octo to
 claim that Codex, Claude Code, and Pi are usable as role runtimes, including at
-least one real mixed-runtime execution.
+least one real mixed-runtime execution. Deferred: this profile is not required
+by the re-scoped EMB-166, which delivers the Claude Code slice only.
+
+**Issue reasoning profile (Claude runtimes)**: The Octo wrapper maps the durable
+`Implementation Effort` value to a per-role Claude model and `effort` selection
+(analogous to the Codex reasoning profile). The mapping table is Octo wrapper
+policy owned by `scaling-octo-engine` (`spec/domains/symphony-role-runtime.md`);
+the Claude Code adapter's obligation is to make model, effort, and no-thinking
+invocation selectable per session.
 
 ## Rules and invariants
 
@@ -75,6 +85,11 @@ least one real mixed-runtime execution.
 - Runtime adapters must collect or expose artifacts and proof in a normalized
   way so review, QA, landing, and operator status surfaces do not need to know
   which provider produced the evidence.
+- The Claude Code adapter must support per-session model selection, `effort`
+  configuration, and a verified no-thinking invocation so the Octo wrapper can
+  map `Implementation Effort` levels onto Claude models. Unsupported
+  combinations (for example Sonnet 4.6 with effort `xhigh`) must fail closed at
+  config validation, not at runtime.
 
 ## Interfaces/contracts
 
@@ -149,9 +164,72 @@ Provider-specific requirements:
   extension bundle, and converts unattended UI/input requests into normalized
   input-required events.
 
-Octo mixed-runtime validation must prove a real workflow can assign roles to
-different runtimes in one run, for example implementer on Pi, reviewer on
-Claude Code, QA on Codex, and landing on Codex.
+Octo mixed-runtime validation (a real workflow assigning roles to different
+runtimes in one run, for example implementer on Pi, reviewer on Claude Code,
+QA on Codex, and landing on Codex) is deferred until a second non-Codex
+adapter exists. The re-scoped EMB-166 requires only that a role configured for
+Claude Code runs end to end while other roles stay on Codex.
+
+### Claude Code shim invocation (implemented)
+
+The first-party Claude Code adapter drives the local `claude` CLI in
+non-interactive print mode and normalizes its streaming JSON output into the
+Symphony runtime events above. The runtime is selected with the
+provider-neutral `agent_runtime.provider` value (`codex` by default,
+`claude_code` to use the shim); a `claude_code` config block declares the
+command, model, effort, no-thinking flag, and permission mode.
+
+Verified Claude Code 2.x invocation (confirmed against `claude --help` and a
+real run, not guessed):
+
+- `claude --print --output-format stream-json --verbose` runs fully
+  non-interactively and emits one JSON object per line: a
+  `{"type":"system","subtype":"init"}` session-start line, `assistant` /
+  `user` turn lines (text, tool use, and tool results), `rate_limit_event`
+  usage notifications, and a terminal `{"type":"result","subtype":...}` line.
+- `--permission-mode bypassPermissions` runs with no interactive permission
+  approval and no extra sandbox layer (ADR 0002).
+- `--model <alias|id>` selects the model and
+  `--effort <low|medium|high|xhigh|max>` selects the reasoning effort.
+- The verified no-thinking invocation is the environment variable
+  `MAX_THINKING_TOKENS=0` (the Claude Code CLI equivalent of the API-level
+  `thinking: {type: "disabled"}` invocation). Fable 5 cannot disable thinking,
+  so requesting no-thinking with a Fable model fails closed at config
+  validation.
+
+Verified model x effort support matrix (transcribed from the `claude` CLI
+v2.1.172 effort-gating allow-lists). `low`, `medium`, and `high` are supported
+on every model; `xhigh` and `max` are gated to specific models:
+
+- `xhigh`: Fable 5, Opus 4.8, Opus 4.7.
+- `max`: Fable 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 4.6.
+
+Config validation resolves bare aliases (`fable`/`opus`/`sonnet`/`haiku`) to the
+current latest model and strips provider routing prefixes (for example
+`us.anthropic.`) before checking the matrix. A restricted-effort request whose
+model is unset, an alias/id resolving to an unsupported family, or otherwise not
+verifiable against this matrix fails closed at config validation rather than at
+runtime. For example `model: sonnet, effort: xhigh` is rejected at config
+validation.
+
+The adapter maps Claude terminal results onto normalized events:
+`result` with `is_error: true` and an auth HTTP status (401/403) fails closed
+as an operator-visible `auth_failed` `turn_failed`; `subtype:
+"error_max_turns"` maps to `turn_input_required`; other `is_error: true`
+results map to `turn_failed`; a successful result maps to `turn_completed` with
+normalized token usage (`input_tokens`/`output_tokens`/`total_tokens`). A
+failed tool result inside the stream flags the completed turn as having a tool
+failure for review/QA. The adapter never prints or forwards credential-bearing
+fields (OAuth tokens, API keys) in events, logs, or transcripts.
+
+Implementation MUST carry deterministic Claude Code shim contract/smoke checks
+that exercise, with a fake `claude` binary replaying recorded stream-json, the
+verified invocation flags and no-thinking env, the normalized event vocabulary,
+fail-closed auth classification, max-turns input-required classification, tool
+failure surfacing, secret redaction, workspace-cwd guarding, and runtime
+selection defaulting to Codex. These checks belong with the Symphony Elixir test
+suite and run under `make all`. The full skills/tools release gate (ADR 0001)
+remains a separate slice and is not satisfied by these shim checks alone.
 
 ## Edge cases
 
@@ -182,6 +260,15 @@ Claude Code, QA on Codex, and landing on Codex.
   credentials for unattended runs.
 - Do not leak provider credentials, Linear tokens, or other secrets through
   prompts, logs, transcripts, or artifacts.
+- The Claude Code adapter authenticates via operator-managed Claude
+  subscription OAuth on the role host, not a repository- or
+  prompt-provisioned API key. Credential material stays outside the
+  repository, and an expired or missing credential fails closed with an
+  operator-visible error instead of hanging or silently degrading.
+- Unattended Claude Code role runs execute in bypass-permissions mode with no
+  additional sandbox layer (operator decision, 2026-06-10). Runs must be
+  fully non-interactive; the adapter must never block a role turn waiting on
+  an interactive permission approval.
 
 ## Non-goals
 
@@ -203,15 +290,34 @@ slices without weakening the skills/tools release gate.
 ## Decision log or links to ADRs
 
 - [ADR 0001: Provider-Neutral Agent Runtimes](../adr/0001-provider-neutral-agent-runtimes.md)
-- EMB-166: The minimum implementation scope is a working multi-runtime system,
-  not a spec-only change. Codex, Claude Code, and Pi must be usable by Octo as
-  real role runtimes before EMB-166 closes.
-- EMB-166: Provider-specific implementation may be split into linked completion
-  slices, but those slices are required to close EMB-166 unless the operator
-  explicitly re-scopes the issue.
+- EMB-166 (superseded 2026-06-10): The minimum implementation scope was a
+  working multi-runtime system with Codex, Claude Code, and Pi all usable
+  before close.
+- EMB-166 re-scope (2026-06-10): The operator narrowed EMB-166 to the Claude
+  Code slice — a first-party `claude-app-server` shim behind the existing
+  Codex app-server protocol plus per-role runtime command/config selection.
+  Pi, Hermes, the normalized cross-provider fixture suite, and mixed-runtime
+  validation are deferred to future issues. ADR 0001 remains the long-term
+  adapter architecture decision; this is sequencing, not a reversal.
+- EMB-166 re-scope (2026-06-10): The Claude Code runtime must support the
+  `Implementation Effort` reasoning-profile mapping (Fable 5 reviews Extreme
+  and High; Opus 4.8 and Sonnet 4.6 cover the lower tiers with effort
+  overrides). The mapping table lives in the Octo wrapper spec and the EMB-166
+  issue body; this spec owns the adapter's model/effort/no-thinking
+  configurability requirement.
 - EMB-166: Skills and tools are a non-negotiable release gate for each enabled
   runtime.
+- EMB-166 re-grill (2026-06-10): Fail-closed default reasoning profile for the
+  Claude Code runtime is the `Moderate` row (reviewer Claude Opus 4.8 effort
+  `high`; implementer/QA Claude Sonnet 4.6 effort `high`). Runtime auth is
+  Claude subscription OAuth; unattended runs use bypass-permissions with no
+  sandbox and must stay non-interactive. Recorded in the EMB-166 issue body
+  acceptance criteria, the Constraints section above, and
+  [ADR 0002](../adr/0002-claude-code-unattended-auth-and-permission-posture.md),
+  which owns the auth and permission-posture rationale and reversal policy.
 
 ## References to source issues
 
-- [EMB-166: Implement multi-runtime Symphony support for Codex, Claude Code, and Pi](https://linear.app/emberai/issue/EMB-166/implement-multi-runtime-symphony-support-for-codex-claude-code-and-pi)
+- [EMB-166: Integrate Claude Code as an Octo Symphony role runtime](https://linear.app/emberai/issue/EMB-166/implement-multi-runtime-symphony-support-for-codex-claude-code-and-pi)
+  (re-scoped 2026-06-10 from "Implement multi-runtime Symphony support for
+  Codex, Claude Code, and Pi")
