@@ -307,4 +307,156 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     assert {:error, {:invalid_workflow_config, message}} = Config.settings()
     assert message =~ "provider"
   end
+
+  test "config validation fails closed on the spec's Sonnet xhigh example" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+      agent_runtime_provider: "claude_code",
+      claude_code_command: "claude",
+      claude_code_model: "sonnet",
+      claude_code_effort: "xhigh"
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.settings()
+    assert message =~ "effort xhigh is not supported for model sonnet"
+  end
+
+  test "config validation fails closed on a full Sonnet model id with xhigh effort" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+      agent_runtime_provider: "claude_code",
+      claude_code_command: "claude",
+      claude_code_model: "claude-sonnet-4-6",
+      claude_code_effort: "xhigh"
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.settings()
+    assert message =~ "effort xhigh is not supported"
+  end
+
+  test "config validation fails closed on max effort for an unsupported model" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+      agent_runtime_provider: "claude_code",
+      claude_code_command: "claude",
+      claude_code_model: "claude-opus-4-5",
+      claude_code_effort: "max"
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.settings()
+    assert message =~ "effort max is not supported"
+  end
+
+  test "config validation fails closed on a restricted effort when the model is unset" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+      agent_runtime_provider: "claude_code",
+      claude_code_command: "claude",
+      claude_code_effort: "xhigh"
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.settings()
+    assert message =~ "effort xhigh is not supported for model (unset)"
+  end
+
+  test "config validation fails closed on an unverifiable model with a restricted effort" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+      agent_runtime_provider: "claude_code",
+      claude_code_command: "claude",
+      claude_code_model: "some-future-model",
+      claude_code_effort: "xhigh"
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.settings()
+    assert message =~ "effort xhigh is not supported"
+  end
+
+  test "config validation accepts xhigh effort on a supported Opus model alias" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+      agent_runtime_provider: "claude_code",
+      claude_code_command: "claude",
+      claude_code_model: "opus",
+      claude_code_effort: "xhigh"
+    )
+
+    assert :ok = Config.validate!()
+  end
+
+  test "config validation accepts xhigh effort on a full supported Opus model id" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+      agent_runtime_provider: "claude_code",
+      claude_code_command: "claude",
+      claude_code_model: "claude-opus-4-7",
+      claude_code_effort: "xhigh"
+    )
+
+    assert :ok = Config.validate!()
+  end
+
+  test "config validation accepts max effort on Sonnet 4.6" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+      agent_runtime_provider: "claude_code",
+      claude_code_command: "claude",
+      claude_code_model: "claude-sonnet-4-6",
+      claude_code_effort: "max"
+    )
+
+    assert :ok = Config.validate!()
+  end
+
+  test "config validation accepts a provider-prefixed supported model with xhigh effort" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+      agent_runtime_provider: "claude_code",
+      claude_code_command: "claude",
+      claude_code_model: "us.anthropic.claude-opus-4-8",
+      claude_code_effort: "xhigh"
+    )
+
+    assert :ok = Config.validate!()
+  end
+
+  test "config validation fails closed on a blank model with a restricted effort" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+      agent_runtime_provider: "claude_code",
+      claude_code_command: "claude",
+      claude_code_model: "   ",
+      claude_code_effort: "max"
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.settings()
+    assert message =~ "effort max is not supported"
+  end
+
+  test "config validation fails closed on a major-only model id with a restricted effort" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+      agent_runtime_provider: "claude_code",
+      claude_code_command: "claude",
+      claude_code_model: "claude-opus-4",
+      claude_code_effort: "max"
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.settings()
+    assert message =~ "effort max is not supported"
+  end
+
+  test "config validation accepts unrestricted effort levels on any model" do
+    for effort <- ["low", "medium", "high"] do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+        agent_runtime_provider: "claude_code",
+        claude_code_command: "claude",
+        claude_code_model: "claude-sonnet-4-6",
+        claude_code_effort: effort
+      )
+
+      assert :ok = Config.validate!(), "expected effort #{effort} to be accepted"
+    end
+  end
 end

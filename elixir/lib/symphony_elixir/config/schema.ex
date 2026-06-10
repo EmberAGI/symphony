@@ -213,6 +213,33 @@ defmodule SymphonyElixir.Config.Schema do
     # Effort levels accepted by `claude --effort` (verified via `claude --help`).
     @supported_efforts ~w(low medium high xhigh max)
 
+    # Effort levels accepted by every Claude model. `xhigh` and `max` are gated
+    # to specific models, so they are validated separately below.
+    @unrestricted_efforts ~w(low medium high)
+
+    # Verified model x effort support matrix, transcribed from the local
+    # `claude` CLI (v2.1.172) effort-gating functions (the `nDH`/`VyH` model
+    # allow-lists in `@anthropic-ai/claude-code`). Each entry is the normalized
+    # `<family>-<major>-<minor>` form produced by `normalize_model_id/1`.
+    #
+    #   xhigh: Fable 5, Opus 4.8, Opus 4.7 (internal Mythos 5 also)
+    #   max:   Fable 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 4.6 (internal Mythos 5 also)
+    #
+    # Aliases (`fable`/`opus`/`sonnet`/`haiku`) resolve to the current latest
+    # model in `normalize_model_id/1`. Combinations not listed here fail closed
+    # at config validation rather than at runtime, including when the model is
+    # unset or cannot be verified.
+    @xhigh_supported_models ~w(fable-5 mythos-5 opus-4-8 opus-4-7)
+    @max_supported_models ~w(fable-5 mythos-5 opus-4-8 opus-4-7 opus-4-6 sonnet-4-6)
+
+    # Latest concrete model each bare alias resolves to in `claude` v2.1.172.
+    @model_alias_resolution %{
+      "fable" => "claude-fable-5",
+      "opus" => "claude-opus-4-8",
+      "sonnet" => "claude-sonnet-4-6",
+      "haiku" => "claude-haiku-4-5"
+    }
+
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "claude")
@@ -237,6 +264,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_inclusion(:effort, @supported_efforts, message: "must be one of: #{Enum.join(@supported_efforts, ", ")}")
       |> validate_no_thinking_supported()
+      |> validate_effort_model_supported()
     end
 
     # Fail closed at config validation time for unsupported model/no-thinking
@@ -261,6 +289,98 @@ defmodule SymphonyElixir.Config.Schema do
       normalized = String.downcase(model)
       Enum.any?(@no_thinking_unsupported_model_substrings, &String.contains?(normalized, &1))
     end
+
+    # Fail closed at config validation for verified-unsupported model x effort
+    # combinations (for example `model: sonnet, effort: xhigh`). The CLI only
+    # rejects these at runtime, so the spec requires we reject them earlier.
+    # `low`/`medium`/`high` are supported on every model and skip this check.
+    defp validate_effort_model_supported(changeset) do
+      effort = get_field(changeset, :effort)
+
+      if not is_binary(effort) or effort in @unrestricted_efforts do
+        changeset
+      else
+        validate_restricted_effort(changeset, effort, supported_models_for_effort(effort))
+      end
+    end
+
+    # Unknown efforts are already rejected by `validate_inclusion` above, so a
+    # nil support list needs no further action here.
+    defp validate_restricted_effort(changeset, _effort, nil), do: changeset
+
+    defp validate_restricted_effort(changeset, effort, supported_models) do
+      model = get_field(changeset, :model)
+
+      if effort_model_supported?(model, supported_models) do
+        changeset
+      else
+        add_error(
+          changeset,
+          :effort,
+          "effort #{effort} is not supported for model #{describe_model(model)}; " <>
+            "supported models for effort #{effort}: #{Enum.join(supported_models, ", ")}"
+        )
+      end
+    end
+
+    defp supported_models_for_effort("xhigh"), do: @xhigh_supported_models
+    defp supported_models_for_effort("max"), do: @max_supported_models
+    defp supported_models_for_effort(_effort), do: nil
+
+    # Restricted efforts require a model we can verify against the support
+    # matrix. A missing or unrecognized model fails closed.
+    defp effort_model_supported?(model, supported_models) when is_binary(model) do
+      case normalize_model_id(model) do
+        nil -> false
+        normalized -> normalized in supported_models
+      end
+    end
+
+    defp effort_model_supported?(_model, _supported_models), do: false
+
+    # Reduce an alias or full model id to the `<family>-<major>-<minor>` key used
+    # by the verified support matrix. Returns nil for forms we cannot map to a
+    # known family so callers fail closed.
+    defp normalize_model_id(model) when is_binary(model) do
+      normalized =
+        model
+        |> String.downcase()
+        |> String.trim()
+
+      cond do
+        normalized == "" ->
+          nil
+
+        Map.has_key?(@model_alias_resolution, normalized) ->
+          @model_alias_resolution[normalized] |> strip_model_prefix() |> family_version()
+
+        true ->
+          normalized |> strip_model_prefix() |> family_version()
+      end
+    end
+
+    # Drop provider routing prefixes such as `us.anthropic.` or `anthropic.` so
+    # `us.anthropic.claude-opus-4-8` and `claude-opus-4-8` normalize the same.
+    defp strip_model_prefix(model) do
+      case Regex.run(~r/(claude-[a-z0-9.-]+)$/, model) do
+        [_, captured] -> captured
+        _ -> model
+      end
+    end
+
+    # Extract `<family>-<major>-<minor>` from a full model id, dropping any
+    # trailing date or build suffix (for example
+    # `claude-haiku-4-5-20251001` -> `haiku-4-5`).
+    defp family_version(model) do
+      case Regex.run(~r/^claude-([a-z]+)-(\d+)(?:-(\d+))?/, model) do
+        [_, family, major, minor] -> "#{family}-#{major}-#{minor}"
+        [_, family, major] -> "#{family}-#{major}"
+        _ -> nil
+      end
+    end
+
+    defp describe_model(model) when is_binary(model), do: model
+    defp describe_model(_model), do: "(unset)"
   end
 
   defmodule AgentRuntime do

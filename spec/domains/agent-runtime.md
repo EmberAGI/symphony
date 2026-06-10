@@ -197,6 +197,21 @@ real run, not guessed):
   so requesting no-thinking with a Fable model fails closed at config
   validation.
 
+Verified model x effort support matrix (transcribed from the `claude` CLI
+v2.1.172 effort-gating allow-lists). `low`, `medium`, and `high` are supported
+on every model; `xhigh` and `max` are gated to specific models:
+
+- `xhigh`: Fable 5, Opus 4.8, Opus 4.7.
+- `max`: Fable 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 4.6.
+
+Config validation resolves bare aliases (`fable`/`opus`/`sonnet`/`haiku`) to the
+current latest model and strips provider routing prefixes (for example
+`us.anthropic.`) before checking the matrix. A restricted-effort request whose
+model is unset, an alias/id resolving to an unsupported family, or otherwise not
+verifiable against this matrix fails closed at config validation rather than at
+runtime. For example `model: sonnet, effort: xhigh` is rejected at config
+validation.
+
 The adapter maps Claude terminal results onto normalized events:
 `result` with `is_error: true` and an auth HTTP status (401/403) fails closed
 as an operator-visible `auth_failed` `turn_failed`; `subtype:
