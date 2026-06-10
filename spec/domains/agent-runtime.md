@@ -231,6 +231,82 @@ selection defaulting to Codex. These checks belong with the Symphony Elixir test
 suite and run under `make all`. The full skills/tools release gate (ADR 0001)
 remains a separate slice and is not satisfied by these shim checks alone.
 
+### Skills/tools release gate contract (EMB-1029)
+
+The non-negotiable gate (ADR 0001) for Claude Code unattended Octo role
+enablement is proved by two deterministic test modules in the Symphony Elixir
+test suite, both driven by a fake `claude` binary replaying recorded stream-json
+without a live Claude subscription:
+
+- `elixir/test/symphony_elixir/claude_code_app_server_test.exs` — shim-level
+  contract checks: verified invocation flags (`--print`, `--output-format
+  stream-json`, `--verbose`, `--permission-mode bypassPermissions`), no-thinking
+  env (`MAX_THINKING_TOKENS=0`), normalized event vocabulary
+  (`session_started`, `text_delta`, `notification`, `tool_finished`,
+  `tool_failed`, `turn_completed`, `turn_failed`, `turn_input_required`),
+  fail-closed auth classification (401/403 `is_error` → `auth_failed`),
+  max-turns input-required classification (`error_max_turns` →
+  `turn_input_required`), tool failure surfacing, secret redaction
+  (`oauth_token`, `api_key`, and other `@redacted_keys` stripped to
+  `[REDACTED]` in payload and raw line), workspace-cwd guarding, and runtime
+  selection defaulting to Codex.
+
+- `elixir/test/symphony_elixir/claude_code_gate_test.exs` — gate-level checks
+  proving all four ADR 0001 gate dimensions:
+
+  1. **Skill materialization**: `.codex/role-skills/implementer.json` and
+     `.codex/role-skills/qa.json` manifests resolve all declared skill
+     directories and SKILL.md files; `elixir/WORKFLOW.md` contains the required
+     Liquid/Solid issue template placeholders; `PromptBuilder` renders the role
+     prompt template with issue variables; manifests carry `octo_authority_boundaries`.
+
+  2. **Octo tool bundle** — all five required surfaces proven via the actual
+     Claude Code runtime tool path, not the Codex DynamicTool path:
+
+     Under Claude Code with `--permission-mode bypassPermissions`, Octo roles
+     execute required tools via runtime-native mechanisms: the Claude Code Bash
+     tool (granted by bypassPermissions) calls the role's skill CLIs directly.
+     Each surface is proven by driving the fake `claude` binary with recorded
+     stream-json carrying `tool_use`/`tool_result` event pairs (success and
+     failure) for a representative Bash invocation of that surface's CLI, then
+     asserting the shim normalizes `tool_finished` (success) and `tool_failed`
+     (failure) correctly:
+
+     - **(1) Linear GraphQL access**: Bash tool_use calling `linear-macro
+       graphql` — success → `tool_finished`; failure → `tool_failed`.
+     - **(2) Workpad operations**: Bash tool_use calling `linear-macro workpad
+       read/update` — success → `tool_finished`; failure → `tool_failed`.
+     - **(3) Artifact/proof capture**: Bash tool_use performing a file write —
+       success → `tool_finished`; failure (permission denied) → `tool_failed`.
+     - **(4) Repository status**: Bash tool_use calling `git status --short` —
+       success → `tool_finished`; failure (not a git repo) → `tool_failed`.
+     - **(5) PR status**: Bash tool_use calling `gh pr view --json state,title`
+       — success → `tool_finished`; failure (no PR found) → `tool_failed`.
+
+     One additional static assertion confirms the shim invocation carries
+     `--permission-mode bypassPermissions` in the trace, proving the mechanism
+     that grants the Bash tool to the Claude Code runtime. The Codex
+     `DynamicTool` module is not wired into the Claude Code runtime path and
+     is not used as evidence here.
+
+  3. **Secret non-leakage**: the tracker API key configured in `WORKFLOW.md`
+     does not appear in the prompt rendered by `PromptBuilder`; `oauth_token`
+     and `api_key` fields in Claude stream events are stripped to `[REDACTED]`
+     in both the event payload and raw line; no emitted runtime event carries
+     the configured tracker token.
+
+  4. **Tool failure normalization**: a stream with mixed successful and failed
+     tool calls produces `tool_finished` for successes and `tool_failed` for
+     failures; `turn_completed` (not `turn_failed`) is emitted with
+     `tool_failed: true`; usage is still reported; a turn with no tool failures
+     produces only `tool_finished` events and `tool_failed: false` on
+     `turn_completed`.
+
+Both test modules run under `make all` (via `mix test`) and require no live
+Claude subscription, Linear API key, or external service. The gate result is
+repeatable in CI. Claude Code MUST NOT be enabled for unattended Octo roles
+until both test modules pass under `make all`.
+
 ## Edge cases
 
 - Provider executable is missing or not authenticated.
