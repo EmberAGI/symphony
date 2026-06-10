@@ -260,10 +260,34 @@ without a live Claude subscription:
      Liquid/Solid issue template placeholders; `PromptBuilder` renders the role
      prompt template with issue variables; manifests carry `octo_authority_boundaries`.
 
-  2. **Octo tool bundle**: `DynamicTool.tool_specs()` exposes at minimum
-     `linear_graphql` with the required schema; a Claude turn that emits an
-     `is_error: true` tool result produces a `tool_failed` event and a
-     `turn_completed` event with `tool_failed: true`.
+  2. **Octo tool bundle** — all five required surfaces proven via the actual
+     Claude Code runtime tool path, not the Codex DynamicTool path:
+
+     Under Claude Code with `--permission-mode bypassPermissions`, Octo roles
+     execute required tools via runtime-native mechanisms: the Claude Code Bash
+     tool (granted by bypassPermissions) calls the role's skill CLIs directly.
+     Each surface is proven by driving the fake `claude` binary with recorded
+     stream-json carrying `tool_use`/`tool_result` event pairs (success and
+     failure) for a representative Bash invocation of that surface's CLI, then
+     asserting the shim normalizes `tool_finished` (success) and `tool_failed`
+     (failure) correctly:
+
+     - **(1) Linear GraphQL access**: Bash tool_use calling `linear-macro
+       graphql` — success → `tool_finished`; failure → `tool_failed`.
+     - **(2) Workpad operations**: Bash tool_use calling `linear-macro workpad
+       read/update` — success → `tool_finished`; failure → `tool_failed`.
+     - **(3) Artifact/proof capture**: Bash tool_use performing a file write —
+       success → `tool_finished`; failure (permission denied) → `tool_failed`.
+     - **(4) Repository status**: Bash tool_use calling `git status --short` —
+       success → `tool_finished`; failure (not a git repo) → `tool_failed`.
+     - **(5) PR status**: Bash tool_use calling `gh pr view --json state,title`
+       — success → `tool_finished`; failure (no PR found) → `tool_failed`.
+
+     One additional static assertion confirms the shim invocation carries
+     `--permission-mode bypassPermissions` in the trace, proving the mechanism
+     that grants the Bash tool to the Claude Code runtime. The Codex
+     `DynamicTool` module is not wired into the Claude Code runtime path and
+     is not used as evidence here.
 
   3. **Secret non-leakage**: the tracker API key configured in `WORKFLOW.md`
      does not appear in the prompt rendered by `PromptBuilder`; `oauth_token`
