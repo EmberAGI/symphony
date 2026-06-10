@@ -6,11 +6,13 @@ Symphony supports a provider-neutral coding-agent runtime layer so a deployment
 can run Codex, Claude Code, and Pi workers behind the same orchestrator,
 workspace, prompt, tool, artifact, and observability contracts.
 
-Codex remains the backward-compatible reference runtime. Claude Code and Pi are
-first-class runtime providers for Octo use: they must be able to run unattended
-Symphony role workflows, load or translate required role skills, execute
-required tools, normalize events and failures, collect artifacts/proof, and
-participate in a real mixed-runtime Octo workflow.
+Codex remains the backward-compatible reference runtime. Claude Code is the
+first non-Codex runtime provider being delivered (EMB-166 as re-scoped on
+2026-06-10): it must be able to run unattended Symphony role workflows, load or
+translate required role skills, execute required tools, normalize events and
+failures, and collect artifacts/proof. Pi (and other future harness CLIs such
+as Hermes) remain planned providers behind the same seam, but their adapters
+and the mixed-runtime validation profile are deferred to future issues.
 
 The runtime layer belongs in Symphony. Octo-specific workflow policy, Linear
 state semantics, repository routing, role ownership, and handoff expectations
@@ -48,7 +50,15 @@ turn failed, input required, usage updated, and artifact available.
 
 **Octo multi-runtime profile**: The conformance profile required for Octo to
 claim that Codex, Claude Code, and Pi are usable as role runtimes, including at
-least one real mixed-runtime execution.
+least one real mixed-runtime execution. Deferred: this profile is not required
+by the re-scoped EMB-166, which delivers the Claude Code slice only.
+
+**Issue reasoning profile (Claude runtimes)**: The Octo wrapper maps the durable
+`Implementation Effort` value to a per-role Claude model and `effort` selection
+(analogous to the Codex reasoning profile). The mapping table is Octo wrapper
+policy owned by `scaling-octo-engine` (`spec/domains/symphony-role-runtime.md`);
+the Claude Code adapter's obligation is to make model, effort, and no-thinking
+invocation selectable per session.
 
 ## Rules and invariants
 
@@ -75,6 +85,11 @@ least one real mixed-runtime execution.
 - Runtime adapters must collect or expose artifacts and proof in a normalized
   way so review, QA, landing, and operator status surfaces do not need to know
   which provider produced the evidence.
+- The Claude Code adapter must support per-session model selection, `effort`
+  configuration, and a verified no-thinking invocation so the Octo wrapper can
+  map `Implementation Effort` levels onto Claude models. Unsupported
+  combinations (for example Sonnet 4.6 with effort `xhigh`) must fail closed at
+  config validation, not at runtime.
 
 ## Interfaces/contracts
 
@@ -149,9 +164,11 @@ Provider-specific requirements:
   extension bundle, and converts unattended UI/input requests into normalized
   input-required events.
 
-Octo mixed-runtime validation must prove a real workflow can assign roles to
-different runtimes in one run, for example implementer on Pi, reviewer on
-Claude Code, QA on Codex, and landing on Codex.
+Octo mixed-runtime validation (a real workflow assigning roles to different
+runtimes in one run, for example implementer on Pi, reviewer on Claude Code,
+QA on Codex, and landing on Codex) is deferred until a second non-Codex
+adapter exists. The re-scoped EMB-166 requires only that a role configured for
+Claude Code runs end to end while other roles stay on Codex.
 
 ## Edge cases
 
@@ -203,15 +220,26 @@ slices without weakening the skills/tools release gate.
 ## Decision log or links to ADRs
 
 - [ADR 0001: Provider-Neutral Agent Runtimes](../adr/0001-provider-neutral-agent-runtimes.md)
-- EMB-166: The minimum implementation scope is a working multi-runtime system,
-  not a spec-only change. Codex, Claude Code, and Pi must be usable by Octo as
-  real role runtimes before EMB-166 closes.
-- EMB-166: Provider-specific implementation may be split into linked completion
-  slices, but those slices are required to close EMB-166 unless the operator
-  explicitly re-scopes the issue.
+- EMB-166 (superseded 2026-06-10): The minimum implementation scope was a
+  working multi-runtime system with Codex, Claude Code, and Pi all usable
+  before close.
+- EMB-166 re-scope (2026-06-10): The operator narrowed EMB-166 to the Claude
+  Code slice — a first-party `claude-app-server` shim behind the existing
+  Codex app-server protocol plus per-role runtime command/config selection.
+  Pi, Hermes, the normalized cross-provider fixture suite, and mixed-runtime
+  validation are deferred to future issues. ADR 0001 remains the long-term
+  adapter architecture decision; this is sequencing, not a reversal.
+- EMB-166 re-scope (2026-06-10): The Claude Code runtime must support the
+  `Implementation Effort` reasoning-profile mapping (Fable 5 reviews Extreme
+  and High; Opus 4.8 and Sonnet 4.6 cover the lower tiers with effort
+  overrides). The mapping table lives in the Octo wrapper spec and the EMB-166
+  issue body; this spec owns the adapter's model/effort/no-thinking
+  configurability requirement.
 - EMB-166: Skills and tools are a non-negotiable release gate for each enabled
   runtime.
 
 ## References to source issues
 
-- [EMB-166: Implement multi-runtime Symphony support for Codex, Claude Code, and Pi](https://linear.app/emberai/issue/EMB-166/implement-multi-runtime-symphony-support-for-codex-claude-code-and-pi)
+- [EMB-166: Integrate Claude Code as an Octo Symphony role runtime](https://linear.app/emberai/issue/EMB-166/implement-multi-runtime-symphony-support-for-codex-claude-code-and-pi)
+  (re-scoped 2026-06-10 from "Implement multi-runtime Symphony support for
+  Codex, Claude Code, and Pi")
