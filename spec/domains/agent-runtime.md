@@ -170,6 +170,52 @@ QA on Codex, and landing on Codex) is deferred until a second non-Codex
 adapter exists. The re-scoped EMB-166 requires only that a role configured for
 Claude Code runs end to end while other roles stay on Codex.
 
+### Claude Code shim invocation (implemented)
+
+The first-party Claude Code adapter drives the local `claude` CLI in
+non-interactive print mode and normalizes its streaming JSON output into the
+Symphony runtime events above. The runtime is selected with the
+provider-neutral `agent_runtime.provider` value (`codex` by default,
+`claude_code` to use the shim); a `claude_code` config block declares the
+command, model, effort, no-thinking flag, and permission mode.
+
+Verified Claude Code 2.x invocation (confirmed against `claude --help` and a
+real run, not guessed):
+
+- `claude --print --output-format stream-json --verbose` runs fully
+  non-interactively and emits one JSON object per line: a
+  `{"type":"system","subtype":"init"}` session-start line, `assistant` /
+  `user` turn lines (text, tool use, and tool results), `rate_limit_event`
+  usage notifications, and a terminal `{"type":"result","subtype":...}` line.
+- `--permission-mode bypassPermissions` runs with no interactive permission
+  approval and no extra sandbox layer (ADR 0002).
+- `--model <alias|id>` selects the model and
+  `--effort <low|medium|high|xhigh|max>` selects the reasoning effort.
+- The verified no-thinking invocation is the environment variable
+  `MAX_THINKING_TOKENS=0` (the Claude Code CLI equivalent of the API-level
+  `thinking: {type: "disabled"}` invocation). Fable 5 cannot disable thinking,
+  so requesting no-thinking with a Fable model fails closed at config
+  validation.
+
+The adapter maps Claude terminal results onto normalized events:
+`result` with `is_error: true` and an auth HTTP status (401/403) fails closed
+as an operator-visible `auth_failed` `turn_failed`; `subtype:
+"error_max_turns"` maps to `turn_input_required`; other `is_error: true`
+results map to `turn_failed`; a successful result maps to `turn_completed` with
+normalized token usage (`input_tokens`/`output_tokens`/`total_tokens`). A
+failed tool result inside the stream flags the completed turn as having a tool
+failure for review/QA. The adapter never prints or forwards credential-bearing
+fields (OAuth tokens, API keys) in events, logs, or transcripts.
+
+Implementation MUST carry deterministic Claude Code shim contract/smoke checks
+that exercise, with a fake `claude` binary replaying recorded stream-json, the
+verified invocation flags and no-thinking env, the normalized event vocabulary,
+fail-closed auth classification, max-turns input-required classification, tool
+failure surfacing, secret redaction, workspace-cwd guarding, and runtime
+selection defaulting to Codex. These checks belong with the Symphony Elixir test
+suite and run under `make all`. The full skills/tools release gate (ADR 0001)
+remains a separate slice and is not satisfied by these shim checks alone.
+
 ## Edge cases
 
 - Provider executable is missing or not authenticated.

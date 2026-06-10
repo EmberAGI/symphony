@@ -147,6 +147,36 @@ codex:
   command: "$CODEX_BIN --config 'model=\"gpt-5.5\"' app-server"
 ```
 
+### Runtime selection (Codex or Claude Code)
+
+Codex is the default and reference runtime. Symphony can instead run role turns
+through a first-party Claude Code shim (`claude-app-server`) that drives the
+local `claude` CLI behind the same app-server contract. Select the runtime with
+`agent_runtime.provider` and configure the shim with a `claude_code` block:
+
+```yaml
+agent_runtime:
+  provider: claude_code
+claude_code:
+  command: claude
+  model: sonnet
+  effort: high          # one of: low, medium, high, xhigh, max
+  no_thinking: true     # maps to MAX_THINKING_TOKENS=0 (Fable 5 cannot disable thinking)
+  permission_mode: bypassPermissions
+```
+
+Notes:
+
+- Omitting `agent_runtime` (or setting `provider: codex`) keeps the existing
+  Codex behavior unchanged.
+- The shim authenticates via operator-managed Claude subscription OAuth on the
+  role host; it never reads, stores, or logs an `ANTHROPIC_API_KEY` or OAuth
+  token. An expired or missing credential fails closed with an operator-visible
+  error instead of hanging.
+- Unattended runs use `bypassPermissions` with no extra sandbox and stay fully
+  non-interactive. Invalid `effort` values and disabling thinking on a model
+  that cannot (Fable 5) are rejected at config validation.
+
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.
