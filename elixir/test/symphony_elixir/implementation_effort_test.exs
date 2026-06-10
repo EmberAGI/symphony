@@ -95,6 +95,49 @@ defmodule SymphonyElixir.ImplementationEffortTest do
              ImplementationEffort.command_for_issue(command, issue, "landing")
   end
 
+  test "appends reasoning config when the command has neither an existing flag nor an app-server suffix" do
+    issue = issue_with_labels(["implementation-effort:moderate"])
+    command = "codex exec --json"
+
+    assert {:ok, {"codex exec --json --config model_reasoning_effort=medium", %{reasoning_effort: "medium"}}} =
+             ImplementationEffort.command_for_issue(command, issue, "implementer")
+  end
+
+  test "non-list labels fall back to the default profile" do
+    assert {:ok, %{effort: "high", source: "default", reasoning_effort: "high"}} =
+             ImplementationEffort.parse_labels(:not_a_list)
+  end
+
+  test "non-issue inputs fall back to the default role profile" do
+    assert {:ok, %{effort: "high", source: "default", role: "reviewer", reasoning_effort: "xhigh"}} =
+             ImplementationEffort.profile_for_issue(%{not: "an issue"}, "reviewer")
+
+    assert {:ok, %{effort: "high", source: "default", role: nil, reasoning_effort: "high"}} =
+             ImplementationEffort.profile_for_issue(%{not: "an issue"}, nil)
+  end
+
+  test "command_for_issue falls back to the default profile for non-issue inputs" do
+    command = "codex app-server"
+
+    assert {:ok, {^command, %{effort: "high", source: "default", role: "implementer"}}} =
+             ImplementationEffort.command_for_issue(command, %{not: "an issue"}, "implementer")
+  end
+
+  test "valid_labels? accepts a valid issue and tolerates non-issue inputs" do
+    assert ImplementationEffort.valid_labels?(issue_with_labels(["implementation-effort:low"]))
+    refute ImplementationEffort.valid_labels?(issue_with_labels(["implementation-effort:bogus"]))
+    assert ImplementationEffort.valid_labels?(%{not: "an issue"})
+  end
+
+  test "non-binary labels and roles normalize to safe defaults" do
+    # A non-binary label normalizes to "" and is ignored, leaving the default
+    # profile; a non-binary role normalizes to nil and keeps the worker tier.
+    issue = issue_with_labels([:not_a_string, "implementation-effort:moderate"])
+
+    assert {:ok, %{effort: "moderate", role: nil, reasoning_effort: "medium"}} =
+             ImplementationEffort.profile_for_issue(issue, :not_a_string)
+  end
+
   defp issue_with_labels(labels) do
     %Issue{
       id: "issue-effort",
