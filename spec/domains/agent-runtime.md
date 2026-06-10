@@ -251,7 +251,9 @@ slices without weakening the skills/tools release gate.
   `high`; implementer/QA Claude Sonnet 4.6 effort `high`). Runtime auth is
   Claude subscription OAuth; unattended runs use bypass-permissions with no
   sandbox and must stay non-interactive. Recorded in the EMB-166 issue body
-  acceptance criteria and the Constraints section above.
+  acceptance criteria, the Constraints section above, and
+  [ADR 0002](../adr/0002-claude-code-unattended-auth-and-permission-posture.md),
+  which owns the auth and permission-posture rationale and reversal policy.
 
 ## References to source issues
 
