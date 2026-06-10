@@ -199,6 +199,15 @@ Claude Code runs end to end while other roles stay on Codex.
   credentials for unattended runs.
 - Do not leak provider credentials, Linear tokens, or other secrets through
   prompts, logs, transcripts, or artifacts.
+- The Claude Code adapter authenticates via operator-managed Claude
+  subscription OAuth on the role host, not a repository- or
+  prompt-provisioned API key. Credential material stays outside the
+  repository, and an expired or missing credential fails closed with an
+  operator-visible error instead of hanging or silently degrading.
+- Unattended Claude Code role runs execute in bypass-permissions mode with no
+  additional sandbox layer (operator decision, 2026-06-10). Runs must be
+  fully non-interactive; the adapter must never block a role turn waiting on
+  an interactive permission approval.
 
 ## Non-goals
 
@@ -237,6 +246,12 @@ slices without weakening the skills/tools release gate.
   configurability requirement.
 - EMB-166: Skills and tools are a non-negotiable release gate for each enabled
   runtime.
+- EMB-166 re-grill (2026-06-10): Fail-closed default reasoning profile for the
+  Claude Code runtime is the `Moderate` row (reviewer Claude Opus 4.8 effort
+  `high`; implementer/QA Claude Sonnet 4.6 effort `high`). Runtime auth is
+  Claude subscription OAuth; unattended runs use bypass-permissions with no
+  sandbox and must stay non-interactive. Recorded in the EMB-166 issue body
+  acceptance criteria and the Constraints section above.
 
 ## References to source issues
 
