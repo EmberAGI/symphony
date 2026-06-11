@@ -54,11 +54,11 @@ least one real mixed-runtime execution. Deferred: this profile is not required
 by the re-scoped EMB-166, which delivers the Claude Code slice only.
 
 **Issue reasoning profile**: Symphony maps the durable `Implementation Effort`
-label to a provider-specific reasoning row for the current role turn. The
-runtime loads a universal provider-keyed profile matrix from the optional TOML
-file named by `SYMPHONY_REASONING_PROFILES`; when that variable is absent, the
-built-in defaults preserve the existing Codex matrix and encode the
-operator-approved Claude Code matrix from the Octo wrapper spec.
+label to a provider-specific reasoning profile for the actual role name and
+current tier. The runtime loads a universal provider-keyed role matrix from the
+optional TOML file named by `SYMPHONY_REASONING_PROFILES`; when that variable
+is absent, the built-in defaults encode the operator-approved Codex and Claude
+Code matrices.
 
 ## Rules and invariants
 
@@ -86,16 +86,16 @@ operator-approved Claude Code matrix from the Octo wrapper spec.
   way so review, QA, landing, and operator status surfaces do not need to know
   which provider produced the evidence.
 - The Claude Code adapter must support per-session model selection, `effort`
-  configuration, and a verified no-thinking invocation so the Octo wrapper can
-  map `Implementation Effort` levels onto Claude models. Unsupported
-  combinations (for example Sonnet 4.6 with effort `xhigh`) must fail closed at
-  config validation, not at runtime.
+  configuration, and a verified no-thinking invocation so Symphony can map
+  `Implementation Effort` levels onto Claude models. Unsupported combinations
+  (for example Sonnet 4.6 with effort `xhigh`) must fail closed at config
+  validation, not at runtime.
 - `SYMPHONY_REASONING_PROFILES`, when set, must point to a valid TOML profile
-  matrix. Parse errors, unknown provider/tier/role/row keys, missing provider
-  defaults, unsupported effort values, unsupported Claude model-effort pairs,
-  and unsupported no-thinking rows fail closed during startup validation. The
-  runtime must not silently fall back to built-in defaults when the file exists
-  but is invalid.
+  matrix. Parse errors, unknown provider keys, unknown role keys, unknown tier
+  keys, missing provider defaults, incomplete tier tables, unsupported effort
+  values, unsupported provider model-effort pairs, and unsupported no-thinking
+  rows fail closed during startup validation. The runtime must not silently fall
+  back to built-in defaults when the file exists but is invalid.
 
 ## Interfaces/contracts
 
@@ -172,69 +172,72 @@ Provider-specific requirements:
 
 ### Reasoning Profile TOML Contract
 
-The optional `SYMPHONY_REASONING_PROFILES` file uses this provider-keyed TOML
-shape:
+The optional `SYMPHONY_REASONING_PROFILES` file uses this provider-keyed,
+role-first TOML shape:
 
 ```toml
 [providers.codex]
 default_tier = "high"
-
-[providers.codex.tiers.moderate.reviewer]
-effort = "high"
-
-[providers.codex.tiers.moderate.worker]
-effort = "medium"
+default = "high"
+implementer = { extreme = "high", high = "high", moderate = "medium", low = "low", minimal = "none" }
+reviewer = { extreme = "xhigh", high = "xhigh", moderate = "high", low = "medium", minimal = "low" }
+qa = { extreme = "xhigh", high = "xhigh", moderate = "high", low = "medium", minimal = "low" }
 
 [providers.claude_code]
 default_tier = "moderate"
-
-[providers.claude_code.fixed]
-model = "opus"
-effort = "high"
-
-[providers.claude_code.tiers.moderate.reviewer]
-model = "opus"
-effort = "high"
-
-[providers.claude_code.tiers.moderate.worker]
-model = "sonnet"
-effort = "high"
+default = "opus/high"
+implementer = { extreme = "opus/xhigh", high = "opus/high", moderate = "sonnet/high", low = "sonnet/medium", minimal = "sonnet/none" }
+reviewer = { extreme = "fable/xhigh", high = "fable/high", moderate = "opus/high", low = "sonnet/high", minimal = "sonnet/medium" }
+qa = { extreme = "fable/xhigh", high = "fable/high", moderate = "opus/high", low = "sonnet/high", minimal = "sonnet/medium" }
 ```
 
 Only `codex` and `claude_code` providers are currently supported. Each provider
-declares a required `default_tier`, a complete `tiers` table for `extreme`,
-`high`, `moderate`, `low`, and `minimal`, and role rows for `reviewer` and
-`worker`. Providers may also declare a `fixed` row for non-dynamic roles such
-as landing and backlog processing. Every row uses the universal schema:
-optional non-blank `model`, required `effort`, and optional `no_thinking`.
-Unknown row keys and blank or non-string model values fail closed during
-profile validation so accepted row keys are never silently inert.
+must declare `default_tier` and `default`. The shared tier vocabulary is
+`extreme`, `high`, `moderate`, `low`, and `minimal`; the shared effort
+vocabulary is `none`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
-Codex preserves its historical behavior exactly when the TOML file is absent:
-default tier `high`; reviewer rows use the higher reasoning value; implementer
-and QA use the worker row; and only implementer, reviewer, and QA have their
-command config rewritten. Dynamic Codex roles rewrite
-`model_reasoning_effort` from the selected row's `effort`; when the selected
-row also declares `model`, they rewrite the command's `model="..."` config
-with the same dynamic-role passthrough semantics. Model-less Codex rows leave
-the frontmatter command model unchanged. Invalid or ambiguous Codex
-`implementation-effort:` labels fail closed as before.
+The profile contract has four rules:
 
-Claude Code resolves the same label to the provider row at session start and
-passes `--model`, `--effort`, and `MAX_THINKING_TOKENS=0` when `no_thinking` is
-true. Claude defaults missing, malformed, unsupported, or ambiguous effort
-labels to the provider `default_tier`, which is `moderate` in the built-in
-matrix. Landing and backlog-processor roles use the provider `fixed` row.
+1. A cell is a string in the form `"effort"` or `"model/effort"`. A model-less
+   cell uses the harness base model from the runtime frontmatter/config.
+2. A provider role key maps either to one scalar cell, meaning tier-invariant,
+   or to a complete five-tier inline table. Partial tier tables are invalid.
+3. Each provider must declare `default`, used as the fallback for unlisted
+   actual role names, and `default_tier`, used as the fail-closed tier for
+   missing or malformed labels when that provider defaults invalid labels.
+4. Unknown role keys, unknown tier keys, unsupported model-effort combinations,
+   and Claude `none` cells whose model cannot be validated for disabling
+   thinking are startup errors. The profile schema has no inheritance,
+   aliasing, provider-specific row shape, `fixed` section, `tiers` section,
+   `worker` row, or `no_thinking` key.
 
-The built-in Claude Code matrix is:
+Codex resolves by actual role name with `default` fallback. Dynamic Codex roles
+(`implementer`, `reviewer`, and `qa`) rewrite `model_reasoning_effort` from the
+selected cell's effort. When the selected cell also declares a model, they
+rewrite the command's `model="..."` config. Model-less Codex cells leave the
+frontmatter command model unchanged. Codex supports native efforts `none`,
+`low`, `medium`, `high`, and `xhigh`; Codex `max` is invalid at startup.
+Invalid or ambiguous Codex `implementation-effort:` labels fail closed.
 
-- Extreme: reviewer `fable`/`xhigh`, worker `opus`/`xhigh`.
-- High: reviewer `fable`/`high`, worker `opus`/`high`.
-- Moderate: reviewer `opus`/`high`, worker `sonnet`/`high`.
-- Low: reviewer `sonnet`/`high`, worker `sonnet`/`medium`.
-- Minimal: reviewer `sonnet`/`medium`, worker `sonnet`/`low` with
-  `no_thinking`.
-- Fixed non-dynamic roles: `opus`/`high`.
+Claude Code resolves the same label to the provider role at session start.
+Model cells set the per-session model, while model-less cells use the
+frontmatter `claude_code.model`. Claude passes `--effort <value>` for
+`low`, `medium`, `high`, `xhigh`, and `max`. A Claude `none` cell translates to
+the verified no-thinking invocation: `--effort low` plus
+`MAX_THINKING_TOKENS=0`. Because that translation is model-sensitive, `none`
+must be paired with a model that startup validation can prove supports
+disabling thinking. Claude defaults missing, malformed, unsupported, or
+ambiguous effort labels to the provider `default_tier`, which is `moderate` in
+the built-in matrix.
+
+The built-in matrices are:
+
+- Codex: `default_tier` `high`; `default` `high`; implementer
+  `high/high/medium/low/none`; reviewer and QA
+  `xhigh/xhigh/high/medium/low`.
+- Claude Code: `default_tier` `moderate`; `default` `opus/high`; implementer
+  `opus-xhigh/opus-high/sonnet-high/sonnet-medium/sonnet-none`; reviewer and QA
+  `fable-xhigh/fable-high/opus-high/sonnet-high/sonnet-medium`.
 
 Octo mixed-runtime validation (a real workflow assigning roles to different
 runtimes in one run, for example implementer on Pi, reviewer on Claude Code,
