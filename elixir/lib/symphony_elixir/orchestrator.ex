@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.{
     AgentRunner,
+    AgentRuntime,
     Config,
     ImplementationEffort,
     RoleTurnRecovery,
@@ -684,12 +685,15 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_routable_to_worker?(_issue), do: true
 
   defp valid_implementation_effort?(%Issue{} = issue) do
-    case ImplementationEffort.parse_labels(issue.labels) do
+    provider = AgentRuntime.provider()
+
+    case ImplementationEffort.profile_for_issue(provider, issue, nil) do
       {:ok, _profile} ->
         true
 
       {:error, reason} ->
-        Logger.error("Skipping dispatch; invalid Implementation Effort labels for #{issue_context(issue)}: #{inspect(reason)}")
+        Logger.error("Skipping dispatch; invalid Implementation Effort labels for #{issue_context(issue)} runtime_provider=#{provider}: #{inspect(reason)}")
+
         false
     end
   end

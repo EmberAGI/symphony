@@ -108,6 +108,11 @@ defmodule SymphonyElixir.ImplementationEffortTest do
              ImplementationEffort.parse_labels(:not_a_list)
   end
 
+  test "legacy list label parser returns the Codex worker profile" do
+    assert {:ok, %{provider: "codex", effort: "low", source: "label", reasoning_effort: "low"}} =
+             ImplementationEffort.parse_labels(["implementation-effort:low"])
+  end
+
   test "non-issue inputs fall back to the default role profile" do
     assert {:ok, %{effort: "high", source: "default", role: "reviewer", reasoning_effort: "xhigh"}} =
              ImplementationEffort.profile_for_issue(%{not: "an issue"}, "reviewer")
