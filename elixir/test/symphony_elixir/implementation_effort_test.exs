@@ -307,6 +307,15 @@ defmodule SymphonyElixir.ImplementationEffortTest do
                ImplementationEffort.profiles()
     end)
 
+    with_profiles_toml!(replace_once(profiles_toml(), "minimal = \"sonnet/none\"", "minimal = \"some-future-model/none\""), fn path ->
+      assert {:error, {:unsupported_reasoning_profile_no_thinking, ^path, "claude_code", ["implementer", "minimal"], "some-future-model"}} =
+               ImplementationEffort.profiles()
+    end)
+
+    with_profiles_toml!(replace_once(profiles_toml(), "minimal = \"sonnet/none\"", "minimal = \"claude-sonnet-4-6/none\""), fn _path ->
+      assert {:ok, _profiles} = ImplementationEffort.profiles()
+    end)
+
     with_profiles_toml!(replace_once(profiles_toml(), "minimal = \"sonnet/none\"", "minimal = \"haiku/max\""), fn path ->
       assert {:error, {:unsupported_reasoning_profile_model_effort, ^path, "claude_code", ["implementer", "minimal"], "haiku", "max"}} =
                ImplementationEffort.profiles()

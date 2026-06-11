@@ -15,6 +15,7 @@ defmodule SymphonyElixir.ImplementationEffort do
   @codex_supported_efforts ~w(none low medium high xhigh)
   @claude_xhigh_supported_models ~w(fable-5 mythos-5 opus-4-8 opus-4-7)
   @claude_max_supported_models ~w(fable-5 mythos-5 opus-4-8 opus-4-7 opus-4-6 sonnet-4-6)
+  @claude_no_thinking_supported_models ~w(opus-4-8 opus-4-7 opus-4-6 sonnet-4-6 haiku-4-5)
   @claude_no_thinking_effort "low"
   @claude_model_alias_resolution %{
     "fable" => "claude-fable-5",
@@ -274,15 +275,10 @@ defmodule SymphonyElixir.ImplementationEffort do
   defp validate_model_effort(_provider, _model, _effort, _source, _path), do: :ok
 
   defp validate_no_thinking("claude_code", model, "none", source, path) do
-    cond do
-      not is_binary(model) ->
-        {:error, {:unsupported_reasoning_profile_no_thinking, source, "claude_code", path, model}}
-
-      model |> String.downcase() |> String.contains?("fable") ->
-        {:error, {:unsupported_reasoning_profile_no_thinking, source, "claude_code", path, model}}
-
-      true ->
-        :ok
+    if claude_effort_model_supported?(model, @claude_no_thinking_supported_models) do
+      :ok
+    else
+      {:error, {:unsupported_reasoning_profile_no_thinking, source, "claude_code", path, model}}
     end
   end
 
