@@ -101,6 +101,49 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            }
   end
 
+  test "Claude Code dispatch accepts malformed effort labels for provider defaulting" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      agent_runtime_provider: "claude_code",
+      claude_code_command: "claude"
+    )
+
+    issue = %Issue{
+      id: "issue-claude-effort-default",
+      identifier: "EMB-CC",
+      title: "Claude effort default",
+      state: "Todo",
+      labels: ["implementation-effort:bogus"]
+    }
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{},
+      claimed: MapSet.new()
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "Codex dispatch still fails closed on malformed effort labels" do
+    write_workflow_file!(Workflow.workflow_file_path())
+
+    issue = %Issue{
+      id: "issue-codex-effort-invalid",
+      identifier: "EMB-CX",
+      title: "Codex effort invalid",
+      state: "Todo",
+      labels: ["implementation-effort:bogus"]
+    }
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{},
+      claimed: MapSet.new()
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
   test "running issue transition to human review without Human Escalation label does not send telegram notification" do
     parent = self()
     previous_request_fun = Application.get_env(:symphony_elixir, :telegram_request_fun)

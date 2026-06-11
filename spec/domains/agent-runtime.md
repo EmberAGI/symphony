@@ -53,12 +53,12 @@ claim that Codex, Claude Code, and Pi are usable as role runtimes, including at
 least one real mixed-runtime execution. Deferred: this profile is not required
 by the re-scoped EMB-166, which delivers the Claude Code slice only.
 
-**Issue reasoning profile (Claude runtimes)**: The Octo wrapper maps the durable
-`Implementation Effort` value to a per-role Claude model and `effort` selection
-(analogous to the Codex reasoning profile). The mapping table is Octo wrapper
-policy owned by `scaling-octo-engine` (`spec/domains/symphony-role-runtime.md`);
-the Claude Code adapter's obligation is to make model, effort, and no-thinking
-invocation selectable per session.
+**Issue reasoning profile**: Symphony maps the durable `Implementation Effort`
+label to a provider-specific reasoning row for the current role turn. The
+runtime loads a universal provider-keyed profile matrix from the optional TOML
+file named by `SYMPHONY_REASONING_PROFILES`; when that variable is absent, the
+built-in defaults preserve the existing Codex matrix and encode the
+operator-approved Claude Code matrix from the Octo wrapper spec.
 
 ## Rules and invariants
 
@@ -90,6 +90,12 @@ invocation selectable per session.
   map `Implementation Effort` levels onto Claude models. Unsupported
   combinations (for example Sonnet 4.6 with effort `xhigh`) must fail closed at
   config validation, not at runtime.
+- `SYMPHONY_REASONING_PROFILES`, when set, must point to a valid TOML profile
+  matrix. Parse errors, unknown provider/tier/role/row keys, missing provider
+  defaults, unsupported effort values, unsupported Claude model-effort pairs,
+  and unsupported no-thinking rows fail closed during startup validation. The
+  runtime must not silently fall back to built-in defaults when the file exists
+  but is invalid.
 
 ## Interfaces/contracts
 
@@ -163,6 +169,66 @@ Provider-specific requirements:
   explicitly controls auto-retry and auto-compaction, uses an explicit worker
   extension bundle, and converts unattended UI/input requests into normalized
   input-required events.
+
+### Reasoning Profile TOML Contract
+
+The optional `SYMPHONY_REASONING_PROFILES` file uses this provider-keyed TOML
+shape:
+
+```toml
+[providers.codex]
+default_tier = "high"
+
+[providers.codex.tiers.moderate.reviewer]
+effort = "high"
+
+[providers.codex.tiers.moderate.worker]
+effort = "medium"
+
+[providers.claude_code]
+default_tier = "moderate"
+
+[providers.claude_code.fixed]
+model = "opus"
+effort = "high"
+
+[providers.claude_code.tiers.moderate.reviewer]
+model = "opus"
+effort = "high"
+
+[providers.claude_code.tiers.moderate.worker]
+model = "sonnet"
+effort = "high"
+```
+
+Only `codex` and `claude_code` providers are currently supported. Each provider
+declares a required `default_tier`, a complete `tiers` table for `extreme`,
+`high`, `moderate`, `low`, and `minimal`, and role rows for `reviewer` and
+`worker`. Providers may also declare a `fixed` row for non-dynamic roles such
+as landing and backlog processing. Every row uses the universal schema:
+optional `model`, required `effort`, and optional `no_thinking`.
+
+Codex preserves its historical behavior exactly when the TOML file is absent:
+default tier `high`; reviewer rows use the higher reasoning value; implementer
+and QA use the worker row; and only implementer, reviewer, and QA have their
+`model_reasoning_effort` command config rewritten. Invalid or ambiguous Codex
+`implementation-effort:` labels fail closed as before.
+
+Claude Code resolves the same label to the provider row at session start and
+passes `--model`, `--effort`, and `MAX_THINKING_TOKENS=0` when `no_thinking` is
+true. Claude defaults missing, malformed, unsupported, or ambiguous effort
+labels to the provider `default_tier`, which is `moderate` in the built-in
+matrix. Landing and backlog-processor roles use the provider `fixed` row.
+
+The built-in Claude Code matrix is:
+
+- Extreme: reviewer `fable`/`xhigh`, worker `opus`/`xhigh`.
+- High: reviewer `fable`/`high`, worker `opus`/`high`.
+- Moderate: reviewer `opus`/`high`, worker `sonnet`/`high`.
+- Low: reviewer `sonnet`/`high`, worker `sonnet`/`medium`.
+- Minimal: reviewer `sonnet`/`medium`, worker `sonnet`/`low` with
+  `no_thinking`.
+- Fixed non-dynamic roles: `opus`/`high`.
 
 Octo mixed-runtime validation (a real workflow assigning roles to different
 runtimes in one run, for example implementer on Pi, reviewer on Claude Code,

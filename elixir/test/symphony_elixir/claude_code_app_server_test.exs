@@ -85,12 +85,18 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
   end
 
   defp run_shim(ctx, prompt, overrides \\ []) do
-    issue = %{id: "issue-#{System.unique_integer([:positive])}", identifier: "MT-CC", title: "Claude shim"}
+    issue = %Issue{
+      id: "issue-#{System.unique_integer([:positive])}",
+      identifier: "MT-CC",
+      title: "Claude shim",
+      state: "Todo",
+      labels: Keyword.get(overrides, :labels, [])
+    }
 
     {:ok, agent} = Agent.start_link(fn -> [] end)
     on_message = fn message -> Agent.update(agent, fn acc -> [message | acc] end) end
 
-    result = ClaudeAppServer.run(ctx.workspace, prompt, issue, on_message: on_message)
+    result = ClaudeAppServer.run(ctx.workspace, prompt, issue, on_message: on_message, role: Keyword.get(overrides, :role))
     events = agent |> Agent.get(& &1) |> Enum.reverse()
     Agent.stop(agent)
 
@@ -116,7 +122,8 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     try do
       configure!(ctx, stream_success(), claude_code_model: "sonnet", claude_code_effort: "low", claude_code_no_thinking: true)
 
-      {result, events, trace} = run_shim(ctx, "Reply with exactly: SHIMOK")
+      {result, events, trace} =
+        run_shim(ctx, "Reply with exactly: SHIMOK", labels: ["implementation-effort:minimal"], role: "qa")
 
       assert {:ok, turn} = result
       assert turn.session_id == "sess-success"
@@ -141,6 +148,12 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       assert trace =~ "--model sonnet"
       assert trace =~ "--effort low"
       assert trace =~ "ENV_MAX_THINKING_TOKENS:0"
+
+      assert completed.implementation_effort == "minimal"
+      assert completed.implementation_effort_source == "label"
+      assert completed.claude_model == "sonnet"
+      assert completed.claude_effort == "low"
+      assert completed.claude_no_thinking == true
     after
       File.rm_rf(ctx.test_root)
     end
@@ -208,6 +221,52 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       assert {:ok, _turn} = result
       assert trace =~ "ENV_MAX_THINKING_TOKENS:\n" or trace =~ "ENV_MAX_THINKING_TOKENS:" <> "\n"
       refute trace =~ "ENV_MAX_THINKING_TOKENS:0"
+    after
+      File.rm_rf(ctx.test_root)
+    end
+  end
+
+  test "uses the Claude fixed row for non-dynamic roles" do
+    ctx = setup_workspace("MT-CC-fixed")
+
+    try do
+      configure!(ctx, stream_success(), claude_code_model: "sonnet", claude_code_effort: "low", claude_code_no_thinking: true)
+
+      {result, events, trace} =
+        run_shim(ctx, "do work", labels: ["implementation-effort:minimal"], role: "landing")
+
+      assert {:ok, _turn} = result
+      assert trace =~ "--model opus"
+      assert trace =~ "--effort high"
+      refute trace =~ "ENV_MAX_THINKING_TOKENS:0"
+
+      completed = Enum.find(events, &(&1.event == :turn_completed))
+      assert completed.implementation_effort == "minimal"
+      assert completed.claude_model == "opus"
+      assert completed.claude_effort == "high"
+      assert completed.claude_no_thinking == false
+    after
+      File.rm_rf(ctx.test_root)
+    end
+  end
+
+  test "uses the moderate Claude default for malformed implementation-effort labels" do
+    ctx = setup_workspace("MT-CC-default-effort")
+
+    try do
+      configure!(ctx, stream_success(), claude_code_model: "opus", claude_code_effort: "low", claude_code_no_thinking: true)
+
+      {result, events, trace} =
+        run_shim(ctx, "do work", labels: ["implementation-effort:bogus"], role: "implementer")
+
+      assert {:ok, _turn} = result
+      assert trace =~ "--model sonnet"
+      assert trace =~ "--effort high"
+      refute trace =~ "ENV_MAX_THINKING_TOKENS:0"
+
+      completed = Enum.find(events, &(&1.event == :turn_completed))
+      assert completed.implementation_effort == "moderate"
+      assert completed.implementation_effort_source == "default_invalid_label"
     after
       File.rm_rf(ctx.test_root)
     end
