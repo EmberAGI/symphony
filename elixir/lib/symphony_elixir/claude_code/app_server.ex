@@ -37,7 +37,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   require Logger
 
-  alias SymphonyElixir.{Config, PathSafety, SSH}
+  alias SymphonyElixir.{Config, ImplementationEffort, Linear.Issue, PathSafety, SSH}
 
   # `claude` exits non-zero when it cannot reach a usable model/auth at all; the
   # streaming protocol also surfaces auth failures as a terminal `result` with
@@ -86,12 +86,15 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
 
+    issue = Keyword.get(opts, :issue)
+    role = Keyword.get(opts, :role, runtime_role())
+
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, launch} <- launch_config() do
+         {:ok, launch} <- launch_config(issue, role) do
       {:ok,
        %{
          port: nil,
-         metadata: %{},
+         metadata: launch.metadata,
          workspace: expanded_workspace,
          worker_host: worker_host,
          launch: launch,
@@ -106,7 +109,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   """
   @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run_turn(
-        %{workspace: workspace, worker_host: worker_host, launch: launch} = session,
+        %{workspace: workspace, worker_host: worker_host, launch: launch, metadata: session_metadata} = session,
         prompt,
         issue,
         opts \\ []
@@ -116,7 +119,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
     case start_port(workspace, worker_host, command, launch.env) do
       {:ok, port} ->
-        metadata = port_metadata(port, worker_host)
+        metadata = port_metadata(port, worker_host) |> Map.merge(session_metadata)
 
         try do
           state = %{
@@ -192,30 +195,33 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   # --- Launch configuration ---
 
   @doc false
-  @spec launch_command_for_test() :: {:ok, map()} | {:error, term()}
-  def launch_command_for_test, do: launch_config()
+  @spec launch_command_for_test(Issue.t() | nil, String.t() | nil) :: {:ok, map()} | {:error, term()}
+  def launch_command_for_test(issue \\ nil, role \\ nil), do: launch_config(issue, role)
 
-  defp launch_config do
-    with {:ok, settings} <- Config.settings() do
+  defp launch_config(issue, role) do
+    with {:ok, settings} <- Config.settings(),
+         {:ok, profile} <- ImplementationEffort.profile_for_issue("claude_code", issue, role) do
       claude = settings.claude_code
 
       env =
         []
-        |> maybe_put_no_thinking_env(claude.no_thinking)
+        |> maybe_put_no_thinking_env(profile.no_thinking)
 
       {:ok,
        %{
          base_command: claude.command,
-         model: claude.model,
-         effort: claude.effort,
-         no_thinking: claude.no_thinking,
+         model: profile.model || claude.model,
+         effort: profile.reasoning_effort,
+         no_thinking: profile.no_thinking,
          permission_mode: claude.permission_mode,
          env: env,
          timeout_ms: claude.turn_timeout_ms,
          metadata: %{
-           claude_model: claude.model,
-           claude_effort: claude.effort,
-           claude_no_thinking: claude.no_thinking
+           implementation_effort: profile.effort,
+           implementation_effort_source: profile.source,
+           claude_model: profile.model || claude.model,
+           claude_effort: profile.reasoning_effort,
+           claude_no_thinking: profile.no_thinking
          }
        }}
     end
@@ -658,6 +664,13 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   end
 
   defp default_on_message(_message), do: :ok
+
+  defp runtime_role do
+    case System.get_env("SYMPHONY_ROLE") do
+      role when is_binary(role) and role != "" -> role
+      _ -> nil
+    end
+  end
 
   defp issue_context(%{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"

@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
-  alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.{Config.Schema, ImplementationEffort}
   alias SymphonyElixir.Workflow
 
   @default_prompt_template """
@@ -129,7 +129,14 @@ defmodule SymphonyElixir.Config do
         {:error, :missing_linear_project_slug}
 
       true ->
-        :ok
+        validate_reasoning_profiles()
+    end
+  end
+
+  defp validate_reasoning_profiles do
+    case ImplementationEffort.profiles() do
+      {:ok, _profiles} -> :ok
+      {:error, reason} -> {:error, {:invalid_reasoning_profiles, reason}}
     end
   end
 

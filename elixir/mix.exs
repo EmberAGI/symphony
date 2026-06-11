@@ -74,6 +74,7 @@ defmodule SymphonyElixir.MixProject do
       {:phoenix_live_view, "~> 1.1.0"},
       {:req, "~> 0.5"},
       {:jason, "~> 1.4"},
+      {:toml, "~> 0.7.0"},
       {:yaml_elixir, "~> 2.12"},
       {:solid, "~> 1.2"},
       {:ecto, "~> 3.13"},
