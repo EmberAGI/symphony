@@ -1169,20 +1169,7 @@ defmodule SymphonyElixir.StatusDashboard do
         humanize_codex_method(method, payload)
 
       _ ->
-        cond do
-          is_binary(map_value(payload, ["session_id", :session_id])) ->
-            "session started (#{map_value(payload, ["session_id", :session_id])})"
-
-          match?(%{"error" => _}, payload) ->
-            "error: #{format_error_value(Map.get(payload, "error"))}"
-
-          true ->
-            payload
-            |> inspect(pretty: true, limit: 30)
-            |> String.replace("\n", " ")
-            |> sanitize_ansi_and_control_bytes()
-            |> String.trim()
-        end
+        humanize_non_method_payload(payload)
     end
   end
 
@@ -1199,6 +1186,89 @@ defmodule SymphonyElixir.StatusDashboard do
     |> String.replace("\n", " ")
     |> sanitize_ansi_and_control_bytes()
     |> String.trim()
+  end
+
+  defp humanize_non_method_payload(payload) do
+    cond do
+      map_value(payload, ["type", :type]) == "assistant" ->
+        humanize_claude_assistant_payload(payload)
+
+      map_value(payload, ["type", :type]) == "user" ->
+        humanize_claude_user_payload(payload)
+
+      map_value(payload, ["type", :type]) == "rate_limit_event" ->
+        "Claude Code rate limit update"
+
+      map_value(payload, ["type", :type]) == "result" ->
+        humanize_claude_result_payload(payload)
+
+      is_binary(map_value(payload, ["session_id", :session_id])) ->
+        "session started (#{map_value(payload, ["session_id", :session_id])})"
+
+      match?(%{"error" => _}, payload) ->
+        "error: #{format_error_value(Map.get(payload, "error"))}"
+
+      true ->
+        payload
+        |> inspect(pretty: true, limit: 30)
+        |> String.replace("\n", " ")
+        |> sanitize_ansi_and_control_bytes()
+        |> String.trim()
+    end
+  end
+
+  defp humanize_claude_assistant_payload(payload) do
+    case claude_text_content(payload) do
+      text when is_binary(text) and text != "" -> "Claude Code: #{inline_text(text)}"
+      _ -> "Claude Code assistant update"
+    end
+  end
+
+  defp humanize_claude_user_payload(payload) do
+    if claude_tool_result_error?(payload) do
+      "Claude Code tool result failed"
+    else
+      "Claude Code tool result"
+    end
+  end
+
+  defp humanize_claude_result_payload(payload) do
+    subtype = map_value(payload, ["subtype", :subtype]) || "completed"
+
+    usage_suffix =
+      case format_usage_counts(map_value(payload, ["usage", :usage])) do
+        nil -> ""
+        usage_text -> " (#{usage_text})"
+      end
+
+    "Claude Code turn #{subtype}#{usage_suffix}"
+  end
+
+  defp claude_text_content(payload) do
+    payload
+    |> claude_content_blocks()
+    |> Enum.find_value(fn
+      %{"type" => "text", "text" => text} when is_binary(text) -> text
+      %{type: "text", text: text} when is_binary(text) -> text
+      _ -> nil
+    end)
+  end
+
+  defp claude_content_blocks(payload) do
+    cond do
+      is_list(map_path(payload, ["message", "content"])) -> map_path(payload, ["message", "content"])
+      is_list(map_path(payload, [:message, :content])) -> map_path(payload, [:message, :content])
+      is_list(map_value(payload, ["content", :content])) -> map_value(payload, ["content", :content])
+      true -> []
+    end
+  end
+
+  defp claude_tool_result_error?(payload) do
+    Enum.any?(claude_content_blocks(payload), fn
+      %{"type" => "tool_result", "is_error" => true} -> true
+      %{type: "tool_result", is_error: true} -> true
+      _ -> false
+    end)
   end
 
   defp sanitize_ansi_and_control_bytes(value) when is_binary(value) do
