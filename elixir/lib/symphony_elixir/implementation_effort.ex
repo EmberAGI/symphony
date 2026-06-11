@@ -9,15 +9,13 @@ defmodule SymphonyElixir.ImplementationEffort do
   @tiers ~w(extreme high moderate low minimal)
   @dynamic_roles ~w(implementer reviewer qa)
   @providers ~w(codex claude_code)
-  @row_keys ~w(model effort no_thinking)
-  @role_keys ~w(reviewer worker)
-  @supported_efforts %{
-    "codex" => ~w(none low medium high xhigh),
-    "claude_code" => ~w(low medium high xhigh max)
-  }
-  @claude_unrestricted_efforts ~w(low medium high)
+  @required_provider_keys ~w(default default_tier)
+  @known_role_keys ~w(default implementer reviewer qa landing backlog-processor)
+  @shared_efforts ~w(none low medium high xhigh max)
+  @codex_supported_efforts ~w(none low medium high xhigh)
   @claude_xhigh_supported_models ~w(fable-5 mythos-5 opus-4-8 opus-4-7)
   @claude_max_supported_models ~w(fable-5 mythos-5 opus-4-8 opus-4-7 opus-4-6 sonnet-4-6)
+  @claude_no_thinking_effort "low"
   @claude_model_alias_resolution %{
     "fable" => "claude-fable-5",
     "opus" => "claude-opus-4-8",
@@ -28,38 +26,34 @@ defmodule SymphonyElixir.ImplementationEffort do
   @built_in_profiles %{
     "codex" => %{
       "default_tier" => "high",
-      "tiers" => %{
-        "extreme" => %{"reviewer" => %{"effort" => "xhigh"}, "worker" => %{"effort" => "high"}},
-        "high" => %{"reviewer" => %{"effort" => "xhigh"}, "worker" => %{"effort" => "high"}},
-        "moderate" => %{"reviewer" => %{"effort" => "high"}, "worker" => %{"effort" => "medium"}},
-        "low" => %{"reviewer" => %{"effort" => "medium"}, "worker" => %{"effort" => "low"}},
-        "minimal" => %{"reviewer" => %{"effort" => "low"}, "worker" => %{"effort" => "none"}}
-      }
+      "default" => "high",
+      "implementer" => %{"extreme" => "high", "high" => "high", "moderate" => "medium", "low" => "low", "minimal" => "none"},
+      "reviewer" => %{"extreme" => "xhigh", "high" => "xhigh", "moderate" => "high", "low" => "medium", "minimal" => "low"},
+      "qa" => %{"extreme" => "xhigh", "high" => "xhigh", "moderate" => "high", "low" => "medium", "minimal" => "low"}
     },
     "claude_code" => %{
       "default_tier" => "moderate",
-      "fixed" => %{"model" => "opus", "effort" => "high"},
-      "tiers" => %{
-        "extreme" => %{
-          "reviewer" => %{"model" => "fable", "effort" => "xhigh"},
-          "worker" => %{"model" => "opus", "effort" => "xhigh"}
-        },
-        "high" => %{
-          "reviewer" => %{"model" => "fable", "effort" => "high"},
-          "worker" => %{"model" => "opus", "effort" => "high"}
-        },
-        "moderate" => %{
-          "reviewer" => %{"model" => "opus", "effort" => "high"},
-          "worker" => %{"model" => "sonnet", "effort" => "high"}
-        },
-        "low" => %{
-          "reviewer" => %{"model" => "sonnet", "effort" => "high"},
-          "worker" => %{"model" => "sonnet", "effort" => "medium"}
-        },
-        "minimal" => %{
-          "reviewer" => %{"model" => "sonnet", "effort" => "medium"},
-          "worker" => %{"model" => "sonnet", "effort" => "low", "no_thinking" => true}
-        }
+      "default" => "opus/high",
+      "implementer" => %{
+        "extreme" => "opus/xhigh",
+        "high" => "opus/high",
+        "moderate" => "sonnet/high",
+        "low" => "sonnet/medium",
+        "minimal" => "sonnet/none"
+      },
+      "reviewer" => %{
+        "extreme" => "fable/xhigh",
+        "high" => "fable/high",
+        "moderate" => "opus/high",
+        "low" => "sonnet/high",
+        "minimal" => "sonnet/medium"
+      },
+      "qa" => %{
+        "extreme" => "fable/xhigh",
+        "high" => "fable/high",
+        "moderate" => "opus/high",
+        "low" => "sonnet/high",
+        "minimal" => "sonnet/medium"
       }
     }
   }
@@ -86,14 +80,14 @@ defmodule SymphonyElixir.ImplementationEffort do
   def parse_labels(labels) when is_list(labels) do
     with {:ok, profiles} <- profiles(),
          {:ok, tier, source} <- label_tier(labels, default_tier(profiles, "codex"), invalid: :error) do
-      {:ok, row_profile(profiles, "codex", tier, "worker", nil, source)}
+      {:ok, row_profile(profiles, "codex", tier, nil, source)}
     end
   end
 
   def parse_labels(_labels) do
     with {:ok, profiles} <- profiles() do
       tier = default_tier(profiles, "codex")
-      {:ok, row_profile(profiles, "codex", tier, "worker", nil, "default")}
+      {:ok, row_profile(profiles, "codex", tier, nil, "default")}
     end
   end
 
@@ -106,7 +100,7 @@ defmodule SymphonyElixir.ImplementationEffort do
 
     with {:ok, profiles} <- profiles(),
          {:ok, tier, source} <- issue_tier(provider, profiles, labels) do
-      {:ok, row_profile(profiles, provider, tier, role_key(role), normalize_role(role), source)}
+      {:ok, row_profile(profiles, provider, tier, normalize_role(role), source)}
     end
   end
 
@@ -115,7 +109,7 @@ defmodule SymphonyElixir.ImplementationEffort do
 
     with {:ok, profiles} <- profiles() do
       tier = default_tier(profiles, provider)
-      {:ok, row_profile(profiles, provider, tier, role_key(role), normalize_role(role), "default")}
+      {:ok, row_profile(profiles, provider, tier, normalize_role(role), "default")}
     end
   end
 
@@ -162,13 +156,15 @@ defmodule SymphonyElixir.ImplementationEffort do
   defp validate_profiles(profiles, source), do: validate_profiles(%{"providers" => profiles}, source)
 
   defp validate_provider(provider, config, source) when is_map(config) do
-    allowed = ~w(default_tier tiers fixed)
+    keys = Map.keys(config)
+    unknown_key_error = {:unknown_reasoning_profile_key, source, provider}
+    missing_key_error = {:missing_reasoning_profile_key, source, provider}
 
-    with :ok <- validate_keys(Map.keys(config), allowed, {:unknown_reasoning_profile_key, source, provider}),
+    with :ok <- validate_keys(keys, @known_role_keys ++ ["default_tier"], unknown_key_error),
+         :ok <- validate_required_keys(keys, @required_provider_keys, missing_key_error),
          {:ok, default_tier} <- fetch_default_tier(config, source, provider),
-         {:ok, tiers} <- fetch_tiers(config, source, provider),
-         {:ok, fixed} <- validate_optional_fixed(provider, Map.get(config, "fixed"), source) do
-      {:ok, %{"default_tier" => default_tier, "tiers" => tiers, "fixed" => fixed}}
+         {:ok, roles} <- validate_roles(provider, Map.drop(config, ["default_tier"]), source) do
+      {:ok, Map.put(roles, "default_tier", default_tier)}
     end
   end
 
@@ -177,68 +173,91 @@ defmodule SymphonyElixir.ImplementationEffort do
   defp fetch_default_tier(config, source, provider) do
     case Map.get(config, "default_tier") do
       tier when tier in @tiers -> {:ok, tier}
-      nil -> {:error, {:missing_reasoning_profile_default_tier, source, provider}}
       tier -> {:error, {:invalid_reasoning_profile_default_tier, source, provider, tier}}
     end
   end
 
-  defp fetch_tiers(config, source, provider) do
-    case Map.get(config, "tiers") do
-      tiers when is_map(tiers) -> validate_tiers(provider, tiers, source)
-      _ -> {:error, {:missing_reasoning_profile_tiers, source, provider}}
-    end
+  defp validate_roles(provider, roles, source) do
+    reduce_validated(Map.keys(roles), fn role ->
+      validate_role(provider, role, Map.fetch!(roles, role), source)
+    end)
   end
 
-  defp validate_tiers(provider, tiers, source) do
-    with :ok <- validate_keys(Map.keys(tiers), @tiers, {:unknown_reasoning_profile_tier, source, provider}),
-         :ok <- validate_required_keys(Map.keys(tiers), @tiers, {:missing_reasoning_profile_tier, source, provider}) do
+  defp validate_role(provider, role, cell, source) when is_binary(cell) do
+    validate_cell(provider, cell, source, [role])
+  end
+
+  defp validate_role(provider, role, table, source) when is_map(table) do
+    with :ok <- validate_keys(Map.keys(table), @tiers, {:unknown_reasoning_profile_tier, source, provider, role}),
+         :ok <- validate_required_keys(Map.keys(table), @tiers, {:missing_reasoning_profile_tier, source, provider, role}) do
       reduce_validated(@tiers, fn tier ->
-        validate_tier(provider, tier, Map.fetch!(tiers, tier), source)
+        validate_cell(provider, Map.fetch!(table, tier), source, [role, tier])
       end)
     end
   end
 
-  defp validate_tier(provider, tier, rows, source) when is_map(rows) do
-    with :ok <- validate_keys(Map.keys(rows), @role_keys, {:unknown_reasoning_profile_role, source, provider, tier}),
-         :ok <- validate_required_keys(Map.keys(rows), @role_keys, {:missing_reasoning_profile_role, source, provider, tier}) do
-      reduce_validated(@role_keys, fn role ->
-        validate_row(provider, Map.fetch!(rows, role), source, [tier, role])
-      end)
-    end
-  end
+  defp validate_role(provider, role, _value, source),
+    do: {:error, {:invalid_reasoning_profile_role_shape, source, provider, role}}
 
-  defp validate_tier(provider, tier, _rows, source), do: {:error, {:invalid_reasoning_profile_tier_shape, source, provider, tier}}
-
-  defp validate_optional_fixed(_provider, nil, _source), do: {:ok, nil}
-
-  defp validate_optional_fixed(provider, row, source) do
-    validate_row(provider, row, source, ["fixed"])
-  end
-
-  defp validate_row(provider, row, source, path) when is_map(row) do
-    with :ok <- validate_keys(Map.keys(row), @row_keys, {:unknown_reasoning_profile_row_key, source, provider, path}),
-         {:ok, effort} <- required_string(row, "effort", {:missing_reasoning_profile_effort, source, provider, path}),
-         :ok <- validate_effort(provider, effort, source, path),
-         {:ok, model} <- optional_string(row, "model", {:invalid_reasoning_profile_model, source, provider, path}),
-         {:ok, no_thinking} <-
-           optional_boolean(row, "no_thinking", {:invalid_reasoning_profile_no_thinking, source, provider, path}),
+  defp validate_cell(provider, cell, source, path) when is_binary(cell) do
+    with {:ok, model, effort} <- parse_cell(cell, source, provider, path),
+         :ok <- validate_effort(provider, model, effort, source, path),
          :ok <- validate_model_effort(provider, model, effort, source, path),
-         :ok <- validate_no_thinking(provider, model, no_thinking, source, path) do
-      {:ok, %{"model" => model, "effort" => effort, "no_thinking" => no_thinking}}
+         :ok <- validate_no_thinking(provider, model, effort, source, path) do
+      {:ok, translated_cell(provider, model, effort)}
     end
   end
 
-  defp validate_row(provider, _row, source, path), do: {:error, {:invalid_reasoning_profile_row_shape, source, provider, path}}
+  defp validate_cell(provider, _cell, source, path), do: {:error, {:invalid_reasoning_profile_cell, source, provider, path}}
 
-  defp validate_effort(provider, effort, source, path) do
-    if effort in Map.fetch!(@supported_efforts, provider) do
+  defp parse_cell(cell, source, provider, path) do
+    parts = String.split(cell, "/", parts: 3)
+
+    case parts do
+      [effort] ->
+        parse_effort_cell(effort, nil, source, provider, path)
+
+      [model, effort] ->
+        with {:ok, model} <- parse_model(model, source, provider, path) do
+          parse_effort_cell(effort, model, source, provider, path)
+        end
+
+      _ ->
+        {:error, {:invalid_reasoning_profile_cell, source, provider, path}}
+    end
+  end
+
+  defp parse_model(model, source, provider, path) do
+    trimmed = String.trim(model)
+
+    if trimmed == "" do
+      {:error, {:invalid_reasoning_profile_model, source, provider, path}}
+    else
+      {:ok, trimmed}
+    end
+  end
+
+  defp parse_effort_cell(effort, model, source, provider, path) do
+    trimmed = String.trim(effort)
+
+    cond do
+      trimmed == "" -> {:error, {:missing_reasoning_profile_effort, source, provider, path}}
+      trimmed in @shared_efforts -> {:ok, model, trimmed}
+      true -> {:error, {:unsupported_reasoning_profile_effort, source, provider, path, trimmed}}
+    end
+  end
+
+  defp validate_effort("codex", _model, effort, source, path) do
+    if effort in @codex_supported_efforts do
       :ok
     else
-      {:error, {:unsupported_reasoning_profile_effort, source, provider, path, effort}}
+      {:error, {:unsupported_reasoning_profile_effort, source, "codex", path, effort}}
     end
   end
 
-  defp validate_model_effort("claude_code", model, effort, source, path) when effort not in @claude_unrestricted_efforts do
+  defp validate_effort("claude_code", _model, _effort, _source, _path), do: :ok
+
+  defp validate_model_effort("claude_code", model, effort, source, path) when effort in ~w(xhigh max) do
     supported =
       case effort do
         "xhigh" -> @claude_xhigh_supported_models
@@ -254,7 +273,7 @@ defmodule SymphonyElixir.ImplementationEffort do
 
   defp validate_model_effort(_provider, _model, _effort, _source, _path), do: :ok
 
-  defp validate_no_thinking("claude_code", model, true, source, path) do
+  defp validate_no_thinking("claude_code", model, "none", source, path) do
     cond do
       not is_binary(model) ->
         {:error, {:unsupported_reasoning_profile_no_thinking, source, "claude_code", path, model}}
@@ -267,7 +286,13 @@ defmodule SymphonyElixir.ImplementationEffort do
     end
   end
 
-  defp validate_no_thinking(_provider, _model, _no_thinking, _source, _path), do: :ok
+  defp validate_no_thinking(_provider, _model, _effort, _source, _path), do: :ok
+
+  defp translated_cell("claude_code", model, "none"),
+    do: %{"model" => model, "effort" => @claude_no_thinking_effort, "no_thinking" => true, "cell_effort" => "none"}
+
+  defp translated_cell(_provider, model, effort),
+    do: %{"model" => model, "effort" => effort, "no_thinking" => false, "cell_effort" => effort}
 
   defp validate_keys(keys, allowed, error_tuple) do
     unknown = Enum.reject(keys, &(&1 in allowed))
@@ -286,37 +311,6 @@ defmodule SymphonyElixir.ImplementationEffort do
       :ok
     else
       {:error, append_tuple(error_tuple, missing)}
-    end
-  end
-
-  defp required_string(row, key, error) do
-    case Map.get(row, key) do
-      value when is_binary(value) and value != "" -> {:ok, value}
-      _ -> {:error, error}
-    end
-  end
-
-  defp optional_string(row, key, error) do
-    case Map.get(row, key) do
-      nil -> {:ok, nil}
-      value when is_binary(value) -> validate_non_empty_string(value, error)
-      _ -> {:error, error}
-    end
-  end
-
-  defp validate_non_empty_string(value, error) do
-    if String.trim(value) == "" do
-      {:error, error}
-    else
-      {:ok, value}
-    end
-  end
-
-  defp optional_boolean(row, key, error) do
-    case Map.get(row, key) do
-      nil -> {:ok, false}
-      value when is_boolean(value) -> {:ok, value}
-      _ -> {:error, error}
     end
   end
 
@@ -382,14 +376,11 @@ defmodule SymphonyElixir.ImplementationEffort do
     end
   end
 
-  defp row_profile(profiles, provider, tier, role_key, role, source) do
+  defp row_profile(profiles, provider, tier, role, source) do
     provider_config = Map.fetch!(profiles, provider)
-
-    row =
-      case {role, Map.get(provider_config, "fixed")} do
-        {role, fixed} when role not in @dynamic_roles and is_map(fixed) -> fixed
-        _ -> get_in(provider_config, ["tiers", tier, role_key])
-      end
+    role_key = if is_binary(role) and Map.has_key?(provider_config, role), do: role, else: "default"
+    role_profile = Map.fetch!(provider_config, role_key)
+    row = if Map.has_key?(role_profile, tier), do: Map.fetch!(role_profile, tier), else: role_profile
 
     effort = Map.fetch!(row, "effort")
 
@@ -405,9 +396,6 @@ defmodule SymphonyElixir.ImplementationEffort do
   end
 
   defp default_tier(profiles, provider), do: get_in(profiles, [provider, "default_tier"])
-
-  defp role_key("reviewer"), do: "reviewer"
-  defp role_key(_role), do: "worker"
 
   defp normalize_label(label) when is_binary(label) do
     label

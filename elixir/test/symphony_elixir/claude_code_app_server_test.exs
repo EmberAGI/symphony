@@ -123,7 +123,7 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       configure!(ctx, stream_success(), claude_code_model: "sonnet", claude_code_effort: "low", claude_code_no_thinking: true)
 
       {result, events, trace} =
-        run_shim(ctx, "Reply with exactly: SHIMOK", labels: ["implementation-effort:minimal"], role: "qa")
+        run_shim(ctx, "Reply with exactly: SHIMOK", labels: ["implementation-effort:minimal"], role: "implementer")
 
       assert {:ok, turn} = result
       assert turn.session_id == "sess-success"
