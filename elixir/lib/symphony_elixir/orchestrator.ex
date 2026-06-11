@@ -1509,15 +1509,25 @@ defmodule SymphonyElixir.Orchestrator do
       update[:usage],
       Map.get(update, "usage"),
       Map.get(update, :usage),
+      update[:metadata],
+      Map.get(update, "metadata"),
+      Map.get(update, :metadata),
       update[:payload],
       Map.get(update, "payload"),
       update
     ]
 
-    Enum.find_value(payloads, &absolute_token_usage_from_payload/1) ||
+    Enum.find_value(payloads, &direct_token_usage_from_payload/1) ||
+      Enum.find_value(payloads, &absolute_token_usage_from_payload/1) ||
       Enum.find_value(payloads, &turn_completed_usage_from_payload/1) ||
       %{}
   end
+
+  defp direct_token_usage_from_payload(payload) when is_map(payload) do
+    if integer_token_map?(payload), do: payload
+  end
+
+  defp direct_token_usage_from_payload(_payload), do: nil
 
   defp extract_rate_limits(update) do
     rate_limits_from_payload(update[:rate_limits]) ||

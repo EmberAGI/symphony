@@ -222,14 +222,25 @@ failed tool result inside the stream flags the completed turn as having a tool
 failure for review/QA. The adapter never prints or forwards credential-bearing
 fields (OAuth tokens, API keys) in events, logs, or transcripts.
 
+Claude Code normalized usage and progress events MUST feed the shared role
+status surfaces used by `/api/v1/state`, status logs, and the dashboard. When a
+Claude turn emits normalized `usage` or result usage maps, the orchestrator
+MUST fold `input_tokens`, `output_tokens`, and `total_tokens` into the same
+runtime totals that Codex turns use. Streamed Claude assistant text, tool
+result, rate-limit, and result events SHOULD update the human-readable
+`last_message` beyond the initial session-start marker whenever provider
+events contain usable progress data.
+
 Implementation MUST carry deterministic Claude Code shim contract/smoke checks
 that exercise, with a fake `claude` binary replaying recorded stream-json, the
 verified invocation flags and no-thinking env, the normalized event vocabulary,
 fail-closed auth classification, max-turns input-required classification, tool
 failure surfacing, secret redaction, workspace-cwd guarding, and runtime
-selection defaulting to Codex. These checks belong with the Symphony Elixir test
-suite and run under `make all`. The full skills/tools release gate (ADR 0001)
-remains a separate slice and is not satisfied by these shim checks alone.
+selection defaulting to Codex, and status aggregation of Claude usage/progress
+into the role status snapshot. These checks belong with the Symphony Elixir
+test suite and run under `make all`. The full skills/tools release gate
+(ADR 0001) remains a separate slice and is not satisfied by these shim checks
+alone.
 
 ### Skills/tools release gate contract (EMB-1029)
 
