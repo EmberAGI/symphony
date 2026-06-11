@@ -123,7 +123,7 @@ defmodule SymphonyElixir.ImplementationEffort do
   def command_for_issue(command, %Issue{} = issue, role) when is_binary(command) do
     with {:ok, profile} <- profile_for_issue("codex", issue, role) do
       if profile.role in @dynamic_roles do
-        {:ok, {put_reasoning_effort(command, profile.reasoning_effort), profile}}
+        {:ok, {put_codex_profile(command, profile), profile}}
       else
         {:ok, {command, profile}}
       end
@@ -299,8 +299,16 @@ defmodule SymphonyElixir.ImplementationEffort do
   defp optional_string(row, key, error) do
     case Map.get(row, key) do
       nil -> {:ok, nil}
-      value when is_binary(value) and value != "" -> {:ok, value}
+      value when is_binary(value) -> validate_non_empty_string(value, error)
       _ -> {:error, error}
+    end
+  end
+
+  defp validate_non_empty_string(value, error) do
+    if String.trim(value) == "" do
+      {:error, error}
+    else
+      {:ok, value}
     end
   end
 
@@ -436,15 +444,10 @@ defmodule SymphonyElixir.ImplementationEffort do
       |> String.downcase()
       |> String.trim()
 
-    cond do
-      normalized == "" ->
-        nil
-
-      Map.has_key?(@claude_model_alias_resolution, normalized) ->
-        @claude_model_alias_resolution[normalized] |> strip_model_prefix() |> family_version()
-
-      true ->
-        normalized |> strip_model_prefix() |> family_version()
+    if Map.has_key?(@claude_model_alias_resolution, normalized) do
+      @claude_model_alias_resolution[normalized] |> strip_model_prefix() |> family_version()
+    else
+      normalized |> strip_model_prefix() |> family_version()
     end
   end
 
@@ -460,6 +463,40 @@ defmodule SymphonyElixir.ImplementationEffort do
       [_, family, major, minor] -> "#{family}-#{major}-#{minor}"
       [_, family, major] -> "#{family}-#{major}"
       _ -> nil
+    end
+  end
+
+  defp put_codex_profile(command, %{reasoning_effort: reasoning_effort, model: model}) do
+    command
+    |> put_reasoning_effort(reasoning_effort)
+    |> put_model(model)
+  end
+
+  defp put_model(command, nil), do: command
+
+  defp put_model(command, model) do
+    replacement = ~s(--config 'model="#{model}"')
+
+    cond do
+      Regex.match?(~r/--config\s+['"]model="/, command) ->
+        Regex.replace(
+          ~r/(--config\s+['"]model=")[^"]+("['"])/,
+          command,
+          "\\1#{model}\\2"
+        )
+
+      Regex.match?(~r/--config\s+model="/, command) ->
+        Regex.replace(
+          ~r/(--config\s+model=")[^"]+(")/,
+          command,
+          "\\1#{model}\\2"
+        )
+
+      Regex.match?(~r/\sapp-server(\s*)$/, command) ->
+        Regex.replace(~r/\sapp-server(\s*)$/, command, " #{replacement} app-server\\1")
+
+      true ->
+        "#{command} #{replacement}"
     end
   end
 

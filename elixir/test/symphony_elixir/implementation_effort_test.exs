@@ -74,6 +74,77 @@ defmodule SymphonyElixir.ImplementationEffortTest do
              "codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=medium app-server"
   end
 
+  test "rewrites dynamic Codex role launch commands with a model-bearing tier row" do
+    issue = issue_with_labels(["implementation-effort:low"])
+
+    toml =
+      replace_once(
+        profiles_toml(""),
+        "[providers.codex.tiers.low.worker]\neffort = \"low\"",
+        """
+        [providers.codex.tiers.low.worker]
+        model = "gpt-5.4"
+        effort = "low"
+        """
+      )
+
+    with_profiles_toml!(toml, fn _path ->
+      command = "codex --config 'model=\"gpt-5.5\"' --config model_reasoning_effort=high app-server"
+
+      assert {:ok, {updated, %{model: "gpt-5.4", reasoning_effort: "low"}}} =
+               ImplementationEffort.command_for_issue(command, issue, "implementer")
+
+      assert updated == "codex --config 'model=\"gpt-5.4\"' --config model_reasoning_effort=low app-server"
+    end)
+  end
+
+  test "applies Codex row models to unquoted model config and commands missing model config" do
+    issue = issue_with_labels(["implementation-effort:low"])
+
+    toml =
+      replace_once(
+        profiles_toml(""),
+        "[providers.codex.tiers.low.worker]\neffort = \"low\"",
+        """
+        [providers.codex.tiers.low.worker]
+        model = "gpt-5.4"
+        effort = "low"
+        """
+      )
+
+    cases = [
+      {
+        ~s(codex --config model="gpt-5.5" --config model_reasoning_effort=high app-server),
+        ~s(codex --config model="gpt-5.4" --config model_reasoning_effort=low app-server)
+      },
+      {
+        "codex --config shell_environment_policy.inherit=all app-server",
+        "codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=low --config 'model=\"gpt-5.4\"' app-server"
+      },
+      {
+        "codex exec --json",
+        "codex exec --json --config model_reasoning_effort=low --config 'model=\"gpt-5.4\"'"
+      }
+    ]
+
+    with_profiles_toml!(toml, fn _path ->
+      Enum.each(cases, fn {command, expected} ->
+        assert {:ok, {^expected, %{model: "gpt-5.4", reasoning_effort: "low"}}} =
+                 ImplementationEffort.command_for_issue(command, issue, "implementer")
+      end)
+    end)
+  end
+
+  test "model-less Codex rows leave the command model unchanged" do
+    issue = issue_with_labels(["implementation-effort:low"])
+    command = "codex --config 'model=\"gpt-5.5\"' --config model_reasoning_effort=high app-server"
+
+    assert {:ok, {updated, %{model: nil, reasoning_effort: "low"}}} =
+             ImplementationEffort.command_for_issue(command, issue, "implementer")
+
+    assert updated == "codex --config 'model=\"gpt-5.5\"' --config model_reasoning_effort=low app-server"
+  end
+
   test "minimal implementer and QA launch commands use Codex no-reasoning none" do
     issue = issue_with_labels(["implementation-effort:minimal"])
     command = "codex --config shell_environment_policy.inherit=all --config 'model=\"gpt-5.5\"' app-server"
@@ -93,6 +164,28 @@ defmodule SymphonyElixir.ImplementationEffortTest do
 
     assert {:ok, {^command, %{effort: "low", reasoning_effort: "low"}}} =
              ImplementationEffort.command_for_issue(command, issue, "landing")
+  end
+
+  test "non dynamic roles do not rewrite a model-bearing Codex row" do
+    issue = issue_with_labels(["implementation-effort:low"])
+
+    toml =
+      replace_once(
+        profiles_toml(""),
+        "[providers.codex.tiers.low.worker]\neffort = \"low\"",
+        """
+        [providers.codex.tiers.low.worker]
+        model = "gpt-5.4"
+        effort = "low"
+        """
+      )
+
+    with_profiles_toml!(toml, fn _path ->
+      command = "codex --config 'model=\"gpt-5.5\"' --config model_reasoning_effort=high app-server"
+
+      assert {:ok, {^command, %{model: "gpt-5.4", reasoning_effort: "low"}}} =
+               ImplementationEffort.command_for_issue(command, issue, "landing")
+    end)
   end
 
   test "appends reasoning config when the command has neither an existing flag nor an app-server suffix" do
@@ -358,6 +451,18 @@ defmodule SymphonyElixir.ImplementationEffortTest do
                ImplementationEffort.profiles()
     end)
 
+    blank_codex_model =
+      replace_once(profiles_toml(""), "[providers.codex.tiers.low.worker]\neffort = \"low\"", """
+      [providers.codex.tiers.low.worker]
+      model = "   "
+      effort = "low"
+      """)
+
+    with_profiles_toml!(blank_codex_model, fn path ->
+      assert {:error, {:invalid_reasoning_profile_model, ^path, "codex", ["low", "worker"]}} =
+               ImplementationEffort.profiles()
+    end)
+
     invalid_no_thinking =
       replace_once(profiles_toml(""), "no_thinking = true", "no_thinking = \"yes\"")
 
@@ -406,7 +511,7 @@ defmodule SymphonyElixir.ImplementationEffortTest do
       """)
 
     with_profiles_toml!(blank_model_max, fn path ->
-      expected = {:unsupported_reasoning_profile_model_effort, path, "claude_code", ["minimal", "worker"], "   ", "max"}
+      expected = {:invalid_reasoning_profile_model, path, "claude_code", ["minimal", "worker"]}
 
       assert {:error, ^expected} = ImplementationEffort.profiles()
     end)

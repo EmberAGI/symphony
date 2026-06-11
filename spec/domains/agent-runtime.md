@@ -206,12 +206,18 @@ declares a required `default_tier`, a complete `tiers` table for `extreme`,
 `high`, `moderate`, `low`, and `minimal`, and role rows for `reviewer` and
 `worker`. Providers may also declare a `fixed` row for non-dynamic roles such
 as landing and backlog processing. Every row uses the universal schema:
-optional `model`, required `effort`, and optional `no_thinking`.
+optional non-blank `model`, required `effort`, and optional `no_thinking`.
+Unknown row keys and blank or non-string model values fail closed during
+profile validation so accepted row keys are never silently inert.
 
 Codex preserves its historical behavior exactly when the TOML file is absent:
 default tier `high`; reviewer rows use the higher reasoning value; implementer
 and QA use the worker row; and only implementer, reviewer, and QA have their
-`model_reasoning_effort` command config rewritten. Invalid or ambiguous Codex
+command config rewritten. Dynamic Codex roles rewrite
+`model_reasoning_effort` from the selected row's `effort`; when the selected
+row also declares `model`, they rewrite the command's `model="..."` config
+with the same dynamic-role passthrough semantics. Model-less Codex rows leave
+the frontmatter command model unchanged. Invalid or ambiguous Codex
 `implementation-effort:` labels fail closed as before.
 
 Claude Code resolves the same label to the provider row at session start and
