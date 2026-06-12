@@ -9,7 +9,9 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
-    {:ok, issue_entries()}
+    issues = issue_entries()
+    send_event({:memory_tracker_fetch_candidate_issues, Enum.map(issues, & &1.id)})
+    {:ok, issues}
   end
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
@@ -27,6 +29,7 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids) do
+    send_event({:memory_tracker_fetch_issue_states_by_ids, issue_ids})
     wanted_ids = MapSet.new(issue_ids)
 
     {:ok,

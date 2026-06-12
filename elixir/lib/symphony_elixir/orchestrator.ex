@@ -337,6 +337,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec handle_retry_issue_for_test(term(), String.t(), pos_integer(), map()) :: {:noreply, term()}
+  def handle_retry_issue_for_test(%State{} = state, issue_id, attempt, metadata)
+      when is_binary(issue_id) and is_integer(attempt) and is_map(metadata) do
+    handle_retry_issue(state, issue_id, attempt, metadata)
+  end
+
+  @doc false
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
@@ -956,11 +963,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp handle_missing_retry_attempt(state, _issue_id), do: state
 
   defp handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
-    case Tracker.fetch_candidate_issues() do
-      {:ok, issues} ->
-        issues
-        |> find_issue_by_id(issue_id)
+    case Tracker.fetch_issue_states_by_ids([issue_id]) do
+      {:ok, [issue | _]} ->
+        issue
         |> handle_retry_issue_lookup(state, issue_id, attempt, metadata)
+
+      {:ok, []} ->
+        handle_retry_issue_lookup(nil, state, issue_id, attempt, metadata)
 
       {:error, reason} ->
         Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
@@ -1178,16 +1187,6 @@ defmodule SymphonyElixir.Orchestrator do
       _ ->
         true
     end
-  end
-
-  defp find_issue_by_id(issues, issue_id) when is_binary(issue_id) do
-    Enum.find(issues, fn
-      %Issue{id: ^issue_id} ->
-        true
-
-      _ ->
-        false
-    end)
   end
 
   defp find_issue_id_for_ref(running, ref) do
