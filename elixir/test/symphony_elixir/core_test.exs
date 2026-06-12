@@ -675,6 +675,77 @@ defmodule SymphonyElixir.CoreTest do
            } = :sys.get_state(pid).retry_attempts[issue_id]
   end
 
+  test "dead retry timer releases leaked claim so issue can dispatch again" do
+    issue_id = "issue-dead-retry"
+    orchestrator_name = Module.concat(__MODULE__, :DeadRetryOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-562",
+      title: "Retry chain died",
+      state: "In Progress"
+    }
+
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:retry_issue, issue_id, make_ref()})
+    Process.sleep(50)
+
+    state = :sys.get_state(pid)
+
+    refute MapSet.member?(state.claimed, issue_id)
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "claim reconciliation releases only claims that are not running or retrying" do
+    running_issue_id = "issue-running-claim"
+    retrying_issue_id = "issue-retrying-claim"
+    orphaned_issue_id = "issue-orphaned-claim"
+
+    state = %Orchestrator.State{
+      running: %{
+        running_issue_id => %{
+          pid: self(),
+          ref: nil,
+          identifier: "MT-563",
+          issue: %Issue{id: running_issue_id, identifier: "MT-563", state: "In Progress"},
+          started_at: DateTime.utc_now()
+        }
+      },
+      retry_attempts: %{
+        retrying_issue_id => %{
+          attempt: 1,
+          timer_ref: nil,
+          retry_token: make_ref(),
+          due_at_ms: System.monotonic_time(:millisecond) + 30_000,
+          identifier: "MT-564",
+          error: "agent exited: :boom"
+        }
+      },
+      claimed: MapSet.new([running_issue_id, retrying_issue_id, orphaned_issue_id])
+    }
+
+    state = Orchestrator.reconcile_claims_for_test(state)
+
+    assert MapSet.member?(state.claimed, running_issue_id)
+    assert MapSet.member?(state.claimed, retrying_issue_id)
+    refute MapSet.member?(state.claimed, orphaned_issue_id)
+  end
+
   test "manual refresh coalesces repeated requests and ignores superseded ticks" do
     now_ms = System.monotonic_time(:millisecond)
     stale_tick_token = make_ref()

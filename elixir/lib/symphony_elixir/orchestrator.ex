@@ -220,7 +220,7 @@ defmodule SymphonyElixir.Orchestrator do
     result =
       case pop_retry_attempt_state(state, issue_id, retry_token) do
         {:ok, attempt, metadata, state} -> handle_retry_issue(state, issue_id, attempt, metadata)
-        :missing -> {:noreply, state}
+        :missing -> {:noreply, handle_missing_retry_attempt(state, issue_id)}
       end
 
     notify_dashboard()
@@ -237,6 +237,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_dispatch(%State{} = state) do
     RoleTurnRecovery.recover_pending_turns(active_state_set(), terminal_state_set(), Map.keys(state.running))
     state = reconcile_running_issues(state)
+    state = reconcile_orphaned_claims(state)
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
@@ -345,6 +346,12 @@ defmodule SymphonyElixir.Orchestrator do
   @spec select_worker_host_for_test(term(), String.t() | nil) :: String.t() | nil | :no_worker_capacity
   def select_worker_host_for_test(%State{} = state, preferred_worker_host) do
     select_worker_host(state, preferred_worker_host)
+  end
+
+  @doc false
+  @spec reconcile_claims_for_test(term()) :: term()
+  def reconcile_claims_for_test(%State{} = state) do
+    reconcile_orphaned_claims(state)
   end
 
   defp reconcile_running_issue_states([], state, _active_states, _terminal_states), do: state
@@ -926,6 +933,28 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp handle_missing_retry_attempt(%State{} = state, issue_id) when is_binary(issue_id) do
+    cond do
+      Map.has_key?(state.retry_attempts, issue_id) ->
+        Logger.warning("Dropping stale retry timer for issue_id=#{issue_id}; newer retry entry is still queued")
+        state
+
+      Map.has_key?(state.running, issue_id) ->
+        Logger.warning("Dropping retry timer for issue_id=#{issue_id}; issue is already running")
+        state
+
+      MapSet.member?(state.claimed, issue_id) ->
+        Logger.warning("Retry chain missing for claimed issue_id=#{issue_id}; releasing leaked claim")
+        release_issue_claim(state, issue_id)
+
+      true ->
+        Logger.debug("Dropping retry timer for unclaimed issue_id=#{issue_id}")
+        state
+    end
+  end
+
+  defp handle_missing_retry_attempt(state, _issue_id), do: state
+
   defp handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
     case Tracker.fetch_candidate_issues() do
       {:ok, issues} ->
@@ -1023,6 +1052,21 @@ defmodule SymphonyElixir.Orchestrator do
          })
        )}
     end
+  end
+
+  defp reconcile_orphaned_claims(%State{} = state) do
+    active_claims =
+      state.running
+      |> Map.keys()
+      |> MapSet.new()
+      |> MapSet.union(MapSet.new(Map.keys(state.retry_attempts)))
+
+    state.claimed
+    |> MapSet.difference(active_claims)
+    |> Enum.reduce(state, fn issue_id, state_acc ->
+      Logger.warning("Claimed issue is neither running nor retrying; releasing leaked claim issue_id=#{issue_id}")
+      release_issue_claim(state_acc, issue_id)
+    end)
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
