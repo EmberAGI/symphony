@@ -275,12 +275,25 @@ The implementer manifest must expose these skills only to the implementer role
 by default. Reviewer, QA, landing, and backlog-processor exposure requires a
 future issue that updates the role contract and validation.
 
-TDD is mandatory for EMB-97 child work that names TDD and for future issues
-that explicitly ask for TDD, red-green-refactor, test-first implementation, or
-integration-test-first development. Frontend and language/package-manager
-skills must activate only from durable issue or repository signals and must not
-override existing product specs, ADRs, framework conventions, component
-libraries, accessibility requirements, or package-manager choices.
+The shared `tdd` skill is the canonical home for implementer red-green-refactor
+execution-loop doctrine. It must describe TDD as the primary development loop
+for implementation work when the active role workflow requires it, while Octo
+role workflows own activation, routing, handoff evidence, and submodule
+delivery. The skill's execution contract should favor small behavior slices,
+current-slice tracer tests at repo-declared public boundaries, targeted-first
+validation, bounded output, and repo-declared test tiers/task runners without
+hardcoding repository-specific Vitest, Turbo/Nx, secret, timing, or placement
+details. Role-skill exposure metadata should keep `tdd` discoverable for
+implementers without preserving an obsolete EMB-97/explicit-request-only
+activation list as the full trigger policy.
+
+Frontend and language/package-manager skills must activate only from durable
+issue or repository signals and must not override existing product specs, ADRs,
+framework conventions, component libraries, accessibility requirements, or
+package-manager choices. TypeScript, pnpm, and Node.js guidance may align with
+the TDD loop by pointing agents to repo-declared placement, task runner,
+affected-cache, validation, and output-control contracts, but test taxonomy and
+workflow activation must remain in the appropriate skill or role workflow.
 
 ## Edge Cases
 
@@ -320,3 +333,4 @@ contract.
 - [Symphony Handoff Artifacts](./symphony-handoff-artifacts.md)
 - [ADR 0001: Provider-Neutral Agent Runtimes](../adr/0001-provider-neutral-agent-runtimes.md)
 - [EMB-187: Add no-key Browser Use capability for Agent QA](https://linear.app/emberai/issue/EMB-187/add-no-key-browser-use-capability-for-agent-qa)
+- [EMB-1065: Merge son-of-anton TDD execution contract into the shared tdd skill and restore default-on doctrine](https://linear.app/emberai/issue/EMB-1065/merge-son-of-anton-tdd-execution-contract-into-the-shared-tdd-skill)
