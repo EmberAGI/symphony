@@ -7,11 +7,8 @@
       "name": "tdd",
       "path": "../skills/tdd",
       "source": "mattpocock/skills@b843cb5:skills/engineering/tdd",
-      "mandatory_when": [
-        "owning issue is EMB-97 or an EMB-97 child that names TDD",
-        "issue, workpad, handoff, specs, ADRs, or user request asks for TDD",
-        "issue asks for red-green-refactor, test-first implementation, or integration-test-first development"
-      ]
+      "role_workflow_authority": "Active Octo/Symphony role workflow owns TDD activation policy, routing, handoff evidence, and submodule delivery.",
+      "execution_contract": "Use as the primary red-green-refactor development loop whenever the active role workflow requires TDD."
     },
     {
       "name": "frontend-design",
@@ -63,7 +60,7 @@
     "work must stay on the issue branch",
     "role workflow state transitions remain authoritative",
     "PR ownership and issue linkage remain authoritative",
-    "the mutable Codex Workpad and immutable Symphony Handoff trail remain authoritative",
+    "legacy Codex Workpad context when present and the immutable Symphony Handoff trail remain authoritative",
     "validation requirements from the issue, specs, ADRs, workpad, and handoff remain authoritative",
     "Human Escalation routing remains authoritative when required source artifacts are missing, unreadable, or conflicting"
   ]

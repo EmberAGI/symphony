@@ -287,6 +287,18 @@ details. Role-skill exposure metadata should keep `tdd` discoverable for
 implementers without preserving an obsolete EMB-97/explicit-request-only
 activation list as the full trigger policy.
 
+The shared `tdd` skill must have one execution loop. It may preserve upstream
+behavior-through-public-interface philosophy and links to upstream support
+docs, but must not duplicate an upstream Workflow section beside a separate
+local contract. The five upstream support docs in `.codex/skills/tdd/` must
+remain byte-pristine against the recorded upstream pin unless a future issue
+intentionally changes the source relationship.
+
+Shared TDD doctrine must state that e2e is not the red-green loop; exact tier
+budgets, triggers, placement, owners, and gate commands come from target repo
+specs. Skill package behavior may use realistic prompt-based evals and human
+review when RED/GREEN unit tests are the wrong surface.
+
 Frontend and language/package-manager skills must activate only from durable
 issue or repository signals and must not override existing product specs, ADRs,
 framework conventions, component libraries, accessibility requirements, or

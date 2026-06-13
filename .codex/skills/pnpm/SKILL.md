@@ -31,7 +31,8 @@ state transitions, PR ownership, workpad, handoff, validation, and
 
 ## Script Contract
 
-Every package should expose these scripts so workspace-level automation stays predictable:
+Use the target repo's declared script contract. When a repo standardizes common
+package scripts, keep their meanings predictable:
 
 - `lint`
 - `lint:fix`
@@ -58,5 +59,18 @@ Repos may also define more specific scripts such as:
 
 ## Workflow Notes
 
-- Prefer `pnpm <script>` or `pnpm --filter <pkg> <script>` for task execution.
+- Use package-filtered, tier-specific, project-specific, or single-file
+  commands while iterating when the repo exposes them.
+- Reserve repo-root `test`, `test:ci`, build, and other broad gate commands
+  for pre-handoff validation unless the role workflow or issue requires an
+  earlier gate.
+- Prefer the repo's declared affected or cached task-runner path when present,
+  such as workspace task commands, affected commands, package filters, or
+  project filters. Do not bypass that path with raw recursive per-package
+  commands unless the repo has no declared path or the issue is explicitly
+  repairing the task-runner path.
+- Prefer `pnpm <script>` or `pnpm --filter <pkg> <script>` for task execution
+  when that matches the repo's script contract.
+- Do not introduce new script names only to satisfy this skill; use the repo's
+  declared script contract.
 - When a repo's `.rulesync/` content or workflow docs change, use that repo's documented regeneration command. In Son of Anton source workspaces, that command is `pnpm renew:forge`.

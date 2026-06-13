@@ -64,11 +64,24 @@ state transitions, PR ownership, workpad, handoff, validation, and
 ## Testing Stack
 
 - Use Vitest for new tests.
-- Co-locate unit and integration tests with source using `*.unit.test.ts` and `*.int.test.ts`.
+- Follow the target repo's documented test-tier placement. When no repo
+  convention exists, default to co-located `*.unit.test.ts` and
+  `*.int.test.ts` files.
 - Keep shared test infrastructure in the repo's established shared test-support location.
 - If the behavior under test needs an end-to-end surface and one does not exist yet, set one up instead of pretending the coverage is optional.
-- Use `pnpm test:record-mocks` to record real API responses for replay-based integration tests.
+- Use the repo's declared replay-recording command to record real API
+  responses for replay-based integration tests.
 - Control test log visibility with `LOG_LEVEL=error`, `LOG_LEVEL=warn`, or `LOG_LEVEL=debug`.
+
+Use the repo's tier vocabulary. In generic terms, unit tests are hermetic and
+in-process; integration tests exercise repo wiring through public surfaces with
+externals mocked; e2e tests are opt-in live, streaming-paced, browser,
+wall-clock, deployed, or full-surface checks and are not the red-green loop.
+
+During iteration, prefer the narrowest repo-declared Vitest project, tier,
+package, or single-file command that exercises the behavior. When Vitest
+projects exist, use the narrowest project and file invocation that covers the
+current slice.
 
 ## MSW And Replay Handlers
 
@@ -82,12 +95,17 @@ state transitions, PR ownership, workpad, handoff, validation, and
 
 ## Validation Commands
 
-Run the repo's established lint, typecheck, test, and build scripts after
-changing TypeScript code or repo instructions.
+Use targeted-first validation while iterating, then run the established repo
+gate once near handoff unless role workflow, stale evidence, or cross-cutting
+changes require more. Prefer repo-declared package, tier, project, or
+single-file commands for the inner loop.
 
 In pnpm repos, run `pnpm lint:fix` after a completed development slice when
 that script exists, and run `pnpm build` near the end of the issue before
 opening or updating the PR.
+
+Keep agent-visible output bounded with repo-supported log controls such as
+`LOG_LEVEL` plus summaries, tails, and exit codes for long commands.
 
 ```bash
 pnpm lint:fix
