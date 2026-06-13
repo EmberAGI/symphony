@@ -145,7 +145,10 @@ defmodule SymphonyElixir.RoleSkillSourceTest do
       assert body =~ "Human Escalation"
     end
 
-    assert File.read!(Path.join([skills_dir(), "tdd", "SKILL.md"])) =~ "Mandatory for EMB-97"
+    tdd_body = File.read!(Path.join([skills_dir(), "tdd", "SKILL.md"]))
+    assert tdd_body =~ "primary development loop"
+    assert tdd_body =~ "Role workflows own the\ntrigger policy"
+
     assert File.read!(Path.join([skills_dir(), "frontend-design", "SKILL.md"])) =~ "Do not use this skill for backend-only changes"
   end
 
