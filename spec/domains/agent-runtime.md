@@ -287,6 +287,13 @@ verifiable against this matrix fails closed at config validation rather than at
 runtime. For example `model: sonnet, effort: xhigh` is rejected at config
 validation.
 
+Runtime Fable availability fallback: when a role profile selects Fable and the
+operator has marked Fable unavailable, the adapter preserves the preferred
+Fable profile in runtime metadata but launches Opus 4.8 at `high` effort. This
+fallback is not a reasoning-profile matrix rewrite; it is a temporary execution
+substitution so the wrapper can keep expressing the preferred profile and
+remove the fallback when Fable access returns.
+
 The adapter maps Claude terminal results onto normalized events:
 `result` with `is_error: true` and an auth HTTP status (401/403) fails closed
 as an operator-visible `auth_failed` `turn_failed`; `subtype:

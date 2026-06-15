@@ -44,6 +44,10 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   # an HTTP auth status. Both paths must fail closed.
   @auth_error_statuses [401, 403]
 
+  @fable_fallback_model "claude-opus-4-8"
+  @fable_fallback_effort "high"
+  @fable_fallback_reason "fable_unavailable"
+
   @no_thinking_env "MAX_THINKING_TOKENS"
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
@@ -202,30 +206,62 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     with {:ok, settings} <- Config.settings(),
          {:ok, profile} <- ImplementationEffort.profile_for_issue("claude_code", issue, role) do
       claude = settings.claude_code
+      {model, effort, no_thinking, fallback_metadata} = resolve_fallback(profile, claude)
 
       env =
         []
-        |> maybe_put_no_thinking_env(profile.no_thinking)
+        |> maybe_put_no_thinking_env(no_thinking)
 
       {:ok,
        %{
          base_command: claude.command,
-         model: profile.model || claude.model,
-         effort: profile.reasoning_effort,
-         no_thinking: profile.no_thinking,
+         model: model,
+         effort: effort,
+         no_thinking: no_thinking,
          permission_mode: claude.permission_mode,
          env: env,
          timeout_ms: claude.turn_timeout_ms,
-         metadata: %{
-           implementation_effort: profile.effort,
-           implementation_effort_source: profile.source,
-           claude_model: profile.model || claude.model,
-           claude_effort: profile.reasoning_effort,
-           claude_no_thinking: profile.no_thinking
-         }
+         metadata:
+           %{
+             implementation_effort: profile.effort,
+             implementation_effort_source: profile.source,
+             claude_model: model,
+             claude_effort: effort,
+             claude_no_thinking: no_thinking
+           }
+           |> Map.merge(fallback_metadata)
        }}
     end
   end
+
+  defp resolve_fallback(profile, claude) do
+    preferred_model = profile.model || claude.model
+    preferred_effort = profile.reasoning_effort
+    preferred_no_thinking = profile.no_thinking
+
+    if fable_model?(preferred_model) do
+      {@fable_fallback_model, @fable_fallback_effort, false,
+       %{
+         claude_preferred_model: preferred_model,
+         claude_preferred_effort: preferred_effort,
+         claude_preferred_no_thinking: preferred_no_thinking,
+         claude_fallback_reason: @fable_fallback_reason
+       }}
+    else
+      {preferred_model, preferred_effort, preferred_no_thinking, %{}}
+    end
+  end
+
+  defp fable_model?(model) when is_binary(model) do
+    normalized =
+      model
+      |> String.trim()
+      |> String.downcase()
+
+    normalized == "fable" or String.contains?(normalized, "claude-fable-")
+  end
+
+  defp fable_model?(_model), do: false
 
   defp maybe_put_no_thinking_env(env, true), do: [{@no_thinking_env, "0"} | env]
   defp maybe_put_no_thinking_env(env, _false), do: env

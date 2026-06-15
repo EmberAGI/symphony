@@ -272,6 +272,37 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     end
   end
 
+  test "falls back from preferred Fable profiles to Opus high at launch" do
+    ctx = setup_workspace("MT-CC-fable-fallback")
+
+    try do
+      configure!(ctx, stream_success(), claude_code_model: "sonnet", claude_code_effort: "low", claude_code_no_thinking: true)
+
+      {result, events, trace} =
+        run_shim(ctx, "do work", labels: ["implementation-effort:extreme"], role: "qa")
+
+      assert {:ok, _turn} = result
+      assert trace =~ "--model claude-opus-4-8"
+      assert trace =~ "--effort high"
+      refute trace =~ "--model fable"
+      refute trace =~ "--model claude-fable-5"
+      refute trace =~ "--effort xhigh"
+      refute trace =~ "ENV_MAX_THINKING_TOKENS:0"
+
+      completed = Enum.find(events, &(&1.event == :turn_completed))
+      assert completed.implementation_effort == "extreme"
+      assert completed.implementation_effort_source == "label"
+      assert completed.claude_model == "claude-opus-4-8"
+      assert completed.claude_effort == "high"
+      assert completed.claude_no_thinking == false
+      assert completed.claude_preferred_model == "fable"
+      assert completed.claude_preferred_effort == "xhigh"
+      assert completed.claude_fallback_reason == "fable_unavailable"
+    after
+      File.rm_rf(ctx.test_root)
+    end
+  end
+
   test "redacts credential-bearing fields from emitted events" do
     ctx = setup_workspace("MT-CC-secret")
 
