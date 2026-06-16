@@ -714,6 +714,7 @@ defmodule SymphonyElixir.CoreTest do
   test "retry timer refreshes retried issue by id instead of fetching candidate page" do
     previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
     previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    default_orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
     issue_id = "issue-retry-by-id"
 
     issue = %Issue{
@@ -725,12 +726,24 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
+    if is_pid(default_orchestrator_pid) do
+      :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
+    end
+
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
     on_exit(fn ->
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+
+      if is_pid(default_orchestrator_pid) and is_nil(Process.whereis(SymphonyElixir.Orchestrator)) do
+        case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+          {:error, :running} -> :ok
+        end
+      end
     end)
 
     state = %Orchestrator.State{
