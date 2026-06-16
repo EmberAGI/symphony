@@ -50,5 +50,7 @@ Use this skill for Node.js runtime and project policy. Keep language-specific ru
 ## Validation
 
 - After changing Node.js runtime code or repo automation, run the relevant package scripts instead of one-off substitutes.
-- Run the repo's established lint, test, and build scripts after changing Node.js runtime surfaces.
+- While iterating, use targeted package or runtime scripts that exercise the
+  changed behavior. Near handoff, run the repo's established gate for lint,
+  test, build, or runtime validation as applicable.
 - In pnpm repos, `pnpm lint:fix` and `pnpm build` are the preferred script forms when those scripts exist.

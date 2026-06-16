@@ -1,27 +1,27 @@
 ---
 name: tdd
-description: Test-driven development with red-green-refactor loop. Mandatory for EMB-97 child work and for future issues that ask for TDD, red-green-refactor, test-first implementation, or integration-test-first development.
+description: Primary test-driven development loop for implementation work, used by default when the active role workflow requires TDD, red-green-refactor, test-first implementation, or integration-test-first development.
 ---
 
 # Test-Driven Development
 
 ## Octo Implementer Use
 
-Use this skill for implementer role work when the owning issue, issue body,
-Codex Workpad, Symphony Handoff trail, linked specs, or user request asks for
-TDD, red-green-refactor, test-first implementation, integration-test-first
-development, or any EMB-97 child deliverable that names TDD.
+Use this skill as the primary development loop for implementation work when
+the active role workflow requires TDD, red-green-refactor, test-first
+implementation, or integration-test-first development. Role workflows own the
+trigger policy; this skill owns how to execute the loop once active.
 
 This skill does not replace Octo workflow authority. Linear repository
-metadata, the issue branch, state transitions, PR ownership, the mutable
-`## Codex Workpad`, immutable `## Symphony Handoff` fields, validation
-requirements, and `Human Escalation` routing remain authoritative. If this
-skill conflicts with issue instructions, specs, ADRs, or handoff guidance,
-record the conflict and route per the role workflow instead of silently
-choosing the skill.
+metadata, the issue branch, state transitions, PR ownership, legacy
+`## Codex Workpad` context when present, immutable `## Symphony Handoff`
+fields, validation requirements, and `Human Escalation` routing remain
+authoritative. If this skill conflicts with issue instructions, specs, ADRs,
+or handoff guidance, record the conflict and route per the role workflow
+instead of silently choosing the skill.
 
-For unattended Symphony implementer runs, treat the "get user approval" steps
-below as "derive approval from durable source artifacts already present in the
+For unattended Symphony implementer runs, treat approval steps as "derive
+approval from durable source artifacts already present in the
 issue, specs, ADRs, workpad, or handoff." Ask the user only when required
 source artifacts are missing, unreadable, or conflicting.
 
@@ -60,63 +60,135 @@ RIGHT (vertical):
   ...
 ```
 
-## Workflow
+## Execution Contract
 
-### 1. Planning
+The three laws of TDD:
 
-When exploring the codebase, use the project's domain glossary so that test names and interface vocabulary match the project's language, and respect ADRs in the area you're touching.
+1. Do not write production logic until a failing test requires it.
+2. Do not write more of a test than is sufficient to fail for the current
+   behavior.
+3. Do not write more production code than is sufficient to pass the current
+   failing test.
 
-Before writing any code:
+### 1. Plan Behavior Slices
 
-- [ ] Confirm with user what interface changes are needed
-- [ ] Confirm with user which behaviors to test (prioritize)
-- [ ] Identify opportunities for [deep modules](deep-modules.md) (small interface, deep implementation)
-- [ ] Design interfaces for [testability](interface-design.md)
-- [ ] List the behaviors to test (not implementation steps)
-- [ ] Get user approval on the plan
+When exploring the codebase, use the project's domain glossary so that test
+names and interface vocabulary match the project's language, and respect ADRs
+in the area you're touching.
 
-Ask: "What should the public interface look like? Which behaviors are most important to test?"
+Before writing implementation logic:
 
-**You can't test everything.** Confirm with the user exactly which behaviors matter most. Focus testing effort on critical paths and complex logic, not every possible edge case.
+- Identify the public interface or boundary for the change.
+- Build a behavior list from acceptance criteria. Each acceptance criterion
+  gets at least one red-green-refactor cycle; record discovered extra
+  behaviors in the role-owned handoff or evidence surface.
+- Identify opportunities for [deep modules](deep-modules.md) and
+  [testable interfaces](interface-design.md).
+- Derive unattended-run approval from durable source artifacts when humans are
+  not in the loop.
 
-### 2. Tracer Bullet
+You cannot test everything. Focus testing effort on critical paths, complex
+logic, and externally observable behavior. Do not add tests whose only value is
+checking compiler or type-system guarantees.
 
-Write ONE test that confirms ONE thing about the system:
+### 2. RED
 
-```
-RED:   Write test for first behavior → test fails
-GREEN: Write minimal code to pass → test passes
-```
+Write exactly one failing test for the current behavior slice.
 
-This is your tracer bullet - proves the path works end-to-end.
+The current slice's first red test is a tracer test at that slice's declared
+boundary: HTTP surface, exported entry point, public module interface, service
+method, worker contract, or similar repo-defined public surface. This is
+integration-tier by default when the target repo has an integration tier.
+Pure-logic slices may be unit-only when the handoff or evidence records the
+rationale. This does not mean every test in the issue is integration-tier, and
+it never makes e2e part of the red-green loop.
 
-### 3. Incremental Loop
+In RED mode, source changes outside tests must be declaration-only: types,
+interfaces, empty or throwing stubs, module exports, or equivalent compile
+scaffolding. Production logic in a RED diff is a violation.
 
-For each remaining behavior:
+Run the narrowest command that proves the test fails and capture the failure
+excerpt for the behavior. Assertion-level red evidence is required at least
+once per behavior. Compile-failure counts as red only for scaffold steps before
+the behavior can reach an assertion.
 
-```
-RED:   Write next test → fails
-GREEN: Minimal code to pass → passes
-```
+### 3. GREEN
+
+Write the minimal implementation needed for the current test to pass.
 
 Rules:
 
-- One test at a time
-- Only enough code to pass current test
-- Don't anticipate future tests
-- Keep tests focused on observable behavior
+- One failing test per iteration.
+- Minimal implementation per slice.
+- No speculative features.
+- No broad refactors while RED.
+- Keep tests focused on observable behavior through public interfaces.
 
-### 4. Refactor
+After the narrow test passes, commit or checkpoint at a per-slice cadence when
+the role workflow expects commits. Separate red-only commits are not required:
+failing commits harm bisect and revert hygiene, so captured red excerpts carry
+the audit burden.
 
-After all tests pass, look for [refactor candidates](refactoring.md):
+### 4. Refactor And Harden
 
-- [ ] Extract duplication
-- [ ] Deepen modules (move complexity behind simple interfaces)
-- [ ] Apply SOLID principles where natural
-- [ ] Consider what new code reveals about existing code
-- [ ] Run tests after each refactor step
+After the current slice is GREEN, look for [refactor candidates](refactoring.md):
 
-**Never refactor while RED.** Get to GREEN first.
+- Extract duplication.
+- Deepen modules by moving complexity behind simple interfaces.
+- Apply SOLID principles where natural.
+- Consider what new code reveals about existing code.
+- Run targeted tests after each refactor step.
+
+Add one or two edge or negative cases per meaningful boundary after the
+tracer path is green. Use property-based tests where pure or branchy logic
+warrants it. Coverage is a guardrail, not a target.
+
+## Test Tiers
+
+Use the target repo's documented test tier names, suffixes, budgets, owners,
+triggers, placement rules, and gate commands. In generic terms:
+
+- Unit tests are hermetic, in-process, and use fake time when needed.
+- Integration tests exercise real repo wiring through public module boundaries
+  while mocking external providers and nondeterministic boundaries.
+- E2e tests cover live, streaming-paced, wall-clock, browser, CLI, deployed, or
+  other full-surface behavior.
+
+E2e is never the red-green loop. Use it as opt-in acceptance or release
+evidence when the repo or issue calls for it.
+
+## Loop Economics
+
+Iterate with the narrowest test file, project, package, or tier command that
+exercises the current behavior. Run the full repo gate once near handoff unless
+the role workflow, stale evidence, or a cross-cutting change requires more.
+
+If the repo declares affected or cached task-runner commands through Turbo, Nx,
+Vitest projects, package filters, or another runner, use those paths instead of
+bypassing them with ad hoc broad recursion. Do not invent script names; use the
+repo's declared script contract.
+
+Bound long agent-visible output with summaries, tails, exit codes, and
+repo-supported log controls such as `LOG_LEVEL`. Preserve enough failure text
+to make the red/green evidence reviewable without streaming full logs into the
+conversation.
+
+## Mocking Doctrine
+
+Mock external providers, network services, clocks, randomness, process
+boundaries, and other nondeterministic dependencies. Prefer real code through
+owned public interfaces. Use fakes only at real seams or adapters.
+
+Do not mock private helpers, internal collaborators, or implementation details
+as a substitute for behavior coverage. External HTTP should use the target
+repo's standard MSW, stub-server, record-replay, or equivalent convention.
+
+## Skill Evaluation Carve-Out
+
+Repo-owned skill packages may validate through `skill-creator` evals when
+RED/GREEN unit tests are not the right behavior surface. Skill behavior and
+quality should be evaluated with realistic prompt-based evals and human review
+rather than brittle string-matching tests as the primary validation path.
 
 ## Checklist Per Cycle
 

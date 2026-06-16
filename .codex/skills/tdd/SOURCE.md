@@ -9,8 +9,16 @@
 
 ## Local Adaptation
 
-The upstream directory is preserved and augmented with Octo implementer
-activation rules in [SKILL.md](SKILL.md). The local rules make TDD mandatory
-for EMB-97 and future explicit TDD, red-green-refactor, test-first, or
-integration-test-first issue scopes while preserving Linear, branch, workpad,
-handoff, validation, PR, and escalation authority.
+The five supporting docs from upstream are preserved byte-pristine to keep the
+re-sync path clear. [SKILL.md](SKILL.md) intentionally diverges from upstream:
+it keeps the Octo authority and unattended approval translation, then replaces
+the upstream Workflow section with a merged Symphony execution contract.
+
+That local execution contract restores the default-on implementer TDD doctrine
+from `EmberAGI/son-of-anton@faf1d5a` while keeping activation, routing,
+handoff evidence, and submodule delivery owned by Octo role workflows. The
+contract adds the Three Laws of TDD, declaration-only RED discipline,
+red-evidence capture, current-slice public-boundary tracer tests, generic test
+tier binding, targeted-first/gate-once loop economics, bounded output,
+repo-declared task-runner respect, checkpoint-commit trade-offs, mocking
+doctrine, and the skill-eval carve-out.
