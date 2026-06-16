@@ -711,6 +711,61 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "retry timer refreshes retried issue by id instead of fetching candidate page" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    default_orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
+    issue_id = "issue-retry-by-id"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-565",
+      title: "Retry by id",
+      state: "Done"
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    if is_pid(default_orchestrator_pid) do
+      :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
+    end
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+
+      if is_pid(default_orchestrator_pid) and is_nil(Process.whereis(SymphonyElixir.Orchestrator)) do
+        case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+          {:error, :running} -> :ok
+        end
+      end
+    end)
+
+    state = %Orchestrator.State{
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{}
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    {:noreply, state} =
+      Orchestrator.handle_retry_issue_for_test(state, issue_id, 1, %{
+        identifier: issue.identifier,
+        error: "agent exited: :boom"
+      })
+
+    assert_receive {:memory_tracker_fetch_issue_states_by_ids, [^issue_id]}, 500
+    refute_receive {:memory_tracker_fetch_candidate_issues, [^issue_id]}, 100
+
+    refute MapSet.member?(state.claimed, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+  end
+
   test "claim reconciliation releases only claims that are not running or retrying" do
     running_issue_id = "issue-running-claim"
     retrying_issue_id = "issue-retrying-claim"

@@ -82,7 +82,7 @@ Important boundary:
 
 3. `Issue Tracker Client`
    - Fetches candidate issues in active states.
-   - Fetches current states for specific issue IDs (reconciliation).
+   - Fetches current states for specific issue IDs (reconciliation and retry refresh).
    - Fetches terminal-state issues during startup cleanup.
    - Normalizes tracker payloads into a stable issue model.
 
@@ -773,20 +773,21 @@ Backoff formula:
 
 Retry handling behavior:
 
-1. Fetch active candidate issues (not all issues).
-2. Find the specific issue by `issue_id`.
+1. Fetch the specific retried issue with `fetch_issue_states_by_ids([issue_id])`.
+2. Treat an empty result as missing.
 3. If not found, release claim.
-4. If found and still candidate-eligible:
+4. If found in a terminal state, release claim and clean the issue workspace.
+5. If found and still candidate-eligible:
    - Dispatch if slots are available.
    - Otherwise requeue with error `no available orchestrator slots`.
-5. If found but no longer active, release claim.
+6. If found but no longer active, release claim without workspace cleanup.
 
 Note:
 
-- Terminal-state workspace cleanup is handled by startup cleanup and active-run reconciliation
-  (including terminal transitions for currently running issues).
-- Retry handling mainly operates on active candidates and releases claims when the issue is absent,
-  rather than performing terminal cleanup itself.
+- Retry handling uses the by-id state refresh path, not the full candidate-page query, to avoid
+  multiplying tracker/API cost during retry storms.
+- Terminal-state workspace cleanup is performed directly by the retry path for the retried issue,
+  and is also handled by startup cleanup and active-run reconciliation for their respective scopes.
 
 ### 8.5 Active Run Reconciliation
 
@@ -1155,7 +1156,7 @@ An implementation MUST support these tracker adapter operations:
    - Used for startup terminal cleanup.
 
 3. `fetch_issue_states_by_ids(issue_ids)`
-   - Used for active-run reconciliation.
+   - Used for active-run reconciliation and retry-timer refresh of a specific queued issue.
 
 ### 11.2 Query Semantics (Linear)
 
@@ -1919,15 +1920,24 @@ on_retry_timer(issue_id, state):
   if missing:
     return state
 
-  candidates = tracker.fetch_candidate_issues()
+  refreshed = tracker.fetch_issue_states_by_ids([issue_id])
   if fetch failed:
     return schedule_retry(state, issue_id, retry_entry.attempt + 1, {
       identifier: retry_entry.identifier,
       error: "retry poll failed"
     })
 
-  issue = find_by_id(candidates, issue_id)
+  issue = first_issue_with_id(refreshed, issue_id)
   if issue is null:
+    state.claimed.remove(issue_id)
+    return state
+
+  if issue.state is terminal:
+    cleanup_workspace(issue)
+    state.claimed.remove(issue_id)
+    return state
+
+  if issue is not candidate-eligible:
     state.claimed.remove(issue_id)
     return state
 
@@ -2018,6 +2028,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Abnormal worker exit increments retries with 10s-based exponential backoff
 - Retry backoff cap uses configured `agent.max_retry_backoff_ms`
 - Retry queue entries include attempt, due time, identifier, and error
+- Retry timer refreshes the queued issue by ID rather than fetching the full candidate page
+- Retry timer releases claims for missing or inactive issues and cleans workspaces for terminal
+  issues
 - Stall detection kills stalled sessions and schedules retry
 - Slot exhaustion requeues retries with explicit error reason
 - If a snapshot API is implemented, it returns running rows, retry rows, token totals, and rate
