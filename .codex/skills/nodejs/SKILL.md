@@ -46,6 +46,12 @@ Use this skill for Node.js runtime and project policy. Keep language-specific ru
 
 - Do not introduce a different package manager into a Node.js repo in this ecosystem.
 - Keep linting, formatting, tests, and build steps as separate scripts so automation remains predictable.
+- Preserve public default command names unless the Linear issue explicitly
+  scopes a durable rename or command-surface change.
+- Do not add package scripts, env examples or templates, task-runner or cache
+  config, runtime helpers, or wrapper scripts solely for agent validation
+  convenience. Use the repo's existing command surface and record any measured
+  blocker before proposing durable automation changes.
 
 ## Validation
 

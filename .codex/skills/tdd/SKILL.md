@@ -148,14 +148,27 @@ warrants it. Coverage is a guardrail, not a target.
 Use the target repo's documented test tier names, suffixes, budgets, owners,
 triggers, placement rules, and gate commands. In generic terms:
 
-- Unit tests are hermetic, in-process, and use fake time when needed.
+- Unit tests are hermetic, in-process, and use fake time when needed. They do
+  not use live providers, production secrets, real network calls, or wall-clock
+  sleeps.
 - Integration tests exercise real repo wiring through public module boundaries
-  while mocking external providers and nondeterministic boundaries.
+  while mocking external providers and nondeterministic boundaries. They should
+  prefer fake timers, local mocks, record/replay fixtures, stub servers, or
+  equivalent seams for clocks, randomness, network, process, and provider
+  behavior.
 - E2e tests cover live, streaming-paced, wall-clock, browser, CLI, deployed, or
   other full-surface behavior.
 
-E2e is never the red-green loop. Use it as opt-in acceptance or release
-evidence when the repo or issue calls for it.
+E2e or other opt-in suites are never the red-green loop. Use them as
+acceptance or release evidence when the repo or issue calls for them. Repos
+that maintain e2e, live, or opt-in suites should document their trigger,
+owner, budget, and required environment.
+
+When repo-level parallelism is expected, integration tests should isolate ports,
+temporary directories, databases, queues, caches, and other mutable state per
+test worker or process. If the repo has a flake, quarantine, retry, or skip
+convention, use it only with an explicit owner, rationale, and follow-up path
+instead of hiding an unknown failure.
 
 ## Loop Economics
 
