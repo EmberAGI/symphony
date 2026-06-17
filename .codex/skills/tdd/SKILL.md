@@ -152,10 +152,10 @@ triggers, placement rules, and gate commands. In generic terms:
   not use live providers, production secrets, real network calls, or wall-clock
   sleeps.
 - Integration tests exercise real repo wiring through public module boundaries
-  while mocking external providers and nondeterministic boundaries. They should
-  prefer fake timers, local mocks, record/replay fixtures, stub servers, or
-  equivalent seams for clocks, randomness, network, process, and provider
-  behavior.
+  while still avoiding live providers, production secrets, real external
+  network calls, and wall-clock sleeps. They should prefer fake timers, local
+  mocks, record/replay fixtures, stub servers, or equivalent seams for clocks,
+  randomness, network, process, and provider behavior.
 - E2e tests cover live, streaming-paced, wall-clock, browser, CLI, deployed, or
   other full-surface behavior.
 
