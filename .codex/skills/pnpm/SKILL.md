@@ -71,6 +71,16 @@ Repos may also define more specific scripts such as:
   repairing the task-runner path.
 - Prefer `pnpm <script>` or `pnpm --filter <pkg> <script>` for task execution
   when that matches the repo's script contract.
-- Do not introduce new script names only to satisfy this skill; use the repo's
-  declared script contract.
-- When a repo's `.rulesync/` content or workflow docs change, use that repo's documented regeneration command. In Son of Anton source workspaces, that command is `pnpm renew:forge`.
+- Raw `pnpm --filter` package, dependent, or changed-workspace filters are
+  acceptable validation evidence when the repo has no durable affected command.
+  Record the selected packages or projects, the filter or command shape, and
+  useful timing evidence when reporting validation.
+- Do not introduce new script names such as `list:affected`, `test:affected`,
+  or equivalent workflow helpers only to satisfy this skill; use the repo's
+  declared script contract or raw pnpm filters as bounded evidence.
+- Before proposing Turbo, Nx, another cache/task runner, helper scripts, or
+  task-runner config, optimize and measure the existing pnpm or package-runner
+  path. A fallback needs measured blocker evidence and issue or operator scope
+  approval.
+- When a repo's `.rulesync/` content or workflow docs change, use that repo's
+  documented regeneration command.
