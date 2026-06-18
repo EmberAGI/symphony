@@ -1420,18 +1420,18 @@ defmodule SymphonyElixir.Orchestrator do
     max(@claim_lease_min_ttl_ms, max(config.codex.stall_timeout_ms, config.polling.interval_ms * 2))
   end
 
-  defp claim_lease_allows_top_level_dispatch?(%Issue{claim_lease: %ClaimLease{} = claim_lease}) do
+  defp claim_lease_allows_top_level_dispatch?(%Issue{claim_lease: %ClaimLease{} = claim_lease} = issue) do
     now = DateTime.utc_now()
-    !ClaimLease.active_or_recoverable?(claim_lease, now)
+    !claim_lease_blocks_current_dispatch?(issue, claim_lease, now)
   end
 
   defp claim_lease_allows_top_level_dispatch?(%Issue{}), do: true
 
-  defp claim_lease_allows_dispatch?(%Issue{claim_lease: %ClaimLease{} = claim_lease}, true) do
+  defp claim_lease_allows_dispatch?(%Issue{claim_lease: %ClaimLease{} = claim_lease} = issue, true) do
     now = DateTime.utc_now()
 
     cond do
-      !ClaimLease.active_or_recoverable?(claim_lease, now) ->
+      !claim_lease_blocks_current_dispatch?(issue, claim_lease, now) ->
         true
 
       ClaimLease.owned_by_current_holder?(claim_lease) and normalize_claim_lease_state(claim_lease.state) == "retrying" ->
@@ -1449,6 +1449,62 @@ defmodule SymphonyElixir.Orchestrator do
   defp normalize_claim_lease_state(state) when is_binary(state) do
     state |> String.trim() |> String.downcase()
   end
+
+  defp claim_lease_blocks_current_dispatch?(%Issue{} = issue, %ClaimLease{} = claim_lease, %DateTime{} = now) do
+    ClaimLease.active_or_recoverable?(claim_lease, now) and
+      claim_lease_role_matches?(claim_lease) and
+      claim_lease_workspace_matches?(issue, claim_lease)
+  end
+
+  defp claim_lease_role_matches?(%ClaimLease{role: role}) do
+    blank?(role) or role == ClaimLease.role_name()
+  end
+
+  defp claim_lease_workspace_matches?(%Issue{} = issue, %ClaimLease{workspace_path: workspace_path}) do
+    blank?(workspace_path) or
+      workspace_paths_match?(workspace_path, expected_workspace_path(issue))
+  end
+
+  defp workspace_paths_match?(workspace_path, expected_workspace_path)
+       when is_binary(workspace_path) and is_binary(expected_workspace_path) do
+    normalize_workspace_path(workspace_path) == normalize_workspace_path(expected_workspace_path)
+  end
+
+  defp workspace_paths_match?(_workspace_path, _expected_workspace_path), do: false
+
+  defp expected_workspace_path(%Issue{} = issue) do
+    case issue.identifier || issue.id do
+      identifier when is_binary(identifier) and identifier != "" ->
+        Path.join(Config.settings!().workspace.root, workspace_basename(identifier, issue.repository))
+
+      _ ->
+        nil
+    end
+  end
+
+  defp workspace_basename(identifier, repository) do
+    case repository_workspace_suffix(repository) do
+      nil -> safe_workspace_name(identifier)
+      "" -> safe_workspace_name(identifier)
+      suffix -> "#{safe_workspace_name(identifier)}-#{suffix}"
+    end
+  end
+
+  defp repository_workspace_suffix(repository) when is_binary(repository) and repository != "" do
+    repository
+    |> String.split("/", parts: 2)
+    |> List.last()
+    |> safe_workspace_name()
+  end
+
+  defp repository_workspace_suffix(_repository), do: nil
+
+  defp normalize_workspace_path(path) when is_binary(path), do: path |> Path.expand() |> Path.absname()
+
+  defp safe_workspace_name(value) when is_binary(value), do: String.replace(value, ~r/[^a-zA-Z0-9._-]/, "_")
+  defp safe_workspace_name(_value), do: nil
+
+  defp blank?(value), do: !is_binary(value) or String.trim(value) == ""
 
   defp process_ownership_blocks_dispatch?(%Issue{} = issue) do
     case ProcessOwnership.blocking_record(issue) do

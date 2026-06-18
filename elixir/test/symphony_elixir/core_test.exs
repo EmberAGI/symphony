@@ -1105,6 +1105,85 @@ defmodule SymphonyElixir.CoreTest do
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "dispatch allows active claim lease for a different role" do
+    previous_holder = Application.get_env(:symphony_elixir, :claim_lease_holder)
+    previous_role = System.get_env("SYMPHONY_ROLE")
+
+    on_exit(fn ->
+      restore_app_env(:claim_lease_holder, previous_holder)
+      restore_env("SYMPHONY_ROLE", previous_role)
+    end)
+
+    Application.put_env(:symphony_elixir, :claim_lease_holder, "this-reviewer")
+    System.put_env("SYMPHONY_ROLE", "reviewer")
+
+    issue = %Issue{
+      id: "issue-cross-role-lease",
+      identifier: "MT-573",
+      title: "Cross role lease",
+      state: "In Progress",
+      claim_lease:
+        ClaimLease.new(%{
+          issue_id: "issue-cross-role-lease",
+          issue_identifier: "MT-573",
+          role: "implementer",
+          holder: "other-worker",
+          run_id: "run-other",
+          refreshed_at: DateTime.utc_now(),
+          expires_at: DateTime.add(DateTime.utc_now(), 60, :second),
+          state: "active"
+        })
+    }
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch allows active claim lease for a different explicit workspace" do
+    previous_holder = Application.get_env(:symphony_elixir, :claim_lease_holder)
+
+    on_exit(fn ->
+      restore_app_env(:claim_lease_holder, previous_holder)
+    end)
+
+    Application.put_env(:symphony_elixir, :claim_lease_holder, "this-worker")
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-cross-workspace-lease-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-cross-workspace-lease",
+      identifier: "MT-574",
+      title: "Cross workspace lease",
+      state: "In Progress",
+      repository: "EmberAGI/symphony",
+      claim_lease:
+        ClaimLease.new(%{
+          issue_id: "issue-cross-workspace-lease",
+          issue_identifier: "MT-574",
+          role: "implementer",
+          holder: "other-worker",
+          run_id: "run-other",
+          workspace_path: Path.join(workspace_root, "other-workspace"),
+          refreshed_at: DateTime.utc_now(),
+          expires_at: DateTime.add(DateTime.utc_now(), 60, :second),
+          state: "active"
+        })
+    }
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
   test "final dispatch revalidation refuses an active external claim lease" do
     issue = %Issue{
       id: "issue-final-lease",
@@ -1202,6 +1281,89 @@ defmodule SymphonyElixir.CoreTest do
     state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
 
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch allows process ownership for a different role" do
+    previous_role = System.get_env("SYMPHONY_ROLE")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_ROLE", previous_role)
+    end)
+
+    System.put_env("SYMPHONY_ROLE", "reviewer")
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-cross-role-process-ownership-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-cross-role-process",
+      identifier: "MT-575",
+      title: "Cross role process ownership",
+      state: "In Progress"
+    }
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    :ok =
+      ProcessOwnership.record_active(issue, %{
+        role: "implementer",
+        run_id: "run-implementer-process",
+        worker_host: "worker-a"
+      })
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch allows process ownership for a different explicit workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-cross-workspace-process-ownership-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-cross-workspace-process",
+      identifier: "MT-576",
+      title: "Cross workspace process ownership",
+      state: "In Progress",
+      repository: "EmberAGI/symphony"
+    }
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    registry_path = ProcessOwnership.registry_path(issue)
+    File.mkdir_p!(Path.dirname(registry_path))
+
+    File.write!(
+      registry_path,
+      Jason.encode!(%{
+        "version" => 1,
+        "issue_id" => issue.id,
+        "issue_identifier" => issue.identifier,
+        "role" => "implementer",
+        "run_id" => "run-other-workspace-process",
+        "worker_host" => "worker-a",
+        "workspace_path" => Path.join(workspace_root, "other-workspace"),
+        "state" => "active",
+        "cleanup_status" => "active",
+        "updated_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+      }) <> "\n"
+    )
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
   test "dispatch refuses when remote process ownership is still active" do

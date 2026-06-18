@@ -39,7 +39,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     issue
     |> candidate_paths()
     |> Enum.flat_map(&read_record/1)
-    |> Enum.find(&blocking_record?/1)
+    |> Enum.find(&blocking_record?(&1, issue))
   end
 
   @spec status_for_issue(Issue.t()) :: map() | nil
@@ -157,11 +157,39 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     end
   end
 
-  defp blocking_record?(%{"state" => state} = record) when state in ["active", "quarantined"] do
-    state == "quarantined" or active_record_blocks?(record)
+  defp blocking_record?(%{"state" => state} = record, %Issue{} = issue) when state in ["active", "quarantined"] do
+    record_scope_matches?(record, issue) and (state == "quarantined" or active_record_blocks?(record))
   end
 
-  defp blocking_record?(_record), do: false
+  defp blocking_record?(_record, _issue), do: false
+
+  defp record_scope_matches?(record, %Issue{} = issue) do
+    record_role_matches?(record) and record_workspace_matches?(record, issue)
+  end
+
+  defp record_role_matches?(record) do
+    case string_value(record["role"]) do
+      nil -> true
+      role -> role == current_role()
+    end
+  end
+
+  defp record_workspace_matches?(record, %Issue{} = issue) do
+    case string_value(record["workspace_path"]) do
+      nil ->
+        true
+
+      workspace_path ->
+        workspace_paths_match?(workspace_path, expected_workspace_path(issue))
+    end
+  end
+
+  defp workspace_paths_match?(workspace_path, expected_workspace_path)
+       when is_binary(workspace_path) and is_binary(expected_workspace_path) do
+    normalize_workspace_path(workspace_path) == normalize_workspace_path(expected_workspace_path)
+  end
+
+  defp workspace_paths_match?(_workspace_path, _expected_workspace_path), do: false
 
   defp active_record_blocks?(%{"worker_host" => worker_host}) when is_binary(worker_host) and worker_host != "",
     do: true
@@ -220,6 +248,8 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   defp record_sort_key(%{"updated_at" => updated_at}) when is_binary(updated_at), do: updated_at
   defp record_sort_key(_record), do: ""
+
+  defp normalize_workspace_path(path) when is_binary(path), do: path |> Path.expand() |> Path.absname()
 
   defp safe_name(value) when is_binary(value), do: String.replace(value, ~r/[^a-zA-Z0-9._-]/, "_")
   defp safe_name(_value), do: nil
