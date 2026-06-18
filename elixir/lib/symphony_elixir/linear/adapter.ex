@@ -87,8 +87,7 @@ defmodule SymphonyElixir.Linear.Adapter do
 
     with :ok <- write_claim_lease_comment(lease),
          {:ok, [refetched_issue | _]} <- client_module().fetch_issue_states_by_ids([issue_id]),
-         %ClaimLease{} = verified <- Map.get(refetched_issue, :claim_lease),
-         true <- verified.holder == lease.holder and verified.run_id == lease.run_id do
+         %ClaimLease{} = verified <- verified_claim_lease(refetched_issue, lease) do
       {:ok, verified}
     else
       {:ok, []} -> {:error, :claim_lease_issue_not_found}
@@ -116,6 +115,34 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   defp client_module do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
+  end
+
+  defp verified_claim_lease(refetched_issue, %ClaimLease{} = lease) do
+    refetched_issue
+    |> claim_lease_candidates()
+    |> Enum.find(&same_claim_lease?(&1, lease))
+  end
+
+  defp claim_lease_candidates(refetched_issue) do
+    leases =
+      refetched_issue
+      |> Map.get(:claim_leases, [])
+      |> Enum.filter(&match?(%ClaimLease{}, &1))
+
+    case Map.get(refetched_issue, :claim_lease) do
+      %ClaimLease{} = lease -> [lease | leases]
+      _ -> leases
+    end
+    |> Enum.uniq_by(&claim_lease_identity/1)
+  end
+
+  defp same_claim_lease?(%ClaimLease{} = left, %ClaimLease{} = right) do
+    left.holder == right.holder and left.run_id == right.run_id and
+      (is_nil(right.comment_id) or left.comment_id == right.comment_id)
+  end
+
+  defp claim_lease_identity(%ClaimLease{} = lease) do
+    {lease.comment_id, lease.role, lease.workspace_path, lease.holder, lease.run_id}
   end
 
   defp write_claim_lease_comment(%ClaimLease{comment_id: comment_id} = lease)

@@ -539,6 +539,8 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp normalize_issue(issue, assignee_filter) when is_map(issue) do
     assignee = issue["assignee"]
+    comments = extract_comments(issue)
+    claim_leases = ClaimLease.all(comments)
 
     %Issue{
       id: issue["id"],
@@ -552,11 +554,12 @@ defmodule SymphonyElixir.Linear.Client do
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
       blocked_by: extract_blockers(issue),
-      comments: extract_comments(issue),
+      comments: comments,
       attachments: extract_attachments(issue),
       repository: repository_from_labels(issue),
       repository_source: repository_source(issue),
-      claim_lease: ClaimLease.find(extract_comments(issue)),
+      claim_lease: List.first(claim_leases),
+      claim_leases: claim_leases,
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
       created_at: parse_datetime(issue["createdAt"]),

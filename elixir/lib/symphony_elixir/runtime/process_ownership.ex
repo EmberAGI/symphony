@@ -37,16 +37,24 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   @spec blocking_record(Issue.t()) :: map() | nil
   def blocking_record(%Issue{} = issue) do
     issue
-    |> candidate_paths()
+    |> candidate_record_paths()
     |> Enum.flat_map(&read_record/1)
     |> Enum.find(&blocking_record?(&1, issue))
   end
 
   @spec status_for_issue(Issue.t()) :: map() | nil
   def status_for_issue(%Issue{} = issue) do
-    issue
-    |> candidate_paths()
-    |> Enum.flat_map(&read_record/1)
+    records =
+      issue
+      |> candidate_record_paths()
+      |> Enum.flat_map(&read_record/1)
+
+    scoped_records = Enum.filter(records, &record_scope_matches?(&1, issue))
+
+    case scoped_records do
+      [] -> records
+      records -> records
+    end
     |> Enum.max_by(&record_sort_key/1, fn -> nil end)
     |> normalize_status()
   end
@@ -63,7 +71,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp write_record(%Issue{} = issue, attrs, state) do
     normalized_attrs = normalize_attrs(attrs)
     workspace_path = normalized_attrs.workspace_path
-    path = registry_path(issue, workspace_path)
+    path = scoped_registry_path(issue, normalized_attrs)
     now = DateTime.utc_now() |> DateTime.to_iso8601()
 
     record =
@@ -120,11 +128,38 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     pid_value(attrs[key]) || pid_value(attrs[Atom.to_string(key)])
   end
 
-  defp candidate_paths(%Issue{} = issue) do
+  defp scoped_registry_path(%Issue{} = issue, normalized_attrs) when is_map(normalized_attrs) do
+    base = normalized_attrs.workspace_path || Config.settings!().workspace.root
+    Path.join([base, @registry_dir, scoped_registry_filename(issue, normalized_attrs)])
+  end
+
+  defp scoped_registry_filename(%Issue{} = issue, attrs) do
+    issue_scope = safe_name(issue.id || issue.identifier || "issue")
+    role_scope = safe_name(attrs.role || current_role() || "role")
+    workspace_scope = safe_name(workspace_scope_name(attrs.workspace_path))
+    run_scope = safe_name(attrs.run_id || attrs.holder || "run")
+
+    [issue_scope, role_scope, workspace_scope, run_scope]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("--")
+    |> Kernel.<>(".json")
+  end
+
+  defp workspace_scope_name(nil), do: "default"
+  defp workspace_scope_name(path) when is_binary(path), do: Path.basename(path)
+
+  defp candidate_record_paths(%Issue{} = issue) do
     workspace_root_path = registry_path(issue, nil)
     workspace = expected_workspace_path(issue)
+    issue_scope = safe_name(issue.id || issue.identifier || "issue")
 
-    [workspace_root_path, registry_path(issue, workspace)]
+    [Path.dirname(workspace_root_path), Path.dirname(registry_path(issue, workspace))]
+    |> Enum.uniq()
+    |> Enum.flat_map(fn dir ->
+      legacy_path = Path.join(dir, issue_scope <> ".json")
+      scoped_paths = Path.wildcard(Path.join(dir, issue_scope <> "--*.json"))
+      [legacy_path | scoped_paths]
+    end)
     |> Enum.uniq()
   end
 

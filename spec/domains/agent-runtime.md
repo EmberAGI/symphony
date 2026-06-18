@@ -100,9 +100,12 @@ lease remains the durable dispatch gate.
   way so review, QA, landing, and operator status surfaces do not need to know
   which provider produced the evidence.
 - Symphony must not start a second top-level role run for the same
-  issue/workspace/role while the latest non-expired claim lease is active,
+  issue/workspace/role while any same-scope non-expired claim lease is active,
   retrying, recoverable, blocked, or quarantined for another holder, or while
-  local process ownership shows a live or quarantined app-server process tree.
+  any same-scope local process ownership record shows a live or quarantined
+  app-server process tree. Claim leases and process ownership records for
+  different roles or workspaces may coexist, but they must not overwrite or
+  hide an active same-scope owner.
 - Legitimate continuation turns inside one role run use the existing runtime
   session and `agent.max_turns` loop; they are not a new top-level dispatch and
   must not be blocked by the duplicate-dispatch gate.
@@ -193,10 +196,10 @@ The minimum Octo tool bundle must include controlled equivalents for:
 
 Top-level dispatch must perform these steps before spawning a worker:
 
-- read candidate issue state, including the latest structured claim lease marker
-  from tracker comments;
-- refuse dispatch when the marker is non-expired and owned by another holder in
-  an active/retry/recoverable/blocked/quarantined state;
+- read candidate issue state, including all structured claim lease markers from
+  tracker comments;
+- refuse dispatch when any same-scope marker is non-expired and owned by
+  another holder in an active/retry/recoverable/blocked/quarantined state;
 - refuse dispatch when local process ownership for the issue/workspace/role is
   live or quarantined;
 - write or update the claim lease for the selected holder/run and refetch the

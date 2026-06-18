@@ -1140,6 +1140,66 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "dispatch refuses same-scope claim lease when a newer cross-role lease exists" do
+    previous_holder = Application.get_env(:symphony_elixir, :claim_lease_holder)
+    previous_role = System.get_env("SYMPHONY_ROLE")
+
+    on_exit(fn ->
+      restore_app_env(:claim_lease_holder, previous_holder)
+      restore_env("SYMPHONY_ROLE", previous_role)
+    end)
+
+    Application.put_env(:symphony_elixir, :claim_lease_holder, "this-implementer")
+    System.put_env("SYMPHONY_ROLE", "implementer")
+
+    now = DateTime.utc_now()
+
+    implementer_marker =
+      ClaimLease.render(%{
+        issue_id: "issue-hidden-implementer-lease",
+        issue_identifier: "MT-577",
+        role: "implementer",
+        holder: "other-implementer",
+        run_id: "run-implementer",
+        refreshed_at: DateTime.add(now, -30, :second),
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    reviewer_marker =
+      ClaimLease.render(%{
+        issue_id: "issue-hidden-implementer-lease",
+        issue_identifier: "MT-577",
+        role: "reviewer",
+        holder: "other-reviewer",
+        run_id: "run-reviewer",
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    issue =
+      Client.normalize_issue_for_test(%{
+        "id" => "issue-hidden-implementer-lease",
+        "identifier" => "MT-577",
+        "title" => "Hidden implementer lease",
+        "state" => %{"name" => "In Progress"},
+        "comments" => %{
+          "nodes" => [
+            %{"id" => "comment-implementer", "body" => "## Symphony Claim Lease\n\n#{implementer_marker}"},
+            %{"id" => "comment-reviewer", "body" => "## Symphony Claim Lease\n\n#{reviewer_marker}"}
+          ]
+        }
+      })
+
+    assert issue.claim_lease.role == "reviewer"
+    assert length(Map.get(issue, :claim_leases, [])) == 2
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
   test "dispatch allows active claim lease for a different explicit workspace" do
     previous_holder = Application.get_env(:symphony_elixir, :claim_lease_holder)
 
@@ -1320,6 +1380,66 @@ defmodule SymphonyElixir.CoreTest do
     state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
 
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch refuses same-scope process ownership when a newer cross-role record exists" do
+    previous_role = System.get_env("SYMPHONY_ROLE")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_ROLE", previous_role)
+    end)
+
+    System.put_env("SYMPHONY_ROLE", "implementer")
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-hidden-process-ownership-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-hidden-implementer-process",
+      identifier: "MT-578",
+      title: "Hidden implementer process ownership",
+      state: "In Progress"
+    }
+
+    sleep = System.find_executable("sleep")
+    assert is_binary(sleep)
+
+    port = Port.open({:spawn_executable, sleep}, [:binary, :exit_status, args: [~c"5"]])
+    {:os_pid, app_server_pid} = :erlang.port_info(port, :os_pid)
+
+    on_exit(fn ->
+      try do
+        Port.close(port)
+      rescue
+        ArgumentError -> :ok
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    :ok =
+      ProcessOwnership.record_active(issue, %{
+        role: "implementer",
+        run_id: "run-implementer-process",
+        app_server_pid: app_server_pid
+      })
+
+    :ok =
+      ProcessOwnership.record_active(issue, %{
+        role: "reviewer",
+        run_id: "run-reviewer-process",
+        worker_host: "worker-a"
+      })
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
   test "dispatch allows process ownership for a different explicit workspace" do

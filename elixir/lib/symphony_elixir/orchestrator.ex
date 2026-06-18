@@ -1380,11 +1380,20 @@ defmodule SymphonyElixir.Orchestrator do
     |> Map.new()
   end
 
-  defp claim_lease_update_overrides(%Issue{claim_lease: %ClaimLease{} = claim_lease}) do
-    %{comment_id: claim_lease.comment_id}
+  defp claim_lease_update_overrides(%Issue{} = issue) do
+    case current_scope_claim_lease(issue) do
+      %ClaimLease{} = claim_lease -> %{comment_id: claim_lease.comment_id}
+      _ -> %{}
+    end
   end
 
-  defp claim_lease_update_overrides(%Issue{}), do: %{}
+  defp current_scope_claim_lease(%Issue{} = issue) do
+    issue
+    |> issue_claim_leases()
+    |> Enum.find(fn %ClaimLease{} = claim_lease ->
+      claim_lease_role_matches?(claim_lease) and claim_lease_workspace_matches?(issue, claim_lease)
+    end)
+  end
 
   defp maybe_release_claim_lease(%Issue{claim_lease: %ClaimLease{} = claim_lease} = issue) do
     attrs =
@@ -1420,25 +1429,19 @@ defmodule SymphonyElixir.Orchestrator do
     max(@claim_lease_min_ttl_ms, max(config.codex.stall_timeout_ms, config.polling.interval_ms * 2))
   end
 
-  defp claim_lease_allows_top_level_dispatch?(%Issue{claim_lease: %ClaimLease{} = claim_lease} = issue) do
-    now = DateTime.utc_now()
-    !claim_lease_blocks_current_dispatch?(issue, claim_lease, now)
+  defp claim_lease_allows_top_level_dispatch?(%Issue{} = issue) do
+    blocking_claim_leases(issue) == []
   end
 
-  defp claim_lease_allows_top_level_dispatch?(%Issue{}), do: true
-
-  defp claim_lease_allows_dispatch?(%Issue{claim_lease: %ClaimLease{} = claim_lease} = issue, true) do
-    now = DateTime.utc_now()
-
-    cond do
-      !claim_lease_blocks_current_dispatch?(issue, claim_lease, now) ->
+  defp claim_lease_allows_dispatch?(%Issue{} = issue, true) do
+    case blocking_claim_leases(issue) do
+      [] ->
         true
 
-      ClaimLease.owned_by_current_holder?(claim_lease) and normalize_claim_lease_state(claim_lease.state) == "retrying" ->
-        true
-
-      true ->
-        false
+      claim_leases ->
+        Enum.all?(claim_leases, fn %ClaimLease{} = claim_lease ->
+          ClaimLease.owned_by_current_holder?(claim_lease) and normalize_claim_lease_state(claim_lease.state) == "retrying"
+        end)
     end
   end
 
@@ -1448,6 +1451,31 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp normalize_claim_lease_state(state) when is_binary(state) do
     state |> String.trim() |> String.downcase()
+  end
+
+  defp blocking_claim_leases(%Issue{} = issue) do
+    now = DateTime.utc_now()
+
+    issue
+    |> issue_claim_leases()
+    |> Enum.filter(&claim_lease_blocks_current_dispatch?(issue, &1, now))
+  end
+
+  defp issue_claim_leases(%Issue{} = issue) do
+    leases =
+      issue
+      |> Map.get(:claim_leases, [])
+      |> Enum.filter(&match?(%ClaimLease{}, &1))
+
+    case Map.get(issue, :claim_lease) do
+      %ClaimLease{} = claim_lease -> [claim_lease | leases]
+      _ -> leases
+    end
+    |> Enum.uniq_by(&claim_lease_identity/1)
+  end
+
+  defp claim_lease_identity(%ClaimLease{} = claim_lease) do
+    {claim_lease.comment_id, claim_lease.role, claim_lease.workspace_path, claim_lease.holder, claim_lease.run_id}
   end
 
   defp claim_lease_blocks_current_dispatch?(%Issue{} = issue, %ClaimLease{} = claim_lease, %DateTime{} = now) do

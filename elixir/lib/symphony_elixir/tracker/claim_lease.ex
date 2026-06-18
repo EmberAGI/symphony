@@ -115,9 +115,16 @@ defmodule SymphonyElixir.Tracker.ClaimLease do
   @spec find([map()]) :: t() | nil
   def find(comments) when is_list(comments) do
     comments
+    |> all()
+    |> List.first()
+  end
+
+  @spec all([map()]) :: [t()]
+  def all(comments) when is_list(comments) do
+    comments
     |> Enum.map(&from_comment/1)
     |> Enum.reject(&is_nil/1)
-    |> Enum.max_by(&lease_sort_key/1, fn -> nil end)
+    |> Enum.sort_by(&lease_sort_key/1, :desc)
   end
 
   @spec expired?(t(), DateTime.t()) :: boolean()
