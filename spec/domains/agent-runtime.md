@@ -116,6 +116,10 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   orchestrator restart paths must either clean the owned app-server process
   tree or preserve/quarantine process ownership metadata so replacement
   top-level dispatch refuses until recovery policy allows it.
+- If stall restart records live owned app-server evidence, the queued retry
+  must surface a quarantined claim lease or equivalent blocked cleanup state
+  plus the scoped process ownership metadata in status/API payloads; it must
+  not appear as an ordinary retry while cleanup remains unresolved.
 - When a running issue leaves active dispatch because it becomes terminal,
   non-active, unroutable, or reassigned, the runtime must record process
   completion or quarantine first and then update the same-scope Linear-visible

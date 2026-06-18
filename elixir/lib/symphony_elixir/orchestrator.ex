@@ -564,16 +564,18 @@ defmodule SymphonyElixir.Orchestrator do
 
       next_attempt = next_retry_attempt_from_running(running_entry)
 
-      state
-      |> terminate_running_issue(issue_id, false)
-      |> schedule_issue_retry(issue_id, next_attempt, %{
+      state = terminate_running_issue(state, issue_id, false)
+      process_ownership = retry_process_ownership_status(running_entry)
+
+      schedule_issue_retry(state, issue_id, next_attempt, %{
         identifier: identifier,
         error: "stalled for #{elapsed_ms}ms without codex activity",
         issue: Map.get(running_entry, :issue),
         claim_lease: Map.get(running_entry, :claim_lease),
         run_id: Map.get(running_entry, :run_id),
         retry_reason: "stalled for #{elapsed_ms}ms without codex activity",
-        lease_state: "retrying"
+        lease_state: retry_lease_state_from_process_ownership(process_ownership),
+        process_ownership: process_ownership
       })
     else
       state
@@ -978,6 +980,7 @@ defmodule SymphonyElixir.Orchestrator do
         worker_host: retry_context.worker_host,
         workspace_path: retry_context.workspace_path,
         run_id: retry_context.run_id,
+        process_ownership: retry_context.process_ownership,
         retry_reason: metadata[:retry_reason] || retry_context.error,
         recovery_reason: metadata[:recovery_reason],
         lease_state: metadata[:lease_state] || "retrying"
@@ -1201,7 +1204,8 @@ defmodule SymphonyElixir.Orchestrator do
       workspace_path: pick_retry_workspace_path(previous_retry, metadata),
       issue: pick_retry_issue(previous_retry, metadata),
       claim_lease: pick_retry_claim_lease(previous_retry, metadata),
-      run_id: pick_retry_run_id(previous_retry, metadata)
+      run_id: pick_retry_run_id(previous_retry, metadata),
+      process_ownership: pick_retry_process_ownership(previous_retry, metadata)
     }
   end
 
@@ -1227,7 +1231,8 @@ defmodule SymphonyElixir.Orchestrator do
       workspace_path: retry_context.workspace_path,
       issue: retry_context.issue,
       claim_lease: retry_claim_lease || retry_context.claim_lease,
-      run_id: retry_context.run_id || (retry_claim_lease && retry_claim_lease.run_id)
+      run_id: retry_context.run_id || (retry_claim_lease && retry_claim_lease.run_id),
+      process_ownership: retry_context.process_ownership
     }
   end
 
@@ -1259,6 +1264,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp pick_retry_run_id(previous_retry, metadata) do
     metadata[:run_id] || Map.get(previous_retry, :run_id)
+  end
+
+  defp pick_retry_process_ownership(previous_retry, metadata) do
+    metadata[:process_ownership] || Map.get(previous_retry, :process_ownership)
   end
 
   defp maybe_upsert_retry_claim_lease(_issue_id, nil, _claim_lease, _attempt, _delay_ms, _metadata), do: nil
@@ -1601,6 +1610,19 @@ defmodule SymphonyElixir.Orchestrator do
   defp retry_lease_state(:quarantined), do: "quarantined"
   defp retry_lease_state(_process_completion_status), do: "retrying"
 
+  defp retry_lease_state_from_process_ownership(%{state: "quarantined"}), do: "quarantined"
+  defp retry_lease_state_from_process_ownership(_process_ownership), do: "retrying"
+
+  defp retry_process_ownership_status(%{issue: %Issue{} = issue}), do: ProcessOwnership.status_for_issue(issue)
+  defp retry_process_ownership_status(_running_entry), do: nil
+
+  defp retry_process_ownership_snapshot(%{process_ownership: process_ownership})
+       when is_map(process_ownership),
+       do: process_ownership
+
+  defp retry_process_ownership_snapshot(%{issue: %Issue{} = issue}), do: ProcessOwnership.status_for_issue(issue)
+  defp retry_process_ownership_snapshot(_retry), do: nil
+
   defp process_ownership_attrs(running_entry) when is_map(running_entry) do
     %{
       role: ClaimLease.role_name(),
@@ -1783,7 +1805,8 @@ defmodule SymphonyElixir.Orchestrator do
           error: Map.get(retry, :error),
           worker_host: Map.get(retry, :worker_host),
           workspace_path: Map.get(retry, :workspace_path),
-          claim_lease: Map.get(retry, :claim_lease)
+          claim_lease: Map.get(retry, :claim_lease),
+          process_ownership: retry_process_ownership_snapshot(retry)
         }
       end)
 
