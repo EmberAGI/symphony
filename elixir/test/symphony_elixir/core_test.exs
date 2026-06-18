@@ -1052,6 +1052,152 @@ defmodule SymphonyElixir.CoreTest do
            } = :sys.get_state(pid).retry_attempts[issue_id]
   end
 
+  test "quarantined retry timer preserves lease and status while live process ownership blocks dispatch" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-quarantined-retry-live-process-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-quarantined-retry"
+    issue_identifier = "MT-QUAR-RETRY"
+    retry_token = make_ref()
+    now = DateTime.utc_now()
+    orchestrator_name = Module.concat(__MODULE__, :QuarantinedRetryOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: issue_identifier,
+      title: "Quarantined retry",
+      state: "In Progress"
+    }
+
+    sleep = System.find_executable("sleep")
+    assert is_binary(sleep)
+    port = Port.open({:spawn_executable, sleep}, [:binary, :exit_status, args: [~c"5"]])
+    {:os_pid, app_server_pid} = :erlang.port_info(port, :os_pid)
+
+    claim_lease =
+      ClaimLease.new(%{
+        comment_id: "comment-quarantined-retry",
+        issue_id: issue_id,
+        issue_identifier: issue_identifier,
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-quarantined-retry",
+        workspace_path: Path.join(workspace_root, issue_identifier),
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        retry_reason: "stalled for 301000ms without codex activity",
+        state: "quarantined"
+      })
+
+    issue = %{issue | claim_lease: claim_lease, claim_leases: [claim_lease]}
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      try do
+        Port.close(port)
+      rescue
+        ArgumentError -> :ok
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    :ok =
+      ProcessOwnership.record_quarantined(
+        issue,
+        %{
+          role: "implementer",
+          run_id: claim_lease.run_id,
+          holder: claim_lease.holder,
+          workspace_path: claim_lease.workspace_path,
+          app_server_pid: app_server_pid
+        },
+        "stalled worker left app-server process live"
+      )
+
+    process_ownership = ProcessOwnership.status_for_issue(issue)
+    assert process_ownership.state == "quarantined"
+    assert process_ownership.live?
+
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{
+        issue_id => %{
+          attempt: 2,
+          timer_ref: nil,
+          retry_token: retry_token,
+          due_at_ms: System.monotonic_time(:millisecond),
+          identifier: issue_identifier,
+          error: "stalled for 301000ms without codex activity",
+          issue: issue,
+          claim_lease: claim_lease,
+          run_id: claim_lease.run_id,
+          process_ownership: process_ownership
+        }
+      })
+    end)
+
+    send(pid, {:retry_issue, issue_id, retry_token})
+    Process.sleep(50)
+
+    state = :sys.get_state(pid)
+    assert MapSet.member?(state.claimed, issue_id)
+    assert %{attempt: 3, retry_token: new_retry_token} = retry = state.retry_attempts[issue_id]
+    assert is_reference(new_retry_token)
+    assert retry.identifier == issue_identifier
+    assert retry.claim_lease.state == "quarantined"
+    assert retry.claim_lease.comment_id == "comment-quarantined-retry"
+    assert retry.claim_lease.run_id == "run-quarantined-retry"
+    assert retry.process_ownership.state == "quarantined"
+    assert retry.process_ownership.live?
+
+    snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+    assert %{retrying: [retry_snapshot]} = snapshot
+    assert retry_snapshot.identifier == issue_identifier
+    assert retry_snapshot.claim_lease.state == "quarantined"
+    assert retry_snapshot.process_ownership.state == "quarantined"
+    assert retry_snapshot.process_ownership.live?
+
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, refreshed_lease}, 500
+    assert refreshed_lease.state == "quarantined"
+    assert refreshed_lease.comment_id == "comment-quarantined-retry"
+    assert refreshed_lease.run_id == "run-quarantined-retry"
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "released"}}, 100
+
+    refute Orchestrator.should_dispatch_issue_for_test(
+             issue,
+             %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+           )
+  end
+
   test "dead retry timer releases leaked claim so issue can dispatch again" do
     issue_id = "issue-dead-retry"
     orchestrator_name = Module.concat(__MODULE__, :DeadRetryOrchestrator)

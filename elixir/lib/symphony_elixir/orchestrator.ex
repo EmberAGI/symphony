@@ -1008,7 +1008,11 @@ defmodule SymphonyElixir.Orchestrator do
           identifier: Map.get(retry_entry, :identifier),
           error: Map.get(retry_entry, :error),
           worker_host: Map.get(retry_entry, :worker_host),
-          workspace_path: Map.get(retry_entry, :workspace_path)
+          workspace_path: Map.get(retry_entry, :workspace_path),
+          issue: Map.get(retry_entry, :issue),
+          claim_lease: Map.get(retry_entry, :claim_lease),
+          run_id: Map.get(retry_entry, :run_id),
+          process_ownership: Map.get(retry_entry, :process_ownership)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -1074,6 +1078,9 @@ defmodule SymphonyElixir.Orchestrator do
 
       retry_candidate_issue?(issue, terminal_states) ->
         handle_active_retry(state, issue, attempt, metadata)
+
+      retry_blocked_by_process_ownership?(issue, terminal_states) ->
+        handle_process_blocked_retry(state, issue, attempt, metadata)
 
       true ->
         Logger.debug("Issue left active states, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
@@ -1142,6 +1149,28 @@ defmodule SymphonyElixir.Orchestrator do
          })
        )}
     end
+  end
+
+  defp handle_process_blocked_retry(state, issue, attempt, metadata) do
+    process_ownership = ProcessOwnership.status_for_issue(issue) || metadata[:process_ownership]
+    lease_state = retry_lease_state_from_process_ownership(process_ownership)
+
+    Logger.warning("Retry dispatch blocked by live process ownership for #{issue_context(issue)}; preserving #{lease_state} retry ownership")
+
+    {:noreply,
+     schedule_issue_retry(
+       state,
+       issue.id,
+       attempt + 1,
+       Map.merge(metadata, %{
+         issue: issue,
+         identifier: issue.identifier,
+         error: metadata[:error] || "process ownership blocks retry dispatch",
+         retry_reason: metadata[:retry_reason] || metadata[:error] || "process ownership blocks retry dispatch",
+         lease_state: lease_state,
+         process_ownership: process_ownership
+       })
+     )}
   end
 
   defp reconcile_orphaned_claims(%State{} = state) do
@@ -1977,6 +2006,12 @@ defmodule SymphonyElixir.Orchestrator do
     candidate_issue?(issue, active_state_set(), terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
       !process_ownership_blocks_dispatch?(issue)
+  end
+
+  defp retry_blocked_by_process_ownership?(%Issue{} = issue, terminal_states) do
+    candidate_issue?(issue, active_state_set(), terminal_states) and
+      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      process_ownership_blocks_dispatch?(issue)
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
