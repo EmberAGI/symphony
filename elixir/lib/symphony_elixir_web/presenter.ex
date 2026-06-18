@@ -129,6 +129,7 @@ defmodule SymphonyElixirWeb.Presenter do
       workspace_path: Map.get(entry, :workspace_path)
     }
     |> put_if_present(:claim_lease, claim_lease_payload(Map.get(entry, :claim_lease)))
+    |> put_if_present(:process_ownership, process_ownership_payload(Map.get(entry, :process_ownership)))
   end
 
   defp running_issue_payload(running) do
@@ -161,6 +162,7 @@ defmodule SymphonyElixirWeb.Presenter do
       workspace_path: Map.get(retry, :workspace_path)
     }
     |> put_if_present(:claim_lease, claim_lease_payload(Map.get(retry, :claim_lease)))
+    |> put_if_present(:process_ownership, process_ownership_payload(Map.get(retry, :process_ownership)))
   end
 
   defp workspace_path(issue_identifier, running, retry) do

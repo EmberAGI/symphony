@@ -509,7 +509,22 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
                  "error" => "boom",
                  "worker_host" => nil,
-                 "workspace_path" => nil
+                 "workspace_path" => nil,
+                 "process_ownership" => %{
+                   "app_server_pgid" => 5250,
+                   "app_server_pid" => 5252,
+                   "cleanup_status" => "quarantined",
+                   "live" => true,
+                   "process_tree_pids" => [5252, 5253],
+                   "quarantine_reason" => "live app-server process remains after stalled worker",
+                   "run_id" => "run-retry",
+                   "session_id" => "thread-retry",
+                   "state" => "quarantined",
+                   "updated_at" => nil,
+                   "worker_host" => nil,
+                   "worker_pid" => nil,
+                   "workspace_path" => nil
+                 }
                }
              ],
              "codex_totals" => %{
@@ -554,7 +569,18 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     conn = get(build_conn(), "/api/v1/MT-RETRY")
 
-    assert %{"status" => "retrying", "retry" => %{"attempt" => 2, "error" => "boom"}} =
+    assert %{
+             "status" => "retrying",
+             "retry" => %{
+               "attempt" => 2,
+               "error" => "boom",
+               "process_ownership" => %{
+                 "cleanup_status" => "quarantined",
+                 "app_server_pid" => 5252,
+                 "live" => true
+               }
+             }
+           } =
              json_response(conn, 200)
 
     conn = get(build_conn(), "/api/v1/MT-MISSING")
@@ -636,6 +662,84 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert running.process_ownership.cleanup_status == "active"
     assert running.process_ownership.app_server_pid == 4242
     assert running.process_ownership.live == true
+  end
+
+  test "presenter exposes retry process ownership payloads when present" do
+    now = DateTime.utc_now()
+
+    claim_lease =
+      ClaimLease.new(%{
+        issue_id: "issue-retry-ownership",
+        issue_identifier: "MT-RETRY-OWNERSHIP",
+        role: "implementer",
+        holder: "worker-1",
+        run_id: "run-retry-1",
+        worker_host: "worker-a",
+        workspace_path: "/tmp/workspaces/MT-RETRY-OWNERSHIP",
+        session_id: "thread-retry",
+        attempt: 2,
+        started_at: now,
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        retry_reason: "stalled for 1000ms",
+        state: "quarantined"
+      })
+
+    snapshot = %{
+      running: [],
+      retrying: [
+        %{
+          issue_id: "issue-retry-ownership",
+          identifier: "MT-RETRY-OWNERSHIP",
+          attempt: 2,
+          due_in_ms: 2_000,
+          error: "stalled for 1000ms",
+          worker_host: "worker-a",
+          workspace_path: "/tmp/workspaces/MT-RETRY-OWNERSHIP",
+          claim_lease: claim_lease,
+          process_ownership: %{
+            state: "quarantined",
+            cleanup_status: "quarantined",
+            worker_host: "worker-a",
+            workspace_path: "/tmp/workspaces/MT-RETRY-OWNERSHIP",
+            app_server_pid: 5252,
+            app_server_pgid: 5250,
+            process_tree_pids: [5252, 5253],
+            run_id: "run-retry-1",
+            session_id: "thread-retry",
+            quarantine_reason: "agent exited before app-server process cleaned: :terminated",
+            live?: true
+          }
+        }
+      ],
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      rate_limits: nil
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :RetryOwnershipPayloadOrchestrator)
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+
+    payload = SymphonyElixirWeb.Presenter.state_payload(orchestrator_name, 50)
+    retry = payload.retrying |> List.first()
+
+    assert retry.claim_lease.state == "quarantined"
+    assert retry.process_ownership.cleanup_status == "quarantined"
+    assert retry.process_ownership.app_server_pid == 5252
+    assert retry.process_ownership.process_tree_pids == [5252, 5253]
+    assert retry.process_ownership.live == true
+
+    assert {:ok, issue_payload} =
+             SymphonyElixirWeb.Presenter.issue_payload(
+               "MT-RETRY-OWNERSHIP",
+               orchestrator_name,
+               50
+             )
+
+    assert issue_payload.retry.claim_lease.state == "quarantined"
+    assert issue_payload.retry.process_ownership.cleanup_status == "quarantined"
+
+    assert issue_payload.retry.process_ownership.quarantine_reason =~
+             "app-server process cleaned"
   end
 
   test "phoenix observability api preserves 405, 404, and unavailable behavior" do
@@ -919,7 +1023,18 @@ defmodule SymphonyElixir.ExtensionsTest do
           identifier: "MT-RETRY",
           attempt: 2,
           due_in_ms: 2_000,
-          error: "boom"
+          error: "boom",
+          process_ownership: %{
+            state: "quarantined",
+            cleanup_status: "quarantined",
+            app_server_pid: 5252,
+            app_server_pgid: 5250,
+            process_tree_pids: [5252, 5253],
+            run_id: "run-retry",
+            session_id: "thread-retry",
+            quarantine_reason: "live app-server process remains after stalled worker",
+            live?: true
+          }
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
