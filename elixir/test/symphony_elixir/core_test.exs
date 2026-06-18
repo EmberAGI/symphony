@@ -1419,6 +1419,77 @@ defmodule SymphonyElixir.CoreTest do
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "dispatch refuses when a recorded app-server descendant survives after parent exit" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-process-tree-ownership-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    File.mkdir_p!(test_root)
+
+    issue = %Issue{
+      id: "issue-live-process-tree",
+      identifier: "MT-580",
+      title: "Live process tree ownership",
+      state: "In Progress"
+    }
+
+    parent_pid_file = Path.join(test_root, "parent.pid")
+    child_pid_file = Path.join(test_root, "child.pid")
+
+    script =
+      "echo $$ > #{parent_pid_file}; sleep 5 >/dev/null 2>&1 & echo $! > #{child_pid_file}; sleep 0.5"
+
+    port =
+      Port.open({:spawn_executable, System.find_executable("bash")}, [
+        :binary,
+        :exit_status,
+        args: [~c"-lc", String.to_charlist(script)]
+      ])
+
+    {:os_pid, app_server_pid} = :erlang.port_info(port, :os_pid)
+
+    on_exit(fn ->
+      for pid_file <- [child_pid_file, parent_pid_file],
+          {:ok, body} <- [File.read(pid_file)],
+          {pid, ""} <- [Integer.parse(String.trim(body))] do
+        System.cmd("kill", ["-TERM", Integer.to_string(pid)], stderr_to_stdout: true)
+      end
+
+      try do
+        Port.close(port)
+      rescue
+        ArgumentError -> :ok
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    assert_eventually(fn ->
+      File.exists?(parent_pid_file) and File.exists?(child_pid_file)
+    end)
+
+    :ok =
+      ProcessOwnership.record_active(issue, %{
+        role: "implementer",
+        run_id: "run-live-process-tree",
+        app_server_pid: app_server_pid
+      })
+
+    assert_receive {^port, {:exit_status, 0}}, 1_000
+
+    child_pid = child_pid_file |> File.read!() |> String.trim() |> String.to_integer()
+    assert {_, 0} = System.cmd("kill", ["-0", Integer.to_string(child_pid)], stderr_to_stdout: true)
+    assert ProcessOwnership.owned_process_live?(issue, %{app_server_pid: app_server_pid})
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
   test "dispatch allows process ownership for a different role" do
     previous_role = System.get_env("SYMPHONY_ROLE")
 

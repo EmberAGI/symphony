@@ -70,9 +70,10 @@ and a state such as `active`, `retrying`, `recoverable`, `blocked`,
 
 **Process ownership record**: A local runtime metadata file that records the
 Symphony-owned role run, workspace, worker host, app-server PID when available,
-session/run identity, cleanup status, and quarantine reason for the role
-runtime process tree. This is the OS/process cleanup surface; the tracker claim
-lease remains the durable dispatch gate.
+app-server process group when available, observed descendant PIDs,
+session/run identity, cleanup status, and quarantine reason for the role runtime
+process tree. This is the OS/process cleanup surface; the tracker claim lease
+remains the durable dispatch gate.
 
 ## Rules and invariants
 
@@ -197,11 +198,12 @@ The minimum Octo tool bundle must include controlled equivalents for:
 Top-level dispatch must perform these steps before spawning a worker:
 
 - read candidate issue state, including all structured claim lease markers from
-  tracker comments;
+  tracker comments across paginated comment results;
 - refuse dispatch when any same-scope marker is non-expired and owned by
   another holder in an active/retry/recoverable/blocked/quarantined state;
 - refuse dispatch when local process ownership for the issue/workspace/role is
-  live or quarantined;
+  live or quarantined, including when the recorded parent app-server PID has
+  exited but an observed descendant PID or owned process group remains live;
 - write or update the claim lease for the selected holder/run and refetch the
   issue to verify ownership before spawning the worker; and
 - refresh the same marker from runtime updates rather than creating heartbeat

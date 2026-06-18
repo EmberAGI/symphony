@@ -1570,7 +1570,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp record_process_completion(%{issue: %Issue{} = issue} = running_entry, reason) do
     attrs = process_ownership_attrs(running_entry)
 
-    if pid_live?(Map.get(attrs, :app_server_pid)) do
+    if ProcessOwnership.owned_process_live?(issue, attrs) do
       ProcessOwnership.record_quarantined(issue, attrs, "agent exited before app-server process cleaned: #{inspect(reason)}")
       :quarantined
     else
@@ -1595,26 +1595,6 @@ defmodule SymphonyElixir.Orchestrator do
       app_server_pid: Map.get(running_entry, :codex_app_server_pid)
     }
   end
-
-  defp pid_live?(nil), do: false
-
-  defp pid_live?(pid) when is_binary(pid) do
-    case Integer.parse(pid) do
-      {integer, ""} -> pid_live?(integer)
-      _ -> false
-    end
-  end
-
-  defp pid_live?(pid) when is_integer(pid) and pid > 0 do
-    case System.cmd("kill", ["-0", Integer.to_string(pid)], stderr_to_stdout: true) do
-      {_output, 0} -> true
-      _ -> false
-    end
-  rescue
-    _ -> false
-  end
-
-  defp pid_live?(_pid), do: false
 
   defp new_run_id(%Issue{id: issue_id}) do
     unique = System.unique_integer([:positive, :monotonic])

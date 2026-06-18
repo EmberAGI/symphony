@@ -73,6 +73,8 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     workspace_path = normalized_attrs.workspace_path
     path = scoped_registry_path(issue, normalized_attrs)
     now = DateTime.utc_now() |> DateTime.to_iso8601()
+    app_server_pgid = normalized_attrs.app_server_pgid || process_group_id(normalized_attrs.app_server_pid)
+    process_tree_pids = process_tree_pids(normalized_attrs.app_server_pid, normalized_attrs.process_tree_pids)
 
     record =
       %{
@@ -88,6 +90,8 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
         "session_id" => normalized_attrs.session_id,
         "worker_pid" => normalized_attrs.worker_pid,
         "app_server_pid" => normalized_attrs.app_server_pid,
+        "app_server_pgid" => app_server_pgid,
+        "process_tree_pids" => process_tree_pids,
         "state" => state,
         "cleanup_status" => state,
         "quarantine_reason" => normalized_attrs.quarantine_reason,
@@ -116,7 +120,9 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       session_id: attr_string(attrs, :session_id),
       quarantine_reason: attr_string(attrs, :quarantine_reason),
       worker_pid: attr_pid(attrs, :worker_pid),
-      app_server_pid: attr_pid(attrs, :app_server_pid)
+      app_server_pid: attr_pid(attrs, :app_server_pid),
+      app_server_pgid: attr_pid(attrs, :app_server_pgid),
+      process_tree_pids: attr_pid_list(attrs, :process_tree_pids)
     }
   end
 
@@ -127,6 +133,14 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp attr_pid(attrs, key) when is_atom(key) do
     pid_value(attrs[key]) || pid_value(attrs[Atom.to_string(key)])
   end
+
+  defp attr_pid_list(attrs, key) when is_atom(key) do
+    attrs
+    |> value_for(key)
+    |> pid_list_value()
+  end
+
+  defp value_for(attrs, key) when is_atom(key), do: attrs[key] || attrs[Atom.to_string(key)]
 
   defp scoped_registry_path(%Issue{} = issue, normalized_attrs) when is_map(normalized_attrs) do
     base = normalized_attrs.workspace_path || Config.settings!().workspace.root
@@ -230,19 +244,30 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     do: true
 
   defp active_record_blocks?(record) do
-    process_pids =
-      record
-      |> Map.take(["app_server_pid", "worker_pid"])
-      |> Map.values()
+    process_pids = record_process_pids(record)
 
-    process_pids == [] or Enum.any?(process_pids, &pid_live?/1)
+    process_pids == [] or Enum.any?(process_pids, &pid_live?/1) or process_group_live?(record["app_server_pgid"])
   end
 
   defp local_process_live?(record) do
-    record
-    |> Map.take(["app_server_pid", "worker_pid"])
-    |> Map.values()
-    |> Enum.any?(&pid_live?/1)
+    Enum.any?(record_process_pids(record), &pid_live?/1) or process_group_live?(record["app_server_pgid"])
+  end
+
+  @spec owned_process_live?(map()) :: boolean()
+  def owned_process_live?(attrs) when is_map(attrs) do
+    normalized_attrs = normalize_attrs(attrs)
+    app_server_pgid = normalized_attrs.app_server_pgid || process_group_id(normalized_attrs.app_server_pid)
+    process_tree_pids = process_tree_pids(normalized_attrs.app_server_pid, normalized_attrs.process_tree_pids)
+
+    Enum.any?([normalized_attrs.app_server_pid, normalized_attrs.worker_pid | process_tree_pids], &pid_live?/1) or
+      process_group_live?(app_server_pgid)
+  end
+
+  @spec owned_process_live?(Issue.t(), map()) :: boolean()
+  def owned_process_live?(%Issue{} = issue, attrs) when is_map(attrs) do
+    attrs
+    |> merge_existing_process_tree(status_for_issue(issue))
+    |> owned_process_live?()
   end
 
   defp pid_live?(pid) when is_integer(pid) and pid > 0 do
@@ -272,6 +297,8 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       worker_host: record["worker_host"],
       workspace_path: record["workspace_path"],
       app_server_pid: record["app_server_pid"],
+      app_server_pgid: record["app_server_pgid"],
+      process_tree_pids: record["process_tree_pids"] || [],
       worker_pid: record["worker_pid"],
       run_id: record["run_id"],
       session_id: record["session_id"],
@@ -309,4 +336,128 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   end
 
   defp pid_value(_value), do: nil
+
+  defp merge_existing_process_tree(attrs, nil), do: attrs
+
+  defp merge_existing_process_tree(attrs, existing) when is_map(attrs) and is_map(existing) do
+    attrs
+    |> put_existing_value(:app_server_pgid, existing[:app_server_pgid])
+    |> put_existing_value(:process_tree_pids, existing[:process_tree_pids])
+  end
+
+  defp put_existing_value(attrs, _key, nil), do: attrs
+  defp put_existing_value(attrs, _key, []), do: attrs
+
+  defp put_existing_value(attrs, key, value) when is_atom(key) do
+    if value_for(attrs, key) in [nil, []] do
+      Map.put(attrs, key, value)
+    else
+      attrs
+    end
+  end
+
+  defp pid_list_value(values) when is_list(values) do
+    values
+    |> Enum.map(&pid_value/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp pid_list_value(value) do
+    case pid_value(value) do
+      nil -> []
+      pid -> [pid]
+    end
+  end
+
+  defp process_tree_pids(nil, existing_pids), do: existing_pids
+
+  defp process_tree_pids(app_server_pid, existing_pids) do
+    ([app_server_pid] ++ existing_pids ++ descendant_pids(app_server_pid))
+    |> Enum.map(&pid_value/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp record_process_pids(record) when is_map(record) do
+    (Map.get(record, "process_tree_pids", []) ++ [record["app_server_pid"], record["worker_pid"]])
+    |> Enum.map(&pid_value/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp descendant_pids(pid) do
+    pid
+    |> pid_value()
+    |> case do
+      nil -> []
+      integer -> descendants_from_process_table(integer)
+    end
+  end
+
+  defp descendants_from_process_table(root_pid) when is_integer(root_pid) do
+    process_table()
+    |> descendants_from_process_table(root_pid)
+  end
+
+  defp descendants_from_process_table(processes, root_pid) when is_list(processes) and is_integer(root_pid) do
+    children_by_parent =
+      Enum.group_by(processes, fn {_pid, ppid, _pgid} -> ppid end, fn {pid, _ppid, _pgid} -> pid end)
+
+    [root_pid]
+    |> collect_descendants(children_by_parent, %{})
+    |> Map.delete(root_pid)
+    |> Map.keys()
+  end
+
+  defp collect_descendants([], _children_by_parent, seen), do: seen
+
+  defp collect_descendants([pid | rest], children_by_parent, seen) do
+    children = Map.get(children_by_parent, pid, [])
+    unseen_children = Enum.reject(children, &Map.has_key?(seen, &1))
+    collect_descendants(rest ++ unseen_children, children_by_parent, Map.put(seen, pid, true))
+  end
+
+  defp process_group_id(pid) do
+    pid
+    |> pid_value()
+    |> case do
+      nil ->
+        nil
+
+      integer ->
+        Enum.find_value(process_table(), fn
+          {^integer, _ppid, pgid} -> pgid
+          _process -> nil
+        end)
+    end
+  end
+
+  defp process_group_live?(pgid) do
+    case pid_value(pgid) do
+      nil -> false
+      integer -> Enum.any?(process_table(), fn {_pid, _ppid, process_pgid} -> process_pgid == integer end)
+    end
+  end
+
+  defp process_table do
+    case System.cmd("ps", ["-eo", "pid=,ppid=,pgid="], stderr_to_stdout: true) do
+      {output, 0} ->
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.flat_map(&parse_process_table_line/1)
+
+      _ ->
+        []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp parse_process_table_line(line) when is_binary(line) do
+    case line |> String.split(~r/\s+/, trim: true) |> Enum.map(&Integer.parse/1) do
+      [{pid, ""}, {ppid, ""}, {pgid, ""}] -> [{pid, ppid, pgid}]
+      _ -> []
+    end
+  end
 end

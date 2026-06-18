@@ -218,6 +218,8 @@ defmodule SymphonyElixirWeb.Presenter do
       worker_host: Map.get(process_ownership, :worker_host),
       workspace_path: Map.get(process_ownership, :workspace_path),
       app_server_pid: Map.get(process_ownership, :app_server_pid),
+      app_server_pgid: Map.get(process_ownership, :app_server_pgid),
+      process_tree_pids: Map.get(process_ownership, :process_tree_pids),
       worker_pid: Map.get(process_ownership, :worker_pid),
       run_id: Map.get(process_ownership, :run_id),
       session_id: Map.get(process_ownership, :session_id),
