@@ -5,6 +5,8 @@ defmodule SymphonyElixir.ExtensionsTest do
   import Phoenix.LiveViewTest
 
   alias SymphonyElixir.Linear.Adapter
+  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Tracker.ClaimLease
   alias SymphonyElixir.Tracker.Memory
 
   @endpoint SymphonyElixirWeb.Endpoint
@@ -22,7 +24,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     def fetch_issue_states_by_ids(issue_ids) do
       send(self(), {:fetch_issue_states_by_ids_called, issue_ids})
-      {:ok, issue_ids}
+      Process.get({__MODULE__, :fetch_issue_states_result}, {:ok, issue_ids})
     end
 
     def graphql(query, variables) do
@@ -319,6 +321,46 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
   end
 
+  test "linear adapter updates and verifies an existing claim lease comment before dispatch" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    on_exit(fn ->
+      Process.delete({FakeLinearClient, :graphql_results})
+      Process.delete({FakeLinearClient, :fetch_issue_states_result})
+    end)
+
+    lease_attrs = %{
+      comment_id: "comment-lease",
+      issue_id: "issue-lease",
+      issue_identifier: "MT-LEASE",
+      role: "implementer",
+      holder: "holder-1",
+      run_id: "run-1",
+      state: "active",
+      refreshed_at: DateTime.utc_now(),
+      expires_at: DateTime.add(DateTime.utc_now(), 60, :second)
+    }
+
+    verified_lease = ClaimLease.new(lease_attrs)
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:ok, %{"data" => %{"commentUpdate" => %{"success" => true}}}}
+    ])
+
+    Process.put(
+      {FakeLinearClient, :fetch_issue_states_result},
+      {:ok, [%Issue{id: "issue-lease", claim_lease: verified_lease}]}
+    )
+
+    assert {:ok, ^verified_lease} = Adapter.upsert_claim_lease("issue-lease", lease_attrs)
+
+    assert_receive {:graphql_called, update_query, %{commentId: "comment-lease", body: body}}
+    assert update_query =~ "commentUpdate"
+    refute update_query =~ "commentCreate"
+    assert body =~ "symphony-claim-lease:v1"
+    assert_receive {:fetch_issue_states_by_ids_called, ["issue-lease"]}
+  end
+
   test "phoenix observability api preserves state, issue, and refresh responses" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)
@@ -425,6 +467,75 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert %{"queued" => true, "coalesced" => false, "operations" => ["poll", "reconcile"]} =
              json_response(conn, 202)
+  end
+
+  test "presenter exposes claim lease and process ownership payloads when present" do
+    now = DateTime.utc_now()
+
+    claim_lease =
+      ClaimLease.new(%{
+        issue_id: "issue-lease-payload",
+        issue_identifier: "MT-LEASE",
+        role: "implementer",
+        holder: "worker-1",
+        run_id: "run-1",
+        worker_host: "worker-a",
+        workspace_path: "/tmp/workspaces/MT-LEASE",
+        session_id: "thread-turn",
+        attempt: 3,
+        started_at: now,
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    snapshot = %{
+      running: [
+        %{
+          issue_id: "issue-lease-payload",
+          identifier: "MT-LEASE",
+          state: "In Progress",
+          worker_host: "worker-a",
+          workspace_path: "/tmp/workspaces/MT-LEASE",
+          claim_lease: claim_lease,
+          process_ownership: %{
+            state: "active",
+            cleanup_status: "active",
+            worker_host: "worker-a",
+            workspace_path: "/tmp/workspaces/MT-LEASE",
+            app_server_pid: 4242,
+            run_id: "run-1",
+            session_id: "thread-turn",
+            live?: true
+          },
+          session_id: "thread-turn",
+          turn_count: 1,
+          last_codex_event: :session_started,
+          last_codex_message: nil,
+          last_codex_timestamp: now,
+          codex_input_tokens: 0,
+          codex_output_tokens: 0,
+          codex_total_tokens: 0,
+          started_at: now
+        }
+      ],
+      retrying: [],
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      rate_limits: nil
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :LeasePayloadOrchestrator)
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+
+    payload = SymphonyElixirWeb.Presenter.state_payload(orchestrator_name, 50)
+    running = payload.running |> List.first()
+
+    assert running.claim_lease.role == "implementer"
+    assert running.claim_lease.run_id == "run-1"
+    assert running.claim_lease.state == "active"
+    assert running.process_ownership.cleanup_status == "active"
+    assert running.process_ownership.app_server_pid == 4242
+    assert running.process_ownership.live == true
   end
 
   test "phoenix observability api preserves 405, 404, and unavailable behavior" do

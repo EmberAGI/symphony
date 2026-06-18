@@ -60,6 +60,20 @@ optional TOML file named by `SYMPHONY_REASONING_PROFILES`; when that variable
 is absent, the built-in defaults encode the operator-approved Codex and Claude
 Code matrices.
 
+**Top-level role claim lease**: A Linear-visible structured marker that records
+which Symphony role run currently owns a top-level issue/workspace/role
+dispatch. The marker includes issue id, issue identifier, role, holder/run
+identity, worker host, workspace path, session id when known, attempt,
+started/refreshed/expiry timestamps, retry or recovery reason when applicable,
+and a state such as `active`, `retrying`, `recoverable`, `blocked`,
+`quarantined`, `released`, or `expired`.
+
+**Process ownership record**: A local runtime metadata file that records the
+Symphony-owned role run, workspace, worker host, app-server PID when available,
+session/run identity, cleanup status, and quarantine reason for the role
+runtime process tree. This is the OS/process cleanup surface; the tracker claim
+lease remains the durable dispatch gate.
+
 ## Rules and invariants
 
 - Codex remains the default and reference runtime.
@@ -85,6 +99,25 @@ Code matrices.
 - Runtime adapters must collect or expose artifacts and proof in a normalized
   way so review, QA, landing, and operator status surfaces do not need to know
   which provider produced the evidence.
+- Symphony must not start a second top-level role run for the same
+  issue/workspace/role while the latest non-expired claim lease is active,
+  retrying, recoverable, blocked, or quarantined for another holder, or while
+  local process ownership shows a live or quarantined app-server process tree.
+- Legitimate continuation turns inside one role run use the existing runtime
+  session and `agent.max_turns` loop; they are not a new top-level dispatch and
+  must not be blocked by the duplicate-dispatch gate.
+- Claim lease refreshes must update structured marker state without producing
+  unbounded heartbeat comments or role-authored Symphony Handoff comments.
+- Worker termination, stall restart, abnormal exit, operator restart, and
+  orchestrator restart paths must either clean the owned app-server process
+  tree or preserve/quarantine process ownership metadata so replacement
+  top-level dispatch refuses until recovery policy allows it.
+- Process cleanup must be scoped by issue id, workspace, role, run/session
+  identity, worker host, and app-server PID/process group when available. The
+  runtime must not kill by broad package name or process name.
+- V1 duplicate prevention is intentionally narrow: it covers top-level Symphony
+  role runs and their Codex/Claude app-server process tree. It is not a general
+  whole-repository command lock or broad command de-duplication system.
 - The Claude Code adapter must support per-session model selection, `effort`
   configuration, and a verified no-thinking invocation so Symphony can map
   `Implementation Effort` levels onto Claude models. Unsupported combinations
@@ -157,6 +190,25 @@ The minimum Octo tool bundle must include controlled equivalents for:
 - Artifact/proof capture.
 - Repository status.
 - PR status.
+
+Top-level dispatch must perform these steps before spawning a worker:
+
+- read candidate issue state, including the latest structured claim lease marker
+  from tracker comments;
+- refuse dispatch when the marker is non-expired and owned by another holder in
+  an active/retry/recoverable/blocked/quarantined state;
+- refuse dispatch when local process ownership for the issue/workspace/role is
+  live or quarantined;
+- write or update the claim lease for the selected holder/run and refetch the
+  issue to verify ownership before spawning the worker; and
+- refresh the same marker from runtime updates rather than creating heartbeat
+  comment streams.
+
+Runtime status and API/dashboard projections should expose enough read-only
+metadata to diagnose duplicate-prevention decisions: session age versus
+accumulated issue-pass age, claim state, retry or replacement reason, run/session
+identity, worker host, workspace path, app-server PID when available, and
+process cleanup/quarantine status.
 
 Provider-specific requirements:
 

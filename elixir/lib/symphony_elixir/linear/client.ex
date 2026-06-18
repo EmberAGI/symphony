@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Linear.Client do
 
   require Logger
   alias SymphonyElixir.{Config, Linear.Issue}
+  alias SymphonyElixir.Tracker.ClaimLease
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
@@ -555,6 +556,7 @@ defmodule SymphonyElixir.Linear.Client do
       attachments: extract_attachments(issue),
       repository: repository_from_labels(issue),
       repository_source: repository_source(issue),
+      claim_lease: ClaimLease.find(extract_comments(issue)),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
       created_at: parse_datetime(issue["createdAt"]),
