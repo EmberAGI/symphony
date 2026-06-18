@@ -71,9 +71,9 @@ and a state such as `active`, `retrying`, `recoverable`, `blocked`,
 **Process ownership record**: A local runtime metadata file that records the
 Symphony-owned role run, workspace, worker host, app-server PID when available,
 app-server process group when available, observed descendant PIDs,
-session/run identity, cleanup status, and quarantine reason for the role runtime
-process tree. This is the OS/process cleanup surface; the tracker claim lease
-remains the durable dispatch gate.
+session/run identity, inherited role-run environment marker, cleanup status, and
+quarantine reason for the role runtime process tree. This is the OS/process
+cleanup surface; the tracker claim lease remains the durable dispatch gate.
 
 ## Rules and invariants
 
@@ -116,6 +116,12 @@ remains the durable dispatch gate.
   orchestrator restart paths must either clean the owned app-server process
   tree or preserve/quarantine process ownership metadata so replacement
   top-level dispatch refuses until recovery policy allows it.
+- Local app-server launch adapters must pass a scoped, non-secret role-run
+  ownership marker to provider processes so descendants that appear after the
+  last PID snapshot and detach from the original process group can still be
+  detected without matching broad command or package names. The marker must be
+  scoped by issue id, issue identifier when available, role, holder/run
+  identity, and workspace path.
 - Process cleanup must be scoped by issue id, workspace, role, run/session
   identity, worker host, and app-server PID/process group when available. The
   runtime must not kill by broad package name or process name.
@@ -203,7 +209,8 @@ Top-level dispatch must perform these steps before spawning a worker:
   another holder in an active/retry/recoverable/blocked/quarantined state;
 - refuse dispatch when local process ownership for the issue/workspace/role is
   live or quarantined, including when the recorded parent app-server PID has
-  exited but an observed descendant PID or owned process group remains live;
+  exited but an observed descendant PID, owned process group, or process with a
+  matching inherited role-run ownership marker remains live;
 - write or update the claim lease for the selected holder/run and refetch the
   issue to verify ownership before spawning the worker; and
 - refresh the same marker from runtime updates rather than creating heartbeat

@@ -34,6 +34,21 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     write_record(issue, Map.put(attrs, :quarantine_reason, reason), "quarantined")
   end
 
+  @spec ownership_env(Issue.t() | nil, map()) :: [{String.t(), String.t()}]
+  def ownership_env(issue, attrs) when is_map(attrs) do
+    normalized_attrs = normalize_attrs(attrs)
+
+    [
+      {"SYMPHONY_ROLE_RUN_ID", normalized_attrs.run_id},
+      {"SYMPHONY_ROLE_ISSUE_ID", issue_id(issue, normalized_attrs)},
+      {"SYMPHONY_ROLE_ISSUE_IDENTIFIER", issue_identifier(issue, normalized_attrs)},
+      {"SYMPHONY_ROLE_NAME", normalized_attrs.role || current_role()},
+      {"SYMPHONY_ROLE_HOLDER", normalized_attrs.holder || ClaimLease.holder_id()},
+      {"SYMPHONY_ROLE_WORKSPACE_PATH", normalized_attrs.workspace_path}
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
   @spec blocking_record(Issue.t()) :: map() | nil
   def blocking_record(%Issue{} = issue) do
     issue
@@ -92,6 +107,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
         "app_server_pid" => normalized_attrs.app_server_pid,
         "app_server_pgid" => app_server_pgid,
         "process_tree_pids" => process_tree_pids,
+        "ownership_env" => Map.new(ownership_env(issue, normalized_attrs)),
         "state" => state,
         "cleanup_status" => state,
         "quarantine_reason" => normalized_attrs.quarantine_reason,
@@ -115,6 +131,8 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       role: attr_string(attrs, :role),
       run_id: attr_string(attrs, :run_id),
       holder: attr_string(attrs, :holder),
+      issue_id: attr_string(attrs, :issue_id),
+      issue_identifier: attr_string(attrs, :issue_identifier),
       worker_host: attr_string(attrs, :worker_host),
       workspace_path: attr_string(attrs, :workspace_path),
       session_id: attr_string(attrs, :session_id),
@@ -246,11 +264,13 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp active_record_blocks?(record) do
     process_pids = record_process_pids(record)
 
-    process_pids == [] or Enum.any?(process_pids, &pid_live?/1) or process_group_live?(record["app_server_pgid"])
+    process_pids == [] or Enum.any?(process_pids, &pid_live?/1) or
+      process_group_live?(record["app_server_pgid"]) or ownership_env_process_live?(record)
   end
 
   defp local_process_live?(record) do
-    Enum.any?(record_process_pids(record), &pid_live?/1) or process_group_live?(record["app_server_pgid"])
+    Enum.any?(record_process_pids(record), &pid_live?/1) or
+      process_group_live?(record["app_server_pgid"]) or ownership_env_process_live?(record)
   end
 
   @spec owned_process_live?(map()) :: boolean()
@@ -260,12 +280,14 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     process_tree_pids = process_tree_pids(normalized_attrs.app_server_pid, normalized_attrs.process_tree_pids)
 
     Enum.any?([normalized_attrs.app_server_pid, normalized_attrs.worker_pid | process_tree_pids], &pid_live?/1) or
-      process_group_live?(app_server_pgid)
+      process_group_live?(app_server_pgid) or ownership_env_process_live?(normalized_attrs)
   end
 
   @spec owned_process_live?(Issue.t(), map()) :: boolean()
   def owned_process_live?(%Issue{} = issue, attrs) when is_map(attrs) do
     attrs
+    |> Map.put_new(:issue_id, issue.id)
+    |> Map.put_new(:issue_identifier, issue.identifier)
     |> merge_existing_process_tree(status_for_issue(issue))
     |> owned_process_live?()
   end
@@ -294,11 +316,16 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     %{
       state: record["state"],
       cleanup_status: record["cleanup_status"],
+      role: record["role"],
+      holder: record["holder"],
+      issue_id: record["issue_id"],
+      issue_identifier: record["issue_identifier"],
       worker_host: record["worker_host"],
       workspace_path: record["workspace_path"],
       app_server_pid: record["app_server_pid"],
       app_server_pgid: record["app_server_pgid"],
       process_tree_pids: record["process_tree_pids"] || [],
+      ownership_env_pids: ownership_env_pids(record),
       worker_pid: record["worker_pid"],
       run_id: record["run_id"],
       session_id: record["session_id"],
@@ -343,6 +370,12 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     attrs
     |> put_existing_value(:app_server_pgid, existing[:app_server_pgid])
     |> put_existing_value(:process_tree_pids, existing[:process_tree_pids])
+    |> put_existing_value(:role, existing[:role])
+    |> put_existing_value(:holder, existing[:holder])
+    |> put_existing_value(:issue_id, existing[:issue_id])
+    |> put_existing_value(:issue_identifier, existing[:issue_identifier])
+    |> put_existing_value(:run_id, existing[:run_id])
+    |> put_existing_value(:workspace_path, existing[:workspace_path])
   end
 
   defp put_existing_value(attrs, _key, nil), do: attrs
@@ -439,6 +472,103 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       integer -> Enum.any?(process_table(), fn {_pid, _ppid, process_pgid} -> process_pgid == integer end)
     end
   end
+
+  defp ownership_env_process_live?(attrs_or_record), do: ownership_env_pids(attrs_or_record) != []
+
+  defp ownership_env_pids(attrs_or_record) when is_map(attrs_or_record) do
+    criteria = ownership_env_criteria(attrs_or_record)
+
+    if ownership_env_criteria_scoped?(criteria) do
+      process_table()
+      |> Enum.map(fn {pid, _ppid, _pgid} -> pid end)
+      |> Enum.filter(&process_env_matches?(&1, criteria))
+    else
+      []
+    end
+  end
+
+  defp ownership_env_criteria(attrs_or_record) when is_map(attrs_or_record) do
+    attrs =
+      case attrs_or_record do
+        %{"version" => 1} = record ->
+          %{
+            run_id: record["run_id"],
+            issue_id: record["issue_id"],
+            issue_identifier: record["issue_identifier"],
+            role: record["role"],
+            holder: record["holder"],
+            workspace_path: record["workspace_path"]
+          }
+
+        attrs ->
+          normalize_attrs(attrs)
+      end
+
+    [
+      {"SYMPHONY_ROLE_RUN_ID", string_value(attrs[:run_id])},
+      {"SYMPHONY_ROLE_ISSUE_ID", string_value(attrs[:issue_id])},
+      {"SYMPHONY_ROLE_ISSUE_IDENTIFIER", string_value(attrs[:issue_identifier])},
+      {"SYMPHONY_ROLE_NAME", string_value(attrs[:role])},
+      {"SYMPHONY_ROLE_HOLDER", string_value(attrs[:holder])},
+      {"SYMPHONY_ROLE_WORKSPACE_PATH", string_value(attrs[:workspace_path])}
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp ownership_env_criteria_scoped?(criteria) when is_list(criteria) do
+    criteria_has_key?(criteria, "SYMPHONY_ROLE_RUN_ID") and
+      criteria_has_key?(criteria, "SYMPHONY_ROLE_ISSUE_ID") and
+      criteria_has_key?(criteria, "SYMPHONY_ROLE_NAME")
+  end
+
+  defp criteria_has_key?(criteria, key), do: Enum.any?(criteria, fn {candidate, _value} -> candidate == key end)
+
+  defp process_env_matches?(pid, criteria) when is_integer(pid) do
+    case process_env(pid) do
+      {:ok, env} ->
+        Enum.all?(criteria, fn
+          {"SYMPHONY_ROLE_WORKSPACE_PATH", workspace_path} ->
+            workspace_paths_match?(Map.get(env, "SYMPHONY_ROLE_WORKSPACE_PATH"), workspace_path)
+
+          {key, value} ->
+            Map.get(env, key) == value
+        end)
+
+      :error ->
+        false
+    end
+  end
+
+  defp process_env(pid) when is_integer(pid) and pid > 0 do
+    path = Path.join(["/proc", Integer.to_string(pid), "environ"])
+
+    case File.read(path) do
+      {:ok, body} ->
+        env =
+          body
+          |> String.split(<<0>>, trim: true)
+          |> Enum.flat_map(&parse_env_entry/1)
+          |> Map.new()
+
+        {:ok, env}
+
+      _ ->
+        :error
+    end
+  end
+
+  defp parse_env_entry(entry) when is_binary(entry) do
+    case String.split(entry, "=", parts: 2) do
+      [key, value] when key != "" -> [{key, value}]
+      _ -> []
+    end
+  end
+
+  defp issue_id(%Issue{id: id}, _attrs) when is_binary(id), do: id
+  defp issue_id(_issue, attrs), do: attrs.issue_id
+
+  defp issue_identifier(%Issue{identifier: identifier}, _attrs) when is_binary(identifier), do: identifier
+  defp issue_identifier(_issue, attrs), do: attrs.issue_identifier
 
   defp process_table do
     case System.cmd("ps", ["-eo", "pid=,ppid=,pgid="], stderr_to_stdout: true) do

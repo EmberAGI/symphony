@@ -846,7 +846,11 @@ defmodule SymphonyElixir.Orchestrator do
     record_pending_turn_start(issue, worker_host)
 
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(issue, recipient,
+             attempt: attempt,
+             worker_host: worker_host,
+             run_id: claim_lease && claim_lease.run_id
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
