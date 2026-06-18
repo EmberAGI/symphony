@@ -116,6 +116,12 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   orchestrator restart paths must either clean the owned app-server process
   tree or preserve/quarantine process ownership metadata so replacement
   top-level dispatch refuses until recovery policy allows it.
+- Normal worker completion must not mark process ownership as cleaned until the
+  scoped app-server process tree is no longer live. If the app-server PID,
+  observed process tree, process group, or inherited ownership-marker process
+  is still live when the worker exits normally, the runtime must record
+  quarantine metadata and make the active-state continuation lease fail closed
+  instead of allowing a replacement top-level dispatch.
 - Local app-server launch adapters must pass a scoped, non-secret role-run
   ownership marker to provider processes so descendants that appear after the
   last PID snapshot and detach from the original process group can still be

@@ -584,6 +584,92 @@ defmodule SymphonyElixir.CoreTest do
     assert retry_lease.issue_identifier == "MT-558"
   end
 
+  test "normal worker exit quarantines live app-server before continuation retry" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-exit-live-app-server-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.join(test_root, "workspaces")
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    issue_id = "issue-normal-live-process"
+    issue = %Issue{id: issue_id, identifier: "MT-NORMAL-LIVE", state: "In Progress"}
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :NormalLiveProcessOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    sleep = System.find_executable("sleep")
+    assert is_binary(sleep)
+    port = Port.open({:spawn_executable, sleep}, [:binary, :exit_status, args: [~c"5"]])
+    {:os_pid, app_server_pid} = :erlang.port_info(port, :os_pid)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      try do
+        Port.close(port)
+      rescue
+        ArgumentError -> :ok
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      run_id: "run-normal-live-process",
+      codex_app_server_pid: app_server_pid,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+
+    state = :sys.get_state(pid)
+    refute Map.has_key?(state.running, issue_id)
+    assert %{attempt: 1} = state.retry_attempts[issue_id]
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, quarantined_lease}, 500
+    assert quarantined_lease.state == "quarantined"
+    assert quarantined_lease.retry_reason == "active-state-continuation-check"
+
+    process_status = ProcessOwnership.status_for_issue(issue)
+    assert process_status.state == "quarantined"
+    assert process_status.live?
+    assert process_status.quarantine_reason =~ "app-server process remained live after normal worker exit"
+
+    refute Orchestrator.should_dispatch_issue_for_test(
+             issue,
+             %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+           )
+  end
+
   test "terminal issue reconciliation releases the visible claim lease" do
     previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
 

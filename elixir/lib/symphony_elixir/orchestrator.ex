@@ -162,7 +162,7 @@ defmodule SymphonyElixir.Orchestrator do
                 claim_lease: Map.get(running_entry, :claim_lease),
                 run_id: Map.get(running_entry, :run_id),
                 retry_reason: "active-state-continuation-check",
-                lease_state: "retrying"
+                lease_state: retry_lease_state(process_completion_status)
               })
 
             _ ->
@@ -1567,8 +1567,20 @@ defmodule SymphonyElixir.Orchestrator do
   defp record_process_ownership(running_entry, _issue_id), do: running_entry
 
   defp record_process_completion(%{issue: %Issue{} = issue} = running_entry, :normal) do
-    ProcessOwnership.record_cleaned(issue, process_ownership_attrs(running_entry))
-    :cleaned
+    attrs = process_ownership_attrs(running_entry)
+
+    if ProcessOwnership.owned_process_live?(issue, attrs) do
+      ProcessOwnership.record_quarantined(
+        issue,
+        attrs,
+        "app-server process remained live after normal worker exit"
+      )
+
+      :quarantined
+    else
+      ProcessOwnership.record_cleaned(issue, attrs)
+      :cleaned
+    end
   end
 
   defp record_process_completion(%{issue: %Issue{} = issue} = running_entry, reason) do
