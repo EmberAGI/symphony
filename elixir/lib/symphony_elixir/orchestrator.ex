@@ -508,11 +508,11 @@ defmodule SymphonyElixir.Orchestrator do
           cleanup_issue_workspace(issue_or_identifier, worker_host)
         end
 
-        record_process_completion(running_entry, :terminated)
-
         if is_pid(pid) do
           terminate_task(pid)
         end
+
+        record_process_completion(running_entry, :terminated)
 
         if is_reference(ref) do
           Process.demonitor(ref, [:flush])
@@ -1395,7 +1395,19 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp maybe_release_claim_lease(%Issue{claim_lease: %ClaimLease{} = claim_lease} = issue) do
+  defp maybe_release_claim_lease(%Issue{} = issue) do
+    claim_lease = current_scope_claim_lease(issue)
+
+    if is_nil(claim_lease) do
+      :ok
+    else
+      release_claim_lease(issue, claim_lease)
+    end
+  end
+
+  defp maybe_release_claim_lease(_issue), do: :ok
+
+  defp release_claim_lease(%Issue{} = issue, %ClaimLease{} = claim_lease) do
     attrs =
       build_claim_lease_attrs(
         issue,
@@ -1421,8 +1433,6 @@ defmodule SymphonyElixir.Orchestrator do
         :ok
     end
   end
-
-  defp maybe_release_claim_lease(_issue), do: :ok
 
   defp claim_lease_ttl_ms do
     config = Config.settings!()

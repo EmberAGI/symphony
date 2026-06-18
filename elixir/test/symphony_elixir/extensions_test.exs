@@ -404,6 +404,63 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert_receive {:fetch_issue_states_by_ids_called, ["issue-new-lease"]}
   end
 
+  test "linear adapter rejects claim lease upsert when refetch sees a competing same-scope owner" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    on_exit(fn ->
+      Process.delete({FakeLinearClient, :graphql_results})
+      Process.delete({FakeLinearClient, :fetch_issue_states_result})
+    end)
+
+    now = DateTime.utc_now()
+
+    lease_attrs = %{
+      comment_id: "comment-written-lease",
+      issue_id: "issue-competing-lease",
+      issue_identifier: "MT-COMPETE",
+      role: "implementer",
+      holder: "holder-1",
+      run_id: "run-1",
+      workspace_path: "/tmp/workspaces/MT-COMPETE",
+      state: "active",
+      refreshed_at: now,
+      expires_at: DateTime.add(now, 60, :second)
+    }
+
+    written_lease = ClaimLease.new(lease_attrs)
+
+    competing_lease =
+      ClaimLease.new(%{
+        lease_attrs
+        | comment_id: "comment-competing-lease",
+          holder: "holder-2",
+          run_id: "run-2"
+      })
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:ok, %{"data" => %{"commentUpdate" => %{"success" => true}}}}
+    ])
+
+    Process.put(
+      {FakeLinearClient, :fetch_issue_states_result},
+      {:ok,
+       [
+         %Issue{
+           id: "issue-competing-lease",
+           claim_lease: written_lease,
+           claim_leases: [written_lease, competing_lease]
+         }
+       ]}
+    )
+
+    assert {:error, :claim_lease_competing_owner} =
+             Adapter.upsert_claim_lease("issue-competing-lease", lease_attrs)
+
+    assert_receive {:graphql_called, update_query, %{commentId: "comment-written-lease"}}
+    assert update_query =~ "commentUpdate"
+    assert_receive {:fetch_issue_states_by_ids_called, ["issue-competing-lease"]}
+  end
+
   test "phoenix observability api preserves state, issue, and refresh responses" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)

@@ -87,12 +87,15 @@ defmodule SymphonyElixir.Linear.Adapter do
 
     with :ok <- write_claim_lease_comment(lease),
          {:ok, [refetched_issue | _]} <- client_module().fetch_issue_states_by_ids([issue_id]),
-         %ClaimLease{} = verified <- verified_claim_lease(refetched_issue, lease) do
+         candidates <- claim_lease_candidates(refetched_issue),
+         %ClaimLease{} = verified <- verified_claim_lease(candidates, lease),
+         :ok <- verify_exclusive_claim_lease_owner(candidates, verified) do
       {:ok, verified}
     else
       {:ok, []} -> {:error, :claim_lease_issue_not_found}
       false -> {:error, :claim_lease_ownership_verification_failed}
       nil -> {:error, :claim_lease_missing_after_upsert}
+      {:error, :claim_lease_competing_owner} -> {:error, :claim_lease_competing_owner}
       {:error, reason} -> {:error, reason}
       _ -> {:error, :claim_lease_upsert_failed}
     end
@@ -117,10 +120,8 @@ defmodule SymphonyElixir.Linear.Adapter do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
   end
 
-  defp verified_claim_lease(refetched_issue, %ClaimLease{} = lease) do
-    refetched_issue
-    |> claim_lease_candidates()
-    |> Enum.find(&same_claim_lease?(&1, lease))
+  defp verified_claim_lease(candidates, %ClaimLease{} = lease) when is_list(candidates) do
+    Enum.find(candidates, &same_claim_lease?(&1, lease))
   end
 
   defp claim_lease_candidates(refetched_issue) do
@@ -140,6 +141,41 @@ defmodule SymphonyElixir.Linear.Adapter do
     left.holder == right.holder and left.run_id == right.run_id and
       (is_nil(right.comment_id) or left.comment_id == right.comment_id)
   end
+
+  defp verify_exclusive_claim_lease_owner(candidates, %ClaimLease{} = verified) when is_list(candidates) do
+    now = DateTime.utc_now()
+
+    competing_owner? =
+      Enum.any?(candidates, fn
+        %ClaimLease{} = candidate ->
+          ClaimLease.active_or_recoverable?(candidate, now) and
+            same_claim_lease_scope?(candidate, verified) and
+            !same_claim_lease?(candidate, verified)
+
+        _ ->
+          false
+      end)
+
+    if competing_owner?, do: {:error, :claim_lease_competing_owner}, else: :ok
+  end
+
+  defp same_claim_lease_scope?(%ClaimLease{} = left, %ClaimLease{} = right) do
+    role_scope_matches?(left.role, right.role) and workspace_scope_matches?(left.workspace_path, right.workspace_path)
+  end
+
+  defp role_scope_matches?(left, right), do: blank?(left) or blank?(right) or left == right
+
+  defp workspace_scope_matches?(left, right) do
+    if blank?(left) or blank?(right) do
+      true
+    else
+      normalize_workspace_path(left) == normalize_workspace_path(right)
+    end
+  end
+
+  defp normalize_workspace_path(path) when is_binary(path), do: path |> Path.expand() |> Path.absname()
+
+  defp blank?(value), do: !is_binary(value) or String.trim(value) == ""
 
   defp claim_lease_identity(%ClaimLease{} = lease) do
     {lease.comment_id, lease.role, lease.workspace_path, lease.holder, lease.run_id}

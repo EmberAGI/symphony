@@ -193,7 +193,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   end
 
   defp blocking_record?(%{"state" => state} = record, %Issue{} = issue) when state in ["active", "quarantined"] do
-    record_scope_matches?(record, issue) and (state == "quarantined" or active_record_blocks?(record))
+    record_scope_matches?(record, issue) and active_record_blocks?(record)
   end
 
   defp blocking_record?(_record, _issue), do: false

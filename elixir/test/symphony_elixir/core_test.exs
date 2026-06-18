@@ -4,6 +4,17 @@ defmodule SymphonyElixir.CoreTest do
   alias SymphonyElixir.Runtime.ProcessOwnership
   alias SymphonyElixir.Tracker.ClaimLease
 
+  setup do
+    previous_role = System.get_env("SYMPHONY_ROLE")
+    System.put_env("SYMPHONY_ROLE", "implementer")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_ROLE", previous_role)
+    end)
+
+    :ok
+  end
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -619,6 +630,71 @@ defmodule SymphonyElixir.CoreTest do
     refute MapSet.member?(updated_state.claimed, issue_id)
     assert_receive {:memory_tracker_claim_lease, ^issue_id, released_lease}, 500
     assert released_lease.comment_id == "comment-terminal-lease"
+    assert released_lease.state == "released"
+    assert released_lease.recovery_reason == "issue-left-active-dispatch"
+  end
+
+  test "terminal issue reconciliation releases only the current same-scope claim lease" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-terminal-scoped-lease"
+    now = DateTime.utc_now()
+
+    implementer_lease =
+      ClaimLease.new(%{
+        comment_id: "comment-implementer-lease",
+        issue_id: issue_id,
+        issue_identifier: "MT-SCOPED-TERM",
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-implementer-lease",
+        refreshed_at: DateTime.add(now, -30, :second),
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    reviewer_lease =
+      ClaimLease.new(%{
+        comment_id: "comment-reviewer-lease",
+        issue_id: issue_id,
+        issue_identifier: "MT-SCOPED-TERM",
+        role: "reviewer",
+        holder: "reviewer-worker",
+        run_id: "run-reviewer-lease",
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-SCOPED-TERM",
+      state: "Done",
+      title: "Terminal scoped lease",
+      claim_lease: reviewer_lease,
+      claim_leases: [reviewer_lease, implementer_lease]
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, released_lease}, 500
+    assert released_lease.comment_id == "comment-implementer-lease"
+    assert released_lease.role == "implementer"
     assert released_lease.state == "released"
     assert released_lease.recovery_reason == "issue-left-active-dispatch"
   end
@@ -1517,6 +1593,51 @@ defmodule SymphonyElixir.CoreTest do
     state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
 
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch ignores a stale local quarantine record after the process exits" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-quarantine-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-stale-quarantine",
+      identifier: "MT-579",
+      title: "Stale quarantine",
+      state: "In Progress"
+    }
+
+    File.mkdir_p!(test_root)
+    pid_file = Path.join(test_root, "exited-app-server.pid")
+    {_, 0} = System.cmd("sh", ["-c", "echo $$ > #{pid_file}"])
+    app_server_pid = pid_file |> File.read!() |> String.trim() |> String.to_integer()
+
+    :ok =
+      ProcessOwnership.record_quarantined(
+        issue,
+        %{
+          role: "implementer",
+          run_id: "run-stale-quarantine",
+          app_server_pid: app_server_pid
+        },
+        "agent exited before app-server process cleaned: :terminated"
+      )
+
+    on_exit(fn ->
+      File.rm_rf(test_root)
+    end)
+
+    assert_eventually(fn ->
+      Orchestrator.should_dispatch_issue_for_test(
+        issue,
+        %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+      )
+    end)
   end
 
   test "manual refresh coalesces repeated requests and ignores superseded ticks" do
@@ -2664,4 +2785,17 @@ defmodule SymphonyElixir.CoreTest do
       File.rm_rf(test_root)
     end
   end
+
+  defp assert_eventually(fun, attempts \\ 20)
+
+  defp assert_eventually(fun, attempts) when attempts > 0 do
+    if fun.() do
+      assert true
+    else
+      Process.sleep(25)
+      assert_eventually(fun, attempts - 1)
+    end
+  end
+
+  defp assert_eventually(_fun, 0), do: flunk("condition not met in time")
 end
