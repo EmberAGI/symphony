@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   require Logger
   alias SymphonyElixir.{Codex.DynamicTool, Config, ImplementationEffort, Linear.Issue, PathSafety, SSH}
+  alias SymphonyElixir.Runtime.ProcessOwnership
 
   @initialize_id 1
   @thread_start_id 2
@@ -45,7 +46,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, launch} <- launch_config(issue, role),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, launch.command) do
+         ownership_env = ownership_env(issue, role, expanded_workspace, opts),
+         {:ok, port} <- start_port(expanded_workspace, worker_host, launch.command, ownership_env) do
       metadata = port_metadata(port, worker_host) |> Map.merge(launch.metadata)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
@@ -197,7 +199,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> ImplementationEffort.command_for_issue(issue, role)
   end
 
-  defp start_port(workspace, nil, command) do
+  defp start_port(workspace, nil, command, env) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
@@ -212,6 +214,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             :stderr_to_stdout,
             args: [~c"-lc", String.to_charlist(command)],
             cd: String.to_charlist(workspace),
+            env: port_env(env),
             line: @port_line_bytes
           ]
         )
@@ -220,17 +223,39 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, worker_host, command) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace, command)
+  defp start_port(workspace, worker_host, command, env) when is_binary(worker_host) do
+    remote_command = remote_launch_command(workspace, command, env)
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
   end
 
-  defp remote_launch_command(workspace, command) when is_binary(workspace) and is_binary(command) do
+  defp port_env(env) when is_list(env) do
+    Enum.map(env, fn {key, value} ->
+      {String.to_charlist(key), String.to_charlist(value)}
+    end)
+  end
+
+  defp remote_launch_command(workspace, command, env) when is_binary(workspace) and is_binary(command) do
+    env_prefix = Enum.map_join(env, " ", fn {key, value} -> "#{key}=#{shell_escape(value)}" end)
+
+    exec =
+      case env_prefix do
+        "" -> "exec #{command}"
+        prefix -> "exec env #{prefix} #{command}"
+      end
+
     [
       "cd #{shell_escape(workspace)}",
-      "exec #{command}"
+      exec
     ]
     |> Enum.join(" && ")
+  end
+
+  defp ownership_env(issue, role, workspace, opts) do
+    ProcessOwnership.ownership_env(issue, %{
+      role: role,
+      run_id: Keyword.get(opts, :run_id),
+      workspace_path: workspace
+    })
   end
 
   defp port_metadata(port, worker_host) when is_port(port) do

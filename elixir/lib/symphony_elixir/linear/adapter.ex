@@ -6,6 +6,7 @@ defmodule SymphonyElixir.Linear.Adapter do
   @behaviour SymphonyElixir.Tracker
 
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Tracker.ClaimLease
 
   @create_comment_mutation """
   mutation SymphonyCreateComment($issueId: String!, $body: String!) {
@@ -18,6 +19,25 @@ defmodule SymphonyElixir.Linear.Adapter do
   @update_state_mutation """
   mutation SymphonyUpdateIssueState($issueId: String!, $stateId: String!) {
     issueUpdate(id: $issueId, input: {stateId: $stateId}) {
+      success
+    }
+  }
+  """
+
+  @create_claim_lease_comment_mutation """
+  mutation SymphonyCreateClaimLeaseComment($issueId: String!, $body: String!) {
+    commentCreate(input: {issueId: $issueId, body: $body}) {
+      success
+      comment {
+        id
+      }
+    }
+  }
+  """
+
+  @update_claim_lease_comment_mutation """
+  mutation SymphonyUpdateClaimLeaseComment($commentId: String!, $body: String!) {
+    commentUpdate(id: $commentId, input: {body: $body}) {
       success
     }
   }
@@ -58,6 +78,29 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
+  @spec upsert_claim_lease(String.t(), map()) :: {:ok, ClaimLease.t() | nil} | {:error, term()}
+  def upsert_claim_lease(issue_id, lease_attrs) when is_binary(issue_id) and is_map(lease_attrs) do
+    lease =
+      lease_attrs
+      |> Map.put(:issue_id, issue_id)
+      |> ClaimLease.new()
+
+    with :ok <- write_claim_lease_comment(lease),
+         {:ok, [refetched_issue | _]} <- client_module().fetch_issue_states_by_ids([issue_id]),
+         candidates <- claim_lease_candidates(refetched_issue),
+         %ClaimLease{} = verified <- verified_claim_lease(candidates, lease),
+         :ok <- verify_exclusive_claim_lease_owner(candidates, verified) do
+      {:ok, verified}
+    else
+      {:ok, []} -> {:error, :claim_lease_issue_not_found}
+      false -> {:error, :claim_lease_ownership_verification_failed}
+      nil -> {:error, :claim_lease_missing_after_upsert}
+      {:error, :claim_lease_competing_owner} -> {:error, :claim_lease_competing_owner}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :claim_lease_upsert_failed}
+    end
+  end
+
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name)
       when is_binary(issue_id) and is_binary(state_name) do
@@ -75,6 +118,103 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   defp client_module do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
+  end
+
+  defp verified_claim_lease(candidates, %ClaimLease{} = lease) when is_list(candidates) do
+    Enum.find(candidates, &same_claim_lease?(&1, lease))
+  end
+
+  defp claim_lease_candidates(refetched_issue) do
+    leases =
+      refetched_issue
+      |> Map.get(:claim_leases, [])
+      |> Enum.filter(&match?(%ClaimLease{}, &1))
+
+    case Map.get(refetched_issue, :claim_lease) do
+      %ClaimLease{} = lease -> [lease | leases]
+      _ -> leases
+    end
+    |> Enum.uniq_by(&claim_lease_identity/1)
+  end
+
+  defp same_claim_lease?(%ClaimLease{} = left, %ClaimLease{} = right) do
+    left.holder == right.holder and left.run_id == right.run_id and
+      (is_nil(right.comment_id) or left.comment_id == right.comment_id)
+  end
+
+  defp verify_exclusive_claim_lease_owner(candidates, %ClaimLease{} = verified) when is_list(candidates) do
+    now = DateTime.utc_now()
+
+    competing_owner? =
+      Enum.any?(candidates, fn
+        %ClaimLease{} = candidate ->
+          ClaimLease.active_or_recoverable?(candidate, now) and
+            same_claim_lease_scope?(candidate, verified) and
+            !same_claim_lease?(candidate, verified)
+
+        _ ->
+          false
+      end)
+
+    if competing_owner?, do: {:error, :claim_lease_competing_owner}, else: :ok
+  end
+
+  defp same_claim_lease_scope?(%ClaimLease{} = left, %ClaimLease{} = right) do
+    role_scope_matches?(left.role, right.role) and workspace_scope_matches?(left.workspace_path, right.workspace_path)
+  end
+
+  defp role_scope_matches?(left, right), do: blank?(left) or blank?(right) or left == right
+
+  defp workspace_scope_matches?(left, right) do
+    if blank?(left) or blank?(right) do
+      true
+    else
+      normalize_workspace_path(left) == normalize_workspace_path(right)
+    end
+  end
+
+  defp normalize_workspace_path(path) when is_binary(path), do: path |> Path.expand() |> Path.absname()
+
+  defp blank?(value), do: !is_binary(value) or String.trim(value) == ""
+
+  defp claim_lease_identity(%ClaimLease{} = lease) do
+    {lease.comment_id, lease.role, lease.workspace_path, lease.holder, lease.run_id}
+  end
+
+  defp write_claim_lease_comment(%ClaimLease{comment_id: comment_id} = lease)
+       when is_binary(comment_id) do
+    with {:ok, response} <-
+           client_module().graphql(@update_claim_lease_comment_mutation, %{
+             commentId: comment_id,
+             body: claim_lease_comment_body(lease)
+           }),
+         true <- get_in(response, ["data", "commentUpdate", "success"]) == true do
+      :ok
+    else
+      false -> {:error, :claim_lease_comment_update_failed}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :claim_lease_comment_update_failed}
+    end
+  end
+
+  defp write_claim_lease_comment(%ClaimLease{} = lease) do
+    with {:ok, response} <-
+           client_module().graphql(@create_claim_lease_comment_mutation, %{
+             issueId: lease.issue_id,
+             body: claim_lease_comment_body(lease)
+           }),
+         true <- get_in(response, ["data", "commentCreate", "success"]) == true do
+      :ok
+    else
+      false -> {:error, :claim_lease_comment_create_failed}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :claim_lease_comment_create_failed}
+    end
+  end
+
+  defp claim_lease_comment_body(%ClaimLease{} = lease) do
+    ["## Symphony Claim Lease", "", ClaimLease.render(lease)]
+    |> Enum.join("\n")
   end
 
   defp resolve_state_id(issue_id, state_name) do

@@ -38,6 +38,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   require Logger
 
   alias SymphonyElixir.{Config, ImplementationEffort, Linear.Issue, PathSafety, SSH}
+  alias SymphonyElixir.Runtime.ProcessOwnership
 
   # `claude` exits non-zero when it cannot reach a usable model/auth at all; the
   # streaming protocol also surfaces auth failures as a terminal `result` with
@@ -95,13 +96,15 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, launch} <- launch_config(issue, role) do
+      ownership_env = ownership_env(issue, role, expanded_workspace, opts)
+
       {:ok,
        %{
          port: nil,
          metadata: launch.metadata,
          workspace: expanded_workspace,
          worker_host: worker_host,
-         launch: launch,
+         launch: %{launch | env: launch.env ++ ownership_env},
          claude_session_id: nil
        }}
     end
@@ -347,6 +350,14 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
       exec
     ]
     |> Enum.join(" && ")
+  end
+
+  defp ownership_env(issue, role, workspace, opts) do
+    ProcessOwnership.ownership_env(issue, %{
+      role: role,
+      run_id: Keyword.get(opts, :run_id),
+      workspace_path: workspace
+    })
   end
 
   defp port_metadata(port, worker_host) when is_port(port) do

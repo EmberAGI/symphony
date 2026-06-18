@@ -55,6 +55,11 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     trace_file="#{trace_file}"
     printf 'ARGV:%s\\n' "$*" >> "$trace_file"
     printf 'ENV_MAX_THINKING_TOKENS:%s\\n' "${MAX_THINKING_TOKENS}" >> "$trace_file"
+    printf 'ENV_SYMPHONY_ROLE_RUN_ID:%s\\n' "${SYMPHONY_ROLE_RUN_ID}" >> "$trace_file"
+    printf 'ENV_SYMPHONY_ROLE_ISSUE_ID:%s\\n' "${SYMPHONY_ROLE_ISSUE_ID}" >> "$trace_file"
+    printf 'ENV_SYMPHONY_ROLE_ISSUE_IDENTIFIER:%s\\n' "${SYMPHONY_ROLE_ISSUE_IDENTIFIER}" >> "$trace_file"
+    printf 'ENV_SYMPHONY_ROLE_NAME:%s\\n' "${SYMPHONY_ROLE_NAME}" >> "$trace_file"
+    printf 'ENV_SYMPHONY_ROLE_WORKSPACE_PATH:%s\\n' "${SYMPHONY_ROLE_WORKSPACE_PATH}" >> "$trace_file"
     #{body}
     exit 0
     """)
@@ -86,7 +91,7 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
 
   defp run_shim(ctx, prompt, overrides \\ []) do
     issue = %Issue{
-      id: "issue-#{System.unique_integer([:positive])}",
+      id: Keyword.get(overrides, :issue_id, "issue-#{System.unique_integer([:positive])}"),
       identifier: "MT-CC",
       title: "Claude shim",
       state: "Todo",
@@ -96,7 +101,13 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     {:ok, agent} = Agent.start_link(fn -> [] end)
     on_message = fn message -> Agent.update(agent, fn acc -> [message | acc] end) end
 
-    result = ClaudeAppServer.run(ctx.workspace, prompt, issue, on_message: on_message, role: Keyword.get(overrides, :role))
+    result =
+      ClaudeAppServer.run(ctx.workspace, prompt, issue,
+        on_message: on_message,
+        role: Keyword.get(overrides, :role),
+        run_id: Keyword.get(overrides, :run_id)
+      )
+
     events = agent |> Agent.get(& &1) |> Enum.reverse()
     Agent.stop(agent)
 
@@ -123,7 +134,12 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       configure!(ctx, stream_success(), claude_code_model: "sonnet", claude_code_effort: "low", claude_code_no_thinking: true)
 
       {result, events, trace} =
-        run_shim(ctx, "Reply with exactly: SHIMOK", labels: ["implementation-effort:minimal"], role: "implementer")
+        run_shim(ctx, "Reply with exactly: SHIMOK",
+          labels: ["implementation-effort:minimal"],
+          role: "implementer",
+          issue_id: "issue-claude-env",
+          run_id: "run-claude-env"
+        )
 
       assert {:ok, turn} = result
       assert turn.session_id == "sess-success"
@@ -148,6 +164,11 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       assert trace =~ "--model sonnet"
       assert trace =~ "--effort low"
       assert trace =~ "ENV_MAX_THINKING_TOKENS:0"
+      assert trace =~ "ENV_SYMPHONY_ROLE_RUN_ID:run-claude-env"
+      assert trace =~ "ENV_SYMPHONY_ROLE_ISSUE_ID:issue-claude-env"
+      assert trace =~ "ENV_SYMPHONY_ROLE_ISSUE_IDENTIFIER:MT-CC"
+      assert trace =~ "ENV_SYMPHONY_ROLE_NAME:implementer"
+      assert trace =~ "ENV_SYMPHONY_ROLE_WORKSPACE_PATH:#{ctx.workspace}"
 
       assert completed.implementation_effort == "minimal"
       assert completed.implementation_effort_source == "label"

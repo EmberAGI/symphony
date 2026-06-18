@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Linear.Client do
 
   require Logger
   alias SymphonyElixir.{Config, Linear.Issue}
+  alias SymphonyElixir.Tracker.ClaimLease
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
@@ -37,6 +38,10 @@ defmodule SymphonyElixir.Linear.Client do
             body
             createdAt
             updatedAt
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
           }
         }
         attachments(first: $attachmentFirst) {
@@ -100,6 +105,10 @@ defmodule SymphonyElixir.Linear.Client do
             createdAt
             updatedAt
           }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
         }
         attachments(first: $attachmentFirst) {
           nodes {
@@ -123,6 +132,25 @@ defmodule SymphonyElixir.Linear.Client do
         }
         createdAt
         updatedAt
+      }
+    }
+  }
+  """
+
+  @comments_query """
+  query SymphonyLinearIssueComments($issueId: String!, $commentFirst: Int!, $commentAfter: String) {
+    issue(id: $issueId) {
+      comments(first: $commentFirst, after: $commentAfter) {
+        nodes {
+          id
+          body
+          createdAt
+          updatedAt
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
       }
     }
   }
@@ -276,7 +304,7 @@ defmodule SymphonyElixir.Linear.Client do
         {:ok, []}
 
       ids ->
-        do_fetch_issue_states(ids, nil, graphql_fun, [])
+        do_fetch_issue_states(ids, nil, graphql_fun, repository_candidates)
     end
   end
 
@@ -485,15 +513,17 @@ defmodule SymphonyElixir.Linear.Client do
   defp decode_linear_response(
          %{"data" => %{"issues" => %{"nodes" => nodes}}},
          assignee_filter,
-         _graphql_fun,
+         graphql_fun,
          _repository_candidates
        ) do
-    issues =
-      nodes
-      |> Enum.map(&normalize_issue(&1, assignee_filter))
-      |> Enum.reject(&is_nil(&1))
+    with {:ok, nodes} <- fetch_remaining_comment_pages_for_nodes(nodes, graphql_fun) do
+      issues =
+        nodes
+        |> Enum.map(&normalize_issue(&1, assignee_filter))
+        |> Enum.reject(&is_nil(&1))
 
-    {:ok, issues}
+      {:ok, issues}
+    end
   end
 
   defp decode_linear_response(%{"errors" => errors}, _assignee_filter, _graphql_fun, _repository_candidates) do
@@ -503,6 +533,86 @@ defmodule SymphonyElixir.Linear.Client do
   defp decode_linear_response(_unknown, _assignee_filter, _graphql_fun, _repository_candidates) do
     {:error, :linear_unknown_payload}
   end
+
+  defp fetch_remaining_comment_pages_for_nodes(nodes, graphql_fun)
+       when is_list(nodes) and is_function(graphql_fun, 2) do
+    nodes
+    |> Enum.reduce_while({:ok, []}, fn node, {:ok, acc} ->
+      case fetch_remaining_comment_pages(node, graphql_fun) do
+        {:ok, node} -> {:cont, {:ok, [node | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, nodes} -> {:ok, Enum.reverse(nodes)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_remaining_comment_pages(%{"id" => issue_id, "comments" => %{} = comments} = issue, graphql_fun)
+       when is_binary(issue_id) and is_function(graphql_fun, 2) do
+    case next_comment_page_cursor(comments) do
+      {:ok, cursor} ->
+        with {:ok, remaining_comments} <- fetch_comment_pages(issue_id, cursor, graphql_fun, []) do
+          {:ok, put_in(issue, ["comments", "nodes"], comment_nodes(comments) ++ remaining_comments)}
+        end
+
+      :done ->
+        {:ok, issue}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp fetch_remaining_comment_pages(issue, _graphql_fun), do: {:ok, issue}
+
+  defp fetch_comment_pages(issue_id, after_cursor, graphql_fun, acc_comments)
+       when is_binary(issue_id) and is_binary(after_cursor) and is_function(graphql_fun, 2) do
+    graphql_fun.(@comments_query, %{
+      issueId: issue_id,
+      commentFirst: @issue_page_size,
+      commentAfter: after_cursor
+    })
+    |> handle_comment_page_response(issue_id, graphql_fun, acc_comments)
+  end
+
+  defp handle_comment_page_response(
+         {:ok, %{"data" => %{"issue" => %{"comments" => %{} = comments}}}},
+         issue_id,
+         graphql_fun,
+         acc_comments
+       ) do
+    updated_acc = acc_comments ++ comment_nodes(comments)
+    continue_comment_pagination(comments, issue_id, graphql_fun, updated_acc)
+  end
+
+  defp handle_comment_page_response({:ok, %{"errors" => errors}}, _issue_id, _graphql_fun, _acc_comments) do
+    {:error, {:linear_graphql_errors, errors}}
+  end
+
+  defp handle_comment_page_response({:ok, _body}, _issue_id, _graphql_fun, _acc_comments),
+    do: {:error, :linear_unknown_payload}
+
+  defp handle_comment_page_response({:error, reason}, _issue_id, _graphql_fun, _acc_comments),
+    do: {:error, reason}
+
+  defp continue_comment_pagination(comments, issue_id, graphql_fun, acc_comments) do
+    case next_comment_page_cursor(comments) do
+      {:ok, cursor} -> fetch_comment_pages(issue_id, cursor, graphql_fun, acc_comments)
+      :done -> {:ok, acc_comments}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp next_comment_page_cursor(%{"pageInfo" => %{"hasNextPage" => has_next_page, "endCursor" => end_cursor}}) do
+    next_page_cursor(%{has_next_page: has_next_page == true, end_cursor: end_cursor})
+  end
+
+  defp next_comment_page_cursor(_comments), do: :done
+
+  defp comment_nodes(%{"nodes" => comments}) when is_list(comments), do: comments
+  defp comment_nodes(_comments), do: []
 
   defp decode_linear_page_response(
          %{
@@ -538,6 +648,8 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp normalize_issue(issue, assignee_filter) when is_map(issue) do
     assignee = issue["assignee"]
+    comments = extract_comments(issue)
+    claim_leases = ClaimLease.all(comments)
 
     %Issue{
       id: issue["id"],
@@ -551,10 +663,12 @@ defmodule SymphonyElixir.Linear.Client do
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
       blocked_by: extract_blockers(issue),
-      comments: extract_comments(issue),
+      comments: comments,
       attachments: extract_attachments(issue),
       repository: repository_from_labels(issue),
       repository_source: repository_source(issue),
+      claim_lease: List.first(claim_leases),
+      claim_leases: claim_leases,
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
       created_at: parse_datetime(issue["createdAt"]),

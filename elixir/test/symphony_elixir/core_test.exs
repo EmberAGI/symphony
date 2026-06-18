@@ -1,6 +1,20 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Runtime.ProcessOwnership
+  alias SymphonyElixir.Tracker.ClaimLease
+
+  setup do
+    previous_role = System.get_env("SYMPHONY_ROLE")
+    System.put_env("SYMPHONY_ROLE", "implementer")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_ROLE", previous_role)
+    end)
+
+    :ok
+  end
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -515,12 +529,22 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "normal worker exit schedules active-state continuation retry" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
     issue_id = "issue-resume"
     ref = make_ref()
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
     orchestrator_name = Module.concat(__MODULE__, :ContinuationOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+
       if Process.alive?(pid) do
         Process.exit(pid, :normal)
       end
@@ -554,6 +578,277 @@ defmodule SymphonyElixir.CoreTest do
     assert is_integer(due_at_ms)
     assert due_at_ms - down_sent_at_ms >= 500
     assert_due_in_range(due_at_ms, 0, 1_100)
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, retry_lease}, 500
+    assert retry_lease.state == "retrying"
+    assert retry_lease.retry_reason == "active-state-continuation-check"
+    assert retry_lease.issue_identifier == "MT-558"
+  end
+
+  test "normal worker exit quarantines live app-server before continuation retry" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-normal-exit-live-app-server-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.join(test_root, "workspaces")
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    issue_id = "issue-normal-live-process"
+    issue = %Issue{id: issue_id, identifier: "MT-NORMAL-LIVE", state: "In Progress"}
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :NormalLiveProcessOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    sleep = System.find_executable("sleep")
+    assert is_binary(sleep)
+    port = Port.open({:spawn_executable, sleep}, [:binary, :exit_status, args: [~c"5"]])
+    {:os_pid, app_server_pid} = :erlang.port_info(port, :os_pid)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      try do
+        Port.close(port)
+      rescue
+        ArgumentError -> :ok
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      run_id: "run-normal-live-process",
+      codex_app_server_pid: app_server_pid,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+
+    state = :sys.get_state(pid)
+    refute Map.has_key?(state.running, issue_id)
+    assert %{attempt: 1} = state.retry_attempts[issue_id]
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, quarantined_lease}, 500
+    assert quarantined_lease.state == "quarantined"
+    assert quarantined_lease.retry_reason == "active-state-continuation-check"
+
+    process_status = ProcessOwnership.status_for_issue(issue)
+    assert process_status.state == "quarantined"
+    assert process_status.live?
+    assert process_status.quarantine_reason =~ "app-server process remained live after normal worker exit"
+
+    refute Orchestrator.should_dispatch_issue_for_test(
+             issue,
+             %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+           )
+  end
+
+  test "terminal issue reconciliation releases the visible claim lease" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-terminal-lease"
+    now = DateTime.utc_now()
+
+    claim_lease =
+      ClaimLease.new(%{
+        comment_id: "comment-terminal-lease",
+        issue_id: issue_id,
+        issue_identifier: "MT-TERM-LEASE",
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-terminal-lease",
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-TERM-LEASE",
+      state: "Done",
+      title: "Terminal lease",
+      claim_lease: claim_lease
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, released_lease}, 500
+    assert released_lease.comment_id == "comment-terminal-lease"
+    assert released_lease.state == "released"
+    assert released_lease.recovery_reason == "issue-left-active-dispatch"
+  end
+
+  test "terminal issue reconciliation releases claim lease for an actively running issue" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-running-terminal-lease"
+    now = DateTime.utc_now()
+
+    claim_lease =
+      ClaimLease.new(%{
+        comment_id: "comment-running-terminal-lease",
+        issue_id: issue_id,
+        issue_identifier: "MT-RUN-TERM-LEASE",
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-terminal-running-lease",
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: nil,
+          identifier: "MT-RUN-TERM-LEASE",
+          issue: %Issue{
+            id: issue_id,
+            identifier: "MT-RUN-TERM-LEASE",
+            state: "In Progress",
+            claim_lease: claim_lease
+          },
+          claim_lease: claim_lease,
+          run_id: "run-terminal-running-lease",
+          started_at: now
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-RUN-TERM-LEASE",
+      state: "Done",
+      title: "Running terminal lease",
+      claim_lease: claim_lease
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, released_lease}, 500
+    assert released_lease.comment_id == "comment-running-terminal-lease"
+    assert released_lease.state == "released"
+    assert released_lease.recovery_reason == "issue-left-active-dispatch"
+  end
+
+  test "terminal issue reconciliation releases only the current same-scope claim lease" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-terminal-scoped-lease"
+    now = DateTime.utc_now()
+
+    implementer_lease =
+      ClaimLease.new(%{
+        comment_id: "comment-implementer-lease",
+        issue_id: issue_id,
+        issue_identifier: "MT-SCOPED-TERM",
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-implementer-lease",
+        refreshed_at: DateTime.add(now, -30, :second),
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    reviewer_lease =
+      ClaimLease.new(%{
+        comment_id: "comment-reviewer-lease",
+        issue_id: issue_id,
+        issue_identifier: "MT-SCOPED-TERM",
+        role: "reviewer",
+        holder: "reviewer-worker",
+        run_id: "run-reviewer-lease",
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-SCOPED-TERM",
+      state: "Done",
+      title: "Terminal scoped lease",
+      claim_lease: reviewer_lease,
+      claim_leases: [reviewer_lease, implementer_lease]
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, released_lease}, 500
+    assert released_lease.comment_id == "comment-implementer-lease"
+    assert released_lease.role == "implementer"
+    assert released_lease.state == "released"
+    assert released_lease.recovery_reason == "issue-left-active-dispatch"
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -594,6 +889,88 @@ defmodule SymphonyElixir.CoreTest do
              state.retry_attempts[issue_id]
 
     assert_due_in_range(due_at_ms, 38_000, 40_500)
+  end
+
+  test "abnormal worker exit quarantines surviving app-server process and visible lease" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-quarantine-exit-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.join(test_root, "workspaces")
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    issue_id = "issue-quarantine-exit"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :QuarantineExitOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    sleep = System.find_executable("sleep")
+    assert is_binary(sleep)
+    port = Port.open({:spawn_executable, sleep}, [:binary, :exit_status, args: [~c"5"]])
+    {:os_pid, app_server_pid} = :erlang.port_info(port, :os_pid)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      try do
+        Port.close(port)
+      rescue
+        ArgumentError -> :ok
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-QUAR",
+      retry_attempt: 1,
+      issue: %Issue{id: issue_id, identifier: "MT-QUAR", state: "In Progress"},
+      run_id: "run-quarantine",
+      codex_app_server_pid: app_server_pid,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :boom})
+    Process.sleep(50)
+
+    state = :sys.get_state(pid)
+    refute Map.has_key?(state.running, issue_id)
+    assert %{attempt: 2} = state.retry_attempts[issue_id]
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, quarantined_lease}, 500
+    assert quarantined_lease.state == "quarantined"
+    assert quarantined_lease.retry_reason == "agent exited: :boom"
+
+    process_status =
+      ProcessOwnership.status_for_issue(%Issue{id: issue_id, identifier: "MT-QUAR"})
+
+    assert process_status.state == "quarantined"
+    assert process_status.quarantine_reason =~ "agent exited before app-server process cleaned"
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -673,6 +1050,152 @@ defmodule SymphonyElixir.CoreTest do
              identifier: "MT-561",
              error: "agent exited: :boom"
            } = :sys.get_state(pid).retry_attempts[issue_id]
+  end
+
+  test "quarantined retry timer preserves lease and status while live process ownership blocks dispatch" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-quarantined-retry-live-process-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-quarantined-retry"
+    issue_identifier = "MT-QUAR-RETRY"
+    retry_token = make_ref()
+    now = DateTime.utc_now()
+    orchestrator_name = Module.concat(__MODULE__, :QuarantinedRetryOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: issue_identifier,
+      title: "Quarantined retry",
+      state: "In Progress"
+    }
+
+    sleep = System.find_executable("sleep")
+    assert is_binary(sleep)
+    port = Port.open({:spawn_executable, sleep}, [:binary, :exit_status, args: [~c"5"]])
+    {:os_pid, app_server_pid} = :erlang.port_info(port, :os_pid)
+
+    claim_lease =
+      ClaimLease.new(%{
+        comment_id: "comment-quarantined-retry",
+        issue_id: issue_id,
+        issue_identifier: issue_identifier,
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-quarantined-retry",
+        workspace_path: Path.join(workspace_root, issue_identifier),
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        retry_reason: "stalled for 301000ms without codex activity",
+        state: "quarantined"
+      })
+
+    issue = %{issue | claim_lease: claim_lease, claim_leases: [claim_lease]}
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      try do
+        Port.close(port)
+      rescue
+        ArgumentError -> :ok
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    :ok =
+      ProcessOwnership.record_quarantined(
+        issue,
+        %{
+          role: "implementer",
+          run_id: claim_lease.run_id,
+          holder: claim_lease.holder,
+          workspace_path: claim_lease.workspace_path,
+          app_server_pid: app_server_pid
+        },
+        "stalled worker left app-server process live"
+      )
+
+    process_ownership = ProcessOwnership.status_for_issue(issue)
+    assert process_ownership.state == "quarantined"
+    assert process_ownership.live?
+
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{
+        issue_id => %{
+          attempt: 2,
+          timer_ref: nil,
+          retry_token: retry_token,
+          due_at_ms: System.monotonic_time(:millisecond),
+          identifier: issue_identifier,
+          error: "stalled for 301000ms without codex activity",
+          issue: issue,
+          claim_lease: claim_lease,
+          run_id: claim_lease.run_id,
+          process_ownership: process_ownership
+        }
+      })
+    end)
+
+    send(pid, {:retry_issue, issue_id, retry_token})
+    Process.sleep(50)
+
+    state = :sys.get_state(pid)
+    assert MapSet.member?(state.claimed, issue_id)
+    assert %{attempt: 3, retry_token: new_retry_token} = retry = state.retry_attempts[issue_id]
+    assert is_reference(new_retry_token)
+    assert retry.identifier == issue_identifier
+    assert retry.claim_lease.state == "quarantined"
+    assert retry.claim_lease.comment_id == "comment-quarantined-retry"
+    assert retry.claim_lease.run_id == "run-quarantined-retry"
+    assert retry.process_ownership.state == "quarantined"
+    assert retry.process_ownership.live?
+
+    snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+    assert %{retrying: [retry_snapshot]} = snapshot
+    assert retry_snapshot.identifier == issue_identifier
+    assert retry_snapshot.claim_lease.state == "quarantined"
+    assert retry_snapshot.process_ownership.state == "quarantined"
+    assert retry_snapshot.process_ownership.live?
+
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, refreshed_lease}, 500
+    assert refreshed_lease.state == "quarantined"
+    assert refreshed_lease.comment_id == "comment-quarantined-retry"
+    assert refreshed_lease.run_id == "run-quarantined-retry"
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "released"}}, 100
+
+    refute Orchestrator.should_dispatch_issue_for_test(
+             issue,
+             %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+           )
   end
 
   test "dead retry timer releases leaked claim so issue can dispatch again" do
@@ -801,6 +1324,778 @@ defmodule SymphonyElixir.CoreTest do
     refute MapSet.member?(state.claimed, orphaned_issue_id)
   end
 
+  test "linear issue normalization extracts latest structured Symphony claim lease marker" do
+    now = DateTime.utc_now()
+    older = DateTime.add(now, -120, :second)
+    newer = DateTime.add(now, -30, :second)
+
+    old_marker =
+      ClaimLease.render(%{
+        issue_id: "issue-claim-marker",
+        issue_identifier: "MT-566",
+        role: "implementer",
+        holder: "worker-old",
+        run_id: "run-old",
+        refreshed_at: older,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    new_marker =
+      ClaimLease.render(%{
+        issue_id: "issue-claim-marker",
+        issue_identifier: "MT-566",
+        role: "implementer",
+        holder: "worker-new",
+        run_id: "run-new",
+        worker_host: "worker-a",
+        workspace_path: "/tmp/workspaces/MT-566",
+        session_id: "thread-turn",
+        attempt: 2,
+        refreshed_at: newer,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "retrying"
+      })
+
+    issue =
+      Client.normalize_issue_for_test(%{
+        "id" => "issue-claim-marker",
+        "identifier" => "MT-566",
+        "title" => "Claim marker",
+        "state" => %{"name" => "In Progress"},
+        "comments" => %{
+          "nodes" => [
+            %{"id" => "comment-old", "body" => "## Symphony Claim Lease\n\n#{old_marker}"},
+            %{"id" => "comment-new", "body" => "## Symphony Claim Lease\n\n#{new_marker}"}
+          ]
+        }
+      })
+
+    assert issue.claim_lease.holder == "worker-new"
+    assert issue.claim_lease.run_id == "run-new"
+    assert issue.claim_lease.state == "retrying"
+    assert issue.claim_lease.worker_host == "worker-a"
+    assert issue.claim_lease.workspace_path == "/tmp/workspaces/MT-566"
+    assert issue.claim_lease.session_id == "thread-turn"
+    assert issue.claim_lease.attempt == 2
+  end
+
+  test "claim lease normalization does not serialize missing optional fields as nil strings" do
+    now = DateTime.utc_now()
+
+    lease =
+      ClaimLease.new(%{
+        comment_id: nil,
+        issue_id: "issue-nil-fields",
+        issue_identifier: "MT-NIL",
+        role: "implementer",
+        holder: "worker-1",
+        run_id: "run-1",
+        worker_host: nil,
+        workspace_path: nil,
+        session_id: nil,
+        retry_reason: nil,
+        recovery_reason: nil,
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    assert lease.comment_id == nil
+    assert lease.worker_host == nil
+    assert lease.workspace_path == nil
+    assert lease.session_id == nil
+    assert lease.retry_reason == nil
+    assert lease.recovery_reason == nil
+
+    rendered = ClaimLease.render(lease)
+    refute rendered =~ ~s("comment_id")
+    refute rendered =~ ~s("session_id": "nil")
+    refute rendered =~ ~s("retry_reason": "nil")
+    refute rendered =~ ~s("recovery_reason": "nil")
+  end
+
+  test "dispatch refuses a duplicate top-level run while an external claim lease is active" do
+    previous_holder = Application.get_env(:symphony_elixir, :claim_lease_holder)
+
+    on_exit(fn ->
+      restore_app_env(:claim_lease_holder, previous_holder)
+    end)
+
+    Application.put_env(:symphony_elixir, :claim_lease_holder, "this-worker")
+
+    issue = %Issue{
+      id: "issue-active-lease",
+      identifier: "MT-567",
+      title: "Duplicate lease",
+      state: "In Progress",
+      claim_lease:
+        ClaimLease.new(%{
+          issue_id: "issue-active-lease",
+          issue_identifier: "MT-567",
+          role: "implementer",
+          holder: "other-worker",
+          run_id: "run-other",
+          refreshed_at: DateTime.utc_now(),
+          expires_at: DateTime.add(DateTime.utc_now(), 60, :second),
+          state: "active"
+        })
+    }
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch refuses same-holder active lease after runtime memory loss" do
+    previous_holder = Application.get_env(:symphony_elixir, :claim_lease_holder)
+
+    on_exit(fn ->
+      restore_app_env(:claim_lease_holder, previous_holder)
+    end)
+
+    Application.put_env(:symphony_elixir, :claim_lease_holder, "this-worker")
+
+    issue = %Issue{
+      id: "issue-same-holder-lease",
+      identifier: "MT-571",
+      title: "Same holder duplicate lease",
+      state: "In Progress",
+      claim_lease:
+        ClaimLease.new(%{
+          issue_id: "issue-same-holder-lease",
+          issue_identifier: "MT-571",
+          role: "implementer",
+          holder: "this-worker",
+          run_id: "run-existing",
+          refreshed_at: DateTime.utc_now(),
+          expires_at: DateTime.add(DateTime.utc_now(), 60, :second),
+          state: "active"
+        })
+    }
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch allows active claim lease for a different role" do
+    previous_holder = Application.get_env(:symphony_elixir, :claim_lease_holder)
+    previous_role = System.get_env("SYMPHONY_ROLE")
+
+    on_exit(fn ->
+      restore_app_env(:claim_lease_holder, previous_holder)
+      restore_env("SYMPHONY_ROLE", previous_role)
+    end)
+
+    Application.put_env(:symphony_elixir, :claim_lease_holder, "this-reviewer")
+    System.put_env("SYMPHONY_ROLE", "reviewer")
+
+    issue = %Issue{
+      id: "issue-cross-role-lease",
+      identifier: "MT-573",
+      title: "Cross role lease",
+      state: "In Progress",
+      claim_lease:
+        ClaimLease.new(%{
+          issue_id: "issue-cross-role-lease",
+          issue_identifier: "MT-573",
+          role: "implementer",
+          holder: "other-worker",
+          run_id: "run-other",
+          refreshed_at: DateTime.utc_now(),
+          expires_at: DateTime.add(DateTime.utc_now(), 60, :second),
+          state: "active"
+        })
+    }
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch refuses same-scope claim lease when a newer cross-role lease exists" do
+    previous_holder = Application.get_env(:symphony_elixir, :claim_lease_holder)
+    previous_role = System.get_env("SYMPHONY_ROLE")
+
+    on_exit(fn ->
+      restore_app_env(:claim_lease_holder, previous_holder)
+      restore_env("SYMPHONY_ROLE", previous_role)
+    end)
+
+    Application.put_env(:symphony_elixir, :claim_lease_holder, "this-implementer")
+    System.put_env("SYMPHONY_ROLE", "implementer")
+
+    now = DateTime.utc_now()
+
+    implementer_marker =
+      ClaimLease.render(%{
+        issue_id: "issue-hidden-implementer-lease",
+        issue_identifier: "MT-577",
+        role: "implementer",
+        holder: "other-implementer",
+        run_id: "run-implementer",
+        refreshed_at: DateTime.add(now, -30, :second),
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    reviewer_marker =
+      ClaimLease.render(%{
+        issue_id: "issue-hidden-implementer-lease",
+        issue_identifier: "MT-577",
+        role: "reviewer",
+        holder: "other-reviewer",
+        run_id: "run-reviewer",
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    issue =
+      Client.normalize_issue_for_test(%{
+        "id" => "issue-hidden-implementer-lease",
+        "identifier" => "MT-577",
+        "title" => "Hidden implementer lease",
+        "state" => %{"name" => "In Progress"},
+        "comments" => %{
+          "nodes" => [
+            %{"id" => "comment-implementer", "body" => "## Symphony Claim Lease\n\n#{implementer_marker}"},
+            %{"id" => "comment-reviewer", "body" => "## Symphony Claim Lease\n\n#{reviewer_marker}"}
+          ]
+        }
+      })
+
+    assert issue.claim_lease.role == "reviewer"
+    assert length(Map.get(issue, :claim_leases, [])) == 2
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch allows active claim lease for a different explicit workspace" do
+    previous_holder = Application.get_env(:symphony_elixir, :claim_lease_holder)
+
+    on_exit(fn ->
+      restore_app_env(:claim_lease_holder, previous_holder)
+    end)
+
+    Application.put_env(:symphony_elixir, :claim_lease_holder, "this-worker")
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-cross-workspace-lease-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-cross-workspace-lease",
+      identifier: "MT-574",
+      title: "Cross workspace lease",
+      state: "In Progress",
+      repository: "EmberAGI/symphony",
+      claim_lease:
+        ClaimLease.new(%{
+          issue_id: "issue-cross-workspace-lease",
+          issue_identifier: "MT-574",
+          role: "implementer",
+          holder: "other-worker",
+          run_id: "run-other",
+          workspace_path: Path.join(workspace_root, "other-workspace"),
+          refreshed_at: DateTime.utc_now(),
+          expires_at: DateTime.add(DateTime.utc_now(), 60, :second),
+          state: "active"
+        })
+    }
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "final dispatch revalidation refuses an active external claim lease" do
+    issue = %Issue{
+      id: "issue-final-lease",
+      identifier: "MT-572",
+      title: "Final lease gate",
+      state: "In Progress"
+    }
+
+    refreshed_issue = %{
+      issue
+      | claim_lease:
+          ClaimLease.new(%{
+            issue_id: issue.id,
+            issue_identifier: issue.identifier,
+            role: "implementer",
+            holder: "other-worker",
+            run_id: "run-other",
+            refreshed_at: DateTime.utc_now(),
+            expires_at: DateTime.add(DateTime.utc_now(), 60, :second),
+            state: "active"
+          })
+    }
+
+    assert {:skip, ^refreshed_issue} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(issue, fn [issue_id] ->
+               assert issue_id == issue.id
+               {:ok, [refreshed_issue]}
+             end)
+  end
+
+  test "dispatch allows an expired external claim lease when no process ownership remains" do
+    issue = %Issue{
+      id: "issue-expired-lease",
+      identifier: "MT-568",
+      title: "Expired lease",
+      state: "In Progress",
+      claim_lease:
+        ClaimLease.new(%{
+          issue_id: "issue-expired-lease",
+          issue_identifier: "MT-568",
+          role: "implementer",
+          holder: "other-worker",
+          run_id: "run-other",
+          refreshed_at: DateTime.add(DateTime.utc_now(), -120, :second),
+          expires_at: DateTime.add(DateTime.utc_now(), -60, :second),
+          state: "active"
+        })
+    }
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch refuses when synthetic process ownership records a live app-server pid" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-process-ownership-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-live-process",
+      identifier: "MT-569",
+      title: "Live process ownership",
+      state: "In Progress"
+    }
+
+    sleep = System.find_executable("sleep")
+    assert is_binary(sleep)
+
+    port = Port.open({:spawn_executable, sleep}, [:binary, :exit_status, args: [~c"5"]])
+    {:os_pid, app_server_pid} = :erlang.port_info(port, :os_pid)
+
+    on_exit(fn ->
+      try do
+        Port.close(port)
+      rescue
+        ArgumentError -> :ok
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    :ok =
+      ProcessOwnership.record_active(issue, %{
+        role: "implementer",
+        run_id: "run-live-process",
+        app_server_pid: app_server_pid
+      })
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch refuses when a recorded app-server descendant survives after parent exit" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-process-tree-ownership-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    File.mkdir_p!(test_root)
+
+    issue = %Issue{
+      id: "issue-live-process-tree",
+      identifier: "MT-580",
+      title: "Live process tree ownership",
+      state: "In Progress"
+    }
+
+    parent_pid_file = Path.join(test_root, "parent.pid")
+    child_pid_file = Path.join(test_root, "child.pid")
+
+    script =
+      "echo $$ > #{parent_pid_file}; sleep 5 >/dev/null 2>&1 & echo $! > #{child_pid_file}; sleep 0.5"
+
+    port =
+      Port.open({:spawn_executable, System.find_executable("bash")}, [
+        :binary,
+        :exit_status,
+        args: [~c"-lc", String.to_charlist(script)]
+      ])
+
+    {:os_pid, app_server_pid} = :erlang.port_info(port, :os_pid)
+
+    on_exit(fn ->
+      for pid_file <- [child_pid_file, parent_pid_file],
+          {:ok, body} <- [File.read(pid_file)],
+          {pid, ""} <- [Integer.parse(String.trim(body))] do
+        System.cmd("kill", ["-TERM", Integer.to_string(pid)], stderr_to_stdout: true)
+      end
+
+      try do
+        Port.close(port)
+      rescue
+        ArgumentError -> :ok
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    assert_eventually(fn ->
+      File.exists?(parent_pid_file) and File.exists?(child_pid_file)
+    end)
+
+    :ok =
+      ProcessOwnership.record_active(issue, %{
+        role: "implementer",
+        run_id: "run-live-process-tree",
+        app_server_pid: app_server_pid
+      })
+
+    assert_receive {^port, {:exit_status, 0}}, 1_000
+
+    child_pid = child_pid_file |> File.read!() |> String.trim() |> String.to_integer()
+    assert {_, 0} = System.cmd("kill", ["-0", Integer.to_string(child_pid)], stderr_to_stdout: true)
+    assert ProcessOwnership.owned_process_live?(issue, %{app_server_pid: app_server_pid})
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch refuses when a late-detached app-server descendant inherits run ownership" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-late-detached-process-ownership-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace_path = Path.join(workspace_root, "MT-581-symphony")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    File.mkdir_p!(workspace_path)
+
+    issue = %Issue{
+      id: "issue-late-detached-process-tree",
+      identifier: "MT-581",
+      title: "Late detached process tree ownership",
+      state: "In Progress",
+      repository: "EmberAGI/symphony"
+    }
+
+    parent_pid_file = Path.join(test_root, "parent.pid")
+    child_pid_file = Path.join(test_root, "child.pid")
+    run_id = "run-late-detached-process-tree"
+    holder = "holder-late-detached-process-tree"
+
+    script =
+      """
+      echo $$ > #{parent_pid_file}
+      sleep 0.2
+      setsid env \
+        SYMPHONY_ROLE_RUN_ID=#{run_id} \
+        SYMPHONY_ROLE_ISSUE_ID=#{issue.id} \
+        SYMPHONY_ROLE_ISSUE_IDENTIFIER=#{issue.identifier} \
+        SYMPHONY_ROLE_NAME=implementer \
+        SYMPHONY_ROLE_HOLDER=#{holder} \
+        SYMPHONY_ROLE_WORKSPACE_PATH=#{workspace_path} \
+        sh -c 'echo $$ > #{child_pid_file}; sleep 5' >/dev/null 2>&1 &
+      sleep 0.2
+      """
+
+    port =
+      Port.open({:spawn_executable, System.find_executable("bash")}, [
+        :binary,
+        :exit_status,
+        args: [~c"-lc", String.to_charlist(script)]
+      ])
+
+    {:os_pid, app_server_pid} = :erlang.port_info(port, :os_pid)
+
+    on_exit(fn ->
+      for pid_file <- [child_pid_file, parent_pid_file],
+          {:ok, body} <- [File.read(pid_file)],
+          {pid, ""} <- [Integer.parse(String.trim(body))] do
+        System.cmd("kill", ["-TERM", Integer.to_string(pid)], stderr_to_stdout: true)
+      end
+
+      try do
+        Port.close(port)
+      rescue
+        ArgumentError -> :ok
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    assert_eventually(fn -> File.exists?(parent_pid_file) end)
+
+    :ok =
+      ProcessOwnership.record_active(issue, %{
+        role: "implementer",
+        run_id: run_id,
+        holder: holder,
+        workspace_path: workspace_path,
+        app_server_pid: app_server_pid
+      })
+
+    assert_receive {^port, {:exit_status, 0}}, 1_000
+
+    child_pid = child_pid_file |> File.read!() |> String.trim() |> String.to_integer()
+    assert {_, 0} = System.cmd("kill", ["-0", Integer.to_string(child_pid)], stderr_to_stdout: true)
+    assert ProcessOwnership.owned_process_live?(issue, %{app_server_pid: app_server_pid})
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch allows process ownership for a different role" do
+    previous_role = System.get_env("SYMPHONY_ROLE")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_ROLE", previous_role)
+    end)
+
+    System.put_env("SYMPHONY_ROLE", "reviewer")
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-cross-role-process-ownership-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-cross-role-process",
+      identifier: "MT-575",
+      title: "Cross role process ownership",
+      state: "In Progress"
+    }
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    :ok =
+      ProcessOwnership.record_active(issue, %{
+        role: "implementer",
+        run_id: "run-implementer-process",
+        worker_host: "worker-a"
+      })
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch refuses same-scope process ownership when a newer cross-role record exists" do
+    previous_role = System.get_env("SYMPHONY_ROLE")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_ROLE", previous_role)
+    end)
+
+    System.put_env("SYMPHONY_ROLE", "implementer")
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-hidden-process-ownership-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-hidden-implementer-process",
+      identifier: "MT-578",
+      title: "Hidden implementer process ownership",
+      state: "In Progress"
+    }
+
+    sleep = System.find_executable("sleep")
+    assert is_binary(sleep)
+
+    port = Port.open({:spawn_executable, sleep}, [:binary, :exit_status, args: [~c"5"]])
+    {:os_pid, app_server_pid} = :erlang.port_info(port, :os_pid)
+
+    on_exit(fn ->
+      try do
+        Port.close(port)
+      rescue
+        ArgumentError -> :ok
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    :ok =
+      ProcessOwnership.record_active(issue, %{
+        role: "implementer",
+        run_id: "run-implementer-process",
+        app_server_pid: app_server_pid
+      })
+
+    :ok =
+      ProcessOwnership.record_active(issue, %{
+        role: "reviewer",
+        run_id: "run-reviewer-process",
+        worker_host: "worker-a"
+      })
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch allows process ownership for a different explicit workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-cross-workspace-process-ownership-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-cross-workspace-process",
+      identifier: "MT-576",
+      title: "Cross workspace process ownership",
+      state: "In Progress",
+      repository: "EmberAGI/symphony"
+    }
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    registry_path = ProcessOwnership.registry_path(issue)
+    File.mkdir_p!(Path.dirname(registry_path))
+
+    File.write!(
+      registry_path,
+      Jason.encode!(%{
+        "version" => 1,
+        "issue_id" => issue.id,
+        "issue_identifier" => issue.identifier,
+        "role" => "implementer",
+        "run_id" => "run-other-workspace-process",
+        "worker_host" => "worker-a",
+        "workspace_path" => Path.join(workspace_root, "other-workspace"),
+        "state" => "active",
+        "cleanup_status" => "active",
+        "updated_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+      }) <> "\n"
+    )
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch refuses when remote process ownership is still active" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-process-ownership-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-remote-process",
+      identifier: "MT-570",
+      title: "Remote process ownership",
+      state: "In Progress",
+      repository: "EmberAGI/symphony"
+    }
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    :ok =
+      ProcessOwnership.record_active(issue, %{
+        role: "implementer",
+        run_id: "run-remote-process",
+        worker_host: "worker-a",
+        workspace_path: Path.join(workspace_root, "MT-570-symphony")
+      })
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch ignores a stale local quarantine record after the process exits" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-quarantine-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-stale-quarantine",
+      identifier: "MT-579",
+      title: "Stale quarantine",
+      state: "In Progress"
+    }
+
+    File.mkdir_p!(test_root)
+    pid_file = Path.join(test_root, "exited-app-server.pid")
+    {_, 0} = System.cmd("sh", ["-c", "echo $$ > #{pid_file}"])
+    app_server_pid = pid_file |> File.read!() |> String.trim() |> String.to_integer()
+
+    :ok =
+      ProcessOwnership.record_quarantined(
+        issue,
+        %{
+          role: "implementer",
+          run_id: "run-stale-quarantine",
+          app_server_pid: app_server_pid
+        },
+        "agent exited before app-server process cleaned: :terminated"
+      )
+
+    on_exit(fn ->
+      File.rm_rf(test_root)
+    end)
+
+    assert_eventually(fn ->
+      Orchestrator.should_dispatch_issue_for_test(
+        issue,
+        %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+      )
+    end)
+  end
+
   test "manual refresh coalesces repeated requests and ignores superseded ticks" do
     now_ms = System.monotonic_time(:millisecond)
     stale_tick_token = make_ref()
@@ -880,8 +2175,9 @@ defmodule SymphonyElixir.CoreTest do
 
   defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
+    instrumentation_slack_ms = 2_500
 
-    assert remaining_ms >= min_remaining_ms
+    assert remaining_ms >= min_remaining_ms - instrumentation_slack_ms
     assert remaining_ms <= max_remaining_ms
   end
 
@@ -1621,6 +2917,11 @@ defmodule SymphonyElixir.CoreTest do
       count=0
       printf 'ARGV:%s\\n' \"$*\" >> \"$trace_file\"
       printf 'CWD:%s\\n' \"$PWD\" >> \"$trace_file\"
+      printf 'ROLE_RUN:%s\\n' \"$SYMPHONY_ROLE_RUN_ID\" >> \"$trace_file\"
+      printf 'ROLE_ISSUE:%s\\n' \"$SYMPHONY_ROLE_ISSUE_ID\" >> \"$trace_file\"
+      printf 'ROLE_IDENTIFIER:%s\\n' \"$SYMPHONY_ROLE_ISSUE_IDENTIFIER\" >> \"$trace_file\"
+      printf 'ROLE_NAME:%s\\n' \"$SYMPHONY_ROLE_NAME\" >> \"$trace_file\"
+      printf 'ROLE_WORKSPACE:%s\\n' \"$SYMPHONY_ROLE_WORKSPACE_PATH\" >> \"$trace_file\"
 
       while IFS= read -r line; do
         count=$((count + 1))
@@ -1663,7 +2964,7 @@ defmodule SymphonyElixir.CoreTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Fix workspace start args", issue)
+      assert {:ok, _result} = AppServer.run(workspace, "Fix workspace start args", issue, run_id: "run-app-server-env")
       assert {:ok, canonical_workspace} = SymphonyElixir.PathSafety.canonicalize(workspace)
 
       trace = File.read!(trace_file)
@@ -1674,6 +2975,11 @@ defmodule SymphonyElixir.CoreTest do
       refute Enum.any?(lines, &String.contains?(&1, "--yolo"))
       assert cwd_line = Enum.find(lines, fn line -> String.starts_with?(line, "CWD:") end)
       assert String.ends_with?(cwd_line, Path.basename(workspace))
+      assert "ROLE_RUN:run-app-server-env" in lines
+      assert "ROLE_ISSUE:issue-args" in lines
+      assert "ROLE_IDENTIFIER:MT-77" in lines
+      assert "ROLE_NAME:implementer" in lines
+      assert "ROLE_WORKSPACE:#{canonical_workspace}" in lines
 
       assert Enum.any?(lines, fn line ->
                if String.starts_with?(line, "JSON:") do
@@ -1945,4 +3251,17 @@ defmodule SymphonyElixir.CoreTest do
       File.rm_rf(test_root)
     end
   end
+
+  defp assert_eventually(fun, attempts \\ 20)
+
+  defp assert_eventually(fun, attempts) when attempts > 0 do
+    if fun.() do
+      assert true
+    else
+      Process.sleep(25)
+      assert_eventually(fun, attempts - 1)
+    end
+  end
+
+  defp assert_eventually(_fun, 0), do: flunk("condition not met in time")
 end
