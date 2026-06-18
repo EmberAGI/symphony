@@ -720,6 +720,72 @@ defmodule SymphonyElixir.CoreTest do
     assert released_lease.recovery_reason == "issue-left-active-dispatch"
   end
 
+  test "terminal issue reconciliation releases claim lease for an actively running issue" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-running-terminal-lease"
+    now = DateTime.utc_now()
+
+    claim_lease =
+      ClaimLease.new(%{
+        comment_id: "comment-running-terminal-lease",
+        issue_id: issue_id,
+        issue_identifier: "MT-RUN-TERM-LEASE",
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-terminal-running-lease",
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: nil,
+          identifier: "MT-RUN-TERM-LEASE",
+          issue: %Issue{
+            id: issue_id,
+            identifier: "MT-RUN-TERM-LEASE",
+            state: "In Progress",
+            claim_lease: claim_lease
+          },
+          claim_lease: claim_lease,
+          run_id: "run-terminal-running-lease",
+          started_at: now
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-RUN-TERM-LEASE",
+      state: "Done",
+      title: "Running terminal lease",
+      claim_lease: claim_lease
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, released_lease}, 500
+    assert released_lease.comment_id == "comment-running-terminal-lease"
+    assert released_lease.state == "released"
+    assert released_lease.recovery_reason == "issue-left-active-dispatch"
+  end
+
   test "terminal issue reconciliation releases only the current same-scope claim lease" do
     previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
 

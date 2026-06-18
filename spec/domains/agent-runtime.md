@@ -116,6 +116,10 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   orchestrator restart paths must either clean the owned app-server process
   tree or preserve/quarantine process ownership metadata so replacement
   top-level dispatch refuses until recovery policy allows it.
+- When a running issue leaves active dispatch because it becomes terminal,
+  non-active, unroutable, or reassigned, the runtime must record process
+  completion or quarantine first and then update the same-scope Linear-visible
+  claim lease to `released`.
 - Normal worker completion must not mark process ownership as cleaned until the
   scoped app-server process tree is no longer live. If the app-server PID,
   observed process tree, process group, or inherited ownership-marker process

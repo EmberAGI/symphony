@@ -513,6 +513,7 @@ defmodule SymphonyElixir.Orchestrator do
         end
 
         record_process_completion(running_entry, :terminated)
+        maybe_release_claim_lease(release_issue || Map.get(running_entry, :issue))
 
         if is_reference(ref) do
           Process.demonitor(ref, [:flush])
