@@ -361,6 +361,49 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert_receive {:fetch_issue_states_by_ids_called, ["issue-lease"]}
   end
 
+  test "linear adapter creates a claim lease marker when no comment id exists" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    on_exit(fn ->
+      Process.delete({FakeLinearClient, :graphql_results})
+      Process.delete({FakeLinearClient, :fetch_issue_states_result})
+    end)
+
+    now = DateTime.utc_now()
+
+    lease_attrs = %{
+      comment_id: nil,
+      issue_id: "issue-new-lease",
+      issue_identifier: "MT-NEW-LEASE",
+      role: "implementer",
+      holder: "holder-1",
+      run_id: "run-1",
+      state: "active",
+      refreshed_at: now,
+      expires_at: DateTime.add(now, 60, :second)
+    }
+
+    verified_lease = ClaimLease.new(lease_attrs)
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:ok, %{"data" => %{"commentCreate" => %{"success" => true, "comment" => %{"id" => "comment-created"}}}}}
+    ])
+
+    Process.put(
+      {FakeLinearClient, :fetch_issue_states_result},
+      {:ok, [%Issue{id: "issue-new-lease", claim_lease: verified_lease}]}
+    )
+
+    assert {:ok, ^verified_lease} = Adapter.upsert_claim_lease("issue-new-lease", lease_attrs)
+
+    assert_receive {:graphql_called, create_query, %{issueId: "issue-new-lease", body: body}}
+    assert create_query =~ "commentCreate"
+    refute create_query =~ "commentUpdate"
+    assert body =~ "symphony-claim-lease:v1"
+    refute body =~ ~s("comment_id": "nil")
+    assert_receive {:fetch_issue_states_by_ids_called, ["issue-new-lease"]}
+  end
+
   test "phoenix observability api preserves state, issue, and refresh responses" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)

@@ -518,12 +518,22 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "normal worker exit schedules active-state continuation retry" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
     issue_id = "issue-resume"
     ref = make_ref()
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
     orchestrator_name = Module.concat(__MODULE__, :ContinuationOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+
       if Process.alive?(pid) do
         Process.exit(pid, :normal)
       end
@@ -557,6 +567,60 @@ defmodule SymphonyElixir.CoreTest do
     assert is_integer(due_at_ms)
     assert due_at_ms - down_sent_at_ms >= 500
     assert_due_in_range(due_at_ms, 0, 1_100)
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, retry_lease}, 500
+    assert retry_lease.state == "retrying"
+    assert retry_lease.retry_reason == "active-state-continuation-check"
+    assert retry_lease.issue_identifier == "MT-558"
+  end
+
+  test "terminal issue reconciliation releases the visible claim lease" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-terminal-lease"
+    now = DateTime.utc_now()
+
+    claim_lease =
+      ClaimLease.new(%{
+        comment_id: "comment-terminal-lease",
+        issue_id: issue_id,
+        issue_identifier: "MT-TERM-LEASE",
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-terminal-lease",
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-TERM-LEASE",
+      state: "Done",
+      title: "Terminal lease",
+      claim_lease: claim_lease
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, released_lease}, 500
+    assert released_lease.comment_id == "comment-terminal-lease"
+    assert released_lease.state == "released"
+    assert released_lease.recovery_reason == "issue-left-active-dispatch"
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -597,6 +661,88 @@ defmodule SymphonyElixir.CoreTest do
              state.retry_attempts[issue_id]
 
     assert_due_in_range(due_at_ms, 38_000, 40_500)
+  end
+
+  test "abnormal worker exit quarantines surviving app-server process and visible lease" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-quarantine-exit-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.join(test_root, "workspaces")
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    issue_id = "issue-quarantine-exit"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :QuarantineExitOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    sleep = System.find_executable("sleep")
+    assert is_binary(sleep)
+    port = Port.open({:spawn_executable, sleep}, [:binary, :exit_status, args: [~c"5"]])
+    {:os_pid, app_server_pid} = :erlang.port_info(port, :os_pid)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      try do
+        Port.close(port)
+      rescue
+        ArgumentError -> :ok
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-QUAR",
+      retry_attempt: 1,
+      issue: %Issue{id: issue_id, identifier: "MT-QUAR", state: "In Progress"},
+      run_id: "run-quarantine",
+      codex_app_server_pid: app_server_pid,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :boom})
+    Process.sleep(50)
+
+    state = :sys.get_state(pid)
+    refute Map.has_key?(state.running, issue_id)
+    assert %{attempt: 2} = state.retry_attempts[issue_id]
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, quarantined_lease}, 500
+    assert quarantined_lease.state == "quarantined"
+    assert quarantined_lease.retry_reason == "agent exited: :boom"
+
+    process_status =
+      ProcessOwnership.status_for_issue(%Issue{id: issue_id, identifier: "MT-QUAR"})
+
+    assert process_status.state == "quarantined"
+    assert process_status.quarantine_reason =~ "agent exited before app-server process cleaned"
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -860,6 +1006,41 @@ defmodule SymphonyElixir.CoreTest do
     assert issue.claim_lease.attempt == 2
   end
 
+  test "claim lease normalization does not serialize missing optional fields as nil strings" do
+    now = DateTime.utc_now()
+
+    lease =
+      ClaimLease.new(%{
+        comment_id: nil,
+        issue_id: "issue-nil-fields",
+        issue_identifier: "MT-NIL",
+        role: "implementer",
+        holder: "worker-1",
+        run_id: "run-1",
+        worker_host: nil,
+        workspace_path: nil,
+        session_id: nil,
+        retry_reason: nil,
+        recovery_reason: nil,
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    assert lease.comment_id == nil
+    assert lease.worker_host == nil
+    assert lease.workspace_path == nil
+    assert lease.session_id == nil
+    assert lease.retry_reason == nil
+    assert lease.recovery_reason == nil
+
+    rendered = ClaimLease.render(lease)
+    refute rendered =~ ~s("comment_id")
+    refute rendered =~ ~s("session_id": "nil")
+    refute rendered =~ ~s("retry_reason": "nil")
+    refute rendered =~ ~s("recovery_reason": "nil")
+  end
+
   test "dispatch refuses a duplicate top-level run while an external claim lease is active" do
     previous_holder = Application.get_env(:symphony_elixir, :claim_lease_holder)
 
@@ -890,6 +1071,68 @@ defmodule SymphonyElixir.CoreTest do
     state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
 
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch refuses same-holder active lease after runtime memory loss" do
+    previous_holder = Application.get_env(:symphony_elixir, :claim_lease_holder)
+
+    on_exit(fn ->
+      restore_app_env(:claim_lease_holder, previous_holder)
+    end)
+
+    Application.put_env(:symphony_elixir, :claim_lease_holder, "this-worker")
+
+    issue = %Issue{
+      id: "issue-same-holder-lease",
+      identifier: "MT-571",
+      title: "Same holder duplicate lease",
+      state: "In Progress",
+      claim_lease:
+        ClaimLease.new(%{
+          issue_id: "issue-same-holder-lease",
+          issue_identifier: "MT-571",
+          role: "implementer",
+          holder: "this-worker",
+          run_id: "run-existing",
+          refreshed_at: DateTime.utc_now(),
+          expires_at: DateTime.add(DateTime.utc_now(), 60, :second),
+          state: "active"
+        })
+    }
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "final dispatch revalidation refuses an active external claim lease" do
+    issue = %Issue{
+      id: "issue-final-lease",
+      identifier: "MT-572",
+      title: "Final lease gate",
+      state: "In Progress"
+    }
+
+    refreshed_issue = %{
+      issue
+      | claim_lease:
+          ClaimLease.new(%{
+            issue_id: issue.id,
+            issue_identifier: issue.identifier,
+            role: "implementer",
+            holder: "other-worker",
+            run_id: "run-other",
+            refreshed_at: DateTime.utc_now(),
+            expires_at: DateTime.add(DateTime.utc_now(), 60, :second),
+            state: "active"
+          })
+    }
+
+    assert {:skip, ^refreshed_issue} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(issue, fn [issue_id] ->
+               assert issue_id == issue.id
+               {:ok, [refreshed_issue]}
+             end)
   end
 
   test "dispatch allows an expired external claim lease when no process ownership remains" do

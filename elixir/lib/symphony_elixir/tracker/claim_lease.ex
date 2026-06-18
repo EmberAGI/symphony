@@ -203,6 +203,7 @@ defmodule SymphonyElixir.Tracker.ClaimLease do
     end
   end
 
+  defp normalize_string(nil), do: nil
   defp normalize_string(value) when is_integer(value), do: Integer.to_string(value)
   defp normalize_string(value) when is_atom(value), do: Atom.to_string(value)
   defp normalize_string(_value), do: nil

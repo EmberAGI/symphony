@@ -143,7 +143,7 @@ defmodule SymphonyElixir.Orchestrator do
         {running_entry, state} = pop_running_entry(state, issue_id)
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
-        record_process_completion(running_entry, reason)
+        process_completion_status = record_process_completion(running_entry, reason)
 
         state =
           case reason do
@@ -157,7 +157,12 @@ defmodule SymphonyElixir.Orchestrator do
                 identifier: running_entry.identifier,
                 delay_type: :continuation,
                 worker_host: Map.get(running_entry, :worker_host),
-                workspace_path: Map.get(running_entry, :workspace_path)
+                workspace_path: Map.get(running_entry, :workspace_path),
+                issue: Map.get(running_entry, :issue),
+                claim_lease: Map.get(running_entry, :claim_lease),
+                run_id: Map.get(running_entry, :run_id),
+                retry_reason: "active-state-continuation-check",
+                lease_state: "retrying"
               })
 
             _ ->
@@ -170,7 +175,12 @@ defmodule SymphonyElixir.Orchestrator do
                 identifier: running_entry.identifier,
                 error: "agent exited: #{inspect(reason)}",
                 worker_host: Map.get(running_entry, :worker_host),
-                workspace_path: Map.get(running_entry, :workspace_path)
+                workspace_path: Map.get(running_entry, :workspace_path),
+                issue: Map.get(running_entry, :issue),
+                claim_lease: Map.get(running_entry, :claim_lease),
+                run_id: Map.get(running_entry, :run_id),
+                retry_reason: "agent exited: #{inspect(reason)}",
+                lease_state: retry_lease_state(process_completion_status)
               })
           end
 
@@ -345,7 +355,7 @@ defmodule SymphonyElixir.Orchestrator do
           {:ok, Issue.t()} | {:skip, Issue.t() | :missing} | {:error, term()}
   def revalidate_issue_for_dispatch_for_test(%Issue{} = issue, issue_fetcher)
       when is_function(issue_fetcher, 1) do
-    revalidate_issue_for_dispatch(issue, issue_fetcher, terminal_state_set())
+    revalidate_issue_for_dispatch(issue, issue_fetcher, terminal_state_set(), false)
   end
 
   @doc false
@@ -391,12 +401,12 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, true)
+        terminate_running_issue(state, issue.id, true, issue)
 
       !issue_routable_to_worker?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_running_issue(state, issue.id, false, issue)
 
       active_issue_state?(issue.state, active_states) ->
         refresh_running_issue_state(state, issue)
@@ -404,7 +414,7 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_running_issue(state, issue.id, false, issue)
     end
   end
 
@@ -484,10 +494,10 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do
+  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace, release_issue \\ nil) do
     case Map.get(state.running, issue_id) do
       nil ->
-        release_issue_claim(state, issue_id)
+        release_issue_claim(state, issue_id, release_issue)
 
       %{pid: pid, ref: ref} = running_entry ->
         state = record_session_completion_totals(state, running_entry)
@@ -497,6 +507,8 @@ defmodule SymphonyElixir.Orchestrator do
         if cleanup_workspace do
           cleanup_issue_workspace(issue_or_identifier, worker_host)
         end
+
+        record_process_completion(running_entry, :terminated)
 
         if is_pid(pid) do
           terminate_task(pid)
@@ -516,7 +528,7 @@ defmodule SymphonyElixir.Orchestrator do
         }
 
       _ ->
-        release_issue_claim(state, issue_id)
+        release_issue_claim(state, issue_id, release_issue)
     end
   end
 
@@ -555,7 +567,12 @@ defmodule SymphonyElixir.Orchestrator do
       |> terminate_running_issue(issue_id, false)
       |> schedule_issue_retry(issue_id, next_attempt, %{
         identifier: identifier,
-        error: "stalled for #{elapsed_ms}ms without codex activity"
+        error: "stalled for #{elapsed_ms}ms without codex activity",
+        issue: Map.get(running_entry, :issue),
+        claim_lease: Map.get(running_entry, :claim_lease),
+        run_id: Map.get(running_entry, :run_id),
+        retry_reason: "stalled for #{elapsed_ms}ms without codex activity",
+        lease_state: "retrying"
       })
     else
       state
@@ -776,7 +793,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
-    case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
+    case revalidate_issue_for_dispatch(
+           issue,
+           &Tracker.fetch_issue_states_by_ids/1,
+           terminal_state_set(),
+           retry_dispatch?(attempt)
+         ) do
       {:ok, %Issue{} = refreshed_issue} ->
         do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
 
@@ -889,11 +911,12 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp revalidate_issue_for_dispatch(%Issue{id: issue_id}, issue_fetcher, terminal_states)
+  defp revalidate_issue_for_dispatch(%Issue{id: issue_id}, issue_fetcher, terminal_states, retry_dispatch?)
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do
     case issue_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
-        if retry_candidate_issue?(refreshed_issue, terminal_states) do
+        if retry_candidate_issue?(refreshed_issue, terminal_states) and
+             claim_lease_allows_dispatch?(refreshed_issue, retry_dispatch?) do
           {:ok, refreshed_issue}
         else
           {:skip, refreshed_issue}
@@ -907,7 +930,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
+  defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states, _retry_dispatch?), do: {:ok, issue}
 
   defp complete_issue(%State{} = state, issue_id) do
     %{
@@ -919,7 +942,16 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp upsert_dispatch_claim_lease(%Issue{id: issue_id} = issue, attempt, worker_host, run_id)
        when is_binary(issue_id) do
-    Tracker.upsert_claim_lease(issue_id, build_claim_lease_attrs(issue, attempt, worker_host, run_id))
+    attrs =
+      build_claim_lease_attrs(
+        issue,
+        attempt,
+        worker_host,
+        run_id,
+        claim_lease_update_overrides(issue)
+      )
+
+    Tracker.upsert_claim_lease(issue_id, attrs)
   end
 
   defp upsert_dispatch_claim_lease(_issue, _attempt, _worker_host, _run_id), do: {:ok, nil}
@@ -927,39 +959,37 @@ defmodule SymphonyElixir.Orchestrator do
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
        when is_binary(issue_id) and is_map(metadata) do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
-    next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
+    next_attempt = retry_attempt_for(previous_retry, attempt)
     delay_ms = retry_delay(next_attempt, metadata)
-    old_timer = Map.get(previous_retry, :timer_ref)
     retry_token = make_ref()
     due_at_ms = System.monotonic_time(:millisecond) + delay_ms
-    identifier = pick_retry_identifier(issue_id, previous_retry, metadata)
-    error = pick_retry_error(previous_retry, metadata)
-    worker_host = pick_retry_worker_host(previous_retry, metadata)
-    workspace_path = pick_retry_workspace_path(previous_retry, metadata)
+    retry_context = retry_context(issue_id, previous_retry, metadata)
 
-    if is_reference(old_timer) do
-      Process.cancel_timer(old_timer)
-    end
+    cancel_retry_timer(previous_retry)
+
+    retry_claim_lease =
+      maybe_upsert_retry_claim_lease(issue_id, retry_context.issue, retry_context.claim_lease, next_attempt, delay_ms, %{
+        error: retry_context.error,
+        worker_host: retry_context.worker_host,
+        workspace_path: retry_context.workspace_path,
+        run_id: retry_context.run_id,
+        retry_reason: metadata[:retry_reason] || retry_context.error,
+        recovery_reason: metadata[:recovery_reason],
+        lease_state: metadata[:lease_state] || "retrying"
+      })
 
     timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
 
-    error_suffix = if is_binary(error), do: " error=#{error}", else: ""
-
-    Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
+    Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{retry_context.identifier} in #{delay_ms}ms (attempt #{next_attempt})#{retry_error_suffix(retry_context.error)}")
 
     %{
       state
       | retry_attempts:
-          Map.put(state.retry_attempts, issue_id, %{
-            attempt: next_attempt,
-            timer_ref: timer_ref,
-            retry_token: retry_token,
-            due_at_ms: due_at_ms,
-            identifier: identifier,
-            error: error,
-            worker_host: worker_host,
-            workspace_path: workspace_path
-          })
+          Map.put(
+            state.retry_attempts,
+            issue_id,
+            retry_entry(next_attempt, timer_ref, retry_token, due_at_ms, retry_context, retry_claim_lease)
+          )
     }
   end
 
@@ -1032,7 +1062,7 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
         cleanup_issue_workspace(issue, metadata[:worker_host])
-        {:noreply, release_issue_claim(state, issue_id)}
+        {:noreply, release_issue_claim(state, issue_id, issue)}
 
       retry_candidate_issue?(issue, terminal_states) ->
         handle_active_retry(state, issue, attempt, metadata)
@@ -1040,7 +1070,7 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.debug("Issue left active states, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
 
-        {:noreply, release_issue_claim(state, issue_id)}
+        {:noreply, release_issue_claim(state, issue_id, issue)}
     end
   end
 
@@ -1096,8 +1126,11 @@ defmodule SymphonyElixir.Orchestrator do
          issue.id,
          attempt + 1,
          Map.merge(metadata, %{
+           issue: issue,
            identifier: issue.identifier,
-           error: "no available orchestrator slots"
+           error: "no available orchestrator slots",
+           retry_reason: "no available orchestrator slots",
+           lease_state: "retrying"
          })
        )}
     end
@@ -1118,7 +1151,8 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp release_issue_claim(%State{} = state, issue_id) do
+  defp release_issue_claim(%State{} = state, issue_id, issue \\ nil) do
+    maybe_release_claim_lease(issue)
     %{state | claimed: MapSet.delete(state.claimed, issue_id)}
   end
 
@@ -1138,6 +1172,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp normalize_retry_attempt(attempt) when is_integer(attempt) and attempt > 0, do: attempt
   defp normalize_retry_attempt(_attempt), do: 0
 
+  defp retry_dispatch?(attempt), do: normalize_retry_attempt(attempt) > 0
+
+  defp retry_attempt_for(_previous_retry, attempt) when is_integer(attempt), do: attempt
+  defp retry_attempt_for(previous_retry, _attempt), do: previous_retry.attempt + 1
+
   defp next_retry_attempt_from_running(running_entry) do
     case Map.get(running_entry, :retry_attempt) do
       attempt when is_integer(attempt) and attempt > 0 -> attempt + 1
@@ -1147,6 +1186,44 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp pick_retry_identifier(issue_id, previous_retry, metadata) do
     metadata[:identifier] || Map.get(previous_retry, :identifier) || issue_id
+  end
+
+  defp retry_context(issue_id, previous_retry, metadata) do
+    %{
+      identifier: pick_retry_identifier(issue_id, previous_retry, metadata),
+      error: pick_retry_error(previous_retry, metadata),
+      worker_host: pick_retry_worker_host(previous_retry, metadata),
+      workspace_path: pick_retry_workspace_path(previous_retry, metadata),
+      issue: pick_retry_issue(previous_retry, metadata),
+      claim_lease: pick_retry_claim_lease(previous_retry, metadata),
+      run_id: pick_retry_run_id(previous_retry, metadata)
+    }
+  end
+
+  defp cancel_retry_timer(%{timer_ref: timer_ref}) when is_reference(timer_ref) do
+    Process.cancel_timer(timer_ref)
+    :ok
+  end
+
+  defp cancel_retry_timer(_previous_retry), do: :ok
+
+  defp retry_error_suffix(error) when is_binary(error), do: " error=#{error}"
+  defp retry_error_suffix(_error), do: ""
+
+  defp retry_entry(next_attempt, timer_ref, retry_token, due_at_ms, retry_context, retry_claim_lease) do
+    %{
+      attempt: next_attempt,
+      timer_ref: timer_ref,
+      retry_token: retry_token,
+      due_at_ms: due_at_ms,
+      identifier: retry_context.identifier,
+      error: retry_context.error,
+      worker_host: retry_context.worker_host,
+      workspace_path: retry_context.workspace_path,
+      issue: retry_context.issue,
+      claim_lease: retry_claim_lease || retry_context.claim_lease,
+      run_id: retry_context.run_id || (retry_claim_lease && retry_claim_lease.run_id)
+    }
   end
 
   defp pick_retry_error(previous_retry, metadata) do
@@ -1159,6 +1236,70 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp pick_retry_workspace_path(previous_retry, metadata) do
     metadata[:workspace_path] || Map.get(previous_retry, :workspace_path)
+  end
+
+  defp pick_retry_issue(previous_retry, metadata) do
+    case metadata[:issue] || Map.get(previous_retry, :issue) do
+      %Issue{} = issue -> issue
+      _ -> nil
+    end
+  end
+
+  defp pick_retry_claim_lease(previous_retry, metadata) do
+    case metadata[:claim_lease] || Map.get(previous_retry, :claim_lease) do
+      %ClaimLease{} = claim_lease -> claim_lease
+      _ -> nil
+    end
+  end
+
+  defp pick_retry_run_id(previous_retry, metadata) do
+    metadata[:run_id] || Map.get(previous_retry, :run_id)
+  end
+
+  defp maybe_upsert_retry_claim_lease(_issue_id, nil, _claim_lease, _attempt, _delay_ms, _metadata), do: nil
+
+  defp maybe_upsert_retry_claim_lease(issue_id, %Issue{} = issue, claim_lease, attempt, delay_ms, metadata) do
+    now = DateTime.utc_now()
+    run_id = retry_claim_run_id(metadata, claim_lease, issue)
+    attrs = retry_claim_lease_attrs(issue, claim_lease, attempt, delay_ms, metadata, now, run_id)
+
+    issue_id
+    |> Tracker.upsert_claim_lease(attrs)
+    |> retry_claim_lease_result(issue)
+  end
+
+  defp retry_claim_run_id(metadata, claim_lease, issue) do
+    metadata[:run_id] || (claim_lease && claim_lease.run_id) || new_run_id(issue)
+  end
+
+  defp retry_claim_lease_attrs(issue, claim_lease, attempt, delay_ms, metadata, now, run_id) do
+    build_claim_lease_attrs(issue, attempt, metadata[:worker_host], run_id, %{
+      comment_id: claim_lease && claim_lease.comment_id,
+      started_at: (claim_lease && claim_lease.started_at) || now,
+      workspace_path: metadata[:workspace_path],
+      retry_reason: metadata[:retry_reason] || metadata[:error],
+      recovery_reason: metadata[:recovery_reason],
+      state: metadata[:lease_state] || "retrying"
+    })
+    |> Map.put(:expires_at, retry_claim_expires_at(now, delay_ms))
+  end
+
+  defp retry_claim_expires_at(now, delay_ms) do
+    DateTime.add(now, max(delay_ms + claim_lease_ttl_ms(), claim_lease_ttl_ms()), :millisecond)
+  end
+
+  defp retry_claim_lease_result(result, issue) do
+    case result do
+      {:ok, %ClaimLease{} = retry_claim_lease} ->
+        retry_claim_lease
+
+      {:error, reason} ->
+        Logger.warning("Failed to update retry claim lease for #{issue_context(issue)}: #{inspect(reason)}")
+        nil
+
+      _ ->
+        nil
+    end
   end
 
   defp maybe_refresh_claim_lease(running_entry, issue_id, force \\ false)
@@ -1211,7 +1352,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp build_claim_lease_attrs(%Issue{} = issue, attempt, worker_host, run_id, overrides \\ %{}) do
+  defp build_claim_lease_attrs(%Issue{} = issue, attempt, worker_host, run_id, overrides) do
     now = DateTime.utc_now()
 
     %{
@@ -1234,10 +1375,45 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp claim_lease_overrides(overrides) when is_map(overrides) do
     overrides
-    |> Map.take([:comment_id, :workspace_path, :session_id, :started_at])
+    |> Map.take([:comment_id, :workspace_path, :session_id, :started_at, :retry_reason, :recovery_reason, :state])
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
   end
+
+  defp claim_lease_update_overrides(%Issue{claim_lease: %ClaimLease{} = claim_lease}) do
+    %{comment_id: claim_lease.comment_id}
+  end
+
+  defp claim_lease_update_overrides(%Issue{}), do: %{}
+
+  defp maybe_release_claim_lease(%Issue{claim_lease: %ClaimLease{} = claim_lease} = issue) do
+    attrs =
+      build_claim_lease_attrs(
+        issue,
+        claim_lease.attempt,
+        claim_lease.worker_host,
+        claim_lease.run_id || new_run_id(issue),
+        %{
+          comment_id: claim_lease.comment_id,
+          started_at: claim_lease.started_at,
+          workspace_path: claim_lease.workspace_path,
+          session_id: claim_lease.session_id,
+          recovery_reason: "issue-left-active-dispatch",
+          state: "released"
+        }
+      )
+
+    case Tracker.upsert_claim_lease(issue.id, attrs) do
+      {:ok, _claim_lease} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to release claim lease for #{issue_context(issue)}: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp maybe_release_claim_lease(_issue), do: :ok
 
   defp claim_lease_ttl_ms do
     config = Config.settings!()
@@ -1246,10 +1422,33 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp claim_lease_allows_top_level_dispatch?(%Issue{claim_lease: %ClaimLease{} = claim_lease}) do
     now = DateTime.utc_now()
-    !ClaimLease.active_or_recoverable?(claim_lease, now) or ClaimLease.owned_by_current_holder?(claim_lease)
+    !ClaimLease.active_or_recoverable?(claim_lease, now)
   end
 
   defp claim_lease_allows_top_level_dispatch?(%Issue{}), do: true
+
+  defp claim_lease_allows_dispatch?(%Issue{claim_lease: %ClaimLease{} = claim_lease}, true) do
+    now = DateTime.utc_now()
+
+    cond do
+      !ClaimLease.active_or_recoverable?(claim_lease, now) ->
+        true
+
+      ClaimLease.owned_by_current_holder?(claim_lease) and normalize_claim_lease_state(claim_lease.state) == "retrying" ->
+        true
+
+      true ->
+        false
+    end
+  end
+
+  defp claim_lease_allows_dispatch?(%Issue{} = issue, _retry_dispatch?) do
+    claim_lease_allows_top_level_dispatch?(issue)
+  end
+
+  defp normalize_claim_lease_state(state) when is_binary(state) do
+    state |> String.trim() |> String.downcase()
+  end
 
   defp process_ownership_blocks_dispatch?(%Issue{} = issue) do
     case ProcessOwnership.blocking_record(issue) do
@@ -1271,6 +1470,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_process_completion(%{issue: %Issue{} = issue} = running_entry, :normal) do
     ProcessOwnership.record_cleaned(issue, process_ownership_attrs(running_entry))
+    :cleaned
   end
 
   defp record_process_completion(%{issue: %Issue{} = issue} = running_entry, reason) do
@@ -1278,12 +1478,17 @@ defmodule SymphonyElixir.Orchestrator do
 
     if pid_live?(Map.get(attrs, :app_server_pid)) do
       ProcessOwnership.record_quarantined(issue, attrs, "agent exited before app-server process cleaned: #{inspect(reason)}")
+      :quarantined
     else
       ProcessOwnership.record_cleaned(issue, attrs)
+      :cleaned
     end
   end
 
-  defp record_process_completion(_running_entry, _reason), do: :ok
+  defp record_process_completion(_running_entry, _reason), do: :none
+
+  defp retry_lease_state(:quarantined), do: "quarantined"
+  defp retry_lease_state(_process_completion_status), do: "retrying"
 
   defp process_ownership_attrs(running_entry) when is_map(running_entry) do
     %{
