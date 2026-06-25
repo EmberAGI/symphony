@@ -371,6 +371,12 @@ only the representative snippets needed for judgment, such as
 package with `exports` or `types` pointing at `dist`, a consumer import,
 TypeScript/runtime resolver clues, lifecycle scripts, and timing notes. The
 grader should evaluate concepts and ordering instead of brittle exact prose.
+The eval surface does not need a fully deterministic grader. Deterministic
+assertions should be used where they are cheap and useful, such as fixture
+shape or required output sections, while recommendation quality may be graded
+through an explicit rubric, saved grading records, and human-assisted or
+model-assisted review evidence. The rubric and evidence must be durable enough
+for reviewers and QA to verify why each eval passed or failed.
 The evidence should prove agents recommend the manifest and source-resolution
 architecture before falling back to command-level timing tweaks. The eval
 surface should also include at least one negative or control prompt for a
