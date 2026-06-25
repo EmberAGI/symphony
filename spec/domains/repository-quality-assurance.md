@@ -346,9 +346,14 @@ changed-plus-dependent selection, selected package evidence, and elapsed timing
 are the cache-free baseline before proposing Turbo, Nx, Rush, another
 task-result cache, or durable helper scripts.
 
-Skill changes in this area should include prompt evals, fixtures, or equivalent
-review evidence that exercise slow pnpm/TypeScript monorepo validation
-scenarios. That evidence should prove agents recommend the manifest and
+Skill changes in this area must create or extend a durable prompt eval or
+fixture surface for slow pnpm/TypeScript monorepo validation scenarios. When no
+repo-local skill eval surface exists, the implementation should add a minimal
+one following the skill-creator pattern: realistic prompts, baseline or
+old-skill comparison when useful, objective assertions or grading records,
+aggregate benchmark evidence, and reviewable outputs. Human review may
+supplement that evidence, but it is not a replacement for the durable eval or
+fixture. The evidence should prove agents recommend the manifest and
 source-resolution architecture before falling back to command-level timing
 tweaks.
 
