@@ -362,6 +362,11 @@ fixture. The eval surface should be scoped to proving this pnpm/TypeScript
 monorepo doctrine, not to building a general-purpose skill-eval platform, but
 its layout and helper choices should be reusable enough for future shared
 skill evals to copy or extend.
+This contract does not prescribe an exact eval fixture path or file name. The
+implementation should reuse an existing repo-local skill eval or fixture home
+when one exists; otherwise it should create the smallest obvious durable home
+near the shared skill sources and record the placement rationale in its
+evidence.
 Baseline or old-skill comparison is not mandatory for this doctrine update;
 updated-skill pass/fail evidence against the explicit rubric is the required
 bar. Add comparison artifacts only when they clarify the regression risk
