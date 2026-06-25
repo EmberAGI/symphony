@@ -408,6 +408,15 @@ product expectations. These recommendations are still conditional on durable
 repository signals and must not impose pnpm or TypeScript conventions on
 repositories that have selected other tools.
 
+Final handoff evidence for shared skill-source changes that affect Octo role
+guidance must include an explicit wrapper follow-up assessment for
+`EmberAGI/scaling-octo-engine`. The assessment should state which downstream
+work is needed, choosing from Symphony pin update, wrapper spec update,
+role-skill exposure verification, or no wrapper follow-up required. This
+assessment is required even when the conclusion is that no wrapper work is
+needed, so shared-skill guidance changes remain visible to the consuming Octo
+repository.
+
 ## Edge Cases
 
 - Browser binary is missing.
