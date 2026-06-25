@@ -331,6 +331,13 @@ pnpm workspace signals alone are enough for generic pnpm guidance such as
 filters, package-local scripts, and workspace dependency hygiene. The
 source-first TypeScript resolver and package-manifest doctrine requires durable
 pnpm workspace signals plus TypeScript or runtime resolver signals.
+Slow validation alone is not evidence that a repository should change package
+managers, adopt source-first TypeScript resolution, or add a task runner. Shared
+skills must first diagnose validation cost inside the repository's selected
+package manager and toolchain. Recommendations to use pnpm, source-first
+TypeScript workspace resolution, Turbo, Nx, Rush, or another orchestration
+layer require durable repository signals that those tools or doctrines are
+selected, compatible, or explicitly in scope.
 
 Package scripts should remain package-local. A package's `lint`, `test`,
 `build`, and optional `check` aggregate should validate that package's own
