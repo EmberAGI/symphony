@@ -353,9 +353,12 @@ one following the skill-creator pattern: realistic prompts, baseline or
 old-skill comparison when useful, objective assertions or grading records,
 aggregate benchmark evidence, and reviewable outputs. Human review may
 supplement that evidence, but it is not a replacement for the durable eval or
-fixture. The evidence should prove agents recommend the manifest and
-source-resolution architecture before falling back to command-level timing
-tweaks.
+fixture. The eval surface should be scoped to proving this pnpm/TypeScript
+monorepo doctrine, not to building a general-purpose skill-eval platform, but
+its layout and helper choices should be reusable enough for future shared
+skill evals to copy or extend. The evidence should prove agents recommend the
+manifest and source-resolution architecture before falling back to
+command-level timing tweaks.
 
 Ideal monorepo guidance should also cover strict workspace dependency
 intentions such as `workspace:*` or `workspace:^`, pnpm catalogs for shared
