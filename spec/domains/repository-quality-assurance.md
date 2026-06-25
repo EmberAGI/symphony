@@ -361,13 +361,23 @@ supplement that evidence, but it is not a replacement for the durable eval or
 fixture. The eval surface should be scoped to proving this pnpm/TypeScript
 monorepo doctrine, not to building a general-purpose skill-eval platform, but
 its layout and helper choices should be reusable enough for future shared
-skill evals to copy or extend. The evidence should prove agents recommend the
-manifest and source-resolution architecture before falling back to
-command-level timing tweaks. The eval surface should also include at least one
-negative or control prompt for a repository without durable pnpm workspace
-plus TypeScript or runtime resolver signals, proving the skills do not impose
-pnpm, TypeScript, source-first workspace, or package-manifest refactor guidance
-where those recommendations are not selected by the target repository.
+skill evals to copy or extend.
+
+These evals should stay lightweight. They should use static repo-dossier
+fixtures and concept-bucket grading rather than constructing a full repository
+or running package installs, builds, or tests. A positive dossier may include
+only the representative snippets needed for judgment, such as
+`pnpm-workspace.yaml`, root and package `package.json` excerpts, a local
+package with `exports` or `types` pointing at `dist`, a consumer import,
+TypeScript/runtime resolver clues, lifecycle scripts, and timing notes. The
+grader should evaluate concepts and ordering instead of brittle exact prose.
+The evidence should prove agents recommend the manifest and source-resolution
+architecture before falling back to command-level timing tweaks. The eval
+surface should also include at least one negative or control prompt for a
+repository without durable pnpm workspace plus TypeScript or runtime resolver
+signals, proving the skills do not impose pnpm, TypeScript, source-first
+workspace, or package-manifest refactor guidance where those recommendations
+are not selected by the target repository.
 
 Ideal monorepo guidance should also cover strict workspace dependency
 intentions such as `workspace:*` or `workspace:^`, pnpm catalogs for shared
