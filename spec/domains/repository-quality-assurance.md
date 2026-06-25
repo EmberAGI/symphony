@@ -375,6 +375,11 @@ only the representative snippets needed for judgment, such as
 package with `exports` or `types` pointing at `dist`, a consumer import,
 TypeScript/runtime resolver clues, lifecycle scripts, and timing notes. The
 grader should evaluate concepts and ordering instead of brittle exact prose.
+The required positive eval should exercise the combined pnpm workspace plus
+TypeScript/runtime resolver and package-manifest scenario because that is the
+failure mode this doctrine corrects. Separate pnpm-only or TypeScript-only
+evals are optional when they are cheap and clarify behavior, but they are not
+required for this issue's durable evidence.
 The eval surface does not need a fully deterministic grader. Deterministic
 assertions should be used where they are cheap and useful, such as fixture
 shape or required output sections, while recommendation quality may be graded
