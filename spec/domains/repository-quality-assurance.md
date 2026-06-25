@@ -358,7 +358,11 @@ monorepo doctrine, not to building a general-purpose skill-eval platform, but
 its layout and helper choices should be reusable enough for future shared
 skill evals to copy or extend. The evidence should prove agents recommend the
 manifest and source-resolution architecture before falling back to
-command-level timing tweaks.
+command-level timing tweaks. The eval surface should also include at least one
+negative or control prompt for a repository without durable pnpm plus
+TypeScript signals, proving the skills do not impose pnpm, TypeScript,
+source-first workspace, or package-manifest refactor guidance where those
+recommendations are not selected by the target repository.
 
 Ideal monorepo guidance should also cover strict workspace dependency
 intentions such as `workspace:*` or `workspace:^`, pnpm catalogs for shared
