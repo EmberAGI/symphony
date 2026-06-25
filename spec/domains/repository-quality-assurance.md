@@ -327,6 +327,11 @@ or a deliberately consistent conditional-export/custom-condition strategy
 instead of making all local workspace consumers rely on stale or repeatedly
 rebuilt `dist` artifacts.
 
+pnpm workspace signals alone are enough for generic pnpm guidance such as
+filters, package-local scripts, and workspace dependency hygiene. The
+source-first TypeScript resolver and package-manifest doctrine requires durable
+pnpm workspace signals plus TypeScript or runtime resolver signals.
+
 Package scripts should remain package-local. A package's `lint`, `test`,
 `build`, and optional `check` aggregate should validate that package's own
 surface and must not hide broad sibling dependency rebuilds behind lifecycle
@@ -359,10 +364,10 @@ its layout and helper choices should be reusable enough for future shared
 skill evals to copy or extend. The evidence should prove agents recommend the
 manifest and source-resolution architecture before falling back to
 command-level timing tweaks. The eval surface should also include at least one
-negative or control prompt for a repository without durable pnpm plus
-TypeScript signals, proving the skills do not impose pnpm, TypeScript,
-source-first workspace, or package-manifest refactor guidance where those
-recommendations are not selected by the target repository.
+negative or control prompt for a repository without durable pnpm workspace
+plus TypeScript or runtime resolver signals, proving the skills do not impose
+pnpm, TypeScript, source-first workspace, or package-manifest refactor guidance
+where those recommendations are not selected by the target repository.
 
 Ideal monorepo guidance should also cover strict workspace dependency
 intentions such as `workspace:*` or `workspace:^`, pnpm catalogs for shared
