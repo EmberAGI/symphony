@@ -308,6 +308,53 @@ the TDD loop by pointing agents to repo-declared placement, task runner,
 affected-cache, validation, and output-control contracts, but test taxonomy and
 workflow activation must remain in the appropriate skill or role workflow.
 
+For pnpm and TypeScript monorepo guidance, shared skills must distinguish
+workspace linking from package interface resolution. A pnpm workspace
+dependency selects the local package, but the package's `exports`, `main`,
+`types`, `files`, and publish metadata still define the interface that local
+consumers, tests, bundlers, and packed artifacts observe. The skills should
+therefore treat package manifests as architecture: they define a Module
+interface, caller expectations, resolver behavior, validation cost, and
+publish/runtime adapter behavior.
+
+When a target repository uses pnpm workspaces and TypeScript, shared guidance
+should prefer source-first local workspace resolution for private/internal
+packages when the repository's TypeScript, Node, Vitest, Vite, Next, tsx,
+ESLint, and build tooling can consume that source consistently. Packages that
+must publish, pack, or run as built Node artifacts may expose `dist`, but the
+skill should recommend explicit publish-time metadata such as `publishConfig`
+or a deliberately consistent conditional-export/custom-condition strategy
+instead of making all local workspace consumers rely on stale or repeatedly
+rebuilt `dist` artifacts.
+
+Package scripts should remain package-local. A package's `lint`, `test`,
+`build`, and optional `check` aggregate should validate that package's own
+surface and must not hide broad sibling dependency rebuilds behind lifecycle
+hooks such as `prelint`, `pretest`, or `prebuild` without a documented target
+repository reason. Root or task-runner orchestration owns dependency graph
+selection, ordering, affected/default/full validation tiers, and timing
+evidence. Single-package convenience hooks such as `predev` or `prestart` may
+remain useful in a target repository, but the skills must distinguish that
+developer convenience from root recursive validation.
+
+The shared pnpm skill should recommend `check` as the conventional
+package-level aggregate when a target repository wants one. It must not teach
+`pnpm run all` as an Octo validation convention, and it must not treat
+`make all` as universal across package managers, languages, or repository
+structures. Repository-declared commands remain authoritative: pnpm filters,
+changed-plus-dependent selection, selected package evidence, and elapsed timing
+are the cache-free baseline before proposing Turbo, Nx, Rush, another
+task-result cache, or durable helper scripts.
+
+Ideal monorepo guidance should also cover strict workspace dependency
+intentions such as `workspace:*` or `workspace:^`, pnpm catalogs for shared
+external versions, clear package taxonomy such as `apps/*`, `packages/*`,
+`services/*`, and `tools/*`, explicit generated-artifact contracts, CI tiers
+for affected/default/full/regression/live validation, and timing budgets as
+product expectations. These recommendations are still conditional on durable
+repository signals and must not impose pnpm or TypeScript conventions on
+repositories that have selected other tools.
+
 ## Edge Cases
 
 - Browser binary is missing.
@@ -347,3 +394,4 @@ contract.
 - [ADR 0001: Provider-Neutral Agent Runtimes](../adr/0001-provider-neutral-agent-runtimes.md)
 - [EMB-187: Add no-key Browser Use capability for Agent QA](https://linear.app/emberai/issue/EMB-187/add-no-key-browser-use-capability-for-agent-qa)
 - [EMB-1065: Merge son-of-anton TDD execution contract into the shared tdd skill and restore default-on doctrine](https://linear.app/emberai/issue/EMB-1065/merge-son-of-anton-tdd-execution-contract-into-the-shared-tdd-skill)
+- [EMB-1117: Improve pnpm and TypeScript monorepo skills for source-first workspace validation](https://linear.app/emberai/issue/EMB-1117/prd-improve-pnpm-and-typescript-monorepo-skills-for-source-first)
