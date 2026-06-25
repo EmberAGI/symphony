@@ -346,6 +346,12 @@ changed-plus-dependent selection, selected package evidence, and elapsed timing
 are the cache-free baseline before proposing Turbo, Nx, Rush, another
 task-result cache, or durable helper scripts.
 
+Skill changes in this area should include prompt evals, fixtures, or equivalent
+review evidence that exercise slow pnpm/TypeScript monorepo validation
+scenarios. That evidence should prove agents recommend the manifest and
+source-resolution architecture before falling back to command-level timing
+tweaks.
+
 Ideal monorepo guidance should also cover strict workspace dependency
 intentions such as `workspace:*` or `workspace:^`, pnpm catalogs for shared
 external versions, clear package taxonomy such as `apps/*`, `packages/*`,
