@@ -358,6 +358,15 @@ changed-plus-dependent selection, selected package evidence, and elapsed timing
 are the cache-free baseline before proposing Turbo, Nx, Rush, another
 task-result cache, or durable helper scripts.
 
+Because a skill's `description` field is the trigger surface, pnpm and
+TypeScript skill changes in this area must review and update their descriptions
+when needed. The description review should make the relevant trigger situations
+discoverable, including slow pnpm/TypeScript monorepo validation, workspace
+package manifests, resolver or source-vs-dist mismatches, and package-script
+validation. A small trigger sanity check with near-miss negatives is required
+to guard against under-triggering and over-triggering, but this issue does not
+require a full 16-20 query trigger-eval set or description-optimization loop.
+
 Skill changes in this area must create or extend a durable prompt eval or
 fixture surface for slow pnpm/TypeScript monorepo validation scenarios. When no
 repo-local skill eval surface exists, the implementation should add a minimal
