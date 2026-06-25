@@ -400,7 +400,11 @@ model-assisted review evidence. The rubric and evidence must be durable enough
 for reviewers and QA to verify why each eval passed or failed.
 The evidence should prove agents recommend the manifest and source-resolution
 architecture before falling back to command-level timing tweaks. The eval
-surface should also include at least one negative or control prompt for a
+rubric should treat ordering as part of correctness: an answer that buries the
+manifest/source-resolution diagnosis after generic filter, script-splitting,
+cache, or task-runner advice should fail the positive eval even if it mentions
+the right architecture terms later. The eval surface should also include at
+least one negative or control prompt for a
 repository without durable pnpm workspace plus TypeScript or runtime resolver
 signals, proving the skills do not impose pnpm, TypeScript, source-first
 workspace, or package-manifest refactor guidance where those recommendations
