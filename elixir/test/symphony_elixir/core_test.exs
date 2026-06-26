@@ -2658,6 +2658,57 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner preserves Claude auth failure classification as provider auth exit" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-claude-auth-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      claude_binary = Path.join(test_root, "fake-claude")
+      File.mkdir_p!(workspace_root)
+
+      File.write!(claude_binary, """
+      #!/bin/sh
+      printf '%s\\n' '{"type":"system","subtype":"init","session_id":"sess-runner-auth","apiKeySource":"none"}'
+      printf '%s\\n' '{"type":"result","subtype":"login_required","is_error":true,"api_error_status":403,"result":"Bearer runner-secret-token expired","session_id":"sess-runner-auth","oauth_token":"runner-oauth-token"}'
+      """)
+
+      File.chmod!(claude_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        agent_runtime_provider: "claude_code",
+        claude_code_command: claude_binary
+      )
+
+      issue = %Issue{
+        id: "issue-runner-auth",
+        identifier: "EMB-1123",
+        title: "Preserve provider auth",
+        description: "Runtime auth failure",
+        state: "In Progress",
+        url: "https://example.org/issues/EMB-1123",
+        labels: []
+      }
+
+      log =
+        capture_log(fn ->
+          assert catch_exit(AgentRunner.run(issue, nil, run_id: "run-auth")) ==
+                   {:provider_auth_failed, %{provider: :claude_code, api_error_status: 403, subtype: "login_required"}}
+        end)
+
+      assert log =~ "provider_auth_failed: claude_code status=403 subtype=login_required"
+      refute log =~ "runner-secret-token"
+      refute log =~ "runner-oauth-token"
+      refute log =~ "Bearer"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner continues with a follow-up turn while the issue remains active" do
     test_root =
       Path.join(
