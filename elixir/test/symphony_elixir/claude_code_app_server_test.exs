@@ -60,6 +60,7 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     printf 'ENV_SYMPHONY_ROLE_ISSUE_IDENTIFIER:%s\\n' "${SYMPHONY_ROLE_ISSUE_IDENTIFIER}" >> "$trace_file"
     printf 'ENV_SYMPHONY_ROLE_NAME:%s\\n' "${SYMPHONY_ROLE_NAME}" >> "$trace_file"
     printf 'ENV_SYMPHONY_ROLE_WORKSPACE_PATH:%s\\n' "${SYMPHONY_ROLE_WORKSPACE_PATH}" >> "$trace_file"
+    printf 'ENV_CLAUDE_CODE_OAUTH_TOKEN_PRESENT:%s\\n' "${CLAUDE_CODE_OAUTH_TOKEN:+present}" >> "$trace_file"
     #{body}
     exit 0
     """)
@@ -168,7 +169,8 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       assert trace =~ "ENV_SYMPHONY_ROLE_ISSUE_ID:issue-claude-env"
       assert trace =~ "ENV_SYMPHONY_ROLE_ISSUE_IDENTIFIER:MT-CC"
       assert trace =~ "ENV_SYMPHONY_ROLE_NAME:implementer"
-      assert trace =~ "ENV_SYMPHONY_ROLE_WORKSPACE_PATH:#{ctx.workspace}"
+      {:ok, canonical_workspace} = SymphonyElixir.PathSafety.canonicalize(ctx.workspace)
+      assert trace =~ "ENV_SYMPHONY_ROLE_WORKSPACE_PATH:#{canonical_workspace}"
 
       assert completed.implementation_effort == "minimal"
       assert completed.implementation_effort_source == "label"
@@ -243,6 +245,25 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       assert trace =~ "ENV_MAX_THINKING_TOKENS:\n" or trace =~ "ENV_MAX_THINKING_TOKENS:" <> "\n"
       refute trace =~ "ENV_MAX_THINKING_TOKENS:0"
     after
+      File.rm_rf(ctx.test_root)
+    end
+  end
+
+  test "inherits local Claude OAuth token into the child process without tracing it" do
+    ctx = setup_workspace("MT-CC-oauth-env")
+    previous = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
+
+    try do
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-secret-value")
+      configure!(ctx, stream_success(), claude_code_model: "sonnet")
+
+      {result, _events, trace} = run_shim(ctx, "do work")
+
+      assert {:ok, _turn} = result
+      assert trace =~ "ENV_CLAUDE_CODE_OAUTH_TOKEN_PRESENT:present"
+      refute trace =~ "test-oauth-secret-value"
+    after
+      restore_env("CLAUDE_CODE_OAUTH_TOKEN", previous)
       File.rm_rf(ctx.test_root)
     end
   end

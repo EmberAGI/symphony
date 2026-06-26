@@ -50,6 +50,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   @fable_fallback_reason "fable_unavailable"
 
   @no_thinking_env "MAX_THINKING_TOKENS"
+  @local_provider_auth_env_names ~w(CLAUDE_CODE_OAUTH_TOKEN)
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
 
@@ -97,6 +98,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, launch} <- launch_config(issue, role) do
       ownership_env = ownership_env(issue, role, expanded_workspace, opts)
+      provider_auth_env = local_provider_auth_env(worker_host)
 
       {:ok,
        %{
@@ -104,7 +106,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
          metadata: launch.metadata,
          workspace: expanded_workspace,
          worker_host: worker_host,
-         launch: %{launch | env: launch.env ++ ownership_env},
+         launch: %{launch | env: launch.env ++ provider_auth_env ++ ownership_env},
          claude_session_id: nil
        }}
     end
@@ -268,6 +270,22 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   defp maybe_put_no_thinking_env(env, true), do: [{@no_thinking_env, "0"} | env]
   defp maybe_put_no_thinking_env(env, _false), do: env
+
+  defp local_provider_auth_env(nil) do
+    Enum.flat_map(@local_provider_auth_env_names, fn name ->
+      case System.get_env(name) do
+        value when is_binary(value) ->
+          if String.trim(value) == "", do: [], else: [{name, value}]
+
+        _ ->
+          []
+      end
+    end)
+  end
+
+  # Remote worker launches render env values into an SSH command line, so local
+  # provider auth must be materialized on the worker host instead.
+  defp local_provider_auth_env(_worker_host), do: []
 
   # Build the full `claude` invocation for a turn. The prompt is passed as the
   # last positional argument (`claude -p <prompt>`) so the process needs no
