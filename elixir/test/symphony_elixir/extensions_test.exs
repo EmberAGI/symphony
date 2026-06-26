@@ -533,7 +533,17 @@ defmodule SymphonyElixir.ExtensionsTest do
                "total_tokens" => 12,
                "seconds_running" => 42.5
              },
-             "rate_limits" => %{"primary" => %{"remaining" => 11}}
+             "rate_limits" => %{"primary" => %{"remaining" => 11}},
+             "polling_diagnostics" => %{
+               "checking" => false,
+               "status" => "unavailable",
+               "next_poll_in_ms" => nil,
+               "poll_interval_ms" => nil,
+               "last_poll_started_at" => nil,
+               "last_poll_completed_at" => nil,
+               "last_poll_result" => nil,
+               "latest_dispatch_summary" => %{}
+             }
            }
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")

@@ -20,7 +20,8 @@ defmodule SymphonyElixirWeb.Presenter do
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           codex_totals: snapshot.codex_totals,
-          rate_limits: snapshot.rate_limits
+          rate_limits: snapshot.rate_limits,
+          polling_diagnostics: polling_diagnostics_payload(Map.get(snapshot, :polling))
         }
 
       :timeout ->
@@ -230,6 +231,40 @@ defmodule SymphonyElixirWeb.Presenter do
       live: Map.get(process_ownership, :live?)
     }
   end
+
+  defp polling_diagnostics_payload(polling) when is_map(polling) do
+    %{
+      checking: Map.get(polling, :checking?) == true,
+      status: polling_status(polling),
+      next_poll_in_ms: Map.get(polling, :next_poll_in_ms),
+      poll_interval_ms: Map.get(polling, :poll_interval_ms),
+      last_poll_started_at: Map.get(polling, :last_poll_started_at),
+      last_poll_completed_at: Map.get(polling, :last_poll_completed_at),
+      last_poll_result: Map.get(polling, :last_poll_result),
+      latest_dispatch_summary: Map.get(polling, :latest_dispatch_summary) || %{}
+    }
+  end
+
+  defp polling_diagnostics_payload(_polling) do
+    %{
+      checking: false,
+      status: "unavailable",
+      next_poll_in_ms: nil,
+      poll_interval_ms: nil,
+      last_poll_started_at: nil,
+      last_poll_completed_at: nil,
+      last_poll_result: nil,
+      latest_dispatch_summary: %{}
+    }
+  end
+
+  defp polling_status(%{checking?: true}), do: "checking"
+
+  defp polling_status(%{last_poll_result: result}) when is_binary(result) and result != "" do
+    "idle"
+  end
+
+  defp polling_status(_polling), do: "idle"
 
   defp put_if_present(map, _key, nil), do: map
   defp put_if_present(map, key, value), do: Map.put(map, key, value)
