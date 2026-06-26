@@ -48,12 +48,24 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :last_poll_started_at,
+      :last_poll_completed_at,
+      :last_poll_result,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
       retry_attempts: %{},
       codex_totals: nil,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      latest_dispatch_summary: %{
+        result: "not_checked",
+        candidate_count: 0,
+        dispatched_count: 0,
+        candidate_identifiers: [],
+        dispatched_identifiers: [],
+        skip_reason_families: [],
+        skipped_candidates: []
+      }
     ]
   end
 
@@ -75,8 +87,12 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
+      last_poll_started_at: nil,
+      last_poll_completed_at: nil,
+      last_poll_result: "not_checked",
       codex_totals: @empty_codex_totals,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      latest_dispatch_summary: empty_dispatch_summary("not_checked")
     }
 
     run_terminal_workspace_cleanup()
@@ -123,9 +139,19 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
+    started_at = DateTime.utc_now()
+    state = %{state | last_poll_started_at: started_at}
     state = maybe_dispatch(state)
     state = schedule_tick(state, state.poll_interval_ms)
-    state = %{state | poll_check_in_progress: false}
+
+    completed_at = DateTime.utc_now()
+
+    state = %{
+      state
+      | poll_check_in_progress: false,
+        last_poll_completed_at: completed_at,
+        last_poll_result: latest_poll_result(state)
+    }
 
     notify_dashboard()
     {:noreply, state}
@@ -262,50 +288,46 @@ defmodule SymphonyElixir.Orchestrator do
     state = reconcile_orphaned_claims(state)
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         true <- available_slots(state) > 0 do
+         {:ok, issues} <- Tracker.fetch_candidate_issues() do
       choose_issues(issues, state)
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
-        state
+        record_dispatch_summary(state, candidate_fetch_failure_summary(:missing_linear_api_token))
 
       {:error, :missing_linear_project_slug} ->
         Logger.error("Linear project slug missing in WORKFLOW.md")
-        state
+        record_dispatch_summary(state, candidate_fetch_failure_summary(:missing_linear_project_slug))
 
       {:error, :missing_tracker_kind} ->
         Logger.error("Tracker kind missing in WORKFLOW.md")
 
-        state
+        record_dispatch_summary(state, candidate_fetch_failure_summary(:missing_tracker_kind))
 
       {:error, {:unsupported_tracker_kind, kind}} ->
         Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
 
-        state
+        record_dispatch_summary(state, candidate_fetch_failure_summary(:unsupported_tracker_kind))
 
       {:error, {:invalid_workflow_config, message}} ->
         Logger.error("Invalid WORKFLOW.md config: #{message}")
-        state
+        record_dispatch_summary(state, candidate_fetch_failure_summary(:invalid_workflow_config))
 
       {:error, {:missing_workflow_file, path, reason}} ->
         Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
-        state
+        record_dispatch_summary(state, candidate_fetch_failure_summary(:missing_workflow_file))
 
       {:error, :workflow_front_matter_not_a_map} ->
         Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
-        state
+        record_dispatch_summary(state, candidate_fetch_failure_summary(:workflow_front_matter_not_a_map))
 
       {:error, {:workflow_parse_error, reason}} ->
         Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
-        state
+        record_dispatch_summary(state, candidate_fetch_failure_summary(:workflow_parse_error))
 
       {:error, reason} ->
         Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
-        state
-
-      false ->
-        state
+        record_dispatch_summary(state, candidate_fetch_failure_summary(:tracker_candidate_fetch_failure))
     end
   end
 
@@ -615,16 +637,28 @@ defmodule SymphonyElixir.Orchestrator do
   defp choose_issues(issues, state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
+    sorted_issues = sort_issues_for_dispatch(issues)
 
-    issues
-    |> sort_issues_for_dispatch()
-    |> Enum.reduce(state, fn issue, state_acc ->
-      if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
-        dispatch_issue(state_acc, issue)
-      else
-        state_acc
-      end
-    end)
+    result =
+      Enum.reduce(sorted_issues, %{state: state, skipped: [], dispatched: [], failed: [], attempted: 0}, fn issue, acc ->
+        case dispatch_skip_summary(issue, acc.state, active_states, terminal_states) do
+          nil ->
+            {next_state, dispatch_result} = dispatch_issue_with_result(acc.state, issue)
+
+            acc
+            |> Map.put(:state, next_state)
+            |> record_dispatch_result(issue, dispatch_result)
+
+          skip_summary ->
+            Map.update!(acc, :skipped, &[skip_summary | &1])
+        end
+      end)
+
+    summary =
+      sorted_issues
+      |> dispatch_cycle_summary(result.skipped, result.dispatched, result.failed, result.attempted)
+
+    record_dispatch_summary(result.state, summary)
   end
 
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
@@ -670,27 +704,59 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp should_dispatch_issue?(
          %Issue{} = issue,
-         %State{running: running, claimed: claimed} = state,
+         %State{} = state,
          active_states,
          terminal_states
        ) do
-    issue_dispatchable?(issue, active_states, terminal_states) and
-      !MapSet.member?(claimed, issue.id) and
-      !Map.has_key?(running, issue.id) and
-      available_slots(state) > 0 and
-      state_slots_available?(issue, running) and
-      worker_slots_available?(state)
+    is_nil(dispatch_skip_summary(issue, state, active_states, terminal_states))
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
 
-  defp issue_dispatchable?(%Issue{} = issue, active_states, terminal_states) do
-    candidate_issue?(issue, active_states, terminal_states) and
-      valid_implementation_effort?(issue) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
-      claim_lease_allows_top_level_dispatch?(issue) and
-      !process_ownership_blocks_dispatch?(issue)
+  defp dispatch_skip_summary(
+         %Issue{} = issue,
+         %State{running: running, claimed: claimed} = state,
+         active_states,
+         terminal_states
+       ) do
+    cond do
+      !candidate_issue?(issue, active_states, terminal_states) ->
+        skipped_candidate_summary(issue, "not_candidate")
+
+      !valid_implementation_effort?(issue) ->
+        skipped_candidate_summary(issue, "invalid_implementation_effort")
+
+      todo_issue_blocked_by_non_terminal?(issue, terminal_states) ->
+        skipped_candidate_summary(issue, "blocked_by_non_terminal")
+
+      blocking_claim_leases(issue) != [] ->
+        claim_lease_skipped_candidate_summary(issue, blocking_claim_leases(issue))
+
+      process_ownership_blocks_dispatch?(issue) ->
+        skipped_candidate_summary(issue, "process_ownership_blocked")
+
+      MapSet.member?(claimed, issue.id) ->
+        skipped_candidate_summary(issue, "already_claimed")
+
+      Map.has_key?(running, issue.id) ->
+        skipped_candidate_summary(issue, "already_running")
+
+      available_slots(state) <= 0 ->
+        skipped_candidate_summary(issue, "role_capacity_blocked")
+
+      !state_slots_available?(issue, running) ->
+        skipped_candidate_summary(issue, "state_capacity_blocked")
+
+      !worker_slots_available?(state) ->
+        skipped_candidate_summary(issue, "worker_capacity_blocked")
+
+      true ->
+        nil
+    end
   end
+
+  defp dispatch_skip_summary(_issue, _state, _active_states, _terminal_states),
+    do: skipped_candidate_summary(nil, "not_candidate")
 
   defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
@@ -795,7 +861,12 @@ defmodule SymphonyElixir.Orchestrator do
     |> MapSet.new()
   end
 
-  defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
+  defp dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
+    {state, _result} = dispatch_issue_with_result(state, issue, attempt, preferred_worker_host)
+    state
+  end
+
+  defp dispatch_issue_with_result(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
     case revalidate_issue_for_dispatch(
            issue,
            &Tracker.fetch_issue_states_by_ids/1,
@@ -803,49 +874,49 @@ defmodule SymphonyElixir.Orchestrator do
            retry_dispatch?(attempt)
          ) do
       {:ok, %Issue{} = refreshed_issue} ->
-        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
+        do_dispatch_issue_with_result(state, refreshed_issue, attempt, preferred_worker_host)
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
-        state
+        {state, {:skipped, skipped_candidate_summary(issue, "missing_after_refresh")}}
 
       {:skip, %Issue{} = refreshed_issue} ->
         Logger.info("Skipping stale dispatch after issue refresh: #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)}")
 
-        state
+        {state, {:skipped, skipped_candidate_summary(refreshed_issue, "stale_after_refresh")}}
 
       {:error, reason} ->
         Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
-        state
+        {state, {:failed, "issue_refresh_failed"}}
     end
   end
 
-  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
+  defp do_dispatch_issue_with_result(%State{} = state, issue, attempt, preferred_worker_host) do
     recipient = self()
 
     case select_worker_host(state, preferred_worker_host) do
       :no_worker_capacity ->
         Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
-        state
+        {state, {:skipped, skipped_candidate_summary(issue, "worker_capacity_blocked")}}
 
       worker_host ->
         run_id = new_run_id(issue)
 
         case upsert_dispatch_claim_lease(issue, attempt, worker_host, run_id) do
           {:ok, %ClaimLease{} = claim_lease} ->
-            spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, claim_lease)
+            spawn_issue_on_worker_host_with_result(state, issue, attempt, recipient, worker_host, claim_lease)
 
           {:ok, nil} ->
-            spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, nil)
+            spawn_issue_on_worker_host_with_result(state, issue, attempt, recipient, worker_host, nil)
 
           {:error, reason} ->
             Logger.warning("Skipping dispatch; claim lease upsert failed for #{issue_context(issue)}: #{inspect(reason)}")
-            state
+            {state, {:failed, "claim_lease_upsert_failed"}}
         end
     end
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, claim_lease) do
+  defp spawn_issue_on_worker_host_with_result(%State{} = state, issue, attempt, recipient, worker_host, claim_lease) do
     record_pending_turn_start(issue, worker_host)
 
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
@@ -893,6 +964,7 @@ defmodule SymphonyElixir.Orchestrator do
             claimed: MapSet.put(state.claimed, issue.id),
             retry_attempts: Map.delete(state.retry_attempts, issue.id)
         }
+        |> then(&{&1, :dispatched})
 
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
@@ -900,11 +972,14 @@ defmodule SymphonyElixir.Orchestrator do
         Telegram.notify_agent_failed(issue, reason)
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
-        schedule_issue_retry(state, issue.id, next_attempt, %{
-          identifier: issue.identifier,
-          error: "failed to spawn agent: #{inspect(reason)}",
-          worker_host: worker_host
-        })
+        {
+          schedule_issue_retry(state, issue.id, next_attempt, %{
+            identifier: issue.identifier,
+            error: "failed to spawn agent: #{inspect(reason)}",
+            worker_host: worker_host
+          }),
+          {:failed, "spawn_failed"}
+        }
     end
   end
 
@@ -1848,7 +1923,11 @@ defmodule SymphonyElixir.Orchestrator do
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
-         poll_interval_ms: state.poll_interval_ms
+         poll_interval_ms: state.poll_interval_ms,
+         last_poll_started_at: iso8601(state.last_poll_started_at),
+         last_poll_completed_at: iso8601(state.last_poll_completed_at),
+         last_poll_result: state.last_poll_result,
+         latest_dispatch_summary: state.latest_dispatch_summary
        }
      }, state}
   end
@@ -1867,6 +1946,160 @@ defmodule SymphonyElixir.Orchestrator do
        operations: ["poll", "reconcile"]
      }, state}
   end
+
+  defp record_dispatch_result(acc, issue, :dispatched) do
+    acc
+    |> Map.update!(:attempted, &(&1 + 1))
+    |> Map.update!(:dispatched, &[safe_issue_identifier(issue) | &1])
+  end
+
+  defp record_dispatch_result(acc, _issue, {:failed, reason_family}) do
+    acc
+    |> Map.update!(:attempted, &(&1 + 1))
+    |> Map.update!(:failed, &[reason_family | &1])
+  end
+
+  defp record_dispatch_result(acc, _issue, {:skipped, skip_summary}) do
+    Map.update!(acc, :skipped, &[skip_summary | &1])
+  end
+
+  defp record_dispatch_result(acc, _issue, _result), do: acc
+
+  defp dispatch_cycle_summary(issues, skipped, dispatched, failed, attempted) do
+    skipped = Enum.reverse(skipped)
+    dispatched = dispatched |> Enum.reverse() |> Enum.reject(&is_nil/1)
+    failed = Enum.reverse(failed)
+    candidate_identifiers = issues |> Enum.map(&safe_issue_identifier/1) |> Enum.reject(&is_nil/1)
+
+    result =
+      cond do
+        issues == [] -> "no_candidates"
+        dispatched != [] -> "dispatch_succeeded"
+        failed != [] -> "dispatch_failed"
+        attempted > 0 -> "dispatch_attempted"
+        length(skipped) == length(issues) -> "all_candidates_skipped"
+        true -> "all_candidates_skipped"
+      end
+
+    %{
+      result: result,
+      candidate_count: length(issues),
+      dispatched_count: length(dispatched),
+      attempted_count: attempted,
+      candidate_identifiers: Enum.take(candidate_identifiers, 10),
+      dispatched_identifiers: Enum.take(dispatched, 10),
+      skip_reason_families: skipped |> Enum.map(& &1.reason_family) |> Enum.uniq() |> Enum.take(10),
+      skipped_candidates: Enum.take(skipped, 10),
+      failure_reason_families: failed |> Enum.uniq() |> Enum.take(10)
+    }
+  end
+
+  defp empty_dispatch_summary(result) do
+    %{
+      result: result,
+      candidate_count: 0,
+      dispatched_count: 0,
+      attempted_count: 0,
+      candidate_identifiers: [],
+      dispatched_identifiers: [],
+      skip_reason_families: [],
+      skipped_candidates: [],
+      failure_reason_families: []
+    }
+  end
+
+  defp candidate_fetch_failure_summary(reason_family) do
+    "candidate_fetch_failure"
+    |> empty_dispatch_summary()
+    |> Map.put(:failure_reason_families, [safe_reason_family(reason_family)])
+  end
+
+  defp record_dispatch_summary(%State{} = state, summary) when is_map(summary) do
+    log_dispatch_cycle(summary)
+
+    %{
+      state
+      | latest_dispatch_summary: summary,
+        last_poll_result: Map.get(summary, :result, "unknown")
+    }
+  end
+
+  defp latest_poll_result(%State{latest_dispatch_summary: summary, last_poll_result: last_poll_result}) do
+    case summary do
+      %{result: result} when is_binary(result) -> result
+      _ -> last_poll_result
+    end
+  end
+
+  defp skipped_candidate_summary(%Issue{} = issue, reason_family) do
+    %{
+      issue_id: issue.id,
+      issue_identifier: safe_issue_identifier(issue),
+      reason_family: reason_family
+    }
+  end
+
+  defp skipped_candidate_summary(_issue, reason_family) do
+    %{issue_id: nil, issue_identifier: nil, reason_family: reason_family}
+  end
+
+  defp claim_lease_skipped_candidate_summary(%Issue{} = issue, claim_leases) when is_list(claim_leases) do
+    claim_lease = List.first(claim_leases)
+    reason_family = claim_lease_skip_reason_family(claim_lease)
+
+    issue
+    |> skipped_candidate_summary(reason_family)
+    |> Map.put(:claim_lease, claim_lease_diagnostic(claim_lease))
+  end
+
+  defp claim_lease_skip_reason_family(%ClaimLease{} = claim_lease) do
+    cond do
+      ClaimLease.owned_by_current_holder?(claim_lease) -> "claim_lease_blocked"
+      true -> "stale_claim_lease_blocked"
+    end
+  end
+
+  defp claim_lease_diagnostic(%ClaimLease{} = claim_lease) do
+    %{
+      holder: claim_lease.holder,
+      role: claim_lease.role,
+      state: claim_lease.state,
+      expires_at: iso8601(claim_lease.expires_at),
+      recovery_decision: claim_lease_recovery_decision(claim_lease)
+    }
+  end
+
+  defp claim_lease_diagnostic(_claim_lease), do: %{}
+
+  defp claim_lease_recovery_decision(%ClaimLease{} = claim_lease) do
+    if ClaimLease.owned_by_current_holder?(claim_lease) do
+      "current_holder_retry_or_release"
+    else
+      "wait_for_expiry_or_dead_holder_recovery"
+    end
+  end
+
+  defp safe_issue_identifier(%Issue{identifier: identifier}) when is_binary(identifier) and identifier != "", do: identifier
+  defp safe_issue_identifier(%Issue{id: id}) when is_binary(id) and id != "", do: id
+  defp safe_issue_identifier(_issue), do: nil
+
+  defp safe_reason_family(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp safe_reason_family(reason) when is_binary(reason), do: reason
+  defp safe_reason_family(_reason), do: "unknown"
+
+  defp log_dispatch_cycle(summary) when is_map(summary) do
+    Logger.info(
+      "Poll dispatch cycle result=#{Map.get(summary, :result)} candidate_count=#{Map.get(summary, :candidate_count)} dispatched_count=#{Map.get(summary, :dispatched_count)} skip_reason_families=#{inspect(Map.get(summary, :skip_reason_families, []))} failure_reason_families=#{inspect(Map.get(summary, :failure_reason_families, []))}"
+    )
+  end
+
+  defp iso8601(%DateTime{} = datetime) do
+    datetime
+    |> DateTime.truncate(:second)
+    |> DateTime.to_iso8601()
+  end
+
+  defp iso8601(_datetime), do: nil
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
     token_delta = extract_token_delta(running_entry, update)

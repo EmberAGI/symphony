@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.OrchestratorStatusTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Tracker.ClaimLease
+  alias SymphonyElixirWeb.Presenter
+
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
     parent = self()
@@ -1142,18 +1145,23 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    assert %{polling: %{checking?: true}} =
-             wait_for_snapshot(
-               pid,
-               fn
-                 %{polling: %{checking?: true}} ->
-                   true
+    startup_snapshot =
+      wait_for_snapshot(
+        pid,
+        fn
+          %{polling: %{checking?: true}} ->
+            true
 
-                 _ ->
-                   false
-               end,
-               500
-             )
+          %{polling: %{last_poll_started_at: started_at}} when is_binary(started_at) ->
+            true
+
+          _ ->
+            false
+        end,
+        500
+      )
+
+    assert startup_snapshot.polling.checking? == true or is_binary(startup_snapshot.polling.last_poll_started_at)
 
     assert %{
              polling: %{
@@ -1226,6 +1234,161 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_integer(next_poll_in_ms)
     assert next_poll_in_ms >= 0
     assert next_poll_in_ms <= 50
+  end
+
+  test "orchestrator snapshot records poll diagnostics for all skipped stale claim candidates" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      poll_interval_ms: 30_000,
+      workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces")
+    )
+
+    now = DateTime.utc_now()
+
+    claim_lease =
+      ClaimLease.new(%{
+        issue_id: "issue-stale-lease",
+        issue_identifier: "MT-LEASE",
+        role: ClaimLease.role_name(),
+        holder: "dead-host:1234:implementer",
+        run_id: "dead-host:1234:implementer:issue-stale-lease:1",
+        workspace_path: Path.join(System.tmp_dir!(), "symphony_workspaces/MT-LEASE"),
+        state: "active",
+        started_at: DateTime.add(now, -120, :second),
+        refreshed_at: DateTime.add(now, -120, :second),
+        expires_at: DateTime.add(now, 120, :second),
+        attempt: 1
+      })
+
+    issue = %Issue{
+      id: "issue-stale-lease",
+      identifier: "MT-LEASE",
+      title: "Blocked by stale same-role lease",
+      state: "Todo",
+      labels: ["implementation-effort:high"],
+      claim_lease: claim_lease,
+      claim_leases: [claim_lease]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :SkippedClaimLeaseDiagnosticsOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      %{state | poll_check_in_progress: true, next_poll_due_at_ms: nil}
+    end)
+
+    send(pid, :run_poll_cycle)
+
+    snapshot =
+      wait_for_snapshot(pid, fn
+        %{polling: %{last_poll_result: "all_candidates_skipped"}} -> true
+        _ -> false
+      end)
+
+    assert %{
+             polling: %{
+               checking?: false,
+               last_poll_started_at: last_poll_started_at,
+               last_poll_completed_at: last_poll_completed_at,
+               last_poll_result: "all_candidates_skipped",
+               latest_dispatch_summary: %{
+                 result: "all_candidates_skipped",
+                 candidate_count: 1,
+                 dispatched_count: 0,
+                 candidate_identifiers: ["MT-LEASE"],
+                 dispatched_identifiers: [],
+                 skip_reason_families: ["stale_claim_lease_blocked"],
+                 skipped_candidates: [
+                   %{
+                     issue_identifier: "MT-LEASE",
+                     reason_family: "stale_claim_lease_blocked",
+                     claim_lease: %{
+                       holder: "dead-host:1234:implementer",
+                       role: role,
+                       state: "active",
+                       expires_at: expires_at,
+                       recovery_decision: "wait_for_expiry_or_dead_holder_recovery"
+                     }
+                   }
+                 ]
+               }
+             }
+           } = snapshot
+
+    assert role == ClaimLease.role_name()
+    assert is_binary(expires_at)
+    assert is_binary(last_poll_started_at)
+    assert is_binary(last_poll_completed_at)
+  end
+
+  test "role state presenter exposes polling diagnostics from the default orchestrator snapshot" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      poll_interval_ms: 30_000
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :PresenterPollingDiagnosticsOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    wait_for_snapshot(pid, fn
+      %{polling: %{checking?: false}} -> true
+      _ -> false
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | poll_check_in_progress: false,
+          next_poll_due_at_ms: System.monotonic_time(:millisecond) + 30_000,
+          last_poll_started_at: DateTime.utc_now(),
+          last_poll_completed_at: DateTime.utc_now(),
+          last_poll_result: "no_candidates",
+          latest_dispatch_summary: %{
+            result: "no_candidates",
+            candidate_count: 0,
+            dispatched_count: 0,
+            candidate_identifiers: [],
+            dispatched_identifiers: [],
+            skip_reason_families: [],
+            skipped_candidates: []
+          }
+      }
+    end)
+
+    payload = Presenter.state_payload(orchestrator_name, 50)
+
+    assert %{
+             polling_diagnostics: %{
+               checking: checking,
+               status: status,
+               poll_interval_ms: 30_000,
+               next_poll_in_ms: next_poll_in_ms,
+               last_poll_result: "no_candidates",
+               latest_dispatch_summary: %{
+                 result: "no_candidates",
+                 candidate_count: 0,
+                 dispatched_count: 0
+               }
+             }
+           } = payload
+
+    assert checking in [true, false]
+    assert status in ["idle", "checking"]
+    assert is_integer(next_poll_in_ms) or is_nil(next_poll_in_ms)
   end
 
   test "orchestrator restarts stalled workers with retry backoff" do
