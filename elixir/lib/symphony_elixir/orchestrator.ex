@@ -715,14 +715,14 @@ defmodule SymphonyElixir.Orchestrator do
     is_nil(dispatch_skip_summary(issue, state, active_states, terminal_states))
   end
 
-  defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
-
   defp dispatch_skip_summary(
          %Issue{} = issue,
          %State{running: running, claimed: claimed} = state,
          active_states,
          terminal_states
        ) do
+    claim_leases = blocking_claim_leases(issue)
+
     cond do
       !candidate_issue?(issue, active_states, terminal_states) ->
         skipped_candidate_summary(issue, "not_candidate")
@@ -733,12 +733,22 @@ defmodule SymphonyElixir.Orchestrator do
       todo_issue_blocked_by_non_terminal?(issue, terminal_states) ->
         skipped_candidate_summary(issue, "blocked_by_non_terminal")
 
-      blocking_claim_leases(issue) != [] ->
-        claim_lease_skipped_candidate_summary(issue, blocking_claim_leases(issue))
+      claim_leases != [] ->
+        claim_lease_skipped_candidate_summary(issue, claim_leases)
 
       process_ownership_blocks_dispatch?(issue) ->
         skipped_candidate_summary(issue, "process_ownership_blocked")
 
+      true ->
+        dispatch_capacity_skip_summary(issue, state, running, claimed)
+    end
+  end
+
+  defp dispatch_skip_summary(_issue, _state, _active_states, _terminal_states),
+    do: skipped_candidate_summary(nil, "not_candidate")
+
+  defp dispatch_capacity_skip_summary(issue, state, running, claimed) do
+    cond do
       MapSet.member?(claimed, issue.id) ->
         skipped_candidate_summary(issue, "already_claimed")
 
@@ -758,9 +768,6 @@ defmodule SymphonyElixir.Orchestrator do
         nil
     end
   end
-
-  defp dispatch_skip_summary(_issue, _state, _active_states, _terminal_states),
-    do: skipped_candidate_summary(nil, "not_candidate")
 
   defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
@@ -2049,8 +2056,6 @@ defmodule SymphonyElixir.Orchestrator do
     Map.update!(acc, :skipped, &[skip_summary | &1])
   end
 
-  defp record_dispatch_result(acc, _issue, _result), do: acc
-
   defp dispatch_cycle_summary(issues, skipped, dispatched, failed, attempted) do
     skipped = Enum.reverse(skipped)
     dispatched = dispatched |> Enum.reverse() |> Enum.reject(&is_nil/1)
@@ -2097,7 +2102,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp candidate_fetch_failure_summary(reason_family) do
     "candidate_fetch_failure"
     |> empty_dispatch_summary()
-    |> Map.put(:failure_reason_families, [safe_reason_family(reason_family)])
+    |> Map.put(:failure_reason_families, [Atom.to_string(reason_family)])
   end
 
   defp record_dispatch_summary(%State{} = state, summary) when is_map(summary) do
@@ -2139,9 +2144,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp claim_lease_skip_reason_family(%ClaimLease{} = claim_lease) do
-    cond do
-      ClaimLease.owned_by_current_holder?(claim_lease) -> "claim_lease_blocked"
-      true -> "stale_claim_lease_blocked"
+    if ClaimLease.owned_by_current_holder?(claim_lease) do
+      "claim_lease_blocked"
+    else
+      "stale_claim_lease_blocked"
     end
   end
 
@@ -2155,8 +2161,6 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp claim_lease_diagnostic(_claim_lease), do: %{}
-
   defp claim_lease_recovery_decision(%ClaimLease{} = claim_lease) do
     if ClaimLease.owned_by_current_holder?(claim_lease) do
       "current_holder_retry_or_release"
@@ -2168,10 +2172,6 @@ defmodule SymphonyElixir.Orchestrator do
   defp safe_issue_identifier(%Issue{identifier: identifier}) when is_binary(identifier) and identifier != "", do: identifier
   defp safe_issue_identifier(%Issue{id: id}) when is_binary(id) and id != "", do: id
   defp safe_issue_identifier(_issue), do: nil
-
-  defp safe_reason_family(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp safe_reason_family(reason) when is_binary(reason), do: reason
-  defp safe_reason_family(_reason), do: "unknown"
 
   defp log_dispatch_cycle(summary) when is_map(summary) do
     Logger.info(
