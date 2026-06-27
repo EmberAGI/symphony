@@ -4,6 +4,22 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   alias SymphonyElixir.Tracker.ClaimLease
   alias SymphonyElixirWeb.Presenter
 
+  defmodule DispatchAttemptLinearClient do
+    def fetch_candidate_issues do
+      Application.fetch_env!(:symphony_elixir, :dispatch_attempt_candidate_issues)
+    end
+
+    def fetch_issues_by_states(_states), do: {:ok, []}
+
+    def fetch_issue_states_by_ids(_issue_ids) do
+      Application.fetch_env!(:symphony_elixir, :dispatch_attempt_refetched_issues)
+    end
+
+    def graphql(_query, _variables) do
+      {:ok, %{"data" => %{"commentCreate" => %{"success" => true, "comment" => %{"id" => "claim-comment"}}}}}
+    end
+  end
+
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
     parent = self()
@@ -1438,6 +1454,71 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                }
              } = payload
     end)
+  end
+
+  test "role state presenter exposes dispatch attempted from the live poll path" do
+    previous_client = Application.get_env(:symphony_elixir, :linear_client_module)
+
+    on_exit(fn ->
+      if is_nil(previous_client) do
+        Application.delete_env(:symphony_elixir, :linear_client_module)
+      else
+        Application.put_env(:symphony_elixir, :linear_client_module, previous_client)
+      end
+
+      Application.delete_env(:symphony_elixir, :dispatch_attempt_candidate_issues)
+      Application.delete_env(:symphony_elixir, :dispatch_attempt_refetched_issues)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_api_token: "token",
+      tracker_project_slug: "project",
+      poll_interval_ms: 30_000
+    )
+
+    Application.put_env(:symphony_elixir, :linear_client_module, DispatchAttemptLinearClient)
+
+    candidate = %Issue{
+      id: "issue-attempted-live",
+      identifier: "MT-ATTEMPT",
+      title: "Attempted live dispatch",
+      state: "Todo",
+      labels: ["implementation-effort:high"]
+    }
+
+    Application.put_env(:symphony_elixir, :dispatch_attempt_candidate_issues, {:ok, [candidate]})
+    Application.put_env(:symphony_elixir, :dispatch_attempt_refetched_issues, {:ok, [%{candidate | state: "Done"}]})
+
+    orchestrator_name = Module.concat(__MODULE__, :LiveDispatchAttemptPresenterOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    send(pid, :run_poll_cycle)
+
+    wait_for_snapshot(pid, fn
+      %{polling: %{last_poll_result: "dispatch_attempted"}} -> true
+      _ -> false
+    end)
+
+    assert %{
+             polling_diagnostics: %{
+               last_poll_result: "dispatch_attempted",
+               latest_dispatch_summary: %{
+                 result: "dispatch_attempted",
+                 candidate_count: 1,
+                 dispatched_count: 0,
+                 attempted_count: 1,
+                 candidate_identifiers: ["MT-ATTEMPT"],
+                 dispatched_identifiers: []
+               }
+             }
+           } = Presenter.state_payload(orchestrator_name, 50)
   end
 
   test "role state presenter exposes candidate fetch failure diagnostics from polling" do
