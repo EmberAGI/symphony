@@ -1778,6 +1778,7 @@ defmodule SymphonyElixir.CoreTest do
       })
 
     assert_receive {^port, {:exit_status, 0}}, 1_000
+    assert_eventually(fn -> File.exists?(child_pid_file) end)
 
     child_pid = child_pid_file |> File.read!() |> String.trim() |> String.to_integer()
     assert {_, 0} = System.cmd("kill", ["-0", Integer.to_string(child_pid)], stderr_to_stdout: true)
@@ -1788,6 +1789,7 @@ defmodule SymphonyElixir.CoreTest do
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  @tag skip: is_nil(System.find_executable("setsid")) && "requires setsid"
   test "dispatch refuses when a late-detached app-server descendant inherits run ownership" do
     test_root =
       Path.join(
@@ -1865,6 +1867,7 @@ defmodule SymphonyElixir.CoreTest do
       })
 
     assert_receive {^port, {:exit_status, 0}}, 1_000
+    assert_eventually(fn -> File.exists?(child_pid_file) end)
 
     child_pid = child_pid_file |> File.read!() |> String.trim() |> String.to_integer()
     assert {_, 0} = System.cmd("kill", ["-0", Integer.to_string(child_pid)], stderr_to_stdout: true)
@@ -2453,6 +2456,8 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'
+            printf '%s\\n' '{\"method\":\"item/agentMessage/delta\",\"params\":{\"delta\":\"done\"}}'
+
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
             exit 0
             ;;
@@ -2538,6 +2543,8 @@ defmodule SymphonyElixir.CoreTest do
               printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-live\"}}}'
               ;;
             4)
+              printf '%s\\n' '{\"method\":\"item/agentMessage/delta\",\"params\":{\"delta\":\"done\"}}'
+
               printf '%s\\n' '{\"method\":\"turn/completed\"}'
               ;;
             *)
@@ -2700,10 +2707,14 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-cont-1"}}}'
+            printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"done"}}'
+
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
           5)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-cont-2"}}}'
+            printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"done"}}'
+
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
         esac
@@ -2830,10 +2841,14 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-max-1"}}}'
+            printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"done"}}'
+
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
           5)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-max-2"}}}'
+            printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"done"}}'
+
             printf '%s\\n' '{"method":"turn/completed"}'
             ;;
         esac
@@ -2937,6 +2952,8 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-77\"}}}'
             ;;
           4)
+            printf '%s\\n' '{\"method\":\"item/agentMessage/delta\",\"params\":{\"delta\":\"done\"}}'
+
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
             exit 0
             ;;
@@ -3086,6 +3103,8 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-88\"}}}'
             ;;
           4)
+            printf '%s\\n' '{\"method\":\"item/agentMessage/delta\",\"params\":{\"delta\":\"done\"}}'
+
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
             exit 0
             ;;
@@ -3173,6 +3192,8 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-99"}}}'
             ;;
           4)
+            printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"done"}}'
+
             printf '%s\\n' '{"method":"turn/completed"}'
             exit 0
             ;;

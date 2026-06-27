@@ -392,15 +392,33 @@ defmodule SymphonyElixir.Codex.AppServer do
       Config.settings!().codex.turn_timeout_ms,
       "",
       tool_executor,
-      auto_approve_requests
+      auto_approve_requests,
+      %{agent_message_seen?: false}
     )
   end
 
-  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
+  defp receive_loop(
+         port,
+         on_message,
+         timeout_ms,
+         pending_line,
+         tool_executor,
+         auto_approve_requests,
+         turn_observations
+       ) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> to_string(chunk)
-        handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, auto_approve_requests)
+
+        handle_incoming(
+          port,
+          on_message,
+          complete_line,
+          timeout_ms,
+          tool_executor,
+          auto_approve_requests,
+          turn_observations
+        )
 
       {^port, {:data, {:noeol, chunk}}} ->
         receive_loop(
@@ -409,7 +427,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           timeout_ms,
           pending_line <> to_string(chunk),
           tool_executor,
-          auto_approve_requests
+          auto_approve_requests,
+          turn_observations
         )
 
       {^port, {:exit_status, status}} ->
@@ -420,13 +439,32 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests) do
+  defp handle_incoming(
+         port,
+         on_message,
+         data,
+         timeout_ms,
+         tool_executor,
+         auto_approve_requests,
+         turn_observations
+       ) do
     payload_string = to_string(data)
 
     case Jason.decode(payload_string) do
       {:ok, %{"method" => "turn/completed"} = payload} ->
-        emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
-        {:ok, :turn_completed}
+        if turn_completion_has_agent_output?(payload, turn_observations) do
+          emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
+          {:ok, :turn_completed}
+        else
+          failure_details = %{
+            "reason" => "empty_agent_response",
+            "message" => "Codex reported turn/completed without any agent message output",
+            "completion" => payload
+          }
+
+          emit_turn_event(on_message, :turn_failed, payload, payload_string, port, failure_details)
+          {:error, {:empty_turn_completed, payload}}
+        end
 
       {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
         emit_turn_event(
@@ -462,7 +500,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           method,
           timeout_ms,
           tool_executor,
-          auto_approve_requests
+          auto_approve_requests,
+          turn_observations
         )
 
       {:ok, payload} ->
@@ -476,7 +515,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata_from_message(port, payload)
         )
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, turn_observations)
 
       {:error, _reason} ->
         log_non_json_stream_line(payload_string, "turn stream")
@@ -493,7 +532,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
         end
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, turn_observations)
     end
   end
 
@@ -518,9 +557,11 @@ defmodule SymphonyElixir.Codex.AppServer do
          method,
          timeout_ms,
          tool_executor,
-         auto_approve_requests
+         auto_approve_requests,
+         turn_observations
        ) do
     metadata = metadata_from_message(port, payload)
+    turn_observations = update_turn_observations(turn_observations, method, payload)
 
     case maybe_handle_approval_request(
            port,
@@ -543,7 +584,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:turn_input_required, payload}}
 
       :approved ->
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, turn_observations)
 
       :approval_required ->
         emit_message(
@@ -577,10 +618,84 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
 
           Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, turn_observations)
         end
     end
   end
+
+  defp update_turn_observations(observations, method, payload) do
+    if agent_message_delta?(method, payload) do
+      Map.put(observations, :agent_message_seen?, true)
+    else
+      observations
+    end
+  end
+
+  defp turn_completion_has_agent_output?(payload, observations) do
+    Map.get(observations, :agent_message_seen?) == true or completion_final_message?(payload)
+  end
+
+  defp agent_message_delta?(method, payload)
+       when method in [
+              "item/agentMessage/delta",
+              "codex/event/agent_message_delta",
+              "codex/event/agent_message_content_delta"
+            ] do
+    payload
+    |> text_values_at([
+      ["params", "delta"],
+      [:params, :delta],
+      ["params", "text"],
+      [:params, :text],
+      ["params", "message"],
+      [:params, :message],
+      ["delta"],
+      [:delta]
+    ])
+    |> Enum.any?(&non_empty_text?/1)
+  end
+
+  defp agent_message_delta?(_method, _payload), do: false
+
+  defp completion_final_message?(payload) when is_map(payload) do
+    payload
+    |> text_values_at([
+      ["params", "turn", "lastAgentMessage"],
+      [:params, :turn, :lastAgentMessage],
+      ["params", "turn", "last_agent_message"],
+      [:params, :turn, :last_agent_message],
+      ["params", "lastAgentMessage"],
+      [:params, :lastAgentMessage],
+      ["params", "last_agent_message"],
+      [:params, :last_agent_message],
+      ["lastAgentMessage"],
+      [:lastAgentMessage],
+      ["last_agent_message"],
+      [:last_agent_message]
+    ])
+    |> Enum.any?(&non_empty_text?/1)
+  end
+
+  defp completion_final_message?(_payload), do: false
+
+  defp text_values_at(payload, paths) do
+    Enum.map(paths, &value_at_path(payload, &1))
+  end
+
+  defp value_at_path(payload, path) when is_map(payload) and is_list(path) do
+    Enum.reduce_while(path, payload, fn key, acc ->
+      if is_map(acc) and Map.has_key?(acc, key) do
+        {:cont, Map.get(acc, key)}
+      else
+        {:halt, nil}
+      end
+    end)
+  end
+
+  defp value_at_path(_payload, _path), do: nil
+
+  defp non_empty_text?(value) when is_binary(value), do: String.trim(value) != ""
+  defp non_empty_text?(_value), do: false
 
   defp maybe_handle_approval_request(
          port,

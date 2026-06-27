@@ -121,6 +121,8 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1001"}}}'
             ;;
           4)
+            printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"done"}}'
+
             printf '%s\\n' '{"method":"turn/completed"}'
             exit 0
             ;;
@@ -226,6 +228,8 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-effort"}}}'
             ;;
           4)
+            printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"done"}}'
+
             printf '%s\\n' '{"method":"turn/completed"}'
             exit 0
             ;;
@@ -335,6 +339,83 @@ defmodule SymphonyElixir.AppServerTest do
                AppServer.run(workspace, "Needs input", issue)
 
       assert payload["method"] == "turn/input_required"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server rejects turn completion without agent message output" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-empty-completion-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-87")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-87"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-87"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"status":"completed","last_agent_message":null}}}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-empty-completion",
+        identifier: "MT-87",
+        title: "Empty completion",
+        description: "Reject null-output completed turns",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-87",
+        labels: ["backend"]
+      }
+
+      test_pid = self()
+      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+
+      assert {:error, {:empty_turn_completed, payload}} =
+               AppServer.run(workspace, "Complete without output", issue, on_message: on_message)
+
+      assert payload["method"] == "turn/completed"
+
+      assert_received {:app_server_message,
+                       %{
+                         event: :turn_failed,
+                         details: %{
+                           "reason" => "empty_agent_response"
+                         }
+                       }}
     after
       File.rm_rf(test_root)
     end
@@ -450,6 +531,8 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{\"id\":99,\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"command\":\"gh pr view\",\"cwd\":\"/tmp\",\"reason\":\"need approval\"}}'
             ;;
           5)
+            printf '%s\\n' '{\"method\":\"item/agentMessage/delta\",\"params\":{\"delta\":\"done\"}}'
+
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
             exit 0
             ;;
@@ -587,6 +670,8 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{\"id\":110,\"method\":\"item/tool/requestUserInput\",\"params\":{\"itemId\":\"call-717\",\"questions\":[{\"header\":\"Approve app tool call?\",\"id\":\"mcp_tool_call_approval_call-717\",\"isOther\":false,\"isSecret\":false,\"options\":[{\"description\":\"Run the tool and continue.\",\"label\":\"Approve Once\"},{\"description\":\"Run the tool and remember this choice for this session.\",\"label\":\"Approve this Session\"},{\"description\":\"Decline this tool call and continue.\",\"label\":\"Deny\"},{\"description\":\"Cancel this tool call\",\"label\":\"Cancel\"}],\"question\":\"The linear MCP server wants to run the tool \\\"Save issue\\\", which may modify or delete data. Allow this action?\"}],\"threadId\":\"thread-717\",\"turnId\":\"turn-717\"}}'
             ;;
           5)
+            printf '%s\\n' '{\"method\":\"item/agentMessage/delta\",\"params\":{\"delta\":\"done\"}}'
+
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
             exit 0
             ;;
@@ -672,6 +757,8 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":111,"method":"item/tool/requestUserInput","params":{"itemId":"call-718","questions":[{"header":"Provide context","id":"freeform-718","isOther":false,"isSecret":false,"options":null,"question":"What comment should I post back to the issue?"}],"threadId":"thread-718","turnId":"turn-718"}}'
             ;;
           5)
+            printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"done"}}'
+
             printf '%s\\n' '{"method":"turn/completed"}'
             exit 0
             ;;
@@ -762,6 +849,8 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{\"id\":112,\"method\":\"item/tool/requestUserInput\",\"params\":{\"itemId\":\"call-719\",\"questions\":[{\"header\":\"Choose an action\",\"id\":\"options-719\",\"isOther\":false,\"isSecret\":false,\"options\":[{\"description\":\"Use the default behavior.\",\"label\":\"Use default\"},{\"description\":\"Skip this step.\",\"label\":\"Skip\"}],\"question\":\"How should I proceed?\"}],\"threadId\":\"thread-719\",\"turnId\":\"turn-719\"}}'
             ;;
           5)
+            printf '%s\\n' '{\"method\":\"item/agentMessage/delta\",\"params\":{\"delta\":\"done\"}}'
+
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
             exit 0
             ;;
@@ -862,6 +951,8 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{\"id\":101,\"method\":\"item/tool/call\",\"params\":{\"tool\":\"some_tool\",\"callId\":\"call-90\",\"threadId\":\"thread-90\",\"turnId\":\"turn-90\",\"arguments\":{}}}'
             ;;
           5)
+            printf '%s\\n' '{\"method\":\"item/agentMessage/delta\",\"params\":{\"delta\":\"done\"}}'
+
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
             exit 0
             ;;
@@ -963,6 +1054,8 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{\"id\":102,\"method\":\"item/tool/call\",\"params\":{\"name\":\"linear_graphql\",\"callId\":\"call-90a\",\"threadId\":\"thread-90a\",\"turnId\":\"turn-90a\",\"arguments\":{\"query\":\"query Viewer { viewer { id } }\",\"variables\":{\"includeTeams\":false}}}}'
             ;;
           5)
+            printf '%s\\n' '{\"method\":\"item/agentMessage/delta\",\"params\":{\"delta\":\"done\"}}'
+
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
             exit 0
             ;;
@@ -1085,6 +1178,8 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{\"id\":103,\"method\":\"item/tool/call\",\"params\":{\"tool\":\"linear_graphql\",\"callId\":\"call-90b\",\"threadId\":\"thread-90b\",\"turnId\":\"turn-90b\",\"arguments\":{\"query\":\"query Viewer { viewer { id } }\"}}}'
             ;;
           5)
+            printf '%s\\n' '{\"method\":\"item/agentMessage/delta\",\"params\":{\"delta\":\"done\"}}'
+
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
             exit 0
             ;;
@@ -1175,6 +1270,8 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-91"}}}'
             ;;
           4)
+            printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"done"}}'
+
             printf '%s\\n' '{"method":"turn/completed"}'
             exit 0
             ;;
@@ -1239,6 +1336,8 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' 'warning: this is stderr noise' >&2
+            printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"done"}}'
+
             printf '%s\\n' '{"method":"turn/completed"}'
             exit 0
             ;;
@@ -1314,6 +1413,8 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{"method":"turn/completed"'
+            printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"done"}}'
+
             printf '%s\\n' '{"method":"turn/completed"}'
             exit 0
             ;;
@@ -1399,6 +1500,8 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-remote"}}}'
             ;;
           4)
+            printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"done"}}'
+
             printf '%s\\n' '{"method":"turn/completed"}'
             exit 0
             ;;
