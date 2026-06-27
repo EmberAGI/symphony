@@ -394,6 +394,20 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec dispatch_summary_for_test([Issue.t()], [term()]) :: map()
+  def dispatch_summary_for_test(issues, dispatch_results)
+      when is_list(issues) and is_list(dispatch_results) do
+    result =
+      issues
+      |> Enum.zip(dispatch_results)
+      |> Enum.reduce(%{skipped: [], dispatched: [], failed: [], attempted: 0}, fn {issue, dispatch_result}, acc ->
+        record_dispatch_result(acc, issue, dispatch_result)
+      end)
+
+    dispatch_cycle_summary(issues, result.skipped, result.dispatched, result.failed, result.attempted)
+  end
+
+  @doc false
   @spec select_worker_host_for_test(term(), String.t() | nil) :: String.t() | nil | :no_worker_capacity
   def select_worker_host_for_test(%State{} = state, preferred_worker_host) do
     select_worker_host(state, preferred_worker_host)
@@ -1951,6 +1965,10 @@ defmodule SymphonyElixir.Orchestrator do
     acc
     |> Map.update!(:attempted, &(&1 + 1))
     |> Map.update!(:dispatched, &[safe_issue_identifier(issue) | &1])
+  end
+
+  defp record_dispatch_result(acc, _issue, :attempted) do
+    Map.update!(acc, :attempted, &(&1 + 1))
   end
 
   defp record_dispatch_result(acc, _issue, {:failed, reason_family}) do

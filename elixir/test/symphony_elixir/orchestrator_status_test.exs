@@ -1391,6 +1391,91 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_integer(next_poll_in_ms) or is_nil(next_poll_in_ms)
   end
 
+  test "role state presenter exposes every dispatch diagnostic result family" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      poll_interval_ms: 30_000
+    )
+
+    issue = %Issue{
+      id: "issue-dispatch-family",
+      identifier: "MT-FAMILY",
+      title: "Dispatch family",
+      state: "Todo"
+    }
+
+    cases = [
+      {"no_candidates", [], []},
+      {"all_candidates_skipped", [issue], [{:skipped, %{issue_id: issue.id, issue_identifier: issue.identifier, reason_family: "role_capacity_blocked"}}]},
+      {"dispatch_attempted", [issue], [:attempted]},
+      {"dispatch_failed", [issue], [{:failed, "spawn_failed"}]},
+      {"dispatch_succeeded", [issue], [:dispatched]}
+    ]
+
+    orchestrator_name = Module.concat(__MODULE__, :DispatchFamiliesPresenterOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    Enum.each(cases, fn {expected_result, issues, dispatch_results} ->
+      summary = Orchestrator.dispatch_summary_for_test(issues, dispatch_results)
+      assert summary.result == expected_result
+
+      :sys.replace_state(pid, fn state ->
+        %{state | last_poll_result: expected_result, latest_dispatch_summary: summary}
+      end)
+
+      payload = Presenter.state_payload(orchestrator_name, 50)
+
+      assert %{
+               polling_diagnostics: %{
+                 last_poll_result: ^expected_result,
+                 latest_dispatch_summary: %{result: ^expected_result}
+               }
+             } = payload
+    end)
+  end
+
+  test "role state presenter exposes candidate fetch failure diagnostics from polling" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: nil,
+      poll_interval_ms: 30_000
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :CandidateFetchFailurePresenterOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    wait_for_snapshot(pid, fn
+      %{polling: %{last_poll_result: "candidate_fetch_failure"}} -> true
+      _ -> false
+    end)
+
+    assert %{
+             polling_diagnostics: %{
+               last_poll_result: "candidate_fetch_failure",
+               latest_dispatch_summary: %{
+                 result: "candidate_fetch_failure",
+                 candidate_count: 0,
+                 dispatched_count: 0,
+                 attempted_count: 0,
+                 candidate_identifiers: [],
+                 dispatched_identifiers: [],
+                 failure_reason_families: ["missing_tracker_kind"]
+               }
+             }
+           } = Presenter.state_payload(orchestrator_name, 50)
+  end
+
   test "orchestrator restarts stalled workers with retry backoff" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
