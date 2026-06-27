@@ -4,6 +4,22 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   alias SymphonyElixir.Tracker.ClaimLease
   alias SymphonyElixirWeb.Presenter
 
+  defmodule DispatchAttemptLinearClient do
+    def fetch_candidate_issues do
+      Application.fetch_env!(:symphony_elixir, :dispatch_attempt_candidate_issues)
+    end
+
+    def fetch_issues_by_states(_states), do: {:ok, []}
+
+    def fetch_issue_states_by_ids(_issue_ids) do
+      Application.fetch_env!(:symphony_elixir, :dispatch_attempt_refetched_issues)
+    end
+
+    def graphql(_query, _variables) do
+      {:ok, %{"data" => %{"commentCreate" => %{"success" => true, "comment" => %{"id" => "claim-comment"}}}}}
+    end
+  end
+
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
     parent = self()
@@ -326,9 +342,29 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert request[:json].text =~ "Reason: :timeout"
   end
 
-  test "provider auth task failure blocks without scheduling ordinary retry" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+  test "Claude provider auth task failure escalates visibly without ordinary retry" do
+    parent = self()
+    previous_request_fun = Application.get_env(:symphony_elixir, :telegram_request_fun)
+
+    on_exit(fn ->
+      case previous_request_fun do
+        nil -> Application.delete_env(:symphony_elixir, :telegram_request_fun)
+        request_fun -> Application.put_env(:symphony_elixir, :telegram_request_fun, request_fun)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :telegram_request_fun, fn request ->
+      send(parent, {:telegram_request, request})
+      {:ok, %Req.Response{status: 200}}
+    end)
+
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      telegram_bot_token: "bot-token",
+      telegram_chat_id: "chat-id"
+    )
 
     issue_id = "issue-provider-auth-blocked"
     ref = make_ref()
@@ -338,6 +374,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       identifier: "EMB-1123",
       title: "Classify provider auth",
       state: "In Progress",
+      labels: [],
       url: "https://linear.app/example/EMB-1123"
     }
 
@@ -364,11 +401,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           claim_lease: claim_lease,
           run_id: claim_lease.run_id,
           started_at: DateTime.utc_now(),
-          retry_attempt: 0
+          retry_attempt: 15
         }
       },
       claimed: MapSet.new([issue_id]),
-      retry_attempts: %{},
+      retry_attempts: %{issue_id => %{attempt: 15, error: "ordinary retry should be cleared"}},
       completed: MapSet.new(),
       codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
     }
@@ -395,6 +432,20 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert blocked_lease.retry_reason == "provider_auth_failed: claude_code status=401 subtype=oauth_expired"
     assert blocked_lease.recovery_reason == "provider-authentication-required"
     assert blocked_lease.run_id == "run-provider-auth"
+
+    assert_receive {:memory_tracker_comment, ^issue_id, note}
+    assert note =~ "## Operator Note"
+    assert note =~ "provider_auth_failed: claude_code status=401 subtype=oauth_expired"
+    refute note =~ "raw-secret-token"
+    refute note =~ "Bearer"
+
+    assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}
+    assert_receive {:telegram_request, request}
+    assert request[:json].text =~ "Symphony needs human escalation"
+    assert request[:json].text =~ "Issue: EMB-1123"
+    refute request[:json].text =~ "raw-secret-token"
+    refute request[:json].text =~ "Bearer"
 
     assert log =~ "Provider authentication failed"
     assert log =~ "status=401"
@@ -1468,6 +1519,156 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_integer(next_poll_in_ms) or is_nil(next_poll_in_ms)
   end
 
+  test "role state presenter exposes every dispatch diagnostic result family" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      poll_interval_ms: 30_000
+    )
+
+    issue = %Issue{
+      id: "issue-dispatch-family",
+      identifier: "MT-FAMILY",
+      title: "Dispatch family",
+      state: "Todo"
+    }
+
+    cases = [
+      {"no_candidates", [], []},
+      {"all_candidates_skipped", [issue], [{:skipped, %{issue_id: issue.id, issue_identifier: issue.identifier, reason_family: "role_capacity_blocked"}}]},
+      {"dispatch_attempted", [issue], [:attempted]},
+      {"dispatch_failed", [issue], [{:failed, "spawn_failed"}]},
+      {"dispatch_succeeded", [issue], [:dispatched]}
+    ]
+
+    orchestrator_name = Module.concat(__MODULE__, :DispatchFamiliesPresenterOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    Enum.each(cases, fn {expected_result, issues, dispatch_results} ->
+      summary = Orchestrator.dispatch_summary_for_test(issues, dispatch_results)
+      assert summary.result == expected_result
+
+      :sys.replace_state(pid, fn state ->
+        %{state | last_poll_result: expected_result, latest_dispatch_summary: summary}
+      end)
+
+      payload = Presenter.state_payload(orchestrator_name, 50)
+
+      assert %{
+               polling_diagnostics: %{
+                 last_poll_result: ^expected_result,
+                 latest_dispatch_summary: %{result: ^expected_result}
+               }
+             } = payload
+    end)
+  end
+
+  test "role state presenter exposes dispatch attempted from the live poll path" do
+    previous_client = Application.get_env(:symphony_elixir, :linear_client_module)
+
+    on_exit(fn ->
+      if is_nil(previous_client) do
+        Application.delete_env(:symphony_elixir, :linear_client_module)
+      else
+        Application.put_env(:symphony_elixir, :linear_client_module, previous_client)
+      end
+
+      Application.delete_env(:symphony_elixir, :dispatch_attempt_candidate_issues)
+      Application.delete_env(:symphony_elixir, :dispatch_attempt_refetched_issues)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_api_token: "token",
+      tracker_project_slug: "project",
+      poll_interval_ms: 30_000
+    )
+
+    Application.put_env(:symphony_elixir, :linear_client_module, DispatchAttemptLinearClient)
+
+    candidate = %Issue{
+      id: "issue-attempted-live",
+      identifier: "MT-ATTEMPT",
+      title: "Attempted live dispatch",
+      state: "Todo",
+      labels: ["implementation-effort:high"]
+    }
+
+    Application.put_env(:symphony_elixir, :dispatch_attempt_candidate_issues, {:ok, [candidate]})
+    Application.put_env(:symphony_elixir, :dispatch_attempt_refetched_issues, {:ok, [%{candidate | state: "Done"}]})
+
+    orchestrator_name = Module.concat(__MODULE__, :LiveDispatchAttemptPresenterOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    send(pid, :run_poll_cycle)
+
+    wait_for_snapshot(pid, fn
+      %{polling: %{last_poll_result: "dispatch_attempted"}} -> true
+      _ -> false
+    end)
+
+    assert %{
+             polling_diagnostics: %{
+               last_poll_result: "dispatch_attempted",
+               latest_dispatch_summary: %{
+                 result: "dispatch_attempted",
+                 candidate_count: 1,
+                 dispatched_count: 0,
+                 attempted_count: 1,
+                 candidate_identifiers: ["MT-ATTEMPT"],
+                 dispatched_identifiers: []
+               }
+             }
+           } = Presenter.state_payload(orchestrator_name, 50)
+  end
+
+  test "role state presenter exposes candidate fetch failure diagnostics from polling" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: nil,
+      poll_interval_ms: 30_000
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :CandidateFetchFailurePresenterOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    wait_for_snapshot(pid, fn
+      %{polling: %{last_poll_result: "candidate_fetch_failure"}} -> true
+      _ -> false
+    end)
+
+    assert %{
+             polling_diagnostics: %{
+               last_poll_result: "candidate_fetch_failure",
+               latest_dispatch_summary: %{
+                 result: "candidate_fetch_failure",
+                 candidate_count: 0,
+                 dispatched_count: 0,
+                 attempted_count: 0,
+                 candidate_identifiers: [],
+                 dispatched_identifiers: [],
+                 failure_reason_families: ["missing_tracker_kind"]
+               }
+             }
+           } = Presenter.state_payload(orchestrator_name, 50)
+  end
+
   test "orchestrator restarts stalled workers with retry backoff" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -2255,6 +2456,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "application stop renders offline status" do
+    on_exit(fn ->
+      {:ok, _apps} = Application.ensure_all_started(:symphony_elixir)
+    end)
+
     rendered =
       ExUnit.CaptureIO.capture_io(fn ->
         assert :ok = SymphonyElixir.Application.stop(:normal)

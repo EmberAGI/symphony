@@ -24,6 +24,14 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  @add_label_mutation """
+  mutation SymphonyAddIssueLabel($issueId: String!, $labelId: String!) {
+    issueUpdate(id: $issueId, input: {addedLabelIds: [$labelId]}) {
+      success
+    }
+  }
+  """
+
   @create_claim_lease_comment_mutation """
   mutation SymphonyCreateClaimLeaseComment($issueId: String!, $body: String!) {
     commentCreate(input: {issueId: $issueId, body: $body}) {
@@ -50,6 +58,27 @@ defmodule SymphonyElixir.Linear.Adapter do
         states(filter: {name: {eq: $stateName}}, first: 1) {
           nodes {
             id
+          }
+        }
+      }
+    }
+  }
+  """
+
+  @label_lookup_query """
+  query SymphonyResolveIssueLabelId($issueId: String!) {
+    issue(id: $issueId) {
+      labels {
+        nodes {
+          id
+          name
+        }
+      }
+      team {
+        labels {
+          nodes {
+            id
+            name
           }
         }
       }
@@ -113,6 +142,21 @@ defmodule SymphonyElixir.Linear.Adapter do
       false -> {:error, :issue_update_failed}
       {:error, reason} -> {:error, reason}
       _ -> {:error, :issue_update_failed}
+    end
+  end
+
+  @spec add_issue_label(String.t(), String.t()) :: :ok | {:error, term()}
+  def add_issue_label(issue_id, label_name)
+      when is_binary(issue_id) and is_binary(label_name) do
+    with {:ok, label_id} <- resolve_label_id(issue_id, label_name),
+         {:ok, response} <-
+           client_module().graphql(@add_label_mutation, %{issueId: issue_id, labelId: label_id}),
+         true <- get_in(response, ["data", "issueUpdate", "success"]) == true do
+      :ok
+    else
+      false -> {:error, :issue_label_update_failed}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :issue_label_update_failed}
     end
   end
 
@@ -227,5 +271,36 @@ defmodule SymphonyElixir.Linear.Adapter do
       {:error, reason} -> {:error, reason}
       _ -> {:error, :state_not_found}
     end
+  end
+
+  defp resolve_label_id(issue_id, label_name) do
+    with {:ok, response} <-
+           client_module().graphql(@label_lookup_query, %{issueId: issue_id}),
+         label_id when is_binary(label_id) <- find_label_id(response, label_name) do
+      {:ok, label_id}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :label_not_found}
+    end
+  end
+
+  defp find_label_id(response, label_name) do
+    issue_labels = get_in(response, ["data", "issue", "labels", "nodes"]) || []
+    team_labels = get_in(response, ["data", "issue", "team", "labels", "nodes"]) || []
+    normalized_label_name = normalize_label_name(label_name)
+
+    Enum.find_value(issue_labels ++ team_labels, fn
+      %{"id" => id, "name" => name} when is_binary(id) and is_binary(name) ->
+        if normalize_label_name(name) == normalized_label_name, do: id
+
+      _ ->
+        nil
+    end)
+  end
+
+  defp normalize_label_name(label_name) when is_binary(label_name) do
+    label_name
+    |> String.trim()
+    |> String.downcase()
   end
 end

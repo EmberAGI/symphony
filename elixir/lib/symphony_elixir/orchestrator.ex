@@ -398,6 +398,20 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec dispatch_summary_for_test([Issue.t()], [term()]) :: map()
+  def dispatch_summary_for_test(issues, dispatch_results)
+      when is_list(issues) and is_list(dispatch_results) do
+    result =
+      issues
+      |> Enum.zip(dispatch_results)
+      |> Enum.reduce(%{skipped: [], dispatched: [], failed: [], attempted: 0}, fn {issue, dispatch_result}, acc ->
+        record_dispatch_result(acc, issue, dispatch_result)
+      end)
+
+    dispatch_cycle_summary(issues, result.skipped, result.dispatched, result.failed, result.attempted)
+  end
+
+  @doc false
   @spec select_worker_host_for_test(term(), String.t() | nil) :: String.t() | nil | :no_worker_capacity
   def select_worker_host_for_test(%State{} = state, preferred_worker_host) do
     select_worker_host(state, preferred_worker_host)
@@ -889,12 +903,12 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
-        {state, {:skipped, skipped_candidate_summary(issue, "missing_after_refresh")}}
+        {state, :attempted}
 
       {:skip, %Issue{} = refreshed_issue} ->
         Logger.info("Skipping stale dispatch after issue refresh: #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)}")
 
-        {state, {:skipped, skipped_candidate_summary(refreshed_issue, "stale_after_refresh")}}
+        {state, :attempted}
 
       {:error, reason} ->
         Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
@@ -1263,7 +1277,9 @@ defmodule SymphonyElixir.Orchestrator do
     summary = AgentRuntime.provider_auth_failure_summary(reason)
     identifier = Map.get(running_entry, :identifier, issue_id)
     issue = Map.get(running_entry, :issue)
+
     maybe_upsert_provider_auth_blocked_claim_lease(issue_id, issue, running_entry, summary)
+    maybe_escalate_provider_auth_failure(issue_id, issue, summary)
 
     Logger.error(
       "Provider authentication failed for issue_id=#{issue_id} issue_identifier=#{identifier}; blocked ordinary retry status=#{provider_auth_status_for_log(reason)} subtype=#{provider_auth_subtype_for_log(reason)}"
@@ -1279,8 +1295,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_upsert_provider_auth_blocked_claim_lease(issue_id, %Issue{} = issue, running_entry, summary)
        when is_binary(issue_id) do
-    attrs =
-      provider_auth_blocked_claim_lease_attrs(issue, running_entry, summary)
+    attrs = provider_auth_blocked_claim_lease_attrs(issue, running_entry, summary)
 
     case Tracker.upsert_claim_lease(issue_id, attrs) do
       {:ok, %ClaimLease{} = blocked_lease} ->
@@ -1315,6 +1330,55 @@ defmodule SymphonyElixir.Orchestrator do
         state: "blocked"
       }
     )
+  end
+
+  defp maybe_escalate_provider_auth_failure(issue_id, %Issue{} = issue, summary) when is_binary(issue_id) do
+    comment_result = Tracker.create_comment(issue_id, provider_auth_operator_note(summary))
+    label_result = Tracker.add_issue_label(issue_id, "Human Escalation")
+    state_result = Tracker.update_issue_state(issue_id, "Human Escalation")
+
+    log_provider_auth_escalation_result(:comment, comment_result, issue)
+    log_provider_auth_escalation_result(:label, label_result, issue)
+    log_provider_auth_escalation_result(:state, state_result, issue)
+
+    if label_result == :ok do
+      issue
+      |> provider_auth_escalated_issue()
+      |> Telegram.notify_human_escalation()
+    end
+
+    :ok
+  end
+
+  defp maybe_escalate_provider_auth_failure(_issue_id, _issue, _summary), do: :ok
+
+  defp log_provider_auth_escalation_result(_kind, :ok, _issue), do: :ok
+
+  defp log_provider_auth_escalation_result(kind, {:error, reason}, %Issue{} = issue) do
+    Logger.warning("Failed provider-auth Human Escalation #{kind} update for #{issue_context(issue)}: #{inspect(reason)}")
+  end
+
+  defp provider_auth_operator_note(summary) do
+    [
+      "## Operator Note",
+      "",
+      "Symphony escalated this issue because the runtime reported an irrecoverable provider authentication failure.",
+      "",
+      "- Failure: #{summary}",
+      "- Effect: ordinary retries stopped and the claim lease was marked blocked.",
+      "- Action required: refresh or re-authenticate the unattended provider credential, then move the issue back to the appropriate role state."
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp provider_auth_escalated_issue(%Issue{} = issue) do
+    labels =
+      issue.labels
+      |> List.wrap()
+      |> Kernel.++(["Human Escalation"])
+      |> Enum.uniq_by(&normalize_label/1)
+
+    %{issue | state: "Human Escalation", labels: labels}
   end
 
   defp provider_auth_status_for_log({:provider_auth_failed, details}) when is_map(details) do
@@ -2044,6 +2108,10 @@ defmodule SymphonyElixir.Orchestrator do
     acc
     |> Map.update!(:attempted, &(&1 + 1))
     |> Map.update!(:dispatched, &[safe_issue_identifier(issue) | &1])
+  end
+
+  defp record_dispatch_result(acc, _issue, :attempted) do
+    Map.update!(acc, :attempted, &(&1 + 1))
   end
 
   defp record_dispatch_result(acc, _issue, {:failed, reason_family}) do
