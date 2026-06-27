@@ -65,6 +65,61 @@ defmodule SymphonyElixir.AgentRuntime do
   @spec stop_session(map()) :: :ok
   def stop_session(session), do: adapter().stop_session(session)
 
+  @doc """
+  Return true when a runtime error represents provider authentication failure.
+  """
+  @spec provider_auth_failure?(term()) :: boolean()
+  def provider_auth_failure?({:auth_failed, _details}), do: true
+  def provider_auth_failure?({:provider_auth_failed, _details}), do: true
+  def provider_auth_failure?(_reason), do: false
+
+  @doc """
+  Normalize provider authentication failures into the process-exit reason the
+  orchestrator understands.
+  """
+  @spec provider_auth_failure(term()) :: {:provider_auth_failed, map()}
+  def provider_auth_failure(reason), do: provider_auth_failure(reason, provider())
+
+  @spec provider_auth_failure(term(), provider()) :: {:provider_auth_failed, map()}
+  def provider_auth_failure({:provider_auth_failed, details}, provider) do
+    {:provider_auth_failed, provider_auth_details(details, provider)}
+  end
+
+  def provider_auth_failure({:auth_failed, details}, provider) do
+    {:provider_auth_failed, provider_auth_details(details, provider)}
+  end
+
+  def provider_auth_failure(_reason, provider) do
+    {:provider_auth_failed, provider_auth_details(%{}, provider)}
+  end
+
+  @doc """
+  Format a redacted provider-auth failure for logs, claim leases, and status.
+  """
+  @spec provider_auth_failure_summary(term()) :: String.t()
+  def provider_auth_failure_summary(reason) do
+    details =
+      case reason do
+        {:provider_auth_failed, details} -> provider_auth_details(details, provider())
+        {:auth_failed, details} -> provider_auth_details(details, provider())
+        details when is_map(details) -> provider_auth_details(details, provider())
+        _ -> provider_auth_details(%{}, provider())
+      end
+
+    provider = Map.get(details, :provider) || "unknown"
+    status = Map.get(details, :api_error_status)
+    subtype = Map.get(details, :subtype)
+
+    [
+      "provider_auth_failed:",
+      to_string(provider),
+      provider_auth_status_fragment(status),
+      provider_auth_subtype_fragment(subtype)
+    ]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join(" ")
+  end
+
   # Carry the provider session id forward for adapters (Claude Code) that run a
   # fresh process per turn and resume by session id. Codex keeps one long-lived
   # thread, so its session struct is returned unchanged.
@@ -74,4 +129,50 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   defp advance_session(session, _turn_result), do: session
+
+  defp provider_auth_details(details, provider) when is_map(details) do
+    %{
+      provider: provider_auth_provider(Map.get(details, :provider) || Map.get(details, "provider") || provider),
+      api_error_status: provider_auth_status(Map.get(details, :api_error_status) || Map.get(details, "api_error_status")),
+      subtype: provider_auth_subtype(Map.get(details, :subtype) || Map.get(details, "subtype"))
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp provider_auth_details(_details, provider), do: provider_auth_details(%{}, provider)
+
+  defp provider_auth_provider(provider) when provider in [:codex, :claude_code], do: provider
+
+  defp provider_auth_provider(provider) when is_binary(provider) do
+    case String.trim(provider) do
+      "claude_code" -> :claude_code
+      "codex" -> :codex
+      _ -> nil
+    end
+  end
+
+  defp provider_auth_provider(_provider), do: nil
+
+  defp provider_auth_status(status) when status in [401, 403], do: status
+  defp provider_auth_status(_status), do: nil
+
+  defp provider_auth_subtype(subtype) when is_binary(subtype) do
+    subtype
+    |> String.trim()
+    |> String.replace(~r/[^a-zA-Z0-9_.:-]/, "_")
+    |> String.slice(0, 80)
+    |> case do
+      "" -> nil
+      value -> value
+    end
+  end
+
+  defp provider_auth_subtype(_subtype), do: nil
+
+  defp provider_auth_status_fragment(status) when is_integer(status), do: "status=#{status}"
+  defp provider_auth_status_fragment(_status), do: ""
+
+  defp provider_auth_subtype_fragment(subtype) when is_binary(subtype), do: "subtype=#{subtype}"
+  defp provider_auth_subtype_fragment(_subtype), do: ""
 end

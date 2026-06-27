@@ -452,31 +452,47 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     case Jason.decode(payload_string) do
       {:ok, %{"method" => "turn/completed"} = payload} ->
-        if turn_completion_has_agent_output?(payload, turn_observations) do
-          emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
-          {:ok, :turn_completed}
-        else
-          failure_details = %{
-            "reason" => "empty_agent_response",
-            "message" => "Codex reported turn/completed without any agent message output",
-            "completion" => payload
-          }
+        case codex_provider_auth_failure(payload) do
+          {:ok, details} ->
+            failure_details = provider_auth_failure_event_details(details)
+            emit_turn_event(on_message, :turn_failed, payload, payload_string, port, failure_details)
+            {:error, {:auth_failed, details}}
 
-          emit_turn_event(on_message, :turn_failed, payload, payload_string, port, failure_details)
-          {:error, {:empty_turn_completed, payload}}
+          :error ->
+            if turn_completion_has_agent_output?(payload, turn_observations) do
+              emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
+              {:ok, :turn_completed}
+            else
+              failure_details = %{
+                "reason" => "empty_agent_response",
+                "message" => "Codex reported turn/completed without any agent message output",
+                "completion" => payload
+              }
+
+              emit_turn_event(on_message, :turn_failed, payload, payload_string, port, failure_details)
+              {:error, {:empty_turn_completed, payload}}
+            end
         end
 
       {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
-        emit_turn_event(
-          on_message,
-          :turn_failed,
-          payload,
-          payload_string,
-          port,
-          Map.get(payload, "params")
-        )
+        case codex_provider_auth_failure(payload) do
+          {:ok, details} ->
+            failure_details = provider_auth_failure_event_details(details)
+            emit_turn_event(on_message, :turn_failed, payload, payload_string, port, failure_details)
+            {:error, {:auth_failed, details}}
 
-        {:error, {:turn_failed, Map.get(payload, "params")}}
+          :error ->
+            emit_turn_event(
+              on_message,
+              :turn_failed,
+              payload,
+              payload_string,
+              port,
+              Map.get(payload, "params")
+            )
+
+            {:error, {:turn_failed, Map.get(payload, "params")}}
+        end
 
       {:ok, %{"method" => "turn/cancelled", "params" => _} = payload} ->
         emit_turn_event(
@@ -634,6 +650,96 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp turn_completion_has_agent_output?(payload, observations) do
     Map.get(observations, :agent_message_seen?) == true or completion_final_message?(payload)
   end
+
+  defp codex_provider_auth_failure(payload) when is_map(payload) do
+    error_info =
+      payload
+      |> text_values_at([
+        ["params", "turn", "error", "codexErrorInfo"],
+        ["params", "turn", "error", "code"],
+        ["params", "error", "codexErrorInfo"],
+        ["params", "error", "code"],
+        ["turn", "error", "codexErrorInfo"],
+        ["turn", "error", "code"],
+        ["error", "codexErrorInfo"],
+        ["error", "code"]
+      ])
+      |> Enum.find(&non_empty_text?/1)
+
+    message =
+      payload
+      |> text_values_at([
+        ["params", "turn", "error", "message"],
+        ["params", "turn", "error", "details"],
+        ["params", "error", "message"],
+        ["params", "error", "details"],
+        ["turn", "error", "message"],
+        ["turn", "error", "details"],
+        ["error", "message"],
+        ["error", "details"],
+        ["params", "message"],
+        ["message"]
+      ])
+      |> Enum.find(&non_empty_text?/1)
+
+    if codex_auth_failure_signal?(error_info, message) do
+      {:ok,
+       %{
+         provider: :codex,
+         api_error_status: 401,
+         subtype: codex_auth_failure_subtype(error_info, message)
+       }}
+    else
+      :error
+    end
+  end
+
+  defp codex_provider_auth_failure(_payload), do: :error
+
+  defp codex_auth_failure_signal?(error_info, message) do
+    normalized_info = normalize_auth_text(error_info)
+    normalized_message = normalize_auth_text(message)
+
+    normalized_info in ["unauthorized", "auth_failed", "authentication_failed"] or
+      String.contains?(normalized_message, "refresh token was revoked") or
+      String.contains?(normalized_message, "access token could not be refreshed") or
+      String.contains?(normalized_message, "please log out and sign in again")
+  end
+
+  defp codex_auth_failure_subtype(_error_info, message) do
+    normalized_message = normalize_auth_text(message)
+
+    cond do
+      String.contains?(normalized_message, "refresh token was revoked") ->
+        "refresh_token_revoked"
+
+      String.contains?(normalized_message, "access token could not be refreshed") ->
+        "token_refresh_failed"
+
+      true ->
+        "unauthorized"
+    end
+  end
+
+  defp provider_auth_failure_event_details(details) do
+    %{
+      "reason" => "auth_failed",
+      "message" => "Codex provider authentication failed",
+      "provider" => "codex",
+      "api_error_status" => Map.get(details, :api_error_status),
+      "subtype" => Map.get(details, :subtype)
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp normalize_auth_text(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp normalize_auth_text(_value), do: ""
 
   defp agent_message_delta?(method, payload)
        when method in [

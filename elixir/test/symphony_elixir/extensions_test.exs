@@ -196,12 +196,15 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issue_states_by_ids(["issue-1"])
     assert :ok = SymphonyElixir.Tracker.create_comment("issue-1", "comment")
     assert :ok = SymphonyElixir.Tracker.update_issue_state("issue-1", "Done")
+    assert :ok = SymphonyElixir.Tracker.add_issue_label("issue-1", "Human Escalation")
     assert_receive {:memory_tracker_comment, "issue-1", "comment"}
     assert_receive {:memory_tracker_state_update, "issue-1", "Done"}
+    assert_receive {:memory_tracker_label_add, "issue-1", "Human Escalation"}
 
     Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
     assert :ok = Memory.create_comment("issue-1", "quiet")
     assert :ok = Memory.update_issue_state("issue-1", "Quiet")
+    assert :ok = Memory.add_issue_label("issue-1", "Quiet")
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
     assert SymphonyElixir.Tracker.adapter() == Adapter
@@ -319,6 +322,36 @@ defmodule SymphonyElixir.ExtensionsTest do
     )
 
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "team" => %{
+                 "labels" => %{"nodes" => [%{"id" => "label-human", "name" => "Human Escalation"}]}
+               },
+               "labels" => %{"nodes" => []}
+             }
+           }
+         }},
+        {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}}
+      ]
+    )
+
+    assert :ok = Adapter.add_issue_label("issue-1", "Human Escalation")
+    assert_receive {:graphql_called, label_lookup_query, variables} when variables == %{issueId: "issue-1"}
+    assert label_lookup_query =~ "labels"
+
+    assert_receive {:graphql_called, add_label_query, variables}
+                   when variables == %{issueId: "issue-1", labelId: "label-human"}
+
+    assert add_label_query =~ "addedLabelIds"
+
+    Process.put({FakeLinearClient, :graphql_results}, [{:ok, %{"data" => %{}}}])
+    assert {:error, :label_not_found} = Adapter.add_issue_label("issue-1", "Missing")
   end
 
   test "linear adapter updates and verifies an existing claim lease comment before dispatch" do

@@ -191,6 +191,10 @@ defmodule SymphonyElixir.Orchestrator do
                 lease_state: retry_lease_state(process_completion_status)
               })
 
+            {:provider_auth_failed, _details} ->
+              RoleTurnRecovery.clear_turn(issue_id)
+              block_provider_auth_failure(state, issue_id, running_entry, reason)
+
             _ ->
               Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
               maybe_notify_agent_failed(running_entry, reason)
@@ -210,7 +214,7 @@ defmodule SymphonyElixir.Orchestrator do
               })
           end
 
-        Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
+        Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{task_exit_reason_for_log(reason)}")
 
         notify_dashboard()
         {:noreply, state}
@@ -1261,6 +1265,142 @@ defmodule SymphonyElixir.Orchestrator do
        })
      )}
   end
+
+  defp block_provider_auth_failure(%State{} = state, issue_id, running_entry, reason) do
+    summary = AgentRuntime.provider_auth_failure_summary(reason)
+    identifier = Map.get(running_entry, :identifier, issue_id)
+    issue = Map.get(running_entry, :issue)
+
+    maybe_upsert_provider_auth_blocked_claim_lease(issue_id, issue, running_entry, summary)
+    maybe_escalate_provider_auth_failure(issue_id, issue, summary)
+
+    Logger.error(
+      "Provider authentication failed for issue_id=#{issue_id} issue_identifier=#{identifier}; blocked ordinary retry status=#{provider_auth_status_for_log(reason)} subtype=#{provider_auth_subtype_for_log(reason)}"
+    )
+
+    %{
+      state
+      | running: Map.delete(state.running, issue_id),
+        claimed: MapSet.put(state.claimed, issue_id),
+        retry_attempts: Map.delete(state.retry_attempts, issue_id)
+    }
+  end
+
+  defp maybe_upsert_provider_auth_blocked_claim_lease(issue_id, %Issue{} = issue, running_entry, summary)
+       when is_binary(issue_id) do
+    attrs = provider_auth_blocked_claim_lease_attrs(issue, running_entry, summary)
+
+    case Tracker.upsert_claim_lease(issue_id, attrs) do
+      {:ok, %ClaimLease{} = blocked_lease} ->
+        blocked_lease
+
+      {:error, upsert_reason} ->
+        Logger.warning("Failed to update provider-auth blocked claim lease for #{issue_context(issue)}: #{inspect(upsert_reason)}")
+        nil
+
+      _ ->
+        nil
+    end
+  end
+
+  defp maybe_upsert_provider_auth_blocked_claim_lease(_issue_id, _issue, _running_entry, _summary), do: nil
+
+  defp provider_auth_blocked_claim_lease_attrs(%Issue{} = issue, running_entry, summary) do
+    claim_lease = Map.get(running_entry, :claim_lease) || Map.get(issue, :claim_lease)
+
+    build_claim_lease_attrs(
+      issue,
+      Map.get(running_entry, :retry_attempt),
+      Map.get(running_entry, :worker_host),
+      Map.get(running_entry, :run_id) || (claim_lease && claim_lease.run_id),
+      %{
+        comment_id: claim_lease && claim_lease.comment_id,
+        started_at: (claim_lease && claim_lease.started_at) || Map.get(running_entry, :started_at),
+        workspace_path: Map.get(running_entry, :workspace_path),
+        session_id: running_entry_session_id(running_entry),
+        retry_reason: summary,
+        recovery_reason: "provider-authentication-required",
+        state: "blocked"
+      }
+    )
+  end
+
+  defp maybe_escalate_provider_auth_failure(issue_id, %Issue{} = issue, summary) when is_binary(issue_id) do
+    comment_result = Tracker.create_comment(issue_id, provider_auth_operator_note(summary))
+    label_result = Tracker.add_issue_label(issue_id, "Human Escalation")
+    state_result = Tracker.update_issue_state(issue_id, "Human Escalation")
+
+    log_provider_auth_escalation_result(:comment, comment_result, issue)
+    log_provider_auth_escalation_result(:label, label_result, issue)
+    log_provider_auth_escalation_result(:state, state_result, issue)
+
+    if label_result == :ok do
+      issue
+      |> provider_auth_escalated_issue()
+      |> Telegram.notify_human_escalation()
+    end
+
+    :ok
+  end
+
+  defp maybe_escalate_provider_auth_failure(_issue_id, _issue, _summary), do: :ok
+
+  defp log_provider_auth_escalation_result(_kind, :ok, _issue), do: :ok
+
+  defp log_provider_auth_escalation_result(kind, {:error, reason}, %Issue{} = issue) do
+    Logger.warning("Failed provider-auth Human Escalation #{kind} update for #{issue_context(issue)}: #{inspect(reason)}")
+  end
+
+  defp log_provider_auth_escalation_result(kind, other, %Issue{} = issue) do
+    Logger.warning("Unexpected provider-auth Human Escalation #{kind} update result for #{issue_context(issue)}: #{inspect(other)}")
+  end
+
+  defp provider_auth_operator_note(summary) do
+    [
+      "## Operator Note",
+      "",
+      "Symphony escalated this issue because the runtime reported an irrecoverable provider authentication failure.",
+      "",
+      "- Failure: #{summary}",
+      "- Effect: ordinary retries stopped and the claim lease was marked blocked.",
+      "- Action required: refresh or re-authenticate the unattended provider credential, then move the issue back to the appropriate role state."
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp provider_auth_escalated_issue(%Issue{} = issue) do
+    labels =
+      issue.labels
+      |> List.wrap()
+      |> Kernel.++(["Human Escalation"])
+      |> Enum.uniq_by(&normalize_label/1)
+
+    %{issue | state: "Human Escalation", labels: labels}
+  end
+
+  defp provider_auth_status_for_log({:provider_auth_failed, details}) when is_map(details) do
+    case Map.get(details, :api_error_status) do
+      status when is_integer(status) -> Integer.to_string(status)
+      _ -> "unknown"
+    end
+  end
+
+  defp provider_auth_status_for_log(_reason), do: "unknown"
+
+  defp provider_auth_subtype_for_log({:provider_auth_failed, details}) when is_map(details) do
+    case Map.get(details, :subtype) do
+      subtype when is_binary(subtype) -> subtype
+      _ -> "unknown"
+    end
+  end
+
+  defp provider_auth_subtype_for_log(_reason), do: "unknown"
+
+  defp task_exit_reason_for_log({:provider_auth_failed, _details} = reason) do
+    AgentRuntime.provider_auth_failure_summary(reason)
+  end
+
+  defp task_exit_reason_for_log(reason), do: inspect(reason)
 
   defp reconcile_orphaned_claims(%State{} = state) do
     active_claims =

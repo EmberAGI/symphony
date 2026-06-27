@@ -20,8 +20,16 @@ defmodule SymphonyElixir.AgentRunner do
         :ok
 
       {:error, reason} ->
-        Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-        raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        if AgentRuntime.provider_auth_failure?(reason) do
+          provider_auth_failure = AgentRuntime.provider_auth_failure(reason)
+
+          Logger.error("Agent run blocked by provider authentication for #{issue_context(issue)}: #{AgentRuntime.provider_auth_failure_summary(provider_auth_failure)}")
+
+          exit(provider_auth_failure)
+        else
+          Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
+          raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        end
     end
   end
 

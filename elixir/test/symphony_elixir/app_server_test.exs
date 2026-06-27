@@ -421,6 +421,84 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server classifies Codex revoked-token completion as provider auth failure" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-codex-auth-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-86")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-86"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-86"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"status":"failed","last_agent_message":null,"error":{"codexErrorInfo":"unauthorized","message":"Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again."}}}}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-codex-auth",
+        identifier: "MT-86",
+        title: "Codex auth failure",
+        description: "Escalate revoked provider tokens",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-86",
+        labels: ["backend"]
+      }
+
+      test_pid = self()
+      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+
+      assert {:error, {:auth_failed, %{provider: :codex, api_error_status: 401, subtype: "refresh_token_revoked"}}} =
+               AppServer.run(workspace, "Trigger revoked token", issue, on_message: on_message)
+
+      assert_received {:app_server_message,
+                       %{
+                         event: :turn_failed,
+                         details: %{
+                           "reason" => "auth_failed",
+                           "provider" => "codex",
+                           "api_error_status" => 401,
+                           "subtype" => "refresh_token_revoked"
+                         }
+                       }}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server fails when command execution approval is required under safer defaults" do
     test_root =
       Path.join(

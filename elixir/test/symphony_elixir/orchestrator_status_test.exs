@@ -342,6 +342,114 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert request[:json].text =~ "Reason: :timeout"
   end
 
+  test "provider auth failure escalates issue visibly without ordinary retry" do
+    parent = self()
+    previous_request_fun = Application.get_env(:symphony_elixir, :telegram_request_fun)
+
+    on_exit(fn ->
+      case previous_request_fun do
+        nil -> Application.delete_env(:symphony_elixir, :telegram_request_fun)
+        request_fun -> Application.put_env(:symphony_elixir, :telegram_request_fun, request_fun)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :telegram_request_fun, fn request ->
+      send(parent, {:telegram_request, request})
+      {:ok, %Req.Response{status: 200}}
+    end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      telegram_bot_token: "bot-token",
+      telegram_chat_id: "chat-id"
+    )
+
+    issue_id = "issue-provider-auth"
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "EMB-AUTH",
+      title: "Provider auth escalation",
+      state: "Agent Review",
+      labels: [],
+      url: "https://linear.app/example/EMB-AUTH"
+    }
+
+    claim_lease =
+      ClaimLease.new(%{
+        issue_id: issue_id,
+        issue_identifier: issue.identifier,
+        role: "reviewer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-provider-auth",
+        attempt: 0,
+        state: "active",
+        started_at: DateTime.utc_now()
+      })
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: %{issue | claim_lease: claim_lease},
+          claim_lease: claim_lease,
+          run_id: claim_lease.run_id,
+          started_at: DateTime.utc_now(),
+          retry_attempt: 15
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    auth_reason =
+      {:provider_auth_failed,
+       %{
+         provider: :codex,
+         api_error_status: 401,
+         subtype: "refresh_token_revoked",
+         raw: "Bearer raw-secret-token"
+       }}
+
+    log =
+      capture_log(fn ->
+        assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), auth_reason}, state)
+        assert state.running == %{}
+        assert state.retry_attempts == %{}
+        assert MapSet.member?(state.claimed, issue_id)
+      end)
+
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, blocked_lease}
+    assert blocked_lease.state == "blocked"
+    assert blocked_lease.retry_reason == "provider_auth_failed: codex status=401 subtype=refresh_token_revoked"
+    assert blocked_lease.recovery_reason == "provider-authentication-required"
+    assert blocked_lease.run_id == "run-provider-auth"
+
+    assert_receive {:memory_tracker_comment, ^issue_id, note}
+    assert note =~ "## Operator Note"
+    assert note =~ "provider_auth_failed: codex status=401 subtype=refresh_token_revoked"
+    refute note =~ "raw-secret-token"
+
+    assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}
+    assert_receive {:telegram_request, request}
+    assert request[:json].text =~ "Symphony needs human escalation"
+    assert request[:json].text =~ "Issue: EMB-AUTH"
+
+    assert log =~ "Provider authentication failed"
+    assert log =~ "status=401"
+    assert log =~ "subtype=refresh_token_revoked"
+    refute log =~ "raw-secret-token"
+    refute log =~ "Bearer"
+  end
+
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
     issue_id = "issue-usage-snapshot"
 
