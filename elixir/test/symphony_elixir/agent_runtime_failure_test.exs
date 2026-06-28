@@ -70,6 +70,28 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     end
   end
 
+  test "redacts provider auth retry reason side-effect fields" do
+    assert {:irrecoverable, failure} =
+             AgentRuntime.classify_failure(
+               {:auth_failed,
+                %{
+                  provider: :claude_code,
+                  api_error_status: 403,
+                  subtype: "login_required",
+                  remediation_hint: "refresh with Bearer raw-token-123"
+                }},
+               @context
+             )
+
+    assert failure.family == :provider_authentication_or_revocation
+    assert failure.summary =~ "[REDACTED]"
+    assert failure.retry_reason =~ "[REDACTED]"
+    refute failure.summary =~ "raw-token-123"
+    refute failure.summary =~ "Bearer"
+    refute failure.retry_reason =~ "raw-token-123"
+    refute failure.retry_reason =~ "Bearer"
+  end
+
   test "keeps explicit transient runtime failures retryable" do
     for reason <- [
           :turn_timeout,

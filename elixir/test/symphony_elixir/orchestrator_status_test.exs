@@ -416,6 +416,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
          provider: :claude_code,
          api_error_status: 401,
          subtype: "oauth_expired",
+         remediation_hint: "refresh with Bearer raw-secret-token",
          raw: "Bearer raw-secret-token"
        }}
 
@@ -429,13 +430,19 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     blocked_lease = receive_claim_lease_state!(issue_id, "blocked")
     assert blocked_lease.state == "blocked"
-    assert blocked_lease.retry_reason == "provider_auth_failed: claude_code status=401 subtype=oauth_expired"
+
+    assert blocked_lease.retry_reason ==
+             "provider_auth_failed: claude_code status=401 subtype=oauth_expired remediation=refresh with [REDACTED]"
+
     assert blocked_lease.recovery_reason == "provider-authentication-required"
     assert blocked_lease.run_id == "run-provider-auth"
 
     assert_receive {:memory_tracker_comment, ^issue_id, note}
     assert note =~ "## Operator Note"
-    assert note =~ "provider_auth_failed: claude_code status=401 subtype=oauth_expired"
+
+    assert note =~
+             "provider_auth_failed: claude_code status=401 subtype=oauth_expired remediation=refresh with [REDACTED]"
+
     refute note =~ "raw-secret-token"
     refute note =~ "Bearer"
 
@@ -450,6 +457,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert log =~ "Provider authentication failed"
     assert log =~ "status=401"
     assert log =~ "subtype=oauth_expired"
+    assert log =~ "remediation=refresh with [REDACTED]"
     refute log =~ "raw-secret-token"
     refute log =~ "Bearer"
   end

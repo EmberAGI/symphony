@@ -248,6 +248,7 @@ defmodule SymphonyElixir.AgentRuntime do
     ]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join(" ")
+    |> redact_runtime_text()
   end
 
   # Carry the provider session id forward for adapters (Claude Code) that run a
@@ -409,7 +410,8 @@ defmodule SymphonyElixir.AgentRuntime do
   defp provider_auth_safe_fragment(value) when is_binary(value) do
     value
     |> String.trim()
-    |> String.replace(~r/[^a-zA-Z0-9 ._:@\/+,-]/, "_")
+    |> redact_runtime_text()
+    |> String.replace(~r/[^a-zA-Z0-9 ._:@\/+,\-\[\]=]/, "_")
     |> String.slice(0, 120)
     |> case do
       "" -> nil
