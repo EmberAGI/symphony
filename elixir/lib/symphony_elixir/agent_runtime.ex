@@ -120,12 +120,20 @@ defmodule SymphonyElixir.AgentRuntime do
     provider = Map.get(details, :provider) || "unknown"
     status = Map.get(details, :api_error_status)
     subtype = Map.get(details, :subtype)
+    readiness_status = Map.get(details, :readiness_status)
+    affected_roles = Map.get(details, :affected_roles) || Map.get(details, :affected_role)
+    affected_provider = Map.get(details, :affected_provider)
+    remediation_hint = Map.get(details, :remediation_hint)
 
     [
       "provider_auth_failed:",
       to_string(provider),
       provider_auth_status_fragment(status),
-      provider_auth_subtype_fragment(subtype)
+      provider_auth_subtype_fragment(subtype),
+      provider_auth_named_fragment("readiness_status", readiness_status),
+      provider_auth_named_fragment("affected_roles", affected_roles),
+      provider_auth_named_fragment("affected_provider", affected_provider),
+      provider_auth_named_fragment("remediation", remediation_hint)
     ]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join(" ")
@@ -142,24 +150,27 @@ defmodule SymphonyElixir.AgentRuntime do
   defp advance_session(session, _turn_result), do: session
 
   defp provider_auth_details(details, provider) when is_map(details) do
+    provider_value = provider_auth_detail(details, [:provider, "provider"]) || provider
+
     %{
-      provider: provider_auth_provider(Map.get(details, :provider) || Map.get(details, "provider") || provider),
-      api_error_status:
-        provider_auth_status(
-          Map.get(details, :api_error_status) ||
-            Map.get(details, "api_error_status") ||
-            Map.get(details, :status) ||
-            Map.get(details, "status")
-        ),
-      subtype: provider_auth_subtype(Map.get(details, :subtype) || Map.get(details, "subtype")),
-      remediation_hint: provider_auth_safe_fragment(Map.get(details, :remediation_hint) || Map.get(details, "remediation_hint")),
-      affected_role: provider_auth_safe_fragment(Map.get(details, :affected_role) || Map.get(details, "affected_role"))
+      provider: provider_auth_provider(provider_value),
+      api_error_status: provider_auth_status(provider_auth_detail(details, [:api_error_status, "api_error_status", :status, "status"])),
+      subtype: provider_auth_subtype(provider_auth_detail(details, [:subtype, "subtype"])),
+      remediation_hint: provider_auth_safe_fragment(provider_auth_detail(details, [:remediation_hint, "remediation_hint"])),
+      affected_role: provider_auth_safe_fragment(provider_auth_detail(details, [:affected_role, "affected_role"])),
+      affected_roles: provider_auth_safe_fragment(provider_auth_detail(details, [:affected_roles, "affected_roles"])),
+      affected_provider: provider_auth_safe_fragment(provider_auth_detail(details, [:affected_provider, "affected_provider"])),
+      readiness_status: provider_auth_subtype(provider_auth_detail(details, [:readiness_status, "readiness_status"]))
     }
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
   end
 
   defp provider_auth_details(_details, provider), do: provider_auth_details(%{}, provider)
+
+  defp provider_auth_detail(details, keys) when is_map(details) and is_list(keys) do
+    Enum.find_value(keys, &Map.get(details, &1))
+  end
 
   defp provider_auth_hook_details(output) do
     output
@@ -199,19 +210,53 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   defp provider_auth_summary_details(line) when is_binary(line) do
-    case Regex.run(~r/provider_auth_failed:\s+([a-zA-Z0-9_.:-]+)(?:\s+status=(\d{3}))?(?:\s+subtype=([a-zA-Z0-9_.:-]+))?/, line) do
-      [_, provider, status, subtype] ->
-        %{provider: provider, api_error_status: status, subtype: subtype}
+    cond do
+      match = Regex.run(~r/provider_auth_failed:\s+([a-zA-Z0-9_.:-]+)(?:\s+status=(\d{3}))?(?:\s+subtype=([a-zA-Z0-9_.:-]+))?/, line) ->
+        case match do
+          [_, provider, status, subtype] ->
+            %{provider: provider, api_error_status: status, subtype: subtype}
 
-      [_, provider, status] ->
-        %{provider: provider, api_error_status: status}
+          [_, provider, status] ->
+            %{provider: provider, api_error_status: status}
 
-      [_, provider] ->
-        %{provider: provider}
+          [_, provider] ->
+            %{provider: provider}
+        end
 
-      _ ->
+      Regex.match?(~r/provider-auth/i, line) ->
+        provider_auth_key_value_details(line)
+
+      true ->
         nil
     end
+  end
+
+  defp provider_auth_key_value_details(line) do
+    fields = provider_auth_key_values(line)
+    provider = Map.get(fields, "provider")
+
+    case provider_auth_provider(provider) do
+      nil ->
+        nil
+
+      _provider ->
+        %{
+          provider: provider,
+          readiness_status: Map.get(fields, "status"),
+          affected_roles: Map.get(fields, "affected_roles"),
+          affected_role: Map.get(fields, "affected_role"),
+          affected_provider: Map.get(fields, "affected_provider") || Map.get(fields, "role_provider"),
+          remediation_hint: Map.get(fields, "remediation") || Map.get(fields, "remediation_hint")
+        }
+    end
+  end
+
+  defp provider_auth_key_values(line) do
+    ~r/(?:^|\s)([a-zA-Z_][a-zA-Z0-9_]*)=(.*?)(?=\s+[a-zA-Z_][a-zA-Z0-9_]*=|$)/
+    |> Regex.scan(line)
+    |> Enum.reduce(%{}, fn [_match, key, value], acc ->
+      Map.put(acc, key, String.trim(value))
+    end)
   end
 
   defp provider_auth_provider(provider) when provider in [:codex, :claude_code], do: provider
@@ -253,7 +298,7 @@ defmodule SymphonyElixir.AgentRuntime do
   defp provider_auth_safe_fragment(value) when is_binary(value) do
     value
     |> String.trim()
-    |> String.replace(~r/[^a-zA-Z0-9 ._:@\/+-]/, "_")
+    |> String.replace(~r/[^a-zA-Z0-9 ._:@\/+,-]/, "_")
     |> String.slice(0, 120)
     |> case do
       "" -> nil
@@ -268,4 +313,7 @@ defmodule SymphonyElixir.AgentRuntime do
 
   defp provider_auth_subtype_fragment(subtype) when is_binary(subtype), do: "subtype=#{subtype}"
   defp provider_auth_subtype_fragment(_subtype), do: ""
+
+  defp provider_auth_named_fragment(key, value) when is_binary(value), do: "#{key}=#{value}"
+  defp provider_auth_named_fragment(_key, _value), do: ""
 end

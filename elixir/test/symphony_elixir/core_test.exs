@@ -2730,7 +2730,7 @@ defmodule SymphonyElixir.CoreTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         hook_before_run: """
-        printf '%s\\n' '{"kind":"provider_auth_failed","provider":"claude_code","api_error_status":401,"subtype":"oauth_expired","raw":"Bearer hook-secret-token"}'
+        printf '%s\\n' 'Provider-auth pre-turn withheld: provider-auth provider=claude_code status=unhealthy affected_roles=implementer,reviewer remediation=run claude setup-token raw=Bearer hook-secret-token'
         exit 17
         """
       )
@@ -2748,10 +2748,16 @@ defmodule SymphonyElixir.CoreTest do
       log =
         capture_log(fn ->
           assert catch_exit(AgentRunner.run(issue, nil, run_id: "run-before-run-auth")) ==
-                   {:provider_auth_failed, %{provider: :claude_code, api_error_status: 401, subtype: "oauth_expired"}}
+                   {:provider_auth_failed,
+                    %{
+                      provider: :claude_code,
+                      readiness_status: "unhealthy",
+                      affected_roles: "implementer,reviewer",
+                      remediation_hint: "run claude setup-token"
+                    }}
         end)
 
-      assert log =~ "provider_auth_failed: claude_code status=401 subtype=oauth_expired"
+      assert log =~ "provider_auth_failed: claude_code readiness_status=unhealthy affected_roles=implementer,reviewer remediation=run claude setup-token"
       refute log =~ "hook-secret-token"
       refute log =~ "Bearer"
     after

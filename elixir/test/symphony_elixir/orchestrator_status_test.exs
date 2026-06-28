@@ -472,7 +472,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         poll_interval_ms: 30_000,
         workspace_root: workspace_root,
         hook_before_run: """
-        printf '%s\\n' '{"kind":"provider_auth_failed","provider":"claude_code","api_error_status":401,"subtype":"oauth_expired","remediation_hint":"run claude setup-token","raw":"Bearer orchestrator-hook-secret"}'
+        printf '%s\\n' 'Provider-auth pre-turn withheld: provider-auth provider=claude_code status=unhealthy affected_roles=implementer,qa remediation=run claude setup-token raw=Bearer orchestrator-hook-secret'
         exit 17
         """
       )
@@ -512,12 +512,18 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
           blocked_lease = receive_claim_lease_state!(issue_id, "blocked")
           assert blocked_lease.state == "blocked"
-          assert blocked_lease.retry_reason == "provider_auth_failed: claude_code status=401 subtype=oauth_expired"
+
+          assert blocked_lease.retry_reason ==
+                   "provider_auth_failed: claude_code readiness_status=unhealthy affected_roles=implementer,qa remediation=run claude setup-token"
+
           assert blocked_lease.recovery_reason == "provider-authentication-required"
 
           note = receive_memory_comment_containing!(issue_id, "provider_auth_failed")
           assert note =~ "## Operator Note"
-          assert note =~ "provider_auth_failed: claude_code status=401 subtype=oauth_expired"
+
+          assert note =~
+                   "provider_auth_failed: claude_code readiness_status=unhealthy affected_roles=implementer,qa remediation=run claude setup-token"
+
           refute note =~ "orchestrator-hook-secret"
           refute note =~ "Bearer"
 
@@ -530,7 +536,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         end)
 
       assert log =~ "Provider authentication failed"
-      assert log =~ "provider_auth_failed: claude_code status=401 subtype=oauth_expired"
+
+      assert log =~
+               "provider_auth_failed: claude_code readiness_status=unhealthy affected_roles=implementer,qa remediation=run claude setup-token"
+
       refute log =~ "orchestrator-hook-secret"
       refute log =~ "Bearer"
     after
