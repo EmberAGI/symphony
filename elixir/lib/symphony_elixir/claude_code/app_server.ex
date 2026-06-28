@@ -272,20 +272,22 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   defp maybe_put_no_thinking_env(env, _false), do: env
 
   defp local_provider_auth_env(nil) do
-    Enum.flat_map(@local_provider_auth_env_names, fn name ->
-      case System.get_env(name) do
-        value when is_binary(value) ->
-          if String.trim(value) == "", do: [], else: [{name, value}]
-
-        _ ->
-          []
-      end
-    end)
+    Enum.flat_map(@local_provider_auth_env_names, &local_provider_auth_env_value/1)
   end
 
   # Remote worker launches render env values into an SSH command line, so local
   # provider auth must be materialized on the worker host instead.
   defp local_provider_auth_env(_worker_host), do: []
+
+  defp local_provider_auth_env_value(name) do
+    case System.get_env(name) do
+      value when is_binary(value) -> local_provider_auth_env_pair(name, String.trim(value), value)
+      _ -> []
+    end
+  end
+
+  defp local_provider_auth_env_pair(_name, "", _value), do: []
+  defp local_provider_auth_env_pair(name, _trimmed, value), do: [{name, value}]
 
   # Build the full `claude` invocation for a turn. The prompt is passed as the
   # last positional argument (`claude -p <prompt>`) so the process needs no
@@ -563,7 +565,13 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
       auth_error?(is_error, api_error_status, event) ->
         Logger.error("Claude Code authentication failed for #{issue_context(issue)} status=#{inspect(api_error_status)}")
 
-        emit_message(on_message, :turn_failed, Map.put(details, :reason, :auth_failed), result_metadata)
+        emit_message(
+          on_message,
+          :turn_failed,
+          provider_auth_failure_details(session_id, api_error_status, subtype, usage),
+          result_metadata
+        )
+
         {:error, {:auth_failed, %{api_error_status: api_error_status, subtype: subtype}}}
 
       subtype == "error_max_turns" ->
@@ -596,6 +604,16 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
       session_id: session_id,
       usage: usage,
       tool_failed: state.tool_failed?
+    }
+  end
+
+  defp provider_auth_failure_details(session_id, api_error_status, subtype, usage) do
+    %{
+      session_id: session_id,
+      reason: :auth_failed,
+      api_error_status: api_error_status,
+      subtype: subtype,
+      usage: usage
     }
   end
 

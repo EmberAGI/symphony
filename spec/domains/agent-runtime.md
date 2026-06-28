@@ -95,6 +95,17 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   not exposed through prompts or logs.
 - Runtime adapters must expose tools through controlled runtime-native
   mechanisms. Credentials and tracker tokens must not be pasted into prompts.
+- Provider-authentication failures that occur after runtime startup/readiness
+  checks, including Claude Code HTTP 401/403 results and normalized
+  `{:auth_failed, ...}` adapter errors, must remain provider-infrastructure
+  failures across the adapter, runner, and orchestrator retry interface. They
+  must not be converted into generic agent failures, must not schedule or
+  consume the ordinary issue retry loop, and must emit only redacted
+  operator-visible blocked/status evidence on existing runtime surfaces such as
+  the top-level claim lease. This invariant is recorded for EMB-1123 and
+  supports the wrapper readiness hardening in EMB-1121 while preserving ADR
+  0002: Claude Code continues to use operator-managed subscription OAuth, and
+  no `ANTHROPIC_API_KEY` migration is introduced.
 - User-input-required events and permission prompts must not leave unattended
   runs stalled indefinitely.
 - Runtime adapters must collect or expose artifacts and proof in a normalized

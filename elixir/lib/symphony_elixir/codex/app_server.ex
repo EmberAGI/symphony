@@ -452,47 +452,10 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     case Jason.decode(payload_string) do
       {:ok, %{"method" => "turn/completed"} = payload} ->
-        case codex_provider_auth_failure(payload) do
-          {:ok, details} ->
-            failure_details = provider_auth_failure_event_details(details)
-            emit_turn_event(on_message, :turn_failed, payload, payload_string, port, failure_details)
-            {:error, {:auth_failed, details}}
-
-          :error ->
-            if turn_completion_has_agent_output?(payload, turn_observations) do
-              emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
-              {:ok, :turn_completed}
-            else
-              failure_details = %{
-                "reason" => "empty_agent_response",
-                "message" => "Codex reported turn/completed without any agent message output",
-                "completion" => payload
-              }
-
-              emit_turn_event(on_message, :turn_failed, payload, payload_string, port, failure_details)
-              {:error, {:empty_turn_completed, payload}}
-            end
-        end
+        handle_turn_completed(port, on_message, payload, payload_string, turn_observations)
 
       {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
-        case codex_provider_auth_failure(payload) do
-          {:ok, details} ->
-            failure_details = provider_auth_failure_event_details(details)
-            emit_turn_event(on_message, :turn_failed, payload, payload_string, port, failure_details)
-            {:error, {:auth_failed, details}}
-
-          :error ->
-            emit_turn_event(
-              on_message,
-              :turn_failed,
-              payload,
-              payload_string,
-              port,
-              Map.get(payload, "params")
-            )
-
-            {:error, {:turn_failed, Map.get(payload, "params")}}
-        end
+        handle_turn_failed(port, on_message, payload, payload_string)
 
       {:ok, %{"method" => "turn/cancelled", "params" => _} = payload} ->
         emit_turn_event(
@@ -508,17 +471,17 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       {:ok, %{"method" => method} = payload}
       when is_binary(method) ->
-        handle_turn_method(
-          port,
-          on_message,
-          payload,
-          payload_string,
-          method,
-          timeout_ms,
-          tool_executor,
-          auto_approve_requests,
-          turn_observations
-        )
+        handle_turn_method(%{
+          port: port,
+          on_message: on_message,
+          payload: payload,
+          payload_string: payload_string,
+          method: method,
+          timeout_ms: timeout_ms,
+          tool_executor: tool_executor,
+          auto_approve_requests: auto_approve_requests,
+          turn_observations: turn_observations
+        })
 
       {:ok, payload} ->
         emit_message(
@@ -552,6 +515,50 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  defp handle_turn_completed(port, on_message, payload, payload_string, turn_observations) do
+    case codex_provider_auth_failure(payload) do
+      {:ok, details} ->
+        emit_provider_auth_failure_event(port, on_message, payload, payload_string, details)
+
+      :error ->
+        handle_non_auth_turn_completed(port, on_message, payload, payload_string, turn_observations)
+    end
+  end
+
+  defp handle_non_auth_turn_completed(port, on_message, payload, payload_string, turn_observations) do
+    if turn_completion_has_agent_output?(payload, turn_observations) do
+      emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
+      {:ok, :turn_completed}
+    else
+      failure_details = %{
+        "reason" => "empty_agent_response",
+        "message" => "Codex reported turn/completed without any agent message output",
+        "completion" => payload
+      }
+
+      emit_turn_event(on_message, :turn_failed, payload, payload_string, port, failure_details)
+      {:error, {:empty_turn_completed, payload}}
+    end
+  end
+
+  defp handle_turn_failed(port, on_message, payload, payload_string) do
+    case codex_provider_auth_failure(payload) do
+      {:ok, details} ->
+        emit_provider_auth_failure_event(port, on_message, payload, payload_string, details)
+
+      :error ->
+        failure_details = Map.get(payload, "params")
+        emit_turn_event(on_message, :turn_failed, payload, payload_string, port, failure_details)
+        {:error, {:turn_failed, failure_details}}
+    end
+  end
+
+  defp emit_provider_auth_failure_event(port, on_message, payload, payload_string, details) do
+    failure_details = provider_auth_failure_event_details(details)
+    emit_turn_event(on_message, :turn_failed, payload, payload_string, port, failure_details)
+    {:error, {:auth_failed, details}}
+  end
+
   defp emit_turn_event(on_message, event, payload, payload_string, port, payload_details) do
     emit_message(
       on_message,
@@ -565,17 +572,17 @@ defmodule SymphonyElixir.Codex.AppServer do
     )
   end
 
-  defp handle_turn_method(
-         port,
-         on_message,
-         payload,
-         payload_string,
-         method,
-         timeout_ms,
-         tool_executor,
-         auto_approve_requests,
-         turn_observations
-       ) do
+  defp handle_turn_method(%{
+         port: port,
+         on_message: on_message,
+         payload: payload,
+         payload_string: payload_string,
+         method: method,
+         timeout_ms: timeout_ms,
+         tool_executor: tool_executor,
+         auto_approve_requests: auto_approve_requests,
+         turn_observations: turn_observations
+       }) do
     metadata = metadata_from_message(port, payload)
     turn_observations = update_turn_observations(turn_observations, method, payload)
 
@@ -694,8 +701,6 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp codex_provider_auth_failure(_payload), do: :error
-
   defp codex_auth_failure_signal?(error_info, message) do
     normalized_info = normalize_auth_text(error_info)
     normalized_message = normalize_auth_text(message)
@@ -781,8 +786,6 @@ defmodule SymphonyElixir.Codex.AppServer do
     ])
     |> Enum.any?(&non_empty_text?/1)
   end
-
-  defp completion_final_message?(_payload), do: false
 
   defp text_values_at(payload, paths) do
     Enum.map(paths, &value_at_path(payload, &1))

@@ -342,7 +342,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert request[:json].text =~ "Reason: :timeout"
   end
 
-  test "provider auth failure escalates issue visibly without ordinary retry" do
+  test "Claude provider auth task failure escalates visibly without ordinary retry" do
     parent = self()
     previous_request_fun = Application.get_env(:symphony_elixir, :telegram_request_fun)
 
@@ -366,23 +366,24 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       telegram_chat_id: "chat-id"
     )
 
-    issue_id = "issue-provider-auth"
+    issue_id = "issue-provider-auth-blocked"
     ref = make_ref()
 
     issue = %Issue{
       id: issue_id,
-      identifier: "EMB-AUTH",
-      title: "Provider auth escalation",
-      state: "Agent Review",
+      identifier: "EMB-1123",
+      title: "Classify provider auth",
+      state: "In Progress",
       labels: [],
-      url: "https://linear.app/example/EMB-AUTH"
+      url: "https://linear.app/example/EMB-1123"
     }
 
     claim_lease =
       ClaimLease.new(%{
+        comment_id: "lease-comment",
         issue_id: issue_id,
         issue_identifier: issue.identifier,
-        role: "reviewer",
+        role: "implementer",
         holder: ClaimLease.holder_id(),
         run_id: "run-provider-auth",
         attempt: 0,
@@ -404,7 +405,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         }
       },
       claimed: MapSet.new([issue_id]),
-      retry_attempts: %{},
+      retry_attempts: %{issue_id => %{attempt: 15, error: "ordinary retry should be cleared"}},
       completed: MapSet.new(),
       codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
     }
@@ -412,9 +413,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     auth_reason =
       {:provider_auth_failed,
        %{
-         provider: :codex,
+         provider: :claude_code,
          api_error_status: 401,
-         subtype: "refresh_token_revoked",
+         subtype: "oauth_expired",
          raw: "Bearer raw-secret-token"
        }}
 
@@ -428,24 +429,27 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert_receive {:memory_tracker_claim_lease, ^issue_id, blocked_lease}
     assert blocked_lease.state == "blocked"
-    assert blocked_lease.retry_reason == "provider_auth_failed: codex status=401 subtype=refresh_token_revoked"
+    assert blocked_lease.retry_reason == "provider_auth_failed: claude_code status=401 subtype=oauth_expired"
     assert blocked_lease.recovery_reason == "provider-authentication-required"
     assert blocked_lease.run_id == "run-provider-auth"
 
     assert_receive {:memory_tracker_comment, ^issue_id, note}
     assert note =~ "## Operator Note"
-    assert note =~ "provider_auth_failed: codex status=401 subtype=refresh_token_revoked"
+    assert note =~ "provider_auth_failed: claude_code status=401 subtype=oauth_expired"
     refute note =~ "raw-secret-token"
+    refute note =~ "Bearer"
 
     assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}
     assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}
     assert_receive {:telegram_request, request}
     assert request[:json].text =~ "Symphony needs human escalation"
-    assert request[:json].text =~ "Issue: EMB-AUTH"
+    assert request[:json].text =~ "Issue: EMB-1123"
+    refute request[:json].text =~ "raw-secret-token"
+    refute request[:json].text =~ "Bearer"
 
     assert log =~ "Provider authentication failed"
     assert log =~ "status=401"
-    assert log =~ "subtype=refresh_token_revoked"
+    assert log =~ "subtype=oauth_expired"
     refute log =~ "raw-secret-token"
     refute log =~ "Bearer"
   end
@@ -2452,6 +2456,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "application stop renders offline status" do
+    on_exit(fn ->
+      {:ok, _apps} = Application.ensure_all_started(:symphony_elixir)
+    end)
+
     rendered =
       ExUnit.CaptureIO.capture_io(fn ->
         assert :ok = SymphonyElixir.Application.stop(:normal)

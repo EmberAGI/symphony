@@ -29,6 +29,13 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     ]
   end
 
+  defp stream_auth_failure_with_provider_payload do
+    [
+      ~s({"type":"system","subtype":"init","session_id":"sess-auth-payload","apiKeySource":"none"}),
+      ~s({"type":"result","subtype":"login_required","is_error":true,"api_error_status":403,"result":"Bearer raw-secret-token expired","session_id":"sess-auth-payload","oauth_token":"raw-oauth-token"})
+    ]
+  end
+
   defp stream_max_turns do
     [
       ~s({"type":"system","subtype":"init","session_id":"sess-max"}),
@@ -194,6 +201,28 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
 
       failed = Enum.find(events, &(&1.event == :turn_failed))
       assert failed.reason == :auth_failed
+    after
+      File.rm_rf(ctx.test_root)
+    end
+  end
+
+  test "redacts auth failure provider payloads from normalized status events" do
+    ctx = setup_workspace("MT-CC-auth-redaction")
+
+    try do
+      configure!(ctx, stream_auth_failure_with_provider_payload(), claude_code_model: "sonnet")
+
+      {result, events, _trace} = run_shim(ctx, "do work")
+
+      assert {:error, {:auth_failed, %{api_error_status: 403, subtype: "login_required"}}} = result
+
+      failed = Enum.find(events, &(&1.event == :turn_failed))
+      assert failed.reason == :auth_failed
+      assert failed.api_error_status == 403
+      assert failed.subtype == "login_required"
+      refute inspect(failed) =~ "raw-secret-token"
+      refute inspect(failed) =~ "raw-oauth-token"
+      refute inspect(failed) =~ "Bearer"
     after
       File.rm_rf(ctx.test_root)
     end
