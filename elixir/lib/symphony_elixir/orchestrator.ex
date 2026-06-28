@@ -205,8 +205,8 @@ defmodule SymphonyElixir.Orchestrator do
               |> put_failure_observation(issue_id, failure_observation)
               |> block_irrecoverable_runtime_failure(issue_id, running_entry, failure)
 
-            {:retryable, _failure, failure_observation} ->
-              exit_reason = inspect_full(reason)
+            {:retryable, failure, failure_observation} ->
+              exit_reason = retryable_task_exit_reason(reason, failure)
 
               Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{exit_reason}; scheduling retry")
               maybe_notify_agent_failed(running_entry, reason)
@@ -1497,6 +1497,24 @@ defmodule SymphonyElixir.Orchestrator do
       {:retryable, failure} -> Map.get(failure, :retry_reason)
     end
   end
+
+  defp retryable_task_exit_reason(reason, failure) when is_map(failure) do
+    retry_reason = Map.get(failure, :retry_reason)
+
+    if no_progress_retry_reason?(retry_reason) do
+      retry_reason
+    else
+      inspect_full(reason)
+    end
+  end
+
+  defp no_progress_retry_reason?(retry_reason) when is_binary(retry_reason) do
+    String.contains?(retry_reason, "empty_turn_completed") or
+      String.contains?(retry_reason, "turn_input_required") or
+      String.contains?(retry_reason, "approval_required")
+  end
+
+  defp no_progress_retry_reason?(_retry_reason), do: false
 
   defp inspect_full(reason), do: inspect(reason, limit: :infinity, printable_limit: :infinity)
 

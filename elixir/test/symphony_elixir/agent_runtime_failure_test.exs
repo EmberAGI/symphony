@@ -111,6 +111,23 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     refute third.summary =~ "token="
   end
 
+  test "ordinary retry dispatch run ids do not reset identical no-progress observations" do
+    reason = {:empty_turn_completed, %{message: "same no progress"}}
+
+    {observation, {:retryable, _first}} =
+      AgentRuntime.record_failure_observation(nil, reason, Map.put(@context, :run_id, "run-a"))
+
+    {observation, {:retryable, _second}} =
+      AgentRuntime.record_failure_observation(observation, reason, Map.put(@context, :run_id, "run-b"))
+
+    assert observation.count == 2
+
+    assert {_observation, {:irrecoverable, failure}} =
+             AgentRuntime.record_failure_observation(observation, reason, Map.put(@context, :run_id, "run-c"))
+
+    assert failure.family == :repeated_identical_no_progress_failure
+  end
+
   test "resets no-progress observations for transient failures and different fingerprints" do
     reason = {:empty_turn_completed, %{message: "same no progress"}}
 

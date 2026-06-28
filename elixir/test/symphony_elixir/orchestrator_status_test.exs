@@ -788,6 +788,119 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute log =~ "token="
   end
 
+  test "third identical no-progress retry escalates across retry timer dispatches with redacted metadata" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-no-progress-retry-dispatch-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        max_retry_backoff_ms: 1,
+        hook_before_run: "sleep 30"
+      )
+
+      issue_id = "issue-no-progress-retry-dispatch"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "EMB-1127",
+        title: "Detect repeated no progress across retry dispatch",
+        state: "In Progress",
+        labels: [],
+        url: "https://linear.app/example/EMB-1127"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      issue_workspace_path = Path.join(workspace_root, issue.identifier)
+
+      orchestrator_name = Module.concat(__MODULE__, :NoProgressRetryDispatchOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      initial_state = :sys.get_state(pid)
+      first_ref = make_ref()
+
+      :sys.replace_state(pid, fn _ ->
+        %{
+          initial_state
+          | running: %{
+              issue_id => %{
+                pid: nil,
+                ref: first_ref,
+                identifier: issue.identifier,
+                issue: issue,
+                run_id: "run-initial-no-progress",
+                workspace_path: issue_workspace_path,
+                started_at: DateTime.utc_now(),
+                retry_attempt: 0
+              }
+            },
+            claimed: MapSet.new([issue_id]),
+            retry_attempts: %{}
+        }
+      end)
+
+      reason = {:empty_turn_completed, %{message: "same no progress token=hidden"}}
+
+      log =
+        capture_log(fn ->
+          send(pid, {:DOWN, first_ref, :process, self(), reason})
+
+          first_retry_lease = receive_claim_lease_state!(issue_id, "retrying")
+          refute first_retry_lease.retry_reason =~ "hidden"
+          refute first_retry_lease.retry_reason =~ "token="
+          assert first_retry_lease.retry_reason =~ "retryable_runtime_failure"
+
+          first_retry_run = kill_retry_dispatch!(pid, issue_id, reason)
+          assert first_retry_run != "run-initial-no-progress"
+
+          second_retry_lease = receive_claim_lease_state!(issue_id, "retrying")
+          refute second_retry_lease.retry_reason =~ "hidden"
+          refute second_retry_lease.retry_reason =~ "token="
+
+          second_retry_run = kill_retry_dispatch!(pid, issue_id, reason)
+          assert second_retry_run != first_retry_run
+
+          blocked_lease = receive_claim_lease_state!(issue_id, "blocked")
+          assert blocked_lease.retry_reason =~ "repeated_identical_no_progress_failure"
+          assert blocked_lease.recovery_reason == "repeated-identical-no-progress-failure-repair-required"
+          refute blocked_lease.retry_reason =~ "hidden"
+          refute blocked_lease.retry_reason =~ "token="
+
+          note = receive_memory_comment_containing!(issue_id, "repeated_identical_no_progress_failure")
+          assert note =~ "repeated_identical_no_progress_failure"
+          refute note =~ "hidden"
+          refute note =~ "token="
+
+          assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}, 1_000
+          assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}, 1_000
+
+          state = :sys.get_state(pid)
+          assert state.running == %{}
+          assert state.retry_attempts == %{}
+          assert state.failure_observations[issue_id].count == 3
+        end)
+
+      refute log =~ "hidden"
+      refute log =~ "token="
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "provider auth before_run hook failure reaches orchestrator as blocked without ordinary retry" do
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
@@ -2923,6 +3036,35 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         end
     after
       timeout_ms -> flunk("timed out waiting for memory tracker comment containing #{expected_text}")
+    end
+  end
+
+  defp kill_retry_dispatch!(pid, issue_id, reason) do
+    running = wait_for_running_entry(pid, issue_id, 5_000)
+
+    Process.exit(running.pid, reason)
+
+    running.claim_lease.run_id
+  end
+
+  defp wait_for_running_entry(pid, issue_id, timeout_ms) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_running_entry(pid, issue_id, deadline_ms)
+  end
+
+  defp do_wait_for_running_entry(pid, issue_id, deadline_ms) do
+    case :sys.get_state(pid).running do
+      %{^issue_id => %{pid: running_pid, workspace_path: workspace_path} = running_entry}
+      when is_pid(running_pid) and is_binary(workspace_path) ->
+        running_entry
+
+      _running ->
+        if System.monotonic_time(:millisecond) >= deadline_ms do
+          flunk("timed out waiting for running retry dispatch")
+        else
+          Process.sleep(5)
+          do_wait_for_running_entry(pid, issue_id, deadline_ms)
+        end
     end
   end
 
