@@ -13,6 +13,7 @@ defmodule SymphonyElixir.Orchestrator do
     Config,
     ImplementationEffort,
     RoleTurnRecovery,
+    RunLog,
     Runtime.ProcessOwnership,
     StatusDashboard,
     Tracker,
@@ -187,6 +188,9 @@ defmodule SymphonyElixir.Orchestrator do
                 issue: Map.get(running_entry, :issue),
                 claim_lease: Map.get(running_entry, :claim_lease),
                 run_id: Map.get(running_entry, :run_id),
+                session_id: session_id,
+                attempt: Map.get(running_entry, :retry_attempt) || 1,
+                started_at: Map.get(running_entry, :started_at),
                 retry_reason: "active-state-continuation-check",
                 lease_state: retry_lease_state(process_completion_status)
               })
@@ -196,20 +200,25 @@ defmodule SymphonyElixir.Orchestrator do
               block_provider_auth_failure(state, issue_id, running_entry, reason)
 
             _ ->
-              Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+              exit_reason = inspect_full(reason)
+
+              Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{exit_reason}; scheduling retry")
               maybe_notify_agent_failed(running_entry, reason)
 
               next_attempt = next_retry_attempt_from_running(running_entry)
 
               schedule_issue_retry(state, issue_id, next_attempt, %{
                 identifier: running_entry.identifier,
-                error: "agent exited: #{inspect(reason)}",
+                error: "agent exited: #{exit_reason}",
                 worker_host: Map.get(running_entry, :worker_host),
                 workspace_path: Map.get(running_entry, :workspace_path),
                 issue: Map.get(running_entry, :issue),
                 claim_lease: Map.get(running_entry, :claim_lease),
                 run_id: Map.get(running_entry, :run_id),
-                retry_reason: "agent exited: #{inspect(reason)}",
+                session_id: session_id,
+                attempt: Map.get(running_entry, :retry_attempt) || 1,
+                started_at: Map.get(running_entry, :started_at),
+                retry_reason: "agent exited: #{exit_reason}",
                 lease_state: retry_lease_state(process_completion_status)
               })
           end
@@ -1090,6 +1099,14 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{retry_context.identifier} in #{delay_ms}ms (attempt #{next_attempt})#{retry_error_suffix(retry_context.error)}")
 
+    RunLog.record_agent_retry_scheduled(issue_id, retry_context, retry_claim_lease, metadata, %{
+      attempt: next_attempt,
+      delay_ms: delay_ms,
+      due_at_ms: due_at_ms,
+      scheduled_for: DateTime.add(DateTime.utc_now(), delay_ms, :millisecond),
+      lease_state: metadata[:lease_state] || "retrying"
+    })
+
     %{
       state
       | retry_attempts:
@@ -1404,6 +1421,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp task_exit_reason_for_log(reason), do: inspect(reason)
+
+  defp inspect_full(reason), do: inspect(reason, limit: :infinity, printable_limit: :infinity)
 
   defp reconcile_orphaned_claims(%State{} = state) do
     active_claims =

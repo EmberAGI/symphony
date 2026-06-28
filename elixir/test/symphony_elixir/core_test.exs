@@ -1012,6 +1012,83 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_in_range(due_at_ms, 8_000, 10_500)
   end
 
+  test "abnormal worker exit writes compact run-scoped retry evidence" do
+    previous_run_log_root = Application.get_env(:symphony_elixir, :run_log_root)
+
+    run_log_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-run-log-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-crash-run-log"
+    run_id = "run-crash-log"
+    session_id = "session-crash-log"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :CrashRunLogOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      restore_app_env(:run_log_root, previous_run_log_root)
+      File.rm_rf(run_log_root)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :run_log_root, run_log_root)
+    initial_state = :sys.get_state(pid)
+    long_detail = String.duplicate("run-log-detail-", 500)
+    reason = {:shutdown, {:agent_failed, long_detail}}
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-RUN-LOG",
+      retry_attempt: 1,
+      issue: %Issue{id: issue_id, identifier: "MT-RUN-LOG", state: "In Progress"},
+      run_id: run_id,
+      session_id: session_id,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), reason})
+    Process.sleep(50)
+
+    assert %{attempt: 2, due_at_ms: due_at_ms} = :sys.get_state(pid).retry_attempts[issue_id]
+    run_log_path = Path.join([run_log_root, "MT-RUN-LOG", "#{run_id}.jsonl"])
+    assert File.exists?(run_log_path)
+
+    [event] =
+      run_log_path
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.map(&Jason.decode!/1)
+
+    assert event["event"] == "agent_retry_scheduled"
+    assert event["issue_id"] == issue_id
+    assert event["issue_identifier"] == "MT-RUN-LOG"
+    assert event["run_id"] == run_id
+    assert event["session_id"] == session_id
+    assert event["attempt"] == 1
+    assert event["reason"] == "agent exited: #{inspect(reason, limit: :infinity, printable_limit: :infinity)}"
+    assert event["reason"] =~ long_detail
+    assert event["retry"]["attempt"] == 2
+    assert event["retry"]["delay_ms"] == 20_000
+    assert event["retry"]["due_at_ms"] == due_at_ms
+    assert event["retry"]["lease_state"] == "retrying"
+    assert event["retry"]["claim_lease_state"] == nil
+    assert is_binary(event["timestamp"])
+  end
+
   test "stale retry timer messages do not consume newer retry entries" do
     issue_id = "issue-stale-retry"
     orchestrator_name = Module.concat(__MODULE__, :StaleRetryOrchestrator)
