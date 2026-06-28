@@ -166,6 +166,36 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
     refute backoff_line =~ "\\n"
   end
 
+  test "terminal dashboard renders blocked runtime failures apart from retry queue" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         blocked: [
+           %{
+             issue_id: "issue-blocked-runtime",
+             identifier: "MT-BLOCKED",
+             family: :missing_required_tool_or_cli,
+             provider: :claude_code,
+             error: "missing_required_tool_or_cli claude command not found",
+             recovery_reason: "missing-required-tool-or-cli-repair-required"
+           }
+         ],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = render_snapshot(snapshot_data, 0.0)
+
+    assert rendered =~ "Blocked runtime failures"
+    assert rendered =~ "MT-BLOCKED"
+    assert rendered =~ "family=missing_required_tool_or_cli"
+    assert rendered =~ "provider=claude_code"
+    assert rendered =~ "repair=missing-required-tool-or-cli-repair-required"
+    assert rendered =~ "No queued retries"
+  end
+
   test "snapshot fixture: unlimited credits variant" do
     snapshot_data =
       {:ok,

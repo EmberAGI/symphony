@@ -68,6 +68,16 @@ started/refreshed/expiry timestamps, retry or recovery reason when applicable,
 and a state such as `active`, `retrying`, `recoverable`, `blocked`,
 `quarantined`, `released`, or `expired`.
 
+**Irrecoverable runtime failure**: A runtime failure whose next successful
+step requires human, credential, configuration, host, tool, permission,
+protocol, or implementation repair rather than another ordinary role retry.
+
+**Runtime failure family**: A provider-neutral classification used by the
+runner, orchestrator, tracker, and status surfaces to decide whether a failure
+is retryable, recoverable, blocked, or escalated. Provider adapters translate
+provider-native payloads into this shared family vocabulary before retry
+policy is applied.
+
 **Process ownership record**: A local runtime metadata file that records the
 Symphony-owned role run, workspace, worker host, app-server PID when available,
 app-server process group when available, observed descendant PIDs,
@@ -109,6 +119,67 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   readiness hardening in EMB-1121 while preserving ADR 0002: Claude Code
   continues to use operator-managed subscription OAuth, and no
   `ANTHROPIC_API_KEY` migration is introduced.
+- Runtime retry policy must be driven by a provider-neutral runtime failure
+  family, not by ad hoc process-exit text at each retry call site. Known
+  deterministic irrecoverable families are:
+  `provider_authentication_or_revocation`,
+  `missing_required_runtime_configuration`, `missing_required_tool_or_cli`,
+  `permission_denied`, `invalid_workspace_or_runtime_protocol`,
+  `unsupported_app_server_contract`, `malformed_provider_event_schema`, and
+  `repeated_identical_no_progress_failure`.
+- Deterministic single-shot irrecoverable failures must escalate immediately
+  instead of scheduling or consuming an ordinary role retry. The classification
+  must be preserved across adapter, workspace hook, runner, orchestrator,
+  tracker, log, status API, and dashboard surfaces.
+- Persistent no-progress classification must use a bounded fingerprint that
+  includes at least issue id, workspace path, role, runtime provider, failure
+  family, normalized provider/runtime subtype when known, and redacted stable
+  error summary. Persistent classification is satisfied as soon as the same
+  fingerprint appears in three consecutive failed observations for the same
+  issue/workspace/role without an intervening reset condition. Escalation fires
+  immediately when the third matching observation is recorded, regardless of
+  elapsed wall-clock time between matching observations; a two-minute rapid-loop
+  expectation may be used as a feedback SLO, but not as an eligibility cap.
+  Reset conditions include an intervening successful progress/completion event,
+  a different failure fingerprint or excluded transient class, a new claim
+  lease or intentionally reset retry epoch, a material issue/branch/workspace
+  input change, or an operator-recorded repair action after the prior failure.
+  Explicit transient, network, service unavailable, rate-limit, timeout,
+  capacity, and operator-interrupted classes are excluded from this persistent
+  irrecoverable path unless a later issue records a narrower family-specific
+  policy.
+- Every irrecoverable classification must clear or avoid ordinary retry
+  scheduling, write or update the same-scope claim lease to a blocked or
+  escalated state, include redacted `retry_reason` and `recovery_reason`
+  evidence, apply or preserve the tracker issue's exact `Human Escalation`
+  label when the selected tracker supports it, move the issue to the
+  `Human Escalation` state when the selected workflow supports it, and write a
+  concise operator-visible note describing the redacted failure family,
+  affected provider/runtime when known, and required human action.
+- Tracker mutation failures during irrecoverable escalation must not re-enter
+  ordinary role retry. They must leave local runtime status and logs visibly
+  blocked/escalated with enough redacted evidence for an operator to repair the
+  tracker mutation or runtime environment manually.
+- Irrecoverable failure summaries, claim leases, logs, status payloads, and
+  operator-visible notes must never include bearer tokens, refresh tokens, API
+  keys, raw environment values, raw provider payloads, full Linear bodies, or
+  unbounded process output.
+- Provider/runtime classifier fixtures must preserve the relevant shape of
+  observed real provider and runtime errors when durable evidence exists, while
+  replacing secret-bearing or user-sensitive fields with deterministic redacted
+  values. Synthetic-only fixtures are acceptable for generic runtime classes or
+  unavailable provider variants, but they must still exercise the adapter's real
+  parsing boundary rather than bypassing it with already-normalized families.
+- Before finalizing classifier fixtures, implementation must run a provider
+  evidence discovery pass over available Octo-owned evidence: role run logs,
+  runtime status logs, claim leases, tracker Operator Notes or handoffs for
+  relevant incidents, local generated runtime state, and existing redacted
+  incident notes. Existing authenticated local Codex and Claude CLI contexts may
+  also be used for bounded, non-destructive probes that capture exit status and
+  provider/runtime stderr/stdout/event shape. Discovery must not commit raw logs,
+  secret-bearing payloads, provider credentials, full issue bodies, or
+  unbounded process output; the PR or handoff records only source categories,
+  redaction decisions, and fixture coverage.
 - User-input-required events and permission prompts must not leave unattended
   runs stalled indefinitely.
 - Runtime adapters must collect or expose artifacts and proof in a normalized
@@ -508,6 +579,20 @@ until both test modules pass under `make all`.
 - Provider supports session resume but not continuation turns in the same shape
   as Codex.
 - Artifact/proof collection fails after the turn succeeds.
+- A provider returns an authentication or revocation payload after startup
+  readiness checks have already passed.
+- A runtime hook or adapter reports a missing required configuration value,
+  missing CLI/tool, permission denial, invalid workspace protocol, unsupported
+  app-server contract, or malformed provider event schema.
+- The same redacted no-progress failure fingerprint repeats in three
+  consecutive failed observations, including rapid loops within two minutes and
+  delayed repeats caused by retry backoff, while reset conditions and
+  transient/network/rate-limit failure classes are absent.
+- Applying the `Human Escalation` label, moving the tracker issue, or writing
+  the operator note fails after the runtime has already classified a failure as
+  irrecoverable.
+- A provider-native payload contains secret-bearing fields adjacent to useful
+  classification evidence.
 
 ## Constraints
 
@@ -541,6 +626,11 @@ until both test modules pass under `make all`.
 - Require every Symphony deployment to support the Octo multi-runtime profile;
   the profile is required only for deployments claiming Octo Codex/Claude
   Code/Pi support.
+- For EMB-1127, build a new retry scheduler, persistent failure store,
+  log-mining subsystem, dashboard redesign, live-provider QA gate, or generic
+  provider error ontology beyond the listed irrecoverable runtime failure
+  families. Provider-evidence discovery is a bounded implementation evidence
+  step, not a new runtime feature.
 
 ## Open questions about system behavior
 
@@ -576,9 +666,15 @@ slices without weakening the skills/tools release gate.
   acceptance criteria, the Constraints section above, and
   [ADR 0002](../adr/0002-claude-code-unattended-auth-and-permission-posture.md),
   which owns the auth and permission-posture rationale and reversal policy.
+- EMB-1127 intake: Generalized provider-auth escalation into a
+  provider-neutral irrecoverable runtime failure policy. The classifier is the
+  shared retry/escalation seam; provider adapters are concrete adapters into
+  that seam, and orchestrator/tracker/status code consume the normalized
+  family rather than parsing provider-specific raw payloads.
 
 ## References to source issues
 
 - [EMB-166: Integrate Claude Code as an Octo Symphony role runtime](https://linear.app/emberai/issue/EMB-166/implement-multi-runtime-symphony-support-for-codex-claude-code-and-pi)
   (re-scoped 2026-06-10 from "Implement multi-runtime Symphony support for
   Codex, Claude Code, and Pi")
+- [EMB-1127: Generalize irrecoverable runtime failure escalation](https://linear.app/emberai/issue/EMB-1127/generalize-irrecoverable-runtime-failure-escalation)

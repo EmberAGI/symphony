@@ -41,8 +41,10 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) do
-    send_event({:memory_tracker_comment, issue_id, body})
-    :ok
+    with :ok <- maybe_fail_mutation(:comment) do
+      send_event({:memory_tracker_comment, issue_id, body})
+      :ok
+    end
   end
 
   @spec upsert_claim_lease(String.t(), map()) ::
@@ -59,14 +61,18 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name) do
-    send_event({:memory_tracker_state_update, issue_id, state_name})
-    :ok
+    with :ok <- maybe_fail_mutation(:state) do
+      send_event({:memory_tracker_state_update, issue_id, state_name})
+      :ok
+    end
   end
 
   @spec add_issue_label(String.t(), String.t()) :: :ok | {:error, term()}
   def add_issue_label(issue_id, label_name) do
-    send_event({:memory_tracker_label_add, issue_id, label_name})
-    :ok
+    with :ok <- maybe_fail_mutation(:label) do
+      send_event({:memory_tracker_label_add, issue_id, label_name})
+      :ok
+    end
   end
 
   defp configured_issues do
@@ -81,6 +87,26 @@ defmodule SymphonyElixir.Tracker.Memory do
     case Application.get_env(:symphony_elixir, :memory_tracker_recipient) do
       pid when is_pid(pid) -> send(pid, message)
       _ -> :ok
+    end
+  end
+
+  defp maybe_fail_mutation(kind) when kind in [:comment, :label, :state] do
+    case Application.get_env(:symphony_elixir, :memory_tracker_fail_mutations, %{}) do
+      failures when is_map(failures) ->
+        case Map.get(failures, kind) || Map.get(failures, Atom.to_string(kind)) do
+          nil -> :ok
+          reason -> {:error, reason}
+        end
+
+      failures when is_list(failures) ->
+        if kind in failures or Atom.to_string(kind) in failures do
+          {:error, :memory_tracker_mutation_failed}
+        else
+          :ok
+        end
+
+      _ ->
+        :ok
     end
   end
 

@@ -177,6 +177,26 @@ Notes:
   non-interactive. Invalid `effort` values and disabling thinking on a model
   that cannot (Fable 5) are rejected at config validation.
 
+### Irrecoverable runtime failures
+
+Symphony classifies runtime failures before ordinary retry scheduling. Transient
+network, timeout, service-unavailable, rate-limit, capacity, and operator
+interruption failures remain retryable. Deterministic failures that need human
+repair are treated as irrecoverable, including provider credential revocation,
+missing required runtime configuration, missing CLIs or tools, permission
+denials, invalid workspace/runtime protocol, unsupported app-server contracts,
+malformed provider event schemas, and three consecutive identical no-progress
+observations for the same issue/workspace/role/provider fingerprint.
+
+Irrecoverable failures do not consume the ordinary retry loop. The orchestrator
+marks the same-scope claim lease `blocked`, writes redacted retry and recovery
+reasons, records a compact run-log event when run logging is configured, applies
+the `Human Escalation` label, moves the issue to `Human Escalation` when that
+state exists, and writes an Operator Note with the redacted failure family and
+required repair action. After repairing credentials, configuration, missing
+tools, permissions, workspace/protocol state, or provider event handling, move
+the issue back to the appropriate active role state to resume work.
+
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.

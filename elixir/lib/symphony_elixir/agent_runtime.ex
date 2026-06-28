@@ -15,6 +15,57 @@ defmodule SymphonyElixir.AgentRuntime do
   alias SymphonyElixir.Config
 
   @type provider :: :codex | :claude_code
+  @type failure_family ::
+          :provider_authentication_or_revocation
+          | :missing_required_runtime_configuration
+          | :missing_required_tool_or_cli
+          | :permission_denied
+          | :invalid_workspace_or_runtime_protocol
+          | :unsupported_app_server_contract
+          | :malformed_provider_event_schema
+          | :repeated_identical_no_progress_failure
+
+  @type failure_decision :: %{
+          required(:family) => failure_family() | :retryable_runtime_failure,
+          required(:summary) => String.t(),
+          required(:retry_reason) => String.t(),
+          required(:recovery_reason) => String.t() | nil,
+          required(:retryable?) => boolean(),
+          required(:irrecoverable?) => boolean(),
+          optional(:provider) => provider(),
+          optional(:subtype) => String.t(),
+          optional(:fingerprint) => map()
+        }
+  @type failure_observation :: %{
+          required(:fingerprint) => map() | nil,
+          required(:count) => non_neg_integer(),
+          required(:reset_marker) => map()
+        }
+
+  @irrecoverable_families [
+    :provider_authentication_or_revocation,
+    :missing_required_runtime_configuration,
+    :missing_required_tool_or_cli,
+    :permission_denied,
+    :invalid_workspace_or_runtime_protocol,
+    :unsupported_app_server_contract,
+    :malformed_provider_event_schema,
+    :repeated_identical_no_progress_failure
+  ]
+
+  @transient_markers [
+    "transient",
+    "network",
+    "service_unavailable",
+    "service unavailable",
+    "rate_limit",
+    "rate limit",
+    "rate_limited",
+    "timeout",
+    "capacity",
+    "operator_interrupted",
+    "operator interrupted"
+  ]
 
   @doc """
   Resolve the configured runtime adapter module.
@@ -64,6 +115,66 @@ defmodule SymphonyElixir.AgentRuntime do
   @doc "Stop the runtime session with the configured adapter."
   @spec stop_session(map()) :: :ok
   def stop_session(session), do: adapter().stop_session(session)
+
+  @doc """
+  Classify a provider/runtime failure before retry policy is applied.
+
+  The returned decision is provider-neutral and safe for logs, claim leases,
+  status surfaces, and Operator Notes. Provider adapters should still parse
+  provider-native payloads at their own seam; callers should make retry versus
+  escalation decisions from this typed result rather than raw process text.
+  """
+  @spec classify_failure(term(), map()) :: {:irrecoverable, failure_decision()} | {:retryable, failure_decision()}
+  def classify_failure(reason, context \\ %{}) when is_map(context) do
+    reason = observed_failure_reason(reason)
+    provider = runtime_provider(context)
+
+    cond do
+      irrecoverable_runtime_failed?(reason) ->
+        {:irrecoverable, normalize_irrecoverable_runtime_failure(reason, context)}
+
+      provider_auth_failure?(reason) ->
+        {:irrecoverable,
+         reason
+         |> provider_auth_failure(provider)
+         |> provider_auth_failure_decision(context)}
+
+      real_irrecoverable_runtime_reason(reason) != nil ->
+        {family, details} = real_irrecoverable_runtime_reason(reason)
+        {:irrecoverable, irrecoverable_decision(family, details, context)}
+
+      irrecoverable_family_reason?(reason) ->
+        {family, details} = irrecoverable_family_reason(reason)
+        {:irrecoverable, irrecoverable_decision(family, details, context)}
+
+      transient_failure?(reason) ->
+        {:retryable, retryable_decision(reason, context, :transient_runtime_failure)}
+
+      true ->
+        {:retryable, retryable_decision(reason, context, :retryable_runtime_failure)}
+    end
+  end
+
+  @doc """
+  Record a failed runtime observation and apply the persistent no-progress rule.
+
+  The third consecutive identical no-progress fingerprint escalates immediately.
+  Transient failures, different fingerprints, and changed reset markers restart
+  the sequence.
+  """
+  @spec record_failure_observation(failure_observation() | nil, term(), map()) ::
+          {failure_observation(), {:irrecoverable, failure_decision()} | {:retryable, failure_decision()}}
+  def record_failure_observation(previous_observation, reason, context \\ %{}) when is_map(context) do
+    observed_reason = observed_failure_reason(reason)
+
+    case classify_failure(observed_reason, context) do
+      {:irrecoverable, failure} ->
+        {observation_for(failure, context, 1), {:irrecoverable, failure}}
+
+      {:retryable, failure} ->
+        record_retryable_failure_observation(previous_observation, observed_reason, failure, context)
+    end
+  end
 
   @doc """
   Return true when a runtime error represents provider authentication failure.
@@ -316,4 +427,433 @@ defmodule SymphonyElixir.AgentRuntime do
 
   defp provider_auth_named_fragment(key, value) when is_binary(value), do: "#{key}=#{value}"
   defp provider_auth_named_fragment(_key, _value), do: ""
+
+  defp provider_auth_failure_decision({:provider_auth_failed, details}, context) do
+    family = :provider_authentication_or_revocation
+    provider = Map.get(details, :provider) || runtime_provider(context)
+    subtype = Map.get(details, :subtype)
+    retry_reason = provider_auth_failure_summary({:provider_auth_failed, details})
+
+    summary =
+      family
+      |> Atom.to_string()
+      |> Kernel.<>(": ")
+      |> Kernel.<>(retry_reason)
+      |> redact_runtime_text()
+
+    decision(family, summary, context,
+      provider: provider,
+      subtype: subtype,
+      retryable?: false,
+      retry_reason: retry_reason,
+      recovery_reason: "provider-authentication-required"
+    )
+  end
+
+  defp irrecoverable_family_reason?({family, _details}) when family in @irrecoverable_families, do: true
+  defp irrecoverable_family_reason?(family) when family in @irrecoverable_families, do: true
+  defp irrecoverable_family_reason?({:workspace_hook_failed, _hook, status, output}), do: workspace_hook_irrecoverable_family(status, output) != nil
+  defp irrecoverable_family_reason?(_reason), do: false
+
+  defp irrecoverable_family_reason({family, details}) when family in @irrecoverable_families, do: {family, details}
+  defp irrecoverable_family_reason(family) when family in @irrecoverable_families, do: {family, %{}}
+
+  defp irrecoverable_family_reason({:workspace_hook_failed, hook, status, output}) do
+    family = workspace_hook_irrecoverable_family(status, output)
+
+    {family,
+     %{
+       subtype: "workspace_hook_failed",
+       method: hook,
+       message: workspace_hook_summary(output)
+     }}
+  end
+
+  defp real_irrecoverable_runtime_reason({:invalid_workspace_cwd, subtype, worker_host, workspace}) do
+    details =
+      case subtype do
+        :invalid_remote_workspace ->
+          %{
+            subtype: subtype,
+            path: workspace,
+            message: "remote runtime workspace path is invalid for #{safe_detail_fragment(worker_host)}"
+          }
+
+        _ ->
+          %{
+            subtype: subtype,
+            path: worker_host,
+            message: "runtime workspace path is outside the configured workspace root #{safe_detail_fragment(workspace)}"
+          }
+      end
+
+    {:invalid_workspace_or_runtime_protocol, details}
+  end
+
+  defp real_irrecoverable_runtime_reason({:invalid_workspace_cwd, subtype, path}) do
+    {:invalid_workspace_or_runtime_protocol,
+     %{
+       subtype: subtype,
+       path: path,
+       message: "runtime workspace path is invalid"
+     }}
+  end
+
+  defp real_irrecoverable_runtime_reason(:bash_not_found) do
+    {:missing_required_tool_or_cli, %{tool: "bash", message: "bash executable not found"}}
+  end
+
+  defp real_irrecoverable_runtime_reason({:port_exit, 127, output}) do
+    if missing_tool_output?(output) do
+      {:missing_required_tool_or_cli, %{message: workspace_hook_summary(output)}}
+    end
+  end
+
+  defp real_irrecoverable_runtime_reason({:port_exit, 126, output}) do
+    if permission_denied_output?(output) do
+      {:permission_denied, %{message: workspace_hook_summary(output)}}
+    end
+  end
+
+  defp real_irrecoverable_runtime_reason({:unsupported_runtime_provider, provider}) do
+    {:missing_required_runtime_configuration, %{name: "agent_runtime.provider", message: "unsupported runtime provider #{safe_detail_fragment(provider)}"}}
+  end
+
+  defp real_irrecoverable_runtime_reason({:unsafe_turn_sandbox_policy, details}) do
+    {:missing_required_runtime_configuration,
+     %{
+       name: "agent_runtime.permission_policy",
+       subtype: "unsafe_turn_sandbox_policy",
+       message: detail_summary(details)
+     }}
+  end
+
+  defp real_irrecoverable_runtime_reason({:turn_failed, details}) when is_map(details) do
+    subtype = subtype_from_details(details)
+
+    cond do
+      subtype == "unsupported_app_server_contract" ->
+        {:unsupported_app_server_contract, details}
+
+      subtype == "malformed_provider_event_schema" ->
+        {:malformed_provider_event_schema, details}
+
+      true ->
+        nil
+    end
+  end
+
+  defp real_irrecoverable_runtime_reason(_reason), do: nil
+
+  defp irrecoverable_decision(family, details, context) do
+    provider = provider_from_details(details) || runtime_provider(context)
+    subtype = subtype_from_details(details)
+    summary = irrecoverable_summary(family, details, provider, subtype)
+
+    decision(family, summary, context,
+      provider: provider,
+      subtype: subtype,
+      retryable?: false,
+      recovery_reason: recovery_reason(family)
+    )
+  end
+
+  defp retryable_decision(reason, context, family) do
+    summary =
+      [
+        Atom.to_string(family),
+        detail_summary(reason)
+      ]
+      |> Enum.reject(&(&1 in [nil, ""]))
+      |> Enum.join(": ")
+      |> redact_runtime_text()
+
+    decision(family, summary, context,
+      provider: runtime_provider(context),
+      subtype: subtype_from_details(reason),
+      retryable?: true,
+      recovery_reason: nil
+    )
+  end
+
+  defp record_retryable_failure_observation(previous_observation, reason, failure, context) do
+    cond do
+      transient_failure?(reason) ->
+        {reset_observation(context), {:retryable, failure}}
+
+      no_progress_failure?(reason) ->
+        no_progress_failure =
+          irrecoverable_decision(:repeated_identical_no_progress_failure, no_progress_details(reason), context)
+
+        count = next_observation_count(previous_observation, no_progress_failure, context)
+        observation = observation_for(no_progress_failure, context, count)
+
+        if count >= 3 do
+          {observation, {:irrecoverable, no_progress_failure}}
+        else
+          {observation, {:retryable, failure}}
+        end
+
+      true ->
+        {observation_for(failure, context, 1), {:retryable, failure}}
+    end
+  end
+
+  defp next_observation_count(previous_observation, failure, context) when is_map(previous_observation) do
+    reset_marker = reset_marker(context)
+
+    if Map.get(previous_observation, :fingerprint) == failure.fingerprint and
+         Map.get(previous_observation, :reset_marker) == reset_marker do
+      Map.get(previous_observation, :count, 0) + 1
+    else
+      1
+    end
+  end
+
+  defp next_observation_count(_previous_observation, _failure, _context), do: 1
+
+  defp observation_for(failure, context, count) when is_map(failure) do
+    %{
+      fingerprint: Map.get(failure, :fingerprint),
+      count: max(count, 0),
+      reset_marker: reset_marker(context)
+    }
+  end
+
+  defp reset_observation(context) do
+    %{fingerprint: nil, count: 0, reset_marker: reset_marker(context)}
+  end
+
+  defp reset_marker(context) do
+    %{
+      retry_epoch: context_string(context, :retry_epoch),
+      claim_lease_run_id: context_string(context, :claim_lease_run_id),
+      input_fingerprint: context_string(context, :input_fingerprint),
+      operator_repair_id: context_string(context, :operator_repair_id)
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp decision(family, summary, context, opts) do
+    provider = Keyword.get(opts, :provider)
+    subtype = Keyword.get(opts, :subtype)
+    retryable? = Keyword.fetch!(opts, :retryable?)
+
+    %{
+      family: family,
+      provider: provider,
+      subtype: subtype,
+      summary: summary,
+      retry_reason: Keyword.get(opts, :retry_reason, summary),
+      recovery_reason: Keyword.get(opts, :recovery_reason),
+      retryable?: retryable?,
+      irrecoverable?: !retryable?,
+      fingerprint: failure_fingerprint(family, provider, subtype, summary, context)
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp failure_fingerprint(family, provider, subtype, summary, context) do
+    %{
+      issue_id: context_string(context, :issue_id),
+      workspace_path: context_string(context, :workspace_path),
+      role: context_string(context, :role) || role_name(),
+      runtime_provider: provider,
+      family: family,
+      subtype: subtype,
+      summary: summary
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp irrecoverable_summary(family, details, provider, subtype) do
+    [
+      Atom.to_string(family),
+      provider && to_string(provider),
+      subtype && "subtype=#{subtype}",
+      detail_summary(details)
+    ]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join(" ")
+    |> redact_runtime_text()
+  end
+
+  defp detail_summary(details) when is_map(details) do
+    [
+      value_for_any(details, [:name, "name"]),
+      value_for_any(details, [:tool, "tool", :cli, "cli"]),
+      value_for_any(details, [:path, "path"]),
+      value_for_any(details, [:method, "method"]),
+      value_for_any(details, [:event, "event"]),
+      value_for_any(details, [:summary, "summary"]),
+      value_for_any(details, [:message, "message"])
+    ]
+    |> Enum.map(&safe_detail_fragment/1)
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join(" ")
+  end
+
+  defp detail_summary({reason, details}) when is_atom(reason) do
+    [Atom.to_string(reason), detail_summary(details)]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join(" ")
+  end
+
+  defp detail_summary(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp detail_summary(reason) when is_binary(reason), do: safe_detail_fragment(reason)
+  defp detail_summary(reason), do: reason |> inspect(limit: 20, printable_limit: 200) |> safe_detail_fragment()
+
+  defp safe_detail_fragment(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.replace(~r/[\r\n\t]+/, " ")
+    |> String.slice(0, 180)
+    |> case do
+      "" -> nil
+      value -> value
+    end
+  end
+
+  defp safe_detail_fragment(nil), do: nil
+  defp safe_detail_fragment(value) when is_atom(value), do: Atom.to_string(value)
+  defp safe_detail_fragment(value) when is_integer(value), do: Integer.to_string(value)
+  defp safe_detail_fragment(_value), do: nil
+
+  defp transient_failure?(:turn_timeout), do: true
+  defp transient_failure?({:turn_timeout, _details}), do: true
+  defp transient_failure?({:network_error, _details}), do: true
+  defp transient_failure?({:service_unavailable, _details}), do: true
+  defp transient_failure?({:rate_limited, _details}), do: true
+  defp transient_failure?({:capacity_unavailable, _details}), do: true
+  defp transient_failure?({:operator_interrupted, _details}), do: true
+
+  defp transient_failure?(reason) do
+    reason
+    |> detail_summary()
+    |> String.downcase()
+    |> then(fn summary -> Enum.any?(@transient_markers, &String.contains?(summary, &1)) end)
+  end
+
+  defp no_progress_failure?({:empty_turn_completed, _details}), do: true
+  defp no_progress_failure?({:turn_input_required, _details}), do: true
+  defp no_progress_failure?({:approval_required, _details}), do: true
+  defp no_progress_failure?(:empty_turn_completed), do: true
+  defp no_progress_failure?(:turn_input_required), do: true
+  defp no_progress_failure?(:approval_required), do: true
+  defp no_progress_failure?(_reason), do: false
+
+  defp no_progress_details({subtype, details}) when is_atom(subtype) and is_map(details) do
+    Map.put(details, :subtype, Atom.to_string(subtype))
+  end
+
+  defp no_progress_details(subtype) when is_atom(subtype), do: %{subtype: Atom.to_string(subtype)}
+
+  defp observed_failure_reason({:agent_runtime_failed, reason}), do: reason
+  defp observed_failure_reason(reason), do: reason
+
+  defp irrecoverable_runtime_failed?({:irrecoverable_runtime_failed, failure}) when is_map(failure), do: true
+  defp irrecoverable_runtime_failed?(_reason), do: false
+
+  defp normalize_irrecoverable_runtime_failure({:irrecoverable_runtime_failed, failure}, context) when is_map(failure) do
+    failure
+    |> Map.put_new(:retryable?, false)
+    |> Map.put_new(:irrecoverable?, true)
+    |> Map.put_new(:fingerprint, failure_fingerprint(failure.family, Map.get(failure, :provider), Map.get(failure, :subtype), failure.retry_reason, context))
+  end
+
+  defp workspace_hook_irrecoverable_family(127, output) do
+    if missing_tool_output?(output), do: :missing_required_tool_or_cli
+  end
+
+  defp workspace_hook_irrecoverable_family(126, output) do
+    if permission_denied_output?(output), do: :permission_denied
+  end
+
+  defp workspace_hook_irrecoverable_family(_status, output) do
+    cond do
+      missing_tool_output?(output) -> :missing_required_tool_or_cli
+      permission_denied_output?(output) -> :permission_denied
+      true -> nil
+    end
+  end
+
+  defp missing_tool_output?(output) do
+    output
+    |> workspace_hook_summary()
+    |> String.downcase()
+    |> then(&(String.contains?(&1, "command not found") or String.contains?(&1, "no such file or directory")))
+  end
+
+  defp permission_denied_output?(output) do
+    output
+    |> workspace_hook_summary()
+    |> String.downcase()
+    |> String.contains?("permission denied")
+  end
+
+  defp workspace_hook_summary(output) do
+    output
+    |> hook_output_lines()
+    |> List.first("")
+  end
+
+  defp recovery_reason(:provider_authentication_or_revocation), do: "provider-authentication-required"
+  defp recovery_reason(family), do: family |> Atom.to_string() |> String.replace("_", "-") |> Kernel.<>("-repair-required")
+
+  defp provider_from_details(details) when is_map(details) do
+    details
+    |> value_for_any([:provider, "provider", :runtime_provider, "runtime_provider"])
+    |> provider_auth_provider()
+  end
+
+  defp provider_from_details(_details), do: nil
+
+  defp subtype_from_details(details) when is_map(details) do
+    details
+    |> value_for_any([:subtype, "subtype", :reason, "reason", :code, "code"])
+    |> provider_auth_subtype()
+  end
+
+  defp subtype_from_details({_reason, details}), do: subtype_from_details(details)
+  defp subtype_from_details(_details), do: nil
+
+  defp runtime_provider(context) when is_map(context) do
+    context
+    |> value_for_any([:provider, "provider", :runtime_provider, "runtime_provider"])
+    |> provider_auth_provider()
+    |> case do
+      nil -> provider()
+      provider -> provider
+    end
+  end
+
+  defp context_string(context, key) when is_map(context) do
+    context
+    |> value_for_any([key, Atom.to_string(key)])
+    |> safe_detail_fragment()
+  end
+
+  defp value_for_any(map, keys) when is_map(map) do
+    Enum.find_value(keys, &Map.get(map, &1))
+  end
+
+  defp redact_runtime_text(value) when is_binary(value) do
+    value
+    |> String.replace(~r/(?i)\b(authorization)\s*[:=]\s*bearer\s+[^\s,\]}]+/, "\\1=[REDACTED]")
+    |> String.replace(~r/(?i)\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,\]}]+/, "credential=[REDACTED]")
+    |> String.replace(~r/(?i)\bbearer\s+[A-Za-z0-9._~+\/-]+=*/, "[REDACTED]")
+    |> String.replace(~r/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/, "[REDACTED_EMAIL]")
+  end
+
+  defp redact_runtime_text(value), do: value
+
+  defp role_name do
+    case System.get_env("SYMPHONY_ROLE") do
+      role when is_binary(role) and role != "" -> role
+      _ -> "implementer"
+    end
+  end
 end

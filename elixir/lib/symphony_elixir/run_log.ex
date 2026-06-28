@@ -17,7 +17,17 @@ defmodule SymphonyElixir.RunLog do
       {root, run_id} when is_binary(root) and is_binary(run_id) ->
         issue_identifier = issue_identifier(issue_id, retry_context, retry_claim_lease)
         path = Path.join([root, safe_segment(issue_identifier), "#{safe_segment(run_id)}.jsonl"])
-        payload = agent_retry_scheduled_payload(issue_id, issue_identifier, run_id, retry_context, retry_claim_lease, metadata, retry)
+
+        payload =
+          agent_retry_scheduled_payload(
+            issue_id,
+            issue_identifier,
+            run_id,
+            retry_context,
+            retry_claim_lease,
+            metadata,
+            retry
+          )
 
         :ok = File.mkdir_p(Path.dirname(path))
         :ok = File.write(path, Jason.encode!(payload) <> "\n", [:append])
@@ -29,6 +39,37 @@ defmodule SymphonyElixir.RunLog do
   rescue
     error ->
       Logger.warning("Failed to write run log artifact for issue_id=#{issue_id}: #{Exception.message(error)}")
+      :ok
+  end
+
+  @spec record_irrecoverable_runtime_failure(String.t(), map(), ClaimLease.t() | nil, map()) :: :ok
+  def record_irrecoverable_runtime_failure(issue_id, running_entry, blocked_claim_lease, failure)
+      when is_binary(issue_id) and is_map(running_entry) and is_map(failure) do
+    case {configured_root(), run_id(running_entry, blocked_claim_lease)} do
+      {root, run_id} when is_binary(root) and is_binary(run_id) ->
+        issue_identifier = issue_identifier(issue_id, running_entry, blocked_claim_lease)
+        path = Path.join([root, safe_segment(issue_identifier), "#{safe_segment(run_id)}.jsonl"])
+
+        payload =
+          irrecoverable_runtime_failure_payload(
+            issue_id,
+            issue_identifier,
+            run_id,
+            running_entry,
+            blocked_claim_lease,
+            failure
+          )
+
+        :ok = File.mkdir_p(Path.dirname(path))
+        :ok = File.write(path, Jason.encode!(payload) <> "\n", [:append])
+        :ok
+
+      _ ->
+        :ok
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to write irrecoverable run log artifact for issue_id=#{issue_id}: #{Exception.message(error)}")
       :ok
   end
 
@@ -91,11 +132,41 @@ defmodule SymphonyElixir.RunLog do
     }
   end
 
+  defp irrecoverable_runtime_failure_payload(issue_id, issue_identifier, run_id, running_entry, blocked_claim_lease, failure) do
+    %{
+      event: "irrecoverable_runtime_failure_escalated",
+      timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
+      issue_id: issue_id,
+      issue_identifier: issue_identifier,
+      issue_state: issue_state(running_entry),
+      role: ClaimLease.role_name(),
+      run_id: run_id,
+      session_id: Map.get(running_entry, :session_id),
+      attempt: Map.get(running_entry, :retry_attempt),
+      started_at: iso8601(Map.get(running_entry, :started_at)),
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path),
+      failure: %{
+        family: atom_or_string(failure[:family]),
+        provider: atom_or_string(failure[:provider]),
+        subtype: failure[:subtype],
+        reason: redact_runtime_text(failure[:retry_reason] || failure[:summary]),
+        recovery_reason: failure[:recovery_reason],
+        claim_lease_state: claim_lease_state(blocked_claim_lease)
+      }
+    }
+  end
+
   defp issue_state(%{issue: %Issue{state: state}}), do: state
   defp issue_state(_retry_context), do: nil
 
   defp claim_lease_state(%ClaimLease{state: state}), do: state
   defp claim_lease_state(_claim_lease), do: nil
+
+  defp atom_or_string(nil), do: nil
+  defp atom_or_string(value) when is_atom(value), do: Atom.to_string(value)
+  defp atom_or_string(value) when is_binary(value), do: value
+  defp atom_or_string(_value), do: nil
 
   defp iso8601(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
   defp iso8601(_value), do: nil
