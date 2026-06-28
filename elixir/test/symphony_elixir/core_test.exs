@@ -2716,6 +2716,92 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner classifies provider auth before_run hook failure as provider auth exit" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-before-run-auth-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_before_run: """
+        printf '%s\\n' 'Provider-auth pre-turn withheld: provider-auth provider=claude_code status=unhealthy affected_roles=implementer,reviewer remediation=run claude setup-token raw=Bearer hook-secret-token'
+        exit 17
+        """
+      )
+
+      issue = %Issue{
+        id: "issue-before-run-auth",
+        identifier: "EMB-1128",
+        title: "Classify pre-turn provider auth",
+        description: "Runtime auth failure",
+        state: "In Progress",
+        url: "https://example.org/issues/EMB-1128",
+        labels: []
+      }
+
+      log =
+        capture_log(fn ->
+          assert catch_exit(AgentRunner.run(issue, nil, run_id: "run-before-run-auth")) ==
+                   {:provider_auth_failed,
+                    %{
+                      provider: :claude_code,
+                      readiness_status: "unhealthy",
+                      affected_roles: "implementer,reviewer",
+                      remediation_hint: "run claude setup-token"
+                    }}
+        end)
+
+      assert log =~ "provider_auth_failed: claude_code readiness_status=unhealthy affected_roles=implementer,reviewer remediation=run claude setup-token"
+      refute log =~ "hook-secret-token"
+      refute log =~ "Bearer"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner keeps non-auth before_run hook failures ordinary" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-before-run-ordinary-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_before_run: """
+        printf '%s\\n' 'ordinary setup failure'
+        exit 19
+        """
+      )
+
+      issue = %Issue{
+        id: "issue-before-run-ordinary",
+        identifier: "EMB-1128",
+        title: "Keep ordinary hook failures ordinary",
+        description: "Ordinary hook failure",
+        state: "In Progress",
+        url: "https://example.org/issues/EMB-1128",
+        labels: []
+      }
+
+      assert_raise RuntimeError, ~r/workspace_hook_failed.*before_run.*ordinary setup failure/, fn ->
+        AgentRunner.run(issue, nil, run_id: "run-before-run-ordinary")
+      end
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner continues with a follow-up turn while the issue remains active" do
     test_root =
       Path.join(

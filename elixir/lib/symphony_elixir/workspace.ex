@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Workspace do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, PathSafety, SSH}
+  alias SymphonyElixir.{AgentRuntime, Config, PathSafety, SSH}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
 
@@ -407,11 +407,19 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp handle_hook_command_result({output, status}, workspace, issue_context, hook_name) do
-    sanitized_output = sanitize_hook_output_for_log(output)
+    failure_reason = {:workspace_hook_failed, hook_name, status, output}
+    sanitized_output = hook_failure_output_for_log(failure_reason, output)
 
     Logger.warning("Workspace hook failed hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} status=#{status} output=#{inspect(sanitized_output)}")
 
-    {:error, {:workspace_hook_failed, hook_name, status, output}}
+    {:error, failure_reason}
+  end
+
+  defp hook_failure_output_for_log(failure_reason, output) do
+    case AgentRuntime.provider_auth_failure?(failure_reason) do
+      true -> AgentRuntime.provider_auth_failure_summary(failure_reason)
+      false -> sanitize_hook_output_for_log(output)
+    end
   end
 
   defp sanitize_hook_output_for_log(output, max_bytes \\ 2_048) do
