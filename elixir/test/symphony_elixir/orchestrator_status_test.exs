@@ -705,6 +705,76 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute log =~ "secret="
   end
 
+  test "irrecoverable escalation redacts credential prose and JSON fields from side effects" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-irrecoverable-json-redaction"
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "EMB-1127",
+      title: "Redact irrecoverable runtime evidence",
+      state: "In Progress",
+      labels: [],
+      url: "https://linear.app/example/EMB-1127"
+    }
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: issue,
+          run_id: "run-json-redaction",
+          workspace_path: "/tmp/symphony/EMB-1127",
+          started_at: DateTime.utc_now(),
+          retry_attempt: 1
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{issue_id => %{attempt: 1, error: "ordinary retry should be cleared"}},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    raw_details =
+      ~s(Permission denied refresh token raw-refresh-token {"api_key":"raw-api-key","refresh_token":"raw-json-refresh"})
+
+    reason = {:permission_denied, %{path: "/root/.claude.json", message: raw_details}}
+
+    log =
+      capture_log(fn ->
+        assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), reason}, state)
+        assert state.running == %{}
+        assert state.retry_attempts == %{}
+        assert state.blocked_failures[issue_id].family == :permission_denied
+      end)
+
+    blocked_lease = receive_claim_lease_state!(issue_id, "blocked")
+    assert blocked_lease.retry_reason =~ "permission_denied"
+    assert blocked_lease.retry_reason =~ "[REDACTED]"
+    refute blocked_lease.retry_reason =~ "raw-refresh-token"
+    refute blocked_lease.retry_reason =~ "raw-api-key"
+    refute blocked_lease.retry_reason =~ "raw-json-refresh"
+
+    assert_receive {:memory_tracker_comment, ^issue_id, note}
+    assert note =~ "## Operator Note"
+    assert note =~ "[REDACTED]"
+    refute note =~ "raw-refresh-token"
+    refute note =~ "raw-api-key"
+    refute note =~ "raw-json-refresh"
+
+    assert log =~ "Irrecoverable runtime failure"
+    assert log =~ "[REDACTED]"
+    refute log =~ "raw-refresh-token"
+    refute log =~ "raw-api-key"
+    refute log =~ "raw-json-refresh"
+  end
+
   test "third consecutive identical AgentRunner no-progress exit escalates immediately" do
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 

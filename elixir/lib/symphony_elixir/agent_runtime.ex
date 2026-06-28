@@ -640,6 +640,8 @@ defmodule SymphonyElixir.AgentRuntime do
   defp decision(family, summary, context, opts) do
     provider = Keyword.get(opts, :provider)
     subtype = Keyword.get(opts, :subtype)
+    summary = redact_runtime_text(summary)
+    retry_reason = opts |> Keyword.get(:retry_reason, summary) |> redact_runtime_text()
     retryable? = Keyword.fetch!(opts, :retryable?)
 
     %{
@@ -647,11 +649,11 @@ defmodule SymphonyElixir.AgentRuntime do
       provider: provider,
       subtype: subtype,
       summary: summary,
-      retry_reason: Keyword.get(opts, :retry_reason, summary),
+      retry_reason: retry_reason,
       recovery_reason: Keyword.get(opts, :recovery_reason),
       retryable?: retryable?,
       irrecoverable?: !retryable?,
-      fingerprint: failure_fingerprint(family, provider, subtype, summary, context)
+      fingerprint: failure_fingerprint(family, provider, subtype, retry_reason, context)
     }
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
@@ -712,6 +714,7 @@ defmodule SymphonyElixir.AgentRuntime do
     value
     |> String.trim()
     |> String.replace(~r/[\r\n\t]+/, " ")
+    |> redact_runtime_text()
     |> String.slice(0, 180)
     |> case do
       "" -> nil
@@ -760,11 +763,32 @@ defmodule SymphonyElixir.AgentRuntime do
   defp irrecoverable_runtime_failed?(_reason), do: false
 
   defp normalize_irrecoverable_runtime_failure({:irrecoverable_runtime_failed, failure}, context) when is_map(failure) do
-    failure
+    sanitized_failure =
+      failure
+      |> redact_failure_field(:summary)
+      |> redact_failure_field(:retry_reason)
+      |> redact_failure_field(:recovery_reason)
+
+    sanitized_failure
     |> Map.put_new(:retryable?, false)
     |> Map.put_new(:irrecoverable?, true)
-    |> Map.put_new(:fingerprint, failure_fingerprint(failure.family, Map.get(failure, :provider), Map.get(failure, :subtype), failure.retry_reason, context))
+    |> Map.put_new(
+      :fingerprint,
+      failure_fingerprint(
+        sanitized_failure.family,
+        Map.get(sanitized_failure, :provider),
+        Map.get(sanitized_failure, :subtype),
+        Map.get(sanitized_failure, :retry_reason) || Map.get(sanitized_failure, :summary),
+        context
+      )
+    )
   end
+
+  defp redact_failure_field(failure, key) when is_map_key(failure, key) do
+    Map.update!(failure, key, &redact_runtime_text/1)
+  end
+
+  defp redact_failure_field(failure, _key), do: failure
 
   defp workspace_hook_irrecoverable_family(127, output) do
     if missing_tool_output?(output), do: :missing_required_tool_or_cli
@@ -845,7 +869,15 @@ defmodule SymphonyElixir.AgentRuntime do
   defp redact_runtime_text(value) when is_binary(value) do
     value
     |> String.replace(~r/(?i)\b(authorization)\s*[:=]\s*bearer\s+[^\s,\]}]+/, "\\1=[REDACTED]")
+    |> String.replace(
+      ~r/(?i)(["']?)(api[_-]?key|refresh[_-]?token|access[_-]?token|oauth[_-]?token|token|secret|password)\1\s*[:=]\s*(["'])[^"']*\3/,
+      "credential=[REDACTED]"
+    )
     |> String.replace(~r/(?i)\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,\]}]+/, "credential=[REDACTED]")
+    |> String.replace(
+      ~r/(?i)\b(api[\s_-]?key|refresh[\s_-]?token|access[\s_-]?token|oauth[\s_-]?token)\s+["']?[^\s,\]}]+["']?/,
+      "credential=[REDACTED]"
+    )
     |> String.replace(~r/(?i)\bbearer\s+[A-Za-z0-9._~+\/-]+=*/, "[REDACTED]")
     |> String.replace(~r/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/, "[REDACTED_EMAIL]")
   end

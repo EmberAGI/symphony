@@ -92,6 +92,50 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     refute failure.retry_reason =~ "Bearer"
   end
 
+  test "redacts credential-shaped prose and JSON fields at the classifier interface" do
+    raw_details =
+      ~s(permission denied refresh token raw-refresh-token {"api_key":"raw-api-key","refresh_token":"raw-json-refresh"})
+
+    assert {:irrecoverable, failure} =
+             AgentRuntime.classify_failure(
+               {:permission_denied, %{path: "/root/.claude.json", message: raw_details}},
+               @context
+             )
+
+    assert failure.family == :permission_denied
+    assert failure.summary =~ "[REDACTED]"
+    assert failure.retry_reason =~ "[REDACTED]"
+    refute failure.summary =~ "raw-refresh-token"
+    refute failure.summary =~ "raw-api-key"
+    refute failure.summary =~ "raw-json-refresh"
+    refute failure.retry_reason =~ "raw-refresh-token"
+    refute failure.retry_reason =~ "raw-api-key"
+    refute failure.retry_reason =~ "raw-json-refresh"
+
+    assert {:irrecoverable, normalized} =
+             AgentRuntime.classify_failure(
+               {:irrecoverable_runtime_failed,
+                %{
+                  family: :permission_denied,
+                  provider: :claude_code,
+                  subtype: "fixture",
+                  summary: "permission_denied #{raw_details}",
+                  retry_reason: "permission_denied #{raw_details}",
+                  recovery_reason: "permission-denied-repair-required"
+                }},
+               @context
+             )
+
+    assert normalized.summary =~ "[REDACTED]"
+    assert normalized.retry_reason =~ "[REDACTED]"
+    refute normalized.summary =~ "raw-refresh-token"
+    refute normalized.summary =~ "raw-api-key"
+    refute normalized.summary =~ "raw-json-refresh"
+    refute normalized.retry_reason =~ "raw-refresh-token"
+    refute normalized.retry_reason =~ "raw-api-key"
+    refute normalized.retry_reason =~ "raw-json-refresh"
+  end
+
   test "keeps explicit transient runtime failures retryable" do
     for reason <- [
           :turn_timeout,
