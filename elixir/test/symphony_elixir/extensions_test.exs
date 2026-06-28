@@ -517,7 +517,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "retrying" => 1},
+             "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1},
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -557,6 +557,37 @@ defmodule SymphonyElixir.ExtensionsTest do
                    "worker_host" => nil,
                    "worker_pid" => nil,
                    "workspace_path" => nil
+                 }
+               }
+             ],
+             "blocked" => [
+               %{
+                 "issue_id" => "issue-blocked",
+                 "issue_identifier" => "MT-BLOCKED",
+                 "family" => "missing_required_tool_or_cli",
+                 "provider" => "claude_code",
+                 "subtype" => nil,
+                 "error" => "missing_required_tool_or_cli claude command not found",
+                 "recovery_reason" => "missing-required-tool-or-cli-repair-required",
+                 "worker_host" => nil,
+                 "workspace_path" => "/tmp/workspaces/MT-BLOCKED",
+                 "blocked_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("blocked_at"),
+                 "claim_lease" => %{
+                   "attempt" => 3,
+                   "expires_at" => nil,
+                   "holder" => "worker-1",
+                   "issue_id" => "issue-blocked",
+                   "issue_identifier" => "MT-BLOCKED",
+                   "recovery_reason" => "missing-required-tool-or-cli-repair-required",
+                   "refreshed_at" => nil,
+                   "retry_reason" => "missing_required_tool_or_cli claude command not found",
+                   "role" => "implementer",
+                   "run_id" => "run-blocked",
+                   "session_id" => nil,
+                   "started_at" => state_payload["blocked"] |> List.first() |> get_in(["claim_lease", "started_at"]),
+                   "state" => "blocked",
+                   "worker_host" => nil,
+                   "workspace_path" => "/tmp/workspaces/MT-BLOCKED"
                  }
                }
              ],
@@ -604,6 +635,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
              },
              "retry" => nil,
+             "blocked" => nil,
              "logs" => %{"codex_session_logs" => []},
              "recent_events" => [],
              "last_error" => nil,
@@ -623,6 +655,20 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "live" => true
                }
              }
+           } =
+             json_response(conn, 200)
+
+    conn = get(build_conn(), "/api/v1/MT-BLOCKED")
+
+    assert %{
+             "status" => "blocked",
+             "blocked" => %{
+               "family" => "missing_required_tool_or_cli",
+               "error" => "missing_required_tool_or_cli claude command not found",
+               "claim_lease" => %{"state" => "blocked"}
+             },
+             "retry" => nil,
+             "running" => nil
            } =
              json_response(conn, 200)
 
@@ -999,7 +1045,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
     assert response.status == 200
-    assert response.body["counts"] == %{"running" => 1, "retrying" => 1}
+    assert response.body["counts"] == %{"running" => 1, "retrying" => 1, "blocked" => 1}
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200
@@ -1042,6 +1088,8 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   defp static_snapshot do
+    blocked_started_at = DateTime.utc_now()
+
     %{
       running: [
         %{
@@ -1078,6 +1126,33 @@ defmodule SymphonyElixir.ExtensionsTest do
             quarantine_reason: "live app-server process remains after stalled worker",
             live?: true
           }
+        }
+      ],
+      blocked: [
+        %{
+          issue_id: "issue-blocked",
+          identifier: "MT-BLOCKED",
+          family: :missing_required_tool_or_cli,
+          provider: :claude_code,
+          error: "missing_required_tool_or_cli claude command not found",
+          recovery_reason: "missing-required-tool-or-cli-repair-required",
+          worker_host: nil,
+          workspace_path: "/tmp/workspaces/MT-BLOCKED",
+          blocked_at: DateTime.utc_now(),
+          claim_lease:
+            ClaimLease.new(%{
+              issue_id: "issue-blocked",
+              issue_identifier: "MT-BLOCKED",
+              role: "implementer",
+              holder: "worker-1",
+              run_id: "run-blocked",
+              workspace_path: "/tmp/workspaces/MT-BLOCKED",
+              attempt: 3,
+              retry_reason: "missing_required_tool_or_cli claude command not found",
+              recovery_reason: "missing-required-tool-or-cli-repair-required",
+              state: "blocked",
+              started_at: blocked_started_at
+            })
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},

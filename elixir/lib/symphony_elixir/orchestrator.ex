@@ -56,6 +56,8 @@ defmodule SymphonyElixir.Orchestrator do
       completed: MapSet.new(),
       claimed: MapSet.new(),
       retry_attempts: %{},
+      failure_observations: %{},
+      blocked_failures: %{},
       codex_totals: nil,
       codex_rate_limits: nil,
       latest_dispatch_summary: %{
@@ -173,12 +175,13 @@ defmodule SymphonyElixir.Orchestrator do
         process_completion_status = record_process_completion(running_entry, reason)
 
         state =
-          case reason do
+          case classify_task_exit(reason, running_entry, issue_id, state) do
             :normal ->
               Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
               RoleTurnRecovery.clear_turn(issue_id)
 
               state
+              |> clear_failure_observation(issue_id)
               |> complete_issue(issue_id)
               |> schedule_issue_retry(issue_id, 1, %{
                 identifier: running_entry.identifier,
@@ -195,11 +198,14 @@ defmodule SymphonyElixir.Orchestrator do
                 lease_state: retry_lease_state(process_completion_status)
               })
 
-            {:provider_auth_failed, _details} ->
+            {:irrecoverable, failure, failure_observation} ->
               RoleTurnRecovery.clear_turn(issue_id)
-              block_provider_auth_failure(state, issue_id, running_entry, reason)
 
-            _ ->
+              state
+              |> put_failure_observation(issue_id, failure_observation)
+              |> block_irrecoverable_runtime_failure(issue_id, running_entry, failure)
+
+            {:retryable, _failure, failure_observation} ->
               exit_reason = inspect_full(reason)
 
               Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{exit_reason}; scheduling retry")
@@ -207,7 +213,9 @@ defmodule SymphonyElixir.Orchestrator do
 
               next_attempt = next_retry_attempt_from_running(running_entry)
 
-              schedule_issue_retry(state, issue_id, next_attempt, %{
+              state
+              |> put_failure_observation(issue_id, failure_observation)
+              |> schedule_issue_retry(issue_id, next_attempt, %{
                 identifier: running_entry.identifier,
                 error: "agent exited: #{exit_reason}",
                 worker_host: Map.get(running_entry, :worker_host),
@@ -1290,36 +1298,77 @@ defmodule SymphonyElixir.Orchestrator do
      )}
   end
 
-  defp block_provider_auth_failure(%State{} = state, issue_id, running_entry, reason) do
-    summary = AgentRuntime.provider_auth_failure_summary(reason)
+  defp classify_task_exit(:normal, _running_entry, _issue_id, _state), do: :normal
+
+  defp classify_task_exit(reason, running_entry, issue_id, %State{} = state) do
+    previous_observation = Map.get(state.failure_observations, issue_id)
+    context = runtime_failure_context(issue_id, running_entry)
+
+    {failure_observation, classification} =
+      AgentRuntime.record_failure_observation(previous_observation, reason, context)
+
+    case classification do
+      {:irrecoverable, failure} -> {:irrecoverable, failure, failure_observation}
+      {:retryable, failure} -> {:retryable, failure, failure_observation}
+    end
+  end
+
+  defp runtime_failure_context(issue_id, running_entry) do
+    %{
+      issue_id: issue_id,
+      workspace_path: Map.get(running_entry, :workspace_path),
+      role: ClaimLease.role_name(),
+      provider: AgentRuntime.provider(),
+      run_id: Map.get(running_entry, :run_id)
+    }
+  end
+
+  defp put_failure_observation(%State{} = state, issue_id, observation) when is_binary(issue_id) and is_map(observation) do
+    %{state | failure_observations: Map.put(state.failure_observations, issue_id, observation)}
+  end
+
+  defp clear_failure_observation(%State{} = state, issue_id) when is_binary(issue_id) do
+    %{
+      state
+      | failure_observations: Map.delete(state.failure_observations, issue_id),
+        blocked_failures: Map.delete(state.blocked_failures, issue_id)
+    }
+  end
+
+  defp block_irrecoverable_runtime_failure(%State{} = state, issue_id, running_entry, failure) do
+    summary = Map.fetch!(failure, :retry_reason)
     identifier = Map.get(running_entry, :identifier, issue_id)
     issue = Map.get(running_entry, :issue)
 
-    maybe_upsert_provider_auth_blocked_claim_lease(issue_id, issue, running_entry, summary)
-    maybe_escalate_provider_auth_failure(issue_id, issue, summary)
+    blocked_lease = maybe_upsert_irrecoverable_blocked_claim_lease(issue_id, issue, running_entry, failure)
+    RunLog.record_irrecoverable_runtime_failure(issue_id, running_entry, blocked_lease, failure)
+    maybe_escalate_irrecoverable_runtime_failure(issue_id, issue, failure)
 
-    Logger.error(
-      "Provider authentication failed for issue_id=#{issue_id} issue_identifier=#{identifier}; blocked ordinary retry status=#{provider_auth_status_for_log(reason)} subtype=#{provider_auth_subtype_for_log(reason)}"
-    )
+    Logger.error("Irrecoverable runtime failure for issue_id=#{issue_id} issue_identifier=#{identifier}; blocked ordinary retry family=#{failure.family} summary=#{summary}")
+
+    if failure.family == :provider_authentication_or_revocation do
+      Logger.error("Provider authentication failed for issue_id=#{issue_id} issue_identifier=#{identifier}; blocked ordinary retry")
+    end
 
     %{
       state
       | running: Map.delete(state.running, issue_id),
         claimed: MapSet.put(state.claimed, issue_id),
-        retry_attempts: Map.delete(state.retry_attempts, issue_id)
+        retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        blocked_failures: Map.put(state.blocked_failures, issue_id, blocked_failure_entry(issue_id, running_entry, failure, blocked_lease))
     }
   end
 
-  defp maybe_upsert_provider_auth_blocked_claim_lease(issue_id, %Issue{} = issue, running_entry, summary)
+  defp maybe_upsert_irrecoverable_blocked_claim_lease(issue_id, %Issue{} = issue, running_entry, failure)
        when is_binary(issue_id) do
-    attrs = provider_auth_blocked_claim_lease_attrs(issue, running_entry, summary)
+    attrs = irrecoverable_blocked_claim_lease_attrs(issue, running_entry, failure)
 
     case Tracker.upsert_claim_lease(issue_id, attrs) do
       {:ok, %ClaimLease{} = blocked_lease} ->
         blocked_lease
 
       {:error, upsert_reason} ->
-        Logger.warning("Failed to update provider-auth blocked claim lease for #{issue_context(issue)}: #{inspect(upsert_reason)}")
+        Logger.warning("Failed to update irrecoverable blocked claim lease for #{issue_context(issue)}: #{inspect(upsert_reason)}")
         nil
 
       _ ->
@@ -1327,9 +1376,9 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp maybe_upsert_provider_auth_blocked_claim_lease(_issue_id, _issue, _running_entry, _summary), do: nil
+  defp maybe_upsert_irrecoverable_blocked_claim_lease(_issue_id, _issue, _running_entry, _failure), do: nil
 
-  defp provider_auth_blocked_claim_lease_attrs(%Issue{} = issue, running_entry, summary) do
+  defp irrecoverable_blocked_claim_lease_attrs(%Issue{} = issue, running_entry, failure) do
     claim_lease = Map.get(running_entry, :claim_lease) || Map.get(issue, :claim_lease)
 
     build_claim_lease_attrs(
@@ -1342,53 +1391,72 @@ defmodule SymphonyElixir.Orchestrator do
         started_at: (claim_lease && claim_lease.started_at) || Map.get(running_entry, :started_at),
         workspace_path: Map.get(running_entry, :workspace_path),
         session_id: running_entry_session_id(running_entry),
-        retry_reason: summary,
-        recovery_reason: "provider-authentication-required",
+        retry_reason: Map.fetch!(failure, :retry_reason),
+        recovery_reason: Map.get(failure, :recovery_reason),
         state: "blocked"
       }
     )
   end
 
-  defp maybe_escalate_provider_auth_failure(issue_id, %Issue{} = issue, summary) when is_binary(issue_id) do
-    comment_result = Tracker.create_comment(issue_id, provider_auth_operator_note(summary))
+  defp maybe_escalate_irrecoverable_runtime_failure(issue_id, %Issue{} = issue, failure) when is_binary(issue_id) do
+    comment_result = Tracker.create_comment(issue_id, irrecoverable_operator_note(failure))
     label_result = Tracker.add_issue_label(issue_id, "Human Escalation")
     state_result = Tracker.update_issue_state(issue_id, "Human Escalation")
 
-    log_provider_auth_escalation_result(:comment, comment_result, issue)
-    log_provider_auth_escalation_result(:label, label_result, issue)
-    log_provider_auth_escalation_result(:state, state_result, issue)
+    log_irrecoverable_escalation_result(:comment, comment_result, issue)
+    log_irrecoverable_escalation_result(:label, label_result, issue)
+    log_irrecoverable_escalation_result(:state, state_result, issue)
 
     if label_result == :ok do
       issue
-      |> provider_auth_escalated_issue()
+      |> human_escalated_issue()
       |> Telegram.notify_human_escalation()
     end
 
     :ok
   end
 
-  defp maybe_escalate_provider_auth_failure(_issue_id, _issue, _summary), do: :ok
+  defp maybe_escalate_irrecoverable_runtime_failure(_issue_id, _issue, _failure), do: :ok
 
-  defp log_provider_auth_escalation_result(_kind, :ok, _issue), do: :ok
+  defp log_irrecoverable_escalation_result(_kind, :ok, _issue), do: :ok
 
-  defp log_provider_auth_escalation_result(kind, {:error, reason}, %Issue{} = issue) do
-    Logger.warning("Failed provider-auth Human Escalation #{kind} update for #{issue_context(issue)}: #{inspect(reason)}")
+  defp log_irrecoverable_escalation_result(kind, {:error, reason}, %Issue{} = issue) do
+    Logger.warning("Failed irrecoverable Human Escalation #{kind} update for #{issue_context(issue)}: #{inspect(reason)}")
   end
 
-  defp provider_auth_operator_note(summary) do
+  defp irrecoverable_operator_note(failure) do
     [
       "## Operator Note",
       "",
-      "Symphony escalated this issue because the runtime reported an irrecoverable provider authentication failure.",
+      "Symphony escalated this issue because the runtime reported an irrecoverable runtime failure.",
       "",
-      "- Failure: #{summary}",
+      "- Failure family: #{failure.family}",
+      "- Failure: #{Map.fetch!(failure, :retry_reason)}",
+      affected_runtime_fragment(failure),
       "- Effect: ordinary retries stopped and the claim lease was marked blocked.",
-      "- Action required: refresh or re-authenticate the unattended provider credential, then move the issue back to the appropriate role state."
+      "- Action required: #{operator_repair_action(failure)}"
     ]
+    |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
   end
 
-  defp provider_auth_escalated_issue(%Issue{} = issue) do
+  defp affected_runtime_fragment(failure) do
+    case Map.get(failure, :provider) do
+      provider when is_atom(provider) -> "- Affected runtime: #{provider}"
+      provider when is_binary(provider) -> "- Affected runtime: #{provider}"
+      _ -> nil
+    end
+  end
+
+  defp operator_repair_action(%{family: :provider_authentication_or_revocation}) do
+    "refresh or re-authenticate the unattended provider credential, then move the issue back to the appropriate role state."
+  end
+
+  defp operator_repair_action(%{family: family}) do
+    "repair the #{family} runtime condition, then move the issue back to the appropriate role state."
+  end
+
+  defp human_escalated_issue(%Issue{} = issue) do
     labels =
       issue.labels
       |> List.wrap()
@@ -1398,29 +1466,37 @@ defmodule SymphonyElixir.Orchestrator do
     %{issue | state: "Human Escalation", labels: labels}
   end
 
-  defp provider_auth_status_for_log({:provider_auth_failed, details}) when is_map(details) do
-    case Map.get(details, :api_error_status) do
-      status when is_integer(status) -> Integer.to_string(status)
-      _ -> "unknown"
-    end
+  defp blocked_failure_entry(issue_id, running_entry, failure, blocked_lease) do
+    %{
+      issue_id: issue_id,
+      identifier: Map.get(running_entry, :identifier, issue_id),
+      issue: Map.get(running_entry, :issue),
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path),
+      claim_lease: blocked_lease || Map.get(running_entry, :claim_lease),
+      family: Map.get(failure, :family),
+      provider: Map.get(failure, :provider),
+      subtype: Map.get(failure, :subtype),
+      summary: Map.get(failure, :summary),
+      error: Map.get(failure, :retry_reason),
+      recovery_reason: Map.get(failure, :recovery_reason),
+      started_at: Map.get(running_entry, :started_at),
+      blocked_at: DateTime.utc_now()
+    }
   end
-
-  defp provider_auth_status_for_log(_reason), do: "unknown"
-
-  defp provider_auth_subtype_for_log({:provider_auth_failed, details}) when is_map(details) do
-    case Map.get(details, :subtype) do
-      subtype when is_binary(subtype) -> subtype
-      _ -> "unknown"
-    end
-  end
-
-  defp provider_auth_subtype_for_log(_reason), do: "unknown"
 
   defp task_exit_reason_for_log({:provider_auth_failed, _details} = reason) do
     AgentRuntime.provider_auth_failure_summary(reason)
   end
 
-  defp task_exit_reason_for_log(reason), do: inspect(reason)
+  defp task_exit_reason_for_log(:normal), do: ":normal"
+
+  defp task_exit_reason_for_log(reason) do
+    case AgentRuntime.classify_failure(reason, %{}) do
+      {:irrecoverable, failure} -> Map.get(failure, :retry_reason)
+      {:retryable, failure} -> Map.get(failure, :retry_reason)
+    end
+  end
 
   defp inspect_full(reason), do: inspect(reason, limit: :infinity, printable_limit: :infinity)
 
@@ -2090,10 +2166,29 @@ defmodule SymphonyElixir.Orchestrator do
         }
       end)
 
+    blocked =
+      state.blocked_failures
+      |> Enum.map(fn {_issue_id, blocked_failure} ->
+        %{
+          issue_id: Map.get(blocked_failure, :issue_id),
+          identifier: Map.get(blocked_failure, :identifier),
+          family: Map.get(blocked_failure, :family),
+          provider: Map.get(blocked_failure, :provider),
+          subtype: Map.get(blocked_failure, :subtype),
+          error: Map.get(blocked_failure, :error),
+          recovery_reason: Map.get(blocked_failure, :recovery_reason),
+          worker_host: Map.get(blocked_failure, :worker_host),
+          workspace_path: Map.get(blocked_failure, :workspace_path),
+          claim_lease: Map.get(blocked_failure, :claim_lease),
+          blocked_at: Map.get(blocked_failure, :blocked_at)
+        }
+      end)
+
     {:reply,
      %{
        running: running,
        retrying: retrying,
+       blocked: blocked,
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{

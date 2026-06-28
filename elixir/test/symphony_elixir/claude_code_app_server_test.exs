@@ -36,6 +36,13 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     ]
   end
 
+  defp stream_synthetic_normalized_family_failure do
+    [
+      ~s({"type":"system","subtype":"init","session_id":"sess-synthetic-family","apiKeySource":"none"}),
+      ~s({"type":"result","subtype":"provider_authentication_or_revocation","is_error":true,"api_error_status":null,"result":"synthetic normalized family","session_id":"sess-synthetic-family"})
+    ]
+  end
+
   defp stream_max_turns do
     [
       ~s({"type":"system","subtype":"init","session_id":"sess-max"}),
@@ -184,6 +191,22 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       assert completed.claude_model == "sonnet"
       assert completed.claude_effort == "low"
       assert completed.claude_no_thinking == true
+    after
+      File.rm_rf(ctx.test_root)
+    end
+  end
+
+  test "does not classify already-normalized synthetic families as provider auth at the adapter boundary" do
+    ctx = setup_workspace("MT-CC-synthetic-family")
+
+    try do
+      configure!(ctx, stream_synthetic_normalized_family_failure(), [])
+
+      {result, events, _trace} = run_shim(ctx, "Replay synthetic normalized family")
+
+      assert {:error, {:turn_failed, %{subtype: "provider_authentication_or_revocation", api_error_status: nil}}} = result
+      assert Enum.any?(events, &(&1.event == :turn_failed))
+      refute match?({:error, {:auth_failed, _details}}, result)
     after
       File.rm_rf(ctx.test_root)
     end

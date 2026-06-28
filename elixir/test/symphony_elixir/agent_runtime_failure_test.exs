@@ -1,0 +1,108 @@
+defmodule SymphonyElixir.AgentRuntimeFailureTest do
+  use SymphonyElixir.TestSupport
+
+  alias SymphonyElixir.AgentRuntime
+
+  @context %{
+    issue_id: "issue-runtime-failure",
+    workspace_path: "/tmp/symphony/EMB-1127",
+    role: "implementer",
+    provider: :claude_code
+  }
+
+  test "classifies deterministic irrecoverable runtime failure families with redacted summaries" do
+    cases = [
+      {:provider_authentication_or_revocation,
+       {:auth_failed,
+        %{
+          provider: :claude_code,
+          api_error_status: 403,
+          subtype: "login_required",
+          raw: "Bearer provider-token"
+        }}},
+      {:missing_required_runtime_configuration, {:missing_required_runtime_configuration, %{name: "agent_runtime.provider", value: "secret-token"}}},
+      {:missing_required_tool_or_cli, {:missing_required_tool_or_cli, %{tool: "claude", message: "command not found token=tool-secret"}}},
+      {:permission_denied, {:permission_denied, %{path: "/root/.claude.json", message: "Permission denied api_key=abc123"}}},
+      {:invalid_workspace_or_runtime_protocol, {:invalid_workspace_or_runtime_protocol, %{message: "workspace escaped configured root"}}},
+      {:unsupported_app_server_contract, {:unsupported_app_server_contract, %{method: "turn/start", message: "unsupported schema"}}},
+      {:malformed_provider_event_schema, {:malformed_provider_event_schema, %{event: "result", message: "missing required session_id"}}},
+      {:repeated_identical_no_progress_failure, {:repeated_identical_no_progress_failure, %{subtype: "empty_turn_completed", summary: "same turn emitted no progress"}}}
+    ]
+
+    for {family, reason} <- cases do
+      assert {:irrecoverable, failure} = AgentRuntime.classify_failure(reason, @context)
+      assert failure.family == family
+      assert failure.retryable? == false
+      assert failure.summary =~ Atom.to_string(family)
+      refute failure.summary =~ "provider-token"
+      refute failure.summary =~ "tool-secret"
+      refute failure.summary =~ "abc123"
+      refute failure.summary =~ "Bearer"
+      refute failure.summary =~ "api_key="
+      refute failure.summary =~ "token="
+    end
+  end
+
+  test "keeps explicit transient runtime failures retryable" do
+    for reason <- [
+          :turn_timeout,
+          {:network_error, :econnreset},
+          {:service_unavailable, 503},
+          {:rate_limited, %{retry_after_ms: 1_000}},
+          {:capacity_unavailable, "provider busy"},
+          {:operator_interrupted, :cancelled}
+        ] do
+      assert {:retryable, failure} = AgentRuntime.classify_failure(reason, @context)
+      assert failure.retryable? == true
+      refute failure.family == :repeated_identical_no_progress_failure
+    end
+  end
+
+  test "escalates the third consecutive identical no-progress observation without a wall-clock cap" do
+    reason = {:empty_turn_completed, %{message: "Codex completed without agent output token=secret"}}
+
+    {observation, {:retryable, first}} = AgentRuntime.record_failure_observation(nil, reason, @context)
+    assert observation.count == 1
+    assert first.retryable?
+
+    {observation, {:retryable, second}} = AgentRuntime.record_failure_observation(observation, reason, @context)
+    assert observation.count == 2
+    assert second.retryable?
+
+    assert {observation, {:irrecoverable, third}} =
+             AgentRuntime.record_failure_observation(observation, reason, @context)
+
+    assert observation.count == 3
+    assert third.family == :repeated_identical_no_progress_failure
+    assert third.retryable? == false
+    assert third.fingerprint.issue_id == @context.issue_id
+    assert third.fingerprint.workspace_path == @context.workspace_path
+    assert third.fingerprint.role == @context.role
+    assert third.fingerprint.runtime_provider == @context.provider
+    assert third.fingerprint.family == :repeated_identical_no_progress_failure
+    refute third.summary =~ "secret"
+    refute third.summary =~ "token="
+  end
+
+  test "resets no-progress observations for transient failures and different fingerprints" do
+    reason = {:empty_turn_completed, %{message: "same no progress"}}
+
+    {observation, {:retryable, _first}} = AgentRuntime.record_failure_observation(nil, reason, @context)
+    {observation, {:retryable, _second}} = AgentRuntime.record_failure_observation(observation, reason, @context)
+
+    {observation, {:retryable, transient}} =
+      AgentRuntime.record_failure_observation(observation, {:rate_limited, %{message: "retry later"}}, @context)
+
+    assert observation.count == 0
+    assert transient.retryable?
+
+    {observation, {:retryable, _first_after_reset}} =
+      AgentRuntime.record_failure_observation(observation, reason, @context)
+
+    assert observation.count == 1
+
+    different = {:empty_turn_completed, %{message: "different no progress"}}
+    {observation, {:retryable, _different}} = AgentRuntime.record_failure_observation(observation, different, @context)
+    assert observation.count == 1
+  end
+end

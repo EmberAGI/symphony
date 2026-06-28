@@ -5,6 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.{AgentRuntime, Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.Tracker.ClaimLease
 
   @type worker_host :: String.t() | nil
 
@@ -20,16 +21,37 @@ defmodule SymphonyElixir.AgentRunner do
         :ok
 
       {:error, reason} ->
-        if AgentRuntime.provider_auth_failure?(reason) do
-          provider_auth_failure = AgentRuntime.provider_auth_failure(reason)
+        case run_error_action(issue, reason) do
+          {:exit, exit_reason} ->
+            exit(exit_reason)
 
-          Logger.error("Agent run blocked by provider authentication for #{issue_context(issue)}: #{AgentRuntime.provider_auth_failure_summary(provider_auth_failure)}")
-
-          exit(provider_auth_failure)
-        else
-          Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-          raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+          {:raise, message} ->
+            raise RuntimeError, message
         end
+    end
+  end
+
+  defp run_error_action(issue, reason) do
+    if AgentRuntime.provider_auth_failure?(reason) do
+      provider_auth_failure = AgentRuntime.provider_auth_failure(reason)
+
+      Logger.error("Agent run blocked by provider authentication for #{issue_context(issue)}: #{AgentRuntime.provider_auth_failure_summary(provider_auth_failure)}")
+
+      {:exit, provider_auth_failure}
+    else
+      classified_run_error_action(issue, reason)
+    end
+  end
+
+  defp classified_run_error_action(issue, reason) do
+    case AgentRuntime.classify_failure(reason, runner_failure_context(issue)) do
+      {:irrecoverable, failure} ->
+        Logger.error("Agent run blocked by irrecoverable runtime failure for #{issue_context(issue)}: #{failure.retry_reason}")
+        {:exit, {:irrecoverable_runtime_failed, failure}}
+
+      {:retryable, _failure} ->
+        Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
+        {:raise, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"}
     end
   end
 
@@ -211,5 +233,13 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
+  end
+
+  defp runner_failure_context(%Issue{id: issue_id}) do
+    %{
+      issue_id: issue_id,
+      role: ClaimLease.role_name(),
+      provider: AgentRuntime.provider()
+    }
   end
 end

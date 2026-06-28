@@ -425,13 +425,23 @@ defmodule SymphonyElixir.Workspace do
   defp sanitize_hook_output_for_log(output, max_bytes \\ 2_048) do
     binary_output = IO.iodata_to_binary(output)
 
-    case byte_size(binary_output) <= max_bytes do
-      true ->
-        binary_output
+    sanitized_output =
+      case byte_size(binary_output) <= max_bytes do
+        true ->
+          binary_output
 
-      false ->
-        binary_part(binary_output, 0, max_bytes) <> "... (truncated)"
-    end
+        false ->
+          binary_part(binary_output, 0, max_bytes) <> "... (truncated)"
+      end
+
+    redact_runtime_text(sanitized_output)
+  end
+
+  defp redact_runtime_text(value) when is_binary(value) do
+    value
+    |> String.replace(~r/(?i)\b(authorization)\s*[:=]\s*bearer\s+[^\s,\]}]+/, "\\1=[REDACTED]")
+    |> String.replace(~r/(?i)\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,\]}]+/, "credential=[REDACTED]")
+    |> String.replace(~r/(?i)\bbearer\s+[A-Za-z0-9._~+\/-]+=*/, "[REDACTED]")
   end
 
   defp validate_workspace_path(workspace, nil) when is_binary(workspace) do
