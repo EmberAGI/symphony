@@ -788,6 +788,81 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute log =~ "token="
   end
 
+  test "new claim lease run resets identical no-progress observations through orchestrator context" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-no-progress-new-claim-reset"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "EMB-1127",
+      title: "Reset no-progress on new claim",
+      state: "In Progress",
+      labels: [],
+      url: "https://linear.app/example/EMB-1127"
+    }
+
+    claim_lease = fn run_id ->
+      ClaimLease.new(%{
+        comment_id: "lease-comment-#{run_id}",
+        issue_id: issue_id,
+        issue_identifier: issue.identifier,
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: run_id,
+        attempt: 0,
+        state: "active",
+        started_at: DateTime.utc_now()
+      })
+    end
+
+    running_entry = fn ref, run_id, attempt ->
+      lease = claim_lease.(run_id)
+
+      %{
+        pid: nil,
+        ref: ref,
+        identifier: issue.identifier,
+        issue: %{issue | claim_lease: lease},
+        claim_lease: lease,
+        run_id: run_id,
+        workspace_path: "/tmp/symphony/EMB-1127",
+        started_at: DateTime.utc_now(),
+        retry_attempt: attempt
+      }
+    end
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    reason = {:empty_turn_completed, %{message: "same no progress token=hidden"}}
+
+    first_ref = make_ref()
+    state = %{state | running: %{issue_id => running_entry.(first_ref, "claim-run-a", 1)}}
+    assert {:noreply, state} = Orchestrator.handle_info({:DOWN, first_ref, :process, self(), reason}, state)
+    assert state.failure_observations[issue_id].count == 1
+
+    second_ref = make_ref()
+    state = %{state | running: %{issue_id => running_entry.(second_ref, "claim-run-a", 2)}, retry_attempts: %{}}
+    assert {:noreply, state} = Orchestrator.handle_info({:DOWN, second_ref, :process, self(), reason}, state)
+    assert state.failure_observations[issue_id].count == 2
+
+    third_ref = make_ref()
+    state = %{state | running: %{issue_id => running_entry.(third_ref, "claim-run-b", 1)}, retry_attempts: %{}}
+
+    assert {:noreply, state} = Orchestrator.handle_info({:DOWN, third_ref, :process, self(), reason}, state)
+    assert state.failure_observations[issue_id].count == 1
+    assert Map.has_key?(state.retry_attempts, issue_id)
+    refute Map.has_key?(state.blocked_failures, issue_id)
+    refute_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}, 100
+  end
+
   test "third identical no-progress retry escalates across retry timer dispatches with redacted metadata" do
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 

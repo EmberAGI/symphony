@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.ClaudeCodeAppServerTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.AgentRuntime
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
 
   @moduledoc """
@@ -40,6 +41,13 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     [
       ~s({"type":"system","subtype":"init","session_id":"sess-synthetic-family","apiKeySource":"none"}),
       ~s({"type":"result","subtype":"provider_authentication_or_revocation","is_error":true,"api_error_status":null,"result":"synthetic normalized family","session_id":"sess-synthetic-family"})
+    ]
+  end
+
+  defp stream_irrecoverable_runtime_result(subtype) do
+    [
+      ~s({"type":"system","subtype":"init","session_id":"sess-#{subtype}","apiKeySource":"none"}),
+      ~s({"type":"result","subtype":"#{subtype}","is_error":true,"api_error_status":null,"result":"runtime protocol failure token=adapter-secret","session_id":"sess-#{subtype}"})
     ]
   end
 
@@ -209,6 +217,41 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       refute match?({:error, {:auth_failed, _details}}, result)
     after
       File.rm_rf(ctx.test_root)
+    end
+  end
+
+  test "adapter-boundary runtime result shapes classify as malformed and unsupported families" do
+    cases = [
+      {"unsupported_app_server_contract", :unsupported_app_server_contract},
+      {"malformed_provider_event_schema", :malformed_provider_event_schema}
+    ]
+
+    for {subtype, family} <- cases do
+      ctx = setup_workspace("MT-CC-#{subtype}")
+
+      try do
+        configure!(ctx, stream_irrecoverable_runtime_result(subtype), claude_code_model: "sonnet")
+
+        {result, events, _trace} = run_shim(ctx, "Replay runtime protocol failure")
+
+        assert {:error, {:turn_failed, details}} = result
+        assert details.subtype == subtype
+        assert Enum.any?(events, &(&1.event == :turn_failed))
+
+        assert {:irrecoverable, failure} =
+                 AgentRuntime.classify_failure(result |> elem(1), %{
+                   issue_id: "issue-adapter-#{subtype}",
+                   workspace_path: ctx.workspace,
+                   role: "implementer",
+                   provider: :claude_code
+                 })
+
+        assert failure.family == family
+        refute failure.retry_reason =~ "adapter-secret"
+        refute failure.retry_reason =~ "token="
+      after
+        File.rm_rf(ctx.test_root)
+      end
     end
   end
 

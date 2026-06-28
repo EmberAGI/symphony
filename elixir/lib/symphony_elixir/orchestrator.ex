@@ -1314,14 +1314,51 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp runtime_failure_context(issue_id, running_entry) do
+    issue = Map.get(running_entry, :issue)
+    claim_lease = Map.get(running_entry, :claim_lease) || (match?(%Issue{}, issue) && Map.get(issue, :claim_lease))
+    workspace_path = Map.get(running_entry, :workspace_path)
+
     %{
       issue_id: issue_id,
-      workspace_path: Map.get(running_entry, :workspace_path),
+      workspace_path: workspace_path,
       role: ClaimLease.role_name(),
       provider: AgentRuntime.provider(),
-      run_id: Map.get(running_entry, :run_id)
+      run_id: Map.get(running_entry, :run_id),
+      claim_lease_run_id: claim_lease_scope_id(claim_lease),
+      retry_epoch: Map.get(running_entry, :retry_epoch),
+      input_fingerprint: runtime_input_fingerprint(issue, workspace_path),
+      operator_repair_id: Map.get(running_entry, :operator_repair_id)
     }
   end
+
+  defp claim_lease_scope_id(%ClaimLease{} = claim_lease) do
+    claim_lease.comment_id
+  end
+
+  defp claim_lease_scope_id(_claim_lease), do: nil
+
+  defp runtime_input_fingerprint(%Issue{} = issue, workspace_path) do
+    [
+      issue.id,
+      issue.identifier,
+      issue.title,
+      issue.description,
+      issue.branch_name,
+      issue.labels |> List.wrap() |> Enum.map(&to_string/1) |> Enum.sort(),
+      workspace_path
+    ]
+    |> :erlang.term_to_binary()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp runtime_input_fingerprint(_issue, workspace_path) when is_binary(workspace_path) do
+    :sha256
+    |> :crypto.hash(workspace_path)
+    |> Base.encode16(case: :lower)
+  end
+
+  defp runtime_input_fingerprint(_issue, _workspace_path), do: nil
 
   defp put_failure_observation(%State{} = state, issue_id, observation) when is_binary(issue_id) and is_map(observation) do
     %{state | failure_observations: Map.put(state.failure_observations, issue_id, observation)}

@@ -49,9 +49,10 @@ defmodule SymphonyElixir.AgentRunner do
         Logger.error("Agent run blocked by irrecoverable runtime failure for #{issue_context(issue)}: #{failure.retry_reason}")
         {:exit, {:irrecoverable_runtime_failed, failure}}
 
-      {:retryable, _failure} ->
-        Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-        {:raise, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"}
+      {:retryable, failure} ->
+        retry_reason = Map.get(failure, :retry_reason, "retryable_runtime_failure")
+        Logger.error("Agent run failed for #{issue_context(issue)}: #{retry_reason}")
+        {:raise, "Agent run failed for #{issue_context(issue)}: #{retry_reason}"}
     end
   end
 

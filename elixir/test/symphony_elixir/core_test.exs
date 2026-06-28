@@ -2843,7 +2843,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "agent runner keeps non-auth before_run hook failures ordinary" do
+  test "agent runner keeps non-auth before_run hook failures ordinary with redacted retryable output" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -2857,7 +2857,7 @@ defmodule SymphonyElixir.CoreTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         hook_before_run: """
-        printf '%s\\n' 'ordinary setup failure'
+        printf '%s\\n' 'ordinary setup failure token=ordinary-hook-secret'
         exit 19
         """
       )
@@ -2872,9 +2872,16 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert_raise RuntimeError, ~r/workspace_hook_failed.*before_run.*ordinary setup failure/, fn ->
-        AgentRunner.run(issue, nil, run_id: "run-before-run-ordinary")
-      end
+      log =
+        capture_log(fn ->
+          assert_raise RuntimeError, ~r/retryable_runtime_failure/, fn ->
+            AgentRunner.run(issue, nil, run_id: "run-before-run-ordinary")
+          end
+        end)
+
+      assert log =~ "retryable_runtime_failure"
+      refute log =~ "ordinary-hook-secret"
+      refute log =~ "token="
     after
       File.rm_rf(test_root)
     end
