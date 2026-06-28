@@ -71,6 +71,11 @@ defmodule SymphonyElixir.AgentRuntime do
   @spec provider_auth_failure?(term()) :: boolean()
   def provider_auth_failure?({:auth_failed, _details}), do: true
   def provider_auth_failure?({:provider_auth_failed, _details}), do: true
+
+  def provider_auth_failure?({:workspace_hook_failed, "before_run", _status, output}) do
+    not is_nil(provider_auth_hook_details(output))
+  end
+
   def provider_auth_failure?(_reason), do: false
 
   @doc """
@@ -89,6 +94,11 @@ defmodule SymphonyElixir.AgentRuntime do
     {:provider_auth_failed, provider_auth_details(details, provider)}
   end
 
+  def provider_auth_failure({:workspace_hook_failed, "before_run", _status, output}, provider) do
+    details = provider_auth_hook_details(output) || %{}
+    {:provider_auth_failed, provider_auth_details(details, provider)}
+  end
+
   def provider_auth_failure(_reason, provider) do
     {:provider_auth_failed, provider_auth_details(%{}, provider)}
   end
@@ -102,6 +112,7 @@ defmodule SymphonyElixir.AgentRuntime do
       case reason do
         {:provider_auth_failed, details} -> provider_auth_details(details, provider())
         {:auth_failed, details} -> provider_auth_details(details, provider())
+        {:workspace_hook_failed, "before_run", _status, _output} -> provider_auth_failure(reason) |> elem(1)
         details when is_map(details) -> provider_auth_details(details, provider())
         _ -> provider_auth_details(%{}, provider())
       end
@@ -133,14 +144,75 @@ defmodule SymphonyElixir.AgentRuntime do
   defp provider_auth_details(details, provider) when is_map(details) do
     %{
       provider: provider_auth_provider(Map.get(details, :provider) || Map.get(details, "provider") || provider),
-      api_error_status: provider_auth_status(Map.get(details, :api_error_status) || Map.get(details, "api_error_status")),
-      subtype: provider_auth_subtype(Map.get(details, :subtype) || Map.get(details, "subtype"))
+      api_error_status:
+        provider_auth_status(
+          Map.get(details, :api_error_status) ||
+            Map.get(details, "api_error_status") ||
+            Map.get(details, :status) ||
+            Map.get(details, "status")
+        ),
+      subtype: provider_auth_subtype(Map.get(details, :subtype) || Map.get(details, "subtype")),
+      remediation_hint: provider_auth_safe_fragment(Map.get(details, :remediation_hint) || Map.get(details, "remediation_hint")),
+      affected_role: provider_auth_safe_fragment(Map.get(details, :affected_role) || Map.get(details, "affected_role"))
     }
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
   end
 
   defp provider_auth_details(_details, provider), do: provider_auth_details(%{}, provider)
+
+  defp provider_auth_hook_details(output) do
+    output
+    |> hook_output_lines()
+    |> Enum.find_value(fn line ->
+      provider_auth_json_details(line) || provider_auth_summary_details(line)
+    end)
+  end
+
+  defp hook_output_lines(output) do
+    binary_output = IO.iodata_to_binary(output)
+
+    binary_output
+    |> binary_part(0, min(byte_size(binary_output), 16_384))
+    |> String.split("\n", trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp provider_auth_json_details(line) when is_binary(line) do
+    with {:ok, %{} = payload} <- Jason.decode(line),
+         true <- provider_auth_payload?(payload) do
+      payload
+    else
+      _ -> nil
+    end
+  end
+
+  defp provider_auth_payload?(payload) when is_map(payload) do
+    marker =
+      Map.get(payload, "kind") ||
+        Map.get(payload, "type") ||
+        Map.get(payload, "event") ||
+        Map.get(payload, "reason")
+
+    marker in ["provider_auth_failed", "provider_auth_failure", "auth_failed"]
+  end
+
+  defp provider_auth_summary_details(line) when is_binary(line) do
+    case Regex.run(~r/provider_auth_failed:\s+([a-zA-Z0-9_.:-]+)(?:\s+status=(\d{3}))?(?:\s+subtype=([a-zA-Z0-9_.:-]+))?/, line) do
+      [_, provider, status, subtype] ->
+        %{provider: provider, api_error_status: status, subtype: subtype}
+
+      [_, provider, status] ->
+        %{provider: provider, api_error_status: status}
+
+      [_, provider] ->
+        %{provider: provider}
+
+      _ ->
+        nil
+    end
+  end
 
   defp provider_auth_provider(provider) when provider in [:codex, :claude_code], do: provider
 
@@ -155,6 +227,14 @@ defmodule SymphonyElixir.AgentRuntime do
   defp provider_auth_provider(_provider), do: nil
 
   defp provider_auth_status(status) when status in [401, 403], do: status
+
+  defp provider_auth_status(status) when is_binary(status) do
+    case Integer.parse(String.trim(status)) do
+      {status, ""} -> provider_auth_status(status)
+      _ -> nil
+    end
+  end
+
   defp provider_auth_status(_status), do: nil
 
   defp provider_auth_subtype(subtype) when is_binary(subtype) do
@@ -169,6 +249,19 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   defp provider_auth_subtype(_subtype), do: nil
+
+  defp provider_auth_safe_fragment(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.replace(~r/[^a-zA-Z0-9 ._:@\/+-]/, "_")
+    |> String.slice(0, 120)
+    |> case do
+      "" -> nil
+      value -> value
+    end
+  end
+
+  defp provider_auth_safe_fragment(_value), do: nil
 
   defp provider_auth_status_fragment(status) when is_integer(status), do: "status=#{status}"
   defp provider_auth_status_fragment(_status), do: ""

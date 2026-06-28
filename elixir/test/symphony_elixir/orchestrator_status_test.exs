@@ -454,6 +454,90 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute log =~ "Bearer"
   end
 
+  test "provider auth before_run hook failure reaches orchestrator as blocked without ordinary retry" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-orchestrator-before-run-auth-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        poll_interval_ms: 30_000,
+        workspace_root: workspace_root,
+        hook_before_run: """
+        printf '%s\\n' '{"kind":"provider_auth_failed","provider":"claude_code","api_error_status":401,"subtype":"oauth_expired","remediation_hint":"run claude setup-token","raw":"Bearer orchestrator-hook-secret"}'
+        exit 17
+        """
+      )
+
+      issue_id = "issue-orchestrator-before-run-auth"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "EMB-1128",
+        title: "Classify pre-turn provider auth",
+        state: "In Progress",
+        labels: ["implementation-effort:high"],
+        url: "https://linear.app/example/EMB-1128"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      orchestrator_name = Module.concat(__MODULE__, :BeforeRunProviderAuthOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      :sys.replace_state(pid, fn state ->
+        %{state | poll_check_in_progress: true, next_poll_due_at_ms: nil}
+      end)
+
+      log =
+        capture_log(fn ->
+          send(pid, :run_poll_cycle)
+
+          active_lease = receive_claim_lease_state!(issue_id, "active")
+          assert active_lease.state == "active"
+
+          blocked_lease = receive_claim_lease_state!(issue_id, "blocked")
+          assert blocked_lease.state == "blocked"
+          assert blocked_lease.retry_reason == "provider_auth_failed: claude_code status=401 subtype=oauth_expired"
+          assert blocked_lease.recovery_reason == "provider-authentication-required"
+
+          note = receive_memory_comment_containing!(issue_id, "provider_auth_failed")
+          assert note =~ "## Operator Note"
+          assert note =~ "provider_auth_failed: claude_code status=401 subtype=oauth_expired"
+          refute note =~ "orchestrator-hook-secret"
+          refute note =~ "Bearer"
+
+          assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}, 1_000
+          assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}, 1_000
+
+          state = :sys.get_state(pid)
+          assert state.retry_attempts == %{}
+          assert MapSet.member?(state.claimed, issue_id)
+        end)
+
+      assert log =~ "Provider authentication failed"
+      assert log =~ "provider_auth_failed: claude_code status=401 subtype=oauth_expired"
+      refute log =~ "orchestrator-hook-secret"
+      refute log =~ "Bearer"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
     issue_id = "issue-usage-snapshot"
 
@@ -2472,6 +2556,31 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_snapshot(pid, predicate, deadline_ms)
+  end
+
+  defp receive_claim_lease_state!(issue_id, expected_state, timeout_ms \\ 1_000) do
+    receive do
+      {:memory_tracker_claim_lease, ^issue_id, lease} ->
+        case lease.state do
+          ^expected_state -> lease
+          _other_state -> receive_claim_lease_state!(issue_id, expected_state, timeout_ms)
+        end
+    after
+      timeout_ms -> flunk("timed out waiting for claim lease state #{expected_state}")
+    end
+  end
+
+  defp receive_memory_comment_containing!(issue_id, expected_text, timeout_ms \\ 1_000) do
+    receive do
+      {:memory_tracker_comment, ^issue_id, body} ->
+        if String.contains?(body, expected_text) do
+          body
+        else
+          receive_memory_comment_containing!(issue_id, expected_text, timeout_ms)
+        end
+    after
+      timeout_ms -> flunk("timed out waiting for memory tracker comment containing #{expected_text}")
+    end
   end
 
   defp do_wait_for_snapshot(pid, predicate, deadline_ms) do
