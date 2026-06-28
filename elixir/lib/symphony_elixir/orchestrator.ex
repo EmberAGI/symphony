@@ -1501,12 +1501,23 @@ defmodule SymphonyElixir.Orchestrator do
   defp retryable_task_exit_reason(reason, failure) when is_map(failure) do
     retry_reason = Map.get(failure, :retry_reason)
 
-    if no_progress_retry_reason?(retry_reason) do
-      retry_reason
-    else
-      inspect_full(reason)
+    cond do
+      no_progress_retry_reason?(retry_reason) ->
+        retry_reason
+
+      safe_compact_reason?(reason) ->
+        inspect(reason)
+
+      is_binary(retry_reason) and retry_reason != "" ->
+        retry_reason
+
+      true ->
+        "retryable_runtime_failure"
     end
   end
+
+  defp safe_compact_reason?(reason) when is_atom(reason), do: true
+  defp safe_compact_reason?(_reason), do: false
 
   defp no_progress_retry_reason?(retry_reason) when is_binary(retry_reason) do
     String.contains?(retry_reason, "empty_turn_completed") or
@@ -1515,8 +1526,6 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp no_progress_retry_reason?(_retry_reason), do: false
-
-  defp inspect_full(reason), do: inspect(reason, limit: :infinity, printable_limit: :infinity)
 
   defp reconcile_orphaned_claims(%State{} = state) do
     active_claims =

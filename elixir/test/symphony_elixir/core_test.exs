@@ -1079,8 +1079,9 @@ defmodule SymphonyElixir.CoreTest do
     assert event["run_id"] == run_id
     assert event["session_id"] == session_id
     assert event["attempt"] == 1
-    assert event["reason"] == "agent exited: #{inspect(reason, limit: :infinity, printable_limit: :infinity)}"
-    assert event["reason"] =~ long_detail
+    assert event["reason"] =~ "agent exited: retryable_runtime_failure"
+    refute event["reason"] =~ long_detail
+    assert String.length(event["reason"]) < 260
     assert event["retry"]["attempt"] == 2
     assert event["retry"]["delay_ms"] == 20_000
     assert event["retry"]["due_at_ms"] == due_at_ms

@@ -901,6 +901,59 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  test "generic retryable worker exit uses redacted classifier metadata for retry claim leases" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-generic-retry-redacted"
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "EMB-1127",
+      title: "Redact retry metadata",
+      state: "In Progress",
+      labels: [],
+      url: "https://linear.app/example/EMB-1127"
+    }
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: issue,
+          run_id: "run-generic-retry",
+          workspace_path: "/tmp/symphony/EMB-1127",
+          started_at: DateTime.utc_now(),
+          retry_attempt: 1
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    reason = {:agent_failed, %{message: "agent failed without progress token=generic-retry-secret"}}
+
+    log =
+      capture_log(fn ->
+        assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), reason}, state)
+        assert Map.has_key?(state.retry_attempts, issue_id)
+      end)
+
+    retry_lease = receive_claim_lease_state!(issue_id, "retrying")
+
+    assert retry_lease.retry_reason =~ "retryable_runtime_failure"
+    refute retry_lease.retry_reason =~ "generic-retry-secret"
+    refute retry_lease.retry_reason =~ "token="
+    refute log =~ "generic-retry-secret"
+    refute log =~ "token="
+  end
+
   test "provider auth before_run hook failure reaches orchestrator as blocked without ordinary retry" do
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 

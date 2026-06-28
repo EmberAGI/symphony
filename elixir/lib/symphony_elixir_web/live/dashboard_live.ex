@@ -92,6 +92,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
 
           <article class="metric-card">
+            <p class="metric-label">Blocked</p>
+            <p class="metric-value numeric"><%= @payload.counts.blocked %></p>
+            <p class="metric-detail">Irrecoverable runtime failures awaiting repair.</p>
+          </article>
+
+          <article class="metric-card">
             <p class="metric-label">Total tokens</p>
             <p class="metric-value numeric"><%= format_int(@payload.codex_totals.total_tokens) %></p>
             <p class="metric-detail numeric">
@@ -237,6 +243,51 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     </td>
                     <td><%= entry.attempt %></td>
                     <td class="mono"><%= entry.due_at || "n/a" %></td>
+                    <td><%= entry.error || "n/a" %></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          <% end %>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Blocked runtime failures</h2>
+              <p class="section-copy">Issues escalated because the runtime needs human, credential, configuration, tool, permission, protocol, or implementation repair.</p>
+            </div>
+          </div>
+
+          <%= if @payload.blocked == [] do %>
+            <p class="empty-state">No blocked runtime failures.</p>
+          <% else %>
+            <div class="table-wrap">
+              <table class="data-table" style="min-width: 760px;">
+                <thead>
+                  <tr>
+                    <th>Issue</th>
+                    <th>Family</th>
+                    <th>Runtime</th>
+                    <th>Repair</th>
+                    <th>Error</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr :for={entry <- @payload.blocked}>
+                    <td>
+                      <div class="issue-stack">
+                        <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                      </div>
+                    </td>
+                    <td>
+                      <span class={state_badge_class("blocked")}>
+                        <%= entry.family || "unknown" %>
+                      </span>
+                    </td>
+                    <td><%= entry.provider || "unknown" %></td>
+                    <td><%= entry.recovery_reason || "repair-required" %></td>
                     <td><%= entry.error || "n/a" %></td>
                   </tr>
                 </tbody>
