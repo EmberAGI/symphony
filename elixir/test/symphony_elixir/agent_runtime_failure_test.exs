@@ -43,6 +43,33 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     end
   end
 
+  test "classifies real adapter and runtime error shapes without pre-normalized families" do
+    cases = [
+      {:invalid_workspace_or_runtime_protocol, {:invalid_workspace_cwd, :outside_workspace_root, "/tmp/outside", "/tmp/root"}},
+      {:invalid_workspace_or_runtime_protocol, {:invalid_workspace_cwd, :invalid_remote_workspace, "worker-1", "/tmp/work\nspace"}},
+      {:missing_required_tool_or_cli, :bash_not_found},
+      {:missing_required_tool_or_cli, {:port_exit, 127, "claude: command not found token=tool-secret"}},
+      {:permission_denied, {:port_exit, 126, "permission denied secret=hidden"}},
+      {:missing_required_runtime_configuration, {:unsupported_runtime_provider, "future-provider token=config-secret"}},
+      {:missing_required_runtime_configuration, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, 123}}},
+      {:unsupported_app_server_contract, {:turn_failed, %{subtype: "unsupported_app_server_contract", message: "unsupported schema token=contract-secret"}}},
+      {:malformed_provider_event_schema, {:turn_failed, %{subtype: "malformed_provider_event_schema", event: "result", message: "missing required session_id token=event-secret"}}}
+    ]
+
+    for {family, reason} <- cases do
+      assert {:irrecoverable, failure} = AgentRuntime.classify_failure(reason, @context)
+      assert failure.family == family
+      assert failure.retryable? == false
+      refute failure.retry_reason =~ "tool-secret"
+      refute failure.retry_reason =~ "hidden"
+      refute failure.retry_reason =~ "config-secret"
+      refute failure.retry_reason =~ "contract-secret"
+      refute failure.retry_reason =~ "event-secret"
+      refute failure.retry_reason =~ "token="
+      refute failure.retry_reason =~ "secret="
+    end
+  end
+
   test "keeps explicit transient runtime failures retryable" do
     for reason <- [
           :turn_timeout,

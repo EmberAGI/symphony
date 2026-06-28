@@ -138,6 +138,10 @@ defmodule SymphonyElixir.AgentRuntime do
          |> provider_auth_failure(provider)
          |> provider_auth_failure_decision(context)}
 
+      real_irrecoverable_runtime_reason(reason) != nil ->
+        {family, details} = real_irrecoverable_runtime_reason(reason)
+        {:irrecoverable, irrecoverable_decision(family, details, context)}
+
       irrecoverable_family_reason?(reason) ->
         {family, details} = irrecoverable_family_reason(reason)
         {:irrecoverable, irrecoverable_decision(family, details, context)}
@@ -461,6 +465,82 @@ defmodule SymphonyElixir.AgentRuntime do
        message: workspace_hook_summary(output)
      }}
   end
+
+  defp real_irrecoverable_runtime_reason({:invalid_workspace_cwd, subtype, worker_host, workspace}) do
+    details =
+      case subtype do
+        :invalid_remote_workspace ->
+          %{
+            subtype: subtype,
+            path: workspace,
+            message: "remote runtime workspace path is invalid for #{safe_detail_fragment(worker_host)}"
+          }
+
+        _ ->
+          %{
+            subtype: subtype,
+            path: worker_host,
+            message: "runtime workspace path is outside the configured workspace root #{safe_detail_fragment(workspace)}"
+          }
+      end
+
+    {:invalid_workspace_or_runtime_protocol, details}
+  end
+
+  defp real_irrecoverable_runtime_reason({:invalid_workspace_cwd, subtype, path}) do
+    {:invalid_workspace_or_runtime_protocol,
+     %{
+       subtype: subtype,
+       path: path,
+       message: "runtime workspace path is invalid"
+     }}
+  end
+
+  defp real_irrecoverable_runtime_reason(:bash_not_found) do
+    {:missing_required_tool_or_cli, %{tool: "bash", message: "bash executable not found"}}
+  end
+
+  defp real_irrecoverable_runtime_reason({:port_exit, 127, output}) do
+    if missing_tool_output?(output) do
+      {:missing_required_tool_or_cli, %{message: workspace_hook_summary(output)}}
+    end
+  end
+
+  defp real_irrecoverable_runtime_reason({:port_exit, 126, output}) do
+    if permission_denied_output?(output) do
+      {:permission_denied, %{message: workspace_hook_summary(output)}}
+    end
+  end
+
+  defp real_irrecoverable_runtime_reason({:unsupported_runtime_provider, provider}) do
+    {:missing_required_runtime_configuration, %{name: "agent_runtime.provider", message: "unsupported runtime provider #{safe_detail_fragment(provider)}"}}
+  end
+
+  defp real_irrecoverable_runtime_reason({:unsafe_turn_sandbox_policy, details}) do
+    {:missing_required_runtime_configuration,
+     %{
+       name: "agent_runtime.permission_policy",
+       subtype: "unsafe_turn_sandbox_policy",
+       message: detail_summary(details)
+     }}
+  end
+
+  defp real_irrecoverable_runtime_reason({:turn_failed, details}) when is_map(details) do
+    subtype = subtype_from_details(details)
+
+    cond do
+      subtype == "unsupported_app_server_contract" ->
+        {:unsupported_app_server_contract, details}
+
+      subtype == "malformed_provider_event_schema" ->
+        {:malformed_provider_event_schema, details}
+
+      true ->
+        nil
+    end
+  end
+
+  defp real_irrecoverable_runtime_reason(_reason), do: nil
 
   defp irrecoverable_decision(family, details, context) do
     provider = provider_from_details(details) || runtime_provider(context)
