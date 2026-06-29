@@ -416,6 +416,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
          provider: :claude_code,
          api_error_status: 401,
          subtype: "oauth_expired",
+         remediation_hint: "refresh with Bearer raw-secret-token",
          raw: "Bearer raw-secret-token"
        }}
 
@@ -427,15 +428,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         assert MapSet.member?(state.claimed, issue_id)
       end)
 
-    assert_receive {:memory_tracker_claim_lease, ^issue_id, blocked_lease}
+    blocked_lease = receive_claim_lease_state!(issue_id, "blocked")
     assert blocked_lease.state == "blocked"
-    assert blocked_lease.retry_reason == "provider_auth_failed: claude_code status=401 subtype=oauth_expired"
+
+    assert blocked_lease.retry_reason ==
+             "provider_auth_failed: claude_code status=401 subtype=oauth_expired remediation=refresh with [REDACTED]"
+
     assert blocked_lease.recovery_reason == "provider-authentication-required"
     assert blocked_lease.run_id == "run-provider-auth"
 
     assert_receive {:memory_tracker_comment, ^issue_id, note}
     assert note =~ "## Operator Note"
-    assert note =~ "provider_auth_failed: claude_code status=401 subtype=oauth_expired"
+
+    assert note =~
+             "provider_auth_failed: claude_code status=401 subtype=oauth_expired remediation=refresh with [REDACTED]"
+
     refute note =~ "raw-secret-token"
     refute note =~ "Bearer"
 
@@ -450,8 +457,654 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert log =~ "Provider authentication failed"
     assert log =~ "status=401"
     assert log =~ "subtype=oauth_expired"
+    assert log =~ "remediation=refresh with [REDACTED]"
     refute log =~ "raw-secret-token"
     refute log =~ "Bearer"
+  end
+
+  test "deterministic irrecoverable runtime task failure escalates without ordinary retry" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    run_log_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-irrecoverable-run-log-#{System.unique_integer([:positive])}"
+      )
+
+    Application.put_env(:symphony_elixir, :run_log_root, run_log_root)
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :run_log_root)
+      File.rm_rf(run_log_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-missing-tool-blocked"
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "EMB-1127",
+      title: "Classify missing runtime tool",
+      state: "In Progress",
+      labels: [],
+      url: "https://linear.app/example/EMB-1127"
+    }
+
+    claim_lease =
+      ClaimLease.new(%{
+        comment_id: "lease-comment-missing-tool",
+        issue_id: issue_id,
+        issue_identifier: issue.identifier,
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-missing-tool",
+        attempt: 0,
+        state: "active",
+        started_at: DateTime.utc_now()
+      })
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: %{issue | claim_lease: claim_lease},
+          claim_lease: claim_lease,
+          run_id: claim_lease.run_id,
+          workspace_path: "/tmp/symphony/EMB-1127",
+          started_at: DateTime.utc_now(),
+          retry_attempt: 3
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{issue_id => %{attempt: 3, error: "ordinary retry should be cleared"}},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    reason =
+      {:missing_required_tool_or_cli, %{tool: "claude", message: "command not found token=missing-tool-secret"}}
+
+    log =
+      capture_log(fn ->
+        assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), reason}, state)
+        assert state.running == %{}
+        assert state.retry_attempts == %{}
+        assert MapSet.member?(state.claimed, issue_id)
+      end)
+
+    blocked_lease = receive_claim_lease_state!(issue_id, "blocked")
+    assert blocked_lease.state == "blocked"
+    assert blocked_lease.retry_reason =~ "missing_required_tool_or_cli"
+    assert blocked_lease.recovery_reason == "missing-required-tool-or-cli-repair-required"
+
+    assert_receive {:memory_tracker_comment, ^issue_id, note}
+    assert note =~ "## Operator Note"
+    assert note =~ "missing_required_tool_or_cli"
+    assert note =~ "Action required"
+    refute note =~ "missing-tool-secret"
+    refute note =~ "token="
+
+    assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "retrying"}}, 100
+
+    assert log =~ "Irrecoverable runtime failure"
+    assert log =~ "missing_required_tool_or_cli"
+    refute log =~ "missing-tool-secret"
+    refute log =~ "token="
+
+    run_log_path = Path.join([run_log_root, "EMB-1127", "run-missing-tool.jsonl"])
+    assert File.exists?(run_log_path)
+
+    [event] =
+      run_log_path
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.map(&Jason.decode!/1)
+
+    assert event["event"] == "irrecoverable_runtime_failure_escalated"
+    assert event["failure"]["family"] == "missing_required_tool_or_cli"
+    assert event["failure"]["claim_lease_state"] == "blocked"
+    refute event["failure"]["reason"] =~ "missing-tool-secret"
+    refute event["failure"]["reason"] =~ "token="
+  end
+
+  test "real invalid workspace adapter failure escalates without ordinary retry" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-invalid-workspace-blocked"
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "EMB-1127",
+      title: "Classify invalid workspace",
+      state: "In Progress",
+      labels: [],
+      url: "https://linear.app/example/EMB-1127"
+    }
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: issue,
+          run_id: "run-invalid-workspace",
+          workspace_path: "/tmp/symphony/EMB-1127",
+          started_at: DateTime.utc_now(),
+          retry_attempt: 2
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{issue_id => %{attempt: 2, error: "ordinary retry should be cleared"}},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    reason =
+      {:invalid_workspace_cwd, :outside_workspace_root, "/tmp/outside token=workspace-secret", "/tmp/root"}
+
+    log =
+      capture_log(fn ->
+        assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), reason}, state)
+        assert state.running == %{}
+        assert state.retry_attempts == %{}
+        assert state.blocked_failures[issue_id].family == :invalid_workspace_or_runtime_protocol
+        assert MapSet.member?(state.claimed, issue_id)
+      end)
+
+    blocked_lease = receive_claim_lease_state!(issue_id, "blocked")
+    assert blocked_lease.retry_reason =~ "invalid_workspace_or_runtime_protocol"
+    assert blocked_lease.recovery_reason == "invalid-workspace-or-runtime-protocol-repair-required"
+
+    assert_receive {:memory_tracker_comment, ^issue_id, note}
+    assert note =~ "## Operator Note"
+    assert note =~ "invalid_workspace_or_runtime_protocol"
+    refute note =~ "workspace-secret"
+    refute note =~ "token="
+
+    assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "retrying"}}, 100
+
+    assert log =~ "Irrecoverable runtime failure"
+    assert log =~ "invalid_workspace_or_runtime_protocol"
+    refute log =~ "workspace-secret"
+    refute log =~ "token="
+  end
+
+  test "irrecoverable escalation stays blocked when tracker mutation writes fail" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_fail_mutations, %{
+      comment: :comment_down,
+      label: :label_down,
+      state: :state_down
+    })
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_fail_mutations) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-tracker-mutation-failure"
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "EMB-1127",
+      title: "Tracker mutation failure still blocks",
+      state: "In Progress",
+      labels: [],
+      url: "https://linear.app/example/EMB-1127"
+    }
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: issue,
+          run_id: "run-tracker-failure",
+          workspace_path: "/tmp/symphony/EMB-1127",
+          started_at: DateTime.utc_now(),
+          retry_attempt: 1
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{issue_id => %{attempt: 1, error: "ordinary retry should be cleared"}},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    reason = {:permission_denied, %{path: "/root/.claude.json", message: "Permission denied secret=hidden"}}
+
+    log =
+      capture_log(fn ->
+        assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), reason}, state)
+        assert state.running == %{}
+        assert state.retry_attempts == %{}
+        assert state.blocked_failures[issue_id].family == :permission_denied
+        assert MapSet.member?(state.claimed, issue_id)
+      end)
+
+    blocked_lease = receive_claim_lease_state!(issue_id, "blocked")
+    assert blocked_lease.retry_reason =~ "permission_denied"
+    assert log =~ "Failed irrecoverable Human Escalation comment update"
+    assert log =~ "Failed irrecoverable Human Escalation label update"
+    assert log =~ "Failed irrecoverable Human Escalation state update"
+    refute log =~ "hidden"
+    refute log =~ "secret="
+  end
+
+  test "irrecoverable escalation redacts credential prose and JSON fields from side effects" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-irrecoverable-json-redaction"
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "EMB-1127",
+      title: "Redact irrecoverable runtime evidence",
+      state: "In Progress",
+      labels: [],
+      url: "https://linear.app/example/EMB-1127"
+    }
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: issue,
+          run_id: "run-json-redaction",
+          workspace_path: "/tmp/symphony/EMB-1127",
+          started_at: DateTime.utc_now(),
+          retry_attempt: 1
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{issue_id => %{attempt: 1, error: "ordinary retry should be cleared"}},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    raw_details =
+      ~s(Permission denied refresh token raw-refresh-token {"api_key":"raw-api-key","refresh_token":"raw-json-refresh"})
+
+    reason = {:permission_denied, %{path: "/root/.claude.json", message: raw_details}}
+
+    log =
+      capture_log(fn ->
+        assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), reason}, state)
+        assert state.running == %{}
+        assert state.retry_attempts == %{}
+        assert state.blocked_failures[issue_id].family == :permission_denied
+      end)
+
+    blocked_lease = receive_claim_lease_state!(issue_id, "blocked")
+    assert blocked_lease.retry_reason =~ "permission_denied"
+    assert blocked_lease.retry_reason =~ "[REDACTED]"
+    refute blocked_lease.retry_reason =~ "raw-refresh-token"
+    refute blocked_lease.retry_reason =~ "raw-api-key"
+    refute blocked_lease.retry_reason =~ "raw-json-refresh"
+
+    assert_receive {:memory_tracker_comment, ^issue_id, note}
+    assert note =~ "## Operator Note"
+    assert note =~ "[REDACTED]"
+    refute note =~ "raw-refresh-token"
+    refute note =~ "raw-api-key"
+    refute note =~ "raw-json-refresh"
+
+    assert log =~ "Irrecoverable runtime failure"
+    assert log =~ "[REDACTED]"
+    refute log =~ "raw-refresh-token"
+    refute log =~ "raw-api-key"
+    refute log =~ "raw-json-refresh"
+  end
+
+  test "third consecutive identical AgentRunner no-progress exit escalates immediately" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-no-progress-threshold"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "EMB-1127",
+      title: "Detect repeated no progress",
+      state: "In Progress",
+      labels: [],
+      url: "https://linear.app/example/EMB-1127"
+    }
+
+    claim_lease =
+      ClaimLease.new(%{
+        comment_id: "lease-comment-no-progress",
+        issue_id: issue_id,
+        issue_identifier: issue.identifier,
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-no-progress",
+        attempt: 0,
+        state: "active",
+        started_at: DateTime.utc_now()
+      })
+
+    running_entry = fn ref, attempt ->
+      %{
+        pid: nil,
+        ref: ref,
+        identifier: issue.identifier,
+        issue: %{issue | claim_lease: claim_lease},
+        claim_lease: claim_lease,
+        run_id: claim_lease.run_id,
+        workspace_path: "/tmp/symphony/EMB-1127",
+        started_at: DateTime.utc_now(),
+        retry_attempt: attempt
+      }
+    end
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    reason = {:agent_runtime_failed, {:empty_turn_completed, %{message: "same no progress token=hidden"}}}
+
+    first_ref = make_ref()
+    state = %{state | running: %{issue_id => running_entry.(first_ref, 1)}}
+    assert {:noreply, state} = Orchestrator.handle_info({:DOWN, first_ref, :process, self(), reason}, state)
+    assert Map.has_key?(state.retry_attempts, issue_id)
+    assert state.failure_observations[issue_id].count == 1
+    refute_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}, 100
+
+    second_ref = make_ref()
+    state = %{state | running: %{issue_id => running_entry.(second_ref, 2)}, retry_attempts: %{}}
+    assert {:noreply, state} = Orchestrator.handle_info({:DOWN, second_ref, :process, self(), reason}, state)
+    assert Map.has_key?(state.retry_attempts, issue_id)
+    assert state.failure_observations[issue_id].count == 2
+    refute_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}, 100
+
+    third_ref = make_ref()
+    state = %{state | running: %{issue_id => running_entry.(third_ref, 3)}, retry_attempts: %{}}
+
+    log =
+      capture_log(fn ->
+        assert {:noreply, state} = Orchestrator.handle_info({:DOWN, third_ref, :process, self(), reason}, state)
+        assert state.running == %{}
+        assert state.retry_attempts == %{}
+        assert state.failure_observations[issue_id].count == 3
+        assert MapSet.member?(state.claimed, issue_id)
+      end)
+
+    blocked_lease = receive_claim_lease_state!(issue_id, "blocked")
+    assert blocked_lease.state == "blocked"
+    assert blocked_lease.retry_reason =~ "repeated_identical_no_progress_failure"
+    assert blocked_lease.recovery_reason == "repeated-identical-no-progress-failure-repair-required"
+    assert_receive {:memory_tracker_comment, ^issue_id, note}
+    assert note =~ "repeated_identical_no_progress_failure"
+    assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}
+    refute log =~ "hidden"
+    refute log =~ "token="
+  end
+
+  test "new claim lease run resets identical no-progress observations through orchestrator context" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-no-progress-new-claim-reset"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "EMB-1127",
+      title: "Reset no-progress on new claim",
+      state: "In Progress",
+      labels: [],
+      url: "https://linear.app/example/EMB-1127"
+    }
+
+    claim_lease = fn run_id ->
+      ClaimLease.new(%{
+        comment_id: "lease-comment-#{run_id}",
+        issue_id: issue_id,
+        issue_identifier: issue.identifier,
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: run_id,
+        attempt: 0,
+        state: "active",
+        started_at: DateTime.utc_now()
+      })
+    end
+
+    running_entry = fn ref, run_id, attempt ->
+      lease = claim_lease.(run_id)
+
+      %{
+        pid: nil,
+        ref: ref,
+        identifier: issue.identifier,
+        issue: %{issue | claim_lease: lease},
+        claim_lease: lease,
+        run_id: run_id,
+        workspace_path: "/tmp/symphony/EMB-1127",
+        started_at: DateTime.utc_now(),
+        retry_attempt: attempt
+      }
+    end
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    reason = {:empty_turn_completed, %{message: "same no progress token=hidden"}}
+
+    first_ref = make_ref()
+    state = %{state | running: %{issue_id => running_entry.(first_ref, "claim-run-a", 1)}}
+    assert {:noreply, state} = Orchestrator.handle_info({:DOWN, first_ref, :process, self(), reason}, state)
+    assert state.failure_observations[issue_id].count == 1
+
+    second_ref = make_ref()
+    state = %{state | running: %{issue_id => running_entry.(second_ref, "claim-run-a", 2)}, retry_attempts: %{}}
+    assert {:noreply, state} = Orchestrator.handle_info({:DOWN, second_ref, :process, self(), reason}, state)
+    assert state.failure_observations[issue_id].count == 2
+
+    third_ref = make_ref()
+    state = %{state | running: %{issue_id => running_entry.(third_ref, "claim-run-b", 1)}, retry_attempts: %{}}
+
+    assert {:noreply, state} = Orchestrator.handle_info({:DOWN, third_ref, :process, self(), reason}, state)
+    assert state.failure_observations[issue_id].count == 1
+    assert Map.has_key?(state.retry_attempts, issue_id)
+    refute Map.has_key?(state.blocked_failures, issue_id)
+    refute_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}, 100
+  end
+
+  test "third identical no-progress retry escalates across retry timer dispatches with redacted metadata" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-no-progress-retry-dispatch-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        max_retry_backoff_ms: 1,
+        hook_before_run: "sleep 30"
+      )
+
+      issue_id = "issue-no-progress-retry-dispatch"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "EMB-1127",
+        title: "Detect repeated no progress across retry dispatch",
+        state: "In Progress",
+        labels: [],
+        url: "https://linear.app/example/EMB-1127"
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      issue_workspace_path = Path.join(workspace_root, issue.identifier)
+
+      orchestrator_name = Module.concat(__MODULE__, :NoProgressRetryDispatchOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      initial_state = :sys.get_state(pid)
+      first_ref = make_ref()
+
+      :sys.replace_state(pid, fn _ ->
+        %{
+          initial_state
+          | running: %{
+              issue_id => %{
+                pid: nil,
+                ref: first_ref,
+                identifier: issue.identifier,
+                issue: issue,
+                run_id: "run-initial-no-progress",
+                workspace_path: issue_workspace_path,
+                started_at: DateTime.utc_now(),
+                retry_attempt: 0
+              }
+            },
+            claimed: MapSet.new([issue_id]),
+            retry_attempts: %{}
+        }
+      end)
+
+      reason = {:empty_turn_completed, %{message: "same no progress token=hidden"}}
+
+      log =
+        capture_log(fn ->
+          send(pid, {:DOWN, first_ref, :process, self(), reason})
+
+          first_retry_lease = receive_claim_lease_state!(issue_id, "retrying")
+          refute first_retry_lease.retry_reason =~ "hidden"
+          refute first_retry_lease.retry_reason =~ "token="
+          assert first_retry_lease.retry_reason =~ "retryable_runtime_failure"
+
+          first_retry_run = kill_retry_dispatch!(pid, issue_id, reason)
+          assert first_retry_run != "run-initial-no-progress"
+
+          second_retry_lease = receive_claim_lease_state!(issue_id, "retrying")
+          refute second_retry_lease.retry_reason =~ "hidden"
+          refute second_retry_lease.retry_reason =~ "token="
+
+          second_retry_run = kill_retry_dispatch!(pid, issue_id, reason)
+          assert second_retry_run != first_retry_run
+
+          blocked_lease = receive_claim_lease_state!(issue_id, "blocked")
+          assert blocked_lease.retry_reason =~ "repeated_identical_no_progress_failure"
+          assert blocked_lease.recovery_reason == "repeated-identical-no-progress-failure-repair-required"
+          refute blocked_lease.retry_reason =~ "hidden"
+          refute blocked_lease.retry_reason =~ "token="
+
+          note = receive_memory_comment_containing!(issue_id, "repeated_identical_no_progress_failure")
+          assert note =~ "repeated_identical_no_progress_failure"
+          refute note =~ "hidden"
+          refute note =~ "token="
+
+          assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}, 1_000
+          assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}, 1_000
+
+          state = :sys.get_state(pid)
+          assert state.running == %{}
+          assert state.retry_attempts == %{}
+          assert state.failure_observations[issue_id].count == 3
+        end)
+
+      refute log =~ "hidden"
+      refute log =~ "token="
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "generic retryable worker exit uses redacted classifier metadata for retry claim leases" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-generic-retry-redacted"
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "EMB-1127",
+      title: "Redact retry metadata",
+      state: "In Progress",
+      labels: [],
+      url: "https://linear.app/example/EMB-1127"
+    }
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: issue,
+          run_id: "run-generic-retry",
+          workspace_path: "/tmp/symphony/EMB-1127",
+          started_at: DateTime.utc_now(),
+          retry_attempt: 1
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    reason = {:agent_failed, %{message: "agent failed without progress token=generic-retry-secret"}}
+
+    log =
+      capture_log(fn ->
+        assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), reason}, state)
+        assert Map.has_key?(state.retry_attempts, issue_id)
+      end)
+
+    retry_lease = receive_claim_lease_state!(issue_id, "retrying")
+
+    assert retry_lease.retry_reason =~ "retryable_runtime_failure"
+    refute retry_lease.retry_reason =~ "generic-retry-secret"
+    refute retry_lease.retry_reason =~ "token="
+    refute log =~ "generic-retry-secret"
+    refute log =~ "token="
   end
 
   test "provider auth before_run hook failure reaches orchestrator as blocked without ordinary retry" do
@@ -2589,6 +3242,35 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         end
     after
       timeout_ms -> flunk("timed out waiting for memory tracker comment containing #{expected_text}")
+    end
+  end
+
+  defp kill_retry_dispatch!(pid, issue_id, reason) do
+    running = wait_for_running_entry(pid, issue_id, 5_000)
+
+    Process.exit(running.pid, reason)
+
+    running.claim_lease.run_id
+  end
+
+  defp wait_for_running_entry(pid, issue_id, timeout_ms) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_running_entry(pid, issue_id, deadline_ms)
+  end
+
+  defp do_wait_for_running_entry(pid, issue_id, deadline_ms) do
+    case :sys.get_state(pid).running do
+      %{^issue_id => %{pid: running_pid, workspace_path: workspace_path} = running_entry}
+      when is_pid(running_pid) and is_binary(workspace_path) ->
+        running_entry
+
+      _running ->
+        if System.monotonic_time(:millisecond) >= deadline_ms do
+          flunk("timed out waiting for running retry dispatch")
+        else
+          Process.sleep(5)
+          do_wait_for_running_entry(pid, issue_id, deadline_ms)
+        end
     end
   end
 

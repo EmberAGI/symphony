@@ -673,7 +673,10 @@ Distinct terminal reasons are important because retry logic and logs differ.
 - `Worker Exit (abnormal)`
   - Remove running entry.
   - Update aggregate runtime totals.
-  - Schedule exponential-backoff retry.
+  - Classify the runtime failure before ordinary retry scheduling.
+  - Schedule exponential-backoff retry only for retryable or unknown failures.
+  - For irrecoverable runtime failures, avoid ordinary retry scheduling and
+    drive the configured tracker escalation path instead.
 
 - `Codex Update Event`
   - Update live session fields, token counters, and rate limits.
@@ -764,6 +767,8 @@ Retry entry creation:
 
 - Cancel any existing retry timer for the same issue.
 - Store `attempt`, `identifier`, `error`, `due_at_ms`, and new timer handle.
+- Do not create or preserve a retry entry after the runtime failure classifier
+  marks the failure as irrecoverable.
 
 Backoff formula:
 
@@ -788,6 +793,10 @@ Note:
   multiplying tracker/API cost during retry storms.
 - Terminal-state workspace cleanup is performed directly by the retry path for the retried issue,
   and is also handled by startup cleanup and active-run reconciliation for their respective scopes.
+- Irrecoverable runtime failures are status-visible blocked/escalated outcomes,
+  not retries. The tracker escalation path records the redacted failure family,
+  affected provider/runtime when known, and required human action; it must not
+  log raw provider payloads, secret values, or full issue bodies.
 
 ### 8.5 Active Run Reconciliation
 
@@ -2078,6 +2087,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   changing orchestrator behavior
 - Human attention notifications, when implemented, are triggered by the `Human Escalation` label
   rather than by `Human Review` state transitions alone
+- Irrecoverable runtime failure escalation surfaces must distinguish blocked or
+  escalated claim leases from ordinary retry queue entries, including in any
+  JSON status API, dashboard, or log summary that presents retry state.
 
 ### 17.7 CLI and Host Lifecycle
 

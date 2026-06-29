@@ -626,8 +626,9 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   defp auth_subtype?(%{"subtype" => subtype}) when is_binary(subtype) do
     normalized = String.downcase(subtype)
 
-    String.contains?(normalized, "auth") or String.contains?(normalized, "login") or
-      String.contains?(normalized, "credential")
+    normalized != "provider_authentication_or_revocation" and
+      (String.contains?(normalized, "auth") or String.contains?(normalized, "login") or
+         String.contains?(normalized, "credential"))
   end
 
   defp auth_subtype?(_event), do: false
