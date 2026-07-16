@@ -12,6 +12,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @default_start_timeout_ms 10_000
   @default_poll_interval_ms 50
   @default_stop_timeout_ms 5_000
+  @default_ready_stability_ms 2_000
   @required_version "0.7.4"
   @required_protocol 16
 
@@ -223,7 +224,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
          poll_interval_ms
        ) do
     if MapSet.subset?(statuses, MapSet.new(["idle", "done"])) do
-      stability_ms = Map.get(context, :ready_stability_ms, 750)
+      stability_ms = Map.get(context, :ready_stability_ms, @default_ready_stability_ms)
       Process.sleep(stability_ms)
 
       case command(context, ["--session", session_name, "agent", "get", agent_name], env) do
