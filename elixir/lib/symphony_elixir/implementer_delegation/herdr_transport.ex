@@ -24,15 +24,14 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   @impl true
-  def start_session(%{name: name, isolated: true, workspace: workspace} = spec, context)
+  def start_session(%{name: name, isolated: true, workspace: workspace}, context)
       when is_binary(name) and name != "" and is_binary(workspace) and is_map(context) do
     runtime_root = Map.get(context, :socket_root, short_socket_root(name))
     env = isolated_env(context, runtime_root)
     expected_socket = Path.join([runtime_root, "herdr", "sessions", name, "herdr.sock"])
 
     with :ok <- validate_socket_path(expected_socket),
-         :ok <- validate_runtime_root(runtime_root),
-         {:ok, worker_launcher} <- materialize_worker_launcher(runtime_root, Map.get(spec, :worker), context) do
+         :ok <- validate_runtime_root(runtime_root) do
       File.mkdir_p!(runtime_root)
 
       server_task =
@@ -46,7 +45,6 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
             name: name,
             socket: status.socket,
             runtime_root: runtime_root,
-            worker_launcher: worker_launcher,
             env: env,
             server_task: server_task
           }
@@ -69,6 +67,17 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   def start_session(_spec, _context), do: {:error, :invalid_herdr_isolated_session_spec}
+
+  @impl true
+  def prepare_worker(%{runtime_root: runtime_root} = session, worker, context)
+      when is_binary(runtime_root) and is_map(context) do
+    case materialize_worker_launcher(runtime_root, worker, context) do
+      {:ok, worker_launcher} -> {:ok, Map.put(session, :worker_launcher, worker_launcher)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def prepare_worker(_session, _worker, _context), do: {:error, :invalid_herdr_worker_session}
 
   @impl true
   def start_agent(%{name: session_name, env: env}, %{name: name, cwd: cwd, argv: argv} = spec, context)

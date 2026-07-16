@@ -18,6 +18,8 @@ defmodule SymphonyElixir.ImplementerDelegation.Transport do
 
   @callback default_server_snapshot(context()) :: {:ok, server_snapshot()} | {:error, term()}
   @callback start_session(map(), context()) :: {:ok, session_ref()} | {:error, term()}
+  @callback prepare_worker(session_ref(), map(), context()) ::
+              {:ok, session_ref()} | {:error, term()}
   @callback start_agent(session_ref(), map(), context()) :: {:ok, agent_ref()} | {:error, term()}
   @callback submit(session_ref(), agent_ref(), String.t(), context()) :: :ok | {:error, term()}
   @callback await_agent(session_ref(), agent_ref(), [String.t()], non_neg_integer(), context()) ::

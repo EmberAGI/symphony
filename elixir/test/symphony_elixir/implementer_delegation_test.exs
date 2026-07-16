@@ -17,8 +17,13 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
        %{
          name: spec.name,
          socket: "/tmp/#{spec.name}/herdr.sock",
-         worker_launcher: "/tmp/#{spec.name}/launch-worker"
+         runtime_root: "/tmp/#{spec.name}"
        }}
+    end
+
+    def prepare_worker(session, spec, %{owner: owner}) do
+      send(owner, {:transport, :prepare_worker, session, spec})
+      {:ok, Map.put(session, :worker_launcher, "/tmp/#{session.name}/launch-worker")}
     end
 
     def start_agent(session, spec, %{owner: owner}) do
@@ -101,20 +106,25 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert session_spec.name == "octo-emb-1141-run-7"
     assert session_spec.isolated
     assert session_spec.workspace == "/tmp/selected-workspace"
-    assert session_spec.worker.name == "implementer_worker"
-    assert session_spec.worker.role == :worker
-    assert session_spec.worker.profile == contract.worker
+    refute Map.has_key?(session_spec, :worker)
 
-    assert session_spec.worker.argv ==
-             codex_argv(contract.worker, "/tmp/selected-workspace")
+    assert_receive {:transport, :prepare_worker, herdr_session, worker_spec}
+    assert worker_spec.name == "implementer_worker"
+    assert worker_spec.role == :worker
+    assert worker_spec.profile == contract.worker
 
-    refute session_spec.worker.may_spawn_agents
+    assert worker_spec.argv ==
+             codex_argv(contract.worker, "/tmp/selected-workspace", herdr_session)
+
+    refute worker_spec.may_spawn_agents
 
     assert_receive {:transport, :start_agent, %{name: "octo-emb-1141-run-7"}, orchestrator_spec}
     assert orchestrator_spec.name == "implementer_orchestrator"
     assert orchestrator_spec.role == :orchestrator
     assert orchestrator_spec.profile == contract.orchestrator
-    assert orchestrator_spec.argv == codex_argv(contract.orchestrator, "/tmp/selected-workspace")
+
+    assert orchestrator_spec.argv ==
+             codex_argv(contract.orchestrator, "/tmp/selected-workspace", herdr_session)
 
     assert orchestrator_spec.env == %{
              "OCTO_HERDR_WORKER_LAUNCHER" => "/tmp/octo-emb-1141-run-7/launch-worker"
@@ -172,11 +182,13 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     assert_receive {:transport, :default_server_snapshot}
     assert_receive {:transport, :start_session, session_spec}
+    assert_receive {:transport, :prepare_worker, _, worker_spec}
     assert_receive {:transport, :start_agent, _, orchestrator_spec}
 
-    assert session_spec.worker.argv == claude_argv(contract.worker)
+    refute Map.has_key?(session_spec, :worker)
+    assert worker_spec.argv == claude_argv(contract.worker)
     assert orchestrator_spec.argv == claude_argv(contract.orchestrator)
-    assert Enum.member?(session_spec.worker.argv, contract.worker.instructions)
+    assert Enum.member?(worker_spec.argv, contract.worker.instructions)
     assert Enum.member?(orchestrator_spec.argv, contract.orchestrator.instructions)
   end
 
@@ -200,8 +212,11 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     assert_receive {:transport, :default_server_snapshot}
     assert_receive {:transport, :start_session, session_spec}
-    assert session_spec.worker.profile.name == "implementer-worker"
-    assert session_spec.worker.profile.model == "gpt-5.6-luna"
+    refute Map.has_key?(session_spec, :worker)
+
+    assert_receive {:transport, :prepare_worker, _, worker_spec}
+    assert worker_spec.profile.name == "implementer-worker"
+    assert worker_spec.profile.model == "gpt-5.6-luna"
 
     assert_receive {:transport, :start_agent, _, orchestrator_spec}
     assert orchestrator_spec.profile.name == "implementer-orchestrator"
@@ -253,7 +268,10 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     }
   end
 
-  defp codex_argv(profile, workspace) do
+  defp codex_argv(profile, workspace, herdr_session) do
+    runtime_root = herdr_session.runtime_root
+    socket = herdr_session.socket
+
     [
       "codex",
       "--model",
@@ -266,8 +284,12 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       "developer_instructions=#{inspect(profile.instructions)}",
       "--config",
       "shell_environment_policy.inherit=all",
-      "--sandbox",
-      "workspace-write",
+      "--permission-profile",
+      "octo_herdr",
+      "--config",
+      "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\"},#{inspect(runtime_root)}=\"read\"}",
+      "--config",
+      "permissions.octo_herdr.network={enabled=true,unix_sockets={#{inspect(socket)}=\"allow\"}}",
       "--ask-for-approval",
       "never",
       "--disable",

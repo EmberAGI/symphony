@@ -98,8 +98,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
                %{
                  name: "octo-emb-1141-run-7",
                  isolated: true,
-                 workspace: "/tmp/selected-workspace",
-                 worker: %{argv: ["/bin/sh"]}
+                 workspace: "/tmp/selected-workspace"
                },
                adapter_context
              )
@@ -112,7 +111,23 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert String.starts_with?(session.runtime_root, "/tmp/octo-herdr-")
     assert String.length(session.socket) <= 103
     assert session.socket == Path.join(session.runtime_root, "herdr/sessions/octo-emb-1141-run-7/herdr.sock")
+    refute Map.has_key?(session, :worker_launcher)
+
+    worker_argv = [
+      "codex",
+      "--permission-profile",
+      "octo_herdr",
+      "--config",
+      "permissions.octo_herdr.network={enabled=true,unix_sockets={#{inspect(session.socket)}=\"allow\"}}"
+    ]
+
+    assert {:ok, session} =
+             HerdrTransport.prepare_worker(session, %{argv: worker_argv}, adapter_context)
+
     assert File.exists?(session.worker_launcher)
+    launcher = File.read!(session.worker_launcher)
+    assert launcher =~ "--permission-profile"
+    assert launcher =~ session.socket
 
     restricted_herdr = Path.join(session.runtime_root, "worker-bin/herdr")
     assert File.exists?(restricted_herdr)
