@@ -267,6 +267,20 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert_receive {:transport, :start_agent, _, orchestrator_spec}
     assert orchestrator_spec.profile.name == "implementer-orchestrator"
     assert orchestrator_spec.profile.model == "gpt-5.6-sol"
+
+    assert orchestrator_spec.env == %{
+             "OCTO_HERDR_WORKER_LAUNCHER" => "/tmp/octo-emb-1141-runtime-seam/launch-worker",
+             "SYMPHONY_EXPECTED_BRANCH" => "agent/emb-1141-exercise-the-public-runtime-seam",
+             "SYMPHONY_ISSUE_BRANCH_NAME" => "sebastianvarela/emb-1141-exercise-the-public-runtime-seam",
+             "SYMPHONY_ISSUE_ID" => "issue-1141",
+             "SYMPHONY_ISSUE_IDENTIFIER" => "EMB-1141",
+             "SYMPHONY_ISSUE_REPOSITORY" => "EmberAGI/scaling-octo-engine",
+             "SYMPHONY_ISSUE_REPOSITORY_SOURCE" => "linear_label",
+             "SYMPHONY_ISSUE_STATE" => "In Progress",
+             "SYMPHONY_ISSUE_TITLE" => "Exercise the public runtime seam",
+             "SYMPHONY_ISSUE_URL" => "https://linear.app/emberai/issue/EMB-1141"
+           }
+
     assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 30_000}
 
     assert {:ok, {next_session, turn}} =
@@ -310,6 +324,10 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       identifier: "EMB-1141",
       title: "Exercise the public runtime seam",
       state: "In Progress",
+      branch_name: "sebastianvarela/emb-1141-exercise-the-public-runtime-seam",
+      url: "https://linear.app/emberai/issue/EMB-1141",
+      repository: "EmberAGI/scaling-octo-engine",
+      repository_source: "linear_label",
       labels: ["implementation-effort:moderate"]
     }
   end

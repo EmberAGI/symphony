@@ -27,8 +27,10 @@ defmodule SymphonyElixir.ImplementerDelegation do
   def start_session(workspace, contract, opts) when is_binary(workspace) and is_map(contract) and is_list(opts) do
     transport = Keyword.fetch!(opts, :transport)
     transport_context = Keyword.get(opts, :transport_context, %{})
+    orchestrator_env = Keyword.get(opts, :orchestrator_env, %{})
 
     with :ok <- validate_workspace(workspace),
+         :ok <- validate_orchestrator_env(orchestrator_env),
          {:ok, contract} <- ImplementationEffort.validate_runtime_contract(contract),
          {:ok, name} <- session_name(opts),
          {:ok, default_server_before} <- transport.default_server_snapshot(transport_context),
@@ -49,7 +51,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
              worker_spec(contract, workspace, herdr_session)
            ),
          {:ok, orchestrator} <-
-           start_orchestrator(transport, transport_context, herdr_session, workspace, contract) do
+           start_orchestrator(transport, transport_context, herdr_session, workspace, contract, orchestrator_env) do
       {:ok,
        %{
          runtime_adapter: __MODULE__,
@@ -152,7 +154,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
   def stop_session(_session), do: {:error, :invalid_implementer_delegation_session}
 
-  defp start_orchestrator(transport, transport_context, herdr_session, workspace, contract) do
+  defp start_orchestrator(transport, transport_context, herdr_session, workspace, contract, orchestrator_env) do
     spec = %{
       name: "implementer_orchestrator",
       role: :orchestrator,
@@ -160,7 +162,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
       profile: contract.orchestrator,
       cwd: workspace,
       argv: launcher_argv(contract.provider, contract.orchestrator, workspace, herdr_session),
-      env: %{"OCTO_HERDR_WORKER_LAUNCHER" => Map.fetch!(herdr_session, :worker_launcher)}
+      env: Map.put(orchestrator_env, "OCTO_HERDR_WORKER_LAUNCHER", Map.fetch!(herdr_session, :worker_launcher))
     }
 
     case transport.start_agent(herdr_session, spec, transport_context) do
@@ -190,6 +192,14 @@ defmodule SymphonyElixir.ImplementerDelegation do
         {:error, {:implementer_orchestrator_start_failed, reason}}
     end
   end
+
+  defp validate_orchestrator_env(env) when is_map(env) do
+    if Enum.all?(env, fn {key, value} -> is_binary(key) and is_binary(value) end),
+      do: :ok,
+      else: {:error, :invalid_implementer_orchestrator_environment}
+  end
+
+  defp validate_orchestrator_env(_env), do: {:error, :invalid_implementer_orchestrator_environment}
 
   defp prepare_worker(transport, transport_context, herdr_session, worker_spec) do
     case transport.prepare_worker(herdr_session, worker_spec, transport_context) do

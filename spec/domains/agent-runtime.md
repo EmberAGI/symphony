@@ -370,6 +370,9 @@ validation, and required result; it does not restate stable worker behavior.
 Short Herdr session identities remain readable; identities that would exceed
 the default cross-platform Unix-socket budget compact deterministically to an
 issue-derived prefix plus a digest while remaining unique per production run.
+The orchestrator receives the same non-secret issue, repository, and expected-
+branch environment derived for workspace hooks, projected through the runtime
+session Interface rather than reconstructed by the transport Adapter.
 
 The orchestrator receives the worker launcher path through
 `OCTO_HERDR_WORKER_LAUNCHER`. Missing or incompatible Herdr, unsafe socket

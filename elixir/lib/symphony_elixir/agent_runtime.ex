@@ -12,7 +12,7 @@ defmodule SymphonyElixir.AgentRuntime do
 
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
-  alias SymphonyElixir.{Config, ImplementationEffort, ImplementerDelegation}
+  alias SymphonyElixir.{Config, ImplementationEffort, ImplementerDelegation, Workspace}
   alias SymphonyElixir.ImplementerDelegation.HerdrTransport
 
   @type provider :: :codex | :claude_code
@@ -156,6 +156,7 @@ defmodule SymphonyElixir.AgentRuntime do
         contract,
         issue_identifier: issue_identifier,
         run_id: run_id,
+        orchestrator_env: Workspace.issue_environment(issue),
         transport: Keyword.get(opts, :delegation_transport, HerdrTransport),
         transport_context: transport_context
       )

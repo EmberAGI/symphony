@@ -10,6 +10,15 @@ defmodule SymphonyElixir.Workspace do
 
   @type worker_host :: String.t() | nil
 
+  @doc "Return the non-secret issue context exported to workspace hooks and delegated runtimes."
+  @spec issue_environment(map() | String.t() | nil) :: %{String.t() => String.t()}
+  def issue_environment(issue_or_identifier) do
+    issue_or_identifier
+    |> issue_context()
+    |> hook_env()
+    |> Map.new()
+  end
+
   @spec create_for_issue(map() | String.t() | nil, worker_host()) ::
           {:ok, Path.t()} | {:error, term()}
   def create_for_issue(issue_or_identifier, worker_host \\ nil) do
