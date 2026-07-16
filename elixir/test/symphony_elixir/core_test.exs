@@ -2563,7 +2563,7 @@ defmodule SymphonyElixir.CoreTest do
       }
 
       before = MapSet.new(File.ls!(workspace_root))
-      assert :ok = AgentRunner.run(issue)
+      assert :ok = AgentRunner.run(issue, nil, role: "reviewer")
       entries_after = MapSet.new(File.ls!(workspace_root))
 
       created =
@@ -2656,6 +2656,7 @@ defmodule SymphonyElixir.CoreTest do
                AgentRunner.run(
                  issue,
                  test_pid,
+                 role: "reviewer",
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
                )
 
@@ -2780,7 +2781,7 @@ defmodule SymphonyElixir.CoreTest do
 
       log =
         capture_log(fn ->
-          assert catch_exit(AgentRunner.run(issue, nil, run_id: "run-auth")) ==
+          assert catch_exit(AgentRunner.run(issue, nil, run_id: "run-auth", role: "reviewer")) ==
                    {:provider_auth_failed, %{provider: :claude_code, api_error_status: 403, subtype: "login_required"}}
         end)
 
@@ -3037,7 +3038,7 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert :ok = AgentRunner.run(issue, nil, role: "reviewer", issue_state_fetcher: state_fetcher)
       assert_receive {:issue_state_fetch, 1}
       assert_receive {:issue_state_fetch, 2}
 
@@ -3158,7 +3159,7 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert :ok = AgentRunner.run(issue, nil, role: "reviewer", issue_state_fetcher: state_fetcher)
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1
@@ -3328,6 +3329,8 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "app server startup command supports codex args override from workflow config" do
+    System.put_env("SYMPHONY_ROLE", "reviewer")
+
     test_root =
       Path.join(
         System.tmp_dir!(),

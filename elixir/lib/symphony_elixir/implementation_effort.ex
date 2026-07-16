@@ -1,94 +1,54 @@
 defmodule SymphonyElixir.ImplementationEffort do
   @moduledoc """
-  Parses Linear Implementation Effort labels and derives provider reasoning rows.
+  Selects an implementation-effort tier from Linear labels and resolves the
+  corresponding canonical agent profile.
+
+  Agent identity, reusable instructions, capabilities, models, and provider
+  effort matrices belong to `AgentProfileCatalog`; this module owns only
+  label selection and role-to-profile routing.
   """
 
-  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.{AgentProfileCatalog, Linear.Issue}
 
   @prefix "implementation-effort:"
   @tiers ~w(extreme high moderate low minimal)
-  @dynamic_roles ~w(implementer reviewer qa)
   @providers ~w(codex claude_code)
-  @required_provider_keys ~w(default default_tier)
-  @known_role_keys ~w(default implementer reviewer qa landing backlog-processor)
-  @shared_efforts ~w(none low medium high xhigh max)
-  @codex_supported_efforts ~w(none low medium high xhigh)
-  @claude_xhigh_supported_models ~w(fable-5 mythos-5 opus-4-8 opus-4-7)
-  @claude_max_supported_models ~w(fable-5 mythos-5 opus-4-8 opus-4-7 opus-4-6 sonnet-4-6)
-  @claude_no_thinking_supported_models ~w(opus-4-8 opus-4-7 opus-4-6 sonnet-4-6 haiku-4-5)
-  @claude_no_thinking_effort "low"
-  @claude_model_alias_resolution %{
-    "fable" => "claude-fable-5",
-    "opus" => "claude-opus-4-8",
-    "sonnet" => "claude-sonnet-4-6",
-    "haiku" => "claude-haiku-4-5"
-  }
-
-  @built_in_profiles %{
-    "codex" => %{
-      "default_tier" => "high",
-      "default" => "high",
-      "implementer" => %{"extreme" => "high", "high" => "high", "moderate" => "medium", "low" => "low", "minimal" => "none"},
-      "reviewer" => %{"extreme" => "xhigh", "high" => "xhigh", "moderate" => "high", "low" => "medium", "minimal" => "low"},
-      "qa" => %{"extreme" => "xhigh", "high" => "xhigh", "moderate" => "high", "low" => "medium", "minimal" => "low"}
-    },
-    "claude_code" => %{
-      "default_tier" => "moderate",
-      "default" => "opus/high",
-      "implementer" => %{
-        "extreme" => "opus/xhigh",
-        "high" => "opus/high",
-        "moderate" => "sonnet/high",
-        "low" => "sonnet/medium",
-        "minimal" => "sonnet/none"
-      },
-      "reviewer" => %{
-        "extreme" => "fable/xhigh",
-        "high" => "fable/high",
-        "moderate" => "opus/high",
-        "low" => "sonnet/high",
-        "minimal" => "sonnet/medium"
-      },
-      "qa" => %{
-        "extreme" => "fable/xhigh",
-        "high" => "fable/high",
-        "moderate" => "opus/high",
-        "low" => "sonnet/high",
-        "minimal" => "sonnet/medium"
-      }
-    }
+  @default_tier "moderate"
+  @role_profiles %{
+    "implementer" => "implementer-orchestrator",
+    "reviewer" => "reviewer",
+    "qa" => "qa",
+    "landing" => "landing",
+    "backlog-processor" => "backlog-processor"
   }
 
   @type profile :: %{
-          effort: String.t(),
-          source: String.t(),
-          role: String.t() | nil,
-          reasoning_effort: String.t(),
-          provider: String.t(),
-          model: String.t() | nil,
-          no_thinking: boolean()
+          required(:name) => String.t(),
+          required(:kind) => String.t(),
+          required(:role) => String.t(),
+          required(:provider) => String.t(),
+          required(:effort) => String.t(),
+          required(:source) => String.t(),
+          required(:model) => String.t(),
+          required(:reasoning_effort) => String.t(),
+          required(:profile_source) => String.t(),
+          required(:instructions) => String.t(),
+          required(:capabilities) => map()
         }
 
-  @spec profiles() :: {:ok, map()} | {:error, term()}
+  @spec profiles() :: {:ok, AgentProfileCatalog.catalog()} | {:error, term()}
   def profiles do
-    case System.get_env("SYMPHONY_REASONING_PROFILES") do
-      path when is_binary(path) and path != "" -> load_profiles(path)
-      _ -> validate_profiles(@built_in_profiles, "built_in")
+    case System.get_env("SYMPHONY_AGENT_PROFILES") do
+      path when is_binary(path) and path != "" -> AgentProfileCatalog.load(path)
+      _ -> {:error, :missing_agent_profiles_path}
     end
   end
 
   @spec parse_labels([String.t()]) :: {:ok, profile()} | {:error, term()}
-  def parse_labels(labels) when is_list(labels) do
-    with {:ok, profiles} <- profiles(),
-         {:ok, tier, source} <- label_tier(labels, default_tier(profiles, "codex"), invalid: :error) do
-      {:ok, row_profile(profiles, "codex", tier, nil, source)}
-    end
-  end
-
-  def parse_labels(_labels) do
-    with {:ok, profiles} <- profiles() do
-      tier = default_tier(profiles, "codex")
-      {:ok, row_profile(profiles, "codex", tier, nil, "default")}
+  def parse_labels(labels) do
+    with {:ok, catalog} <- profiles(),
+         {:ok, tier, source} <- label_tier(labels, @default_tier, invalid: :error) do
+      resolve(catalog, "default", "codex", tier, source)
     end
   end
 
@@ -96,261 +56,134 @@ defmodule SymphonyElixir.ImplementationEffort do
   def profile_for_issue(issue, role), do: profile_for_issue("codex", issue, role)
 
   @spec profile_for_issue(String.t() | atom(), term(), String.t() | nil) :: {:ok, profile()} | {:error, term()}
-  def profile_for_issue(provider, %Issue{labels: labels}, role) do
+  def profile_for_issue(provider, issue, role) do
     provider = normalize_provider(provider)
+    role = normalize_role(role)
 
-    with {:ok, profiles} <- profiles(),
-         {:ok, tier, source} <- issue_tier(provider, profiles, labels) do
-      {:ok, row_profile(profiles, provider, tier, normalize_role(role), source)}
+    with :ok <- validate_provider(provider),
+         {:ok, catalog} <- profiles(),
+         {:ok, tier, source} <- issue_tier(provider, issue) do
+      resolve(catalog, profile_name(role), provider, tier, source)
     end
   end
 
-  def profile_for_issue(provider, _issue, role) do
+  @doc "Resolve the provider-neutral orchestrator/worker contract for one role run."
+  @spec runtime_profile_for_issue(String.t() | atom(), term(), String.t() | nil) ::
+          {:ok, %{provider: String.t(), role: String.t() | nil, orchestrator: profile(), worker: profile() | nil}}
+          | {:error, term()}
+  def runtime_profile_for_issue(provider, issue, role) do
     provider = normalize_provider(provider)
+    role = normalize_role(role)
 
-    with {:ok, profiles} <- profiles() do
-      tier = default_tier(profiles, provider)
-      {:ok, row_profile(profiles, provider, tier, normalize_role(role), "default")}
+    with :ok <- validate_provider(provider),
+         {:ok, catalog} <- profiles(),
+         {:ok, tier, source} <- issue_tier(provider, issue),
+         {:ok, orchestrator} <- resolve(catalog, profile_name(role), provider, tier, source),
+         {:ok, worker} <- resolve_worker(catalog, role, provider, tier, source) do
+      validate_runtime_contract(%{
+        provider: provider,
+        role: role,
+        orchestrator: orchestrator,
+        worker: worker
+      })
     end
   end
 
-  @spec command_for_issue(String.t(), Issue.t(), String.t() | nil) :: {:ok, {String.t(), profile()}} | {:error, term()}
-  def command_for_issue(command, %Issue{} = issue, role) when is_binary(command) do
+  @doc "Reject missing, mixed-provider, or capability-inconsistent delegation contracts."
+  @spec validate_runtime_contract(map()) :: {:ok, map()} | {:error, term()}
+  def validate_runtime_contract(
+        %{
+          provider: provider,
+          role: "implementer",
+          orchestrator: %{provider: provider, kind: "orchestrator"} = orchestrator,
+          worker: %{provider: provider, kind: "worker"} = worker
+        } = contract
+      ) do
+    cond do
+      orchestrator.name != "implementer-orchestrator" ->
+        {:error, {:invalid_implementer_orchestrator_profile, orchestrator.name}}
+
+      worker.name != "implementer-worker" ->
+        {:error, {:invalid_implementer_worker_profile, worker.name}}
+
+      not orchestrator.capabilities.can_delegate ->
+        {:error, :implementer_orchestrator_cannot_delegate}
+
+      worker.capabilities.can_delegate ->
+        {:error, :implementer_worker_may_delegate}
+
+      orchestrator.effort != worker.effort ->
+        {:error, {:mixed_implementer_effort, orchestrator.effort, worker.effort}}
+
+      true ->
+        {:ok, contract}
+    end
+  end
+
+  def validate_runtime_contract(%{role: "implementer"}),
+    do: {:error, :missing_implementer_delegation_contract}
+
+  def validate_runtime_contract(%{orchestrator: orchestrator, worker: nil} = contract) when is_map(orchestrator),
+    do: {:ok, contract}
+
+  def validate_runtime_contract(_contract), do: {:error, :invalid_runtime_profile_contract}
+
+  @spec command_for_issue(String.t(), Issue.t(), String.t() | nil) ::
+          {:ok, {String.t(), profile()}} | {:error, term()}
+  def command_for_issue(command, issue, role) when is_binary(command) do
     with {:ok, profile} <- profile_for_issue("codex", issue, role) do
-      if profile.role in @dynamic_roles do
-        {:ok, {put_codex_profile(command, profile), profile}}
-      else
-        {:ok, {command, profile}}
-      end
+      {:ok, {apply_codex_orchestrator(command, profile), profile}}
     end
   end
 
-  def command_for_issue(command, _issue, role) when is_binary(command) do
-    with {:ok, profile} <- profile_for_issue("codex", nil, role) do
-      {:ok, {command, profile}}
-    end
-  end
+  @doc "Apply one already-resolved Codex orchestrator profile without re-reading the catalog."
+  @spec apply_codex_orchestrator(String.t(), profile()) :: String.t()
+  def apply_codex_orchestrator(command, profile) when is_binary(command), do: put_codex_profile(command, profile)
+
+  # Compatibility for existing app-server callers while terminology migrates.
+  @spec apply_codex_lead(String.t(), profile()) :: String.t()
+  def apply_codex_lead(command, profile), do: apply_codex_orchestrator(command, profile)
 
   @spec valid_labels?(Issue.t()) :: boolean()
-  def valid_labels?(%Issue{} = issue) do
-    match?({:ok, _profile}, profile_for_issue(issue, nil))
-  end
-
+  def valid_labels?(%Issue{} = issue), do: match?({:ok, _profile}, profile_for_issue(issue, nil))
   def valid_labels?(_issue), do: true
 
-  defp load_profiles(path) do
-    case Toml.decode_file(path) do
-      {:ok, decoded} -> validate_profiles(decoded, path)
-      {:error, reason} -> {:error, {:invalid_reasoning_profiles_toml, path, reason}}
+  defp resolve(catalog, name, provider, tier, source) do
+    with {:ok, profile} <- AgentProfileCatalog.resolve(catalog, name, provider, tier, source) do
+      {:ok, Map.put(profile, :no_thinking, false)}
     end
   end
 
-  defp validate_profiles(%{"providers" => providers}, source) when is_map(providers) do
-    with :ok <- validate_keys(Map.keys(providers), @providers, {:unknown_reasoning_profile_provider, source}),
-         :ok <- validate_required_keys(Map.keys(providers), @providers, {:missing_reasoning_profile_provider, source}) do
-      reduce_validated(@providers, fn provider ->
-        validate_provider(provider, Map.fetch!(providers, provider), source)
-      end)
-    end
-  end
+  defp resolve_worker(catalog, "implementer", provider, tier, source),
+    do: resolve(catalog, "implementer-worker", provider, tier, source)
 
-  defp validate_profiles(profiles, source), do: validate_profiles(%{"providers" => profiles}, source)
+  defp resolve_worker(_catalog, _role, _provider, _tier, _source), do: {:ok, nil}
 
-  defp validate_provider(provider, config, source) when is_map(config) do
-    keys = Map.keys(config)
-    unknown_key_error = {:unknown_reasoning_profile_key, source, provider}
-    missing_key_error = {:missing_reasoning_profile_key, source, provider}
+  defp profile_name(role), do: Map.get(@role_profiles, role, "default")
 
-    with :ok <- validate_keys(keys, @known_role_keys ++ ["default_tier"], unknown_key_error),
-         :ok <- validate_required_keys(keys, @required_provider_keys, missing_key_error),
-         {:ok, default_tier} <- fetch_default_tier(config, source, provider),
-         {:ok, roles} <- validate_roles(provider, Map.drop(config, ["default_tier"]), source) do
-      {:ok, Map.put(roles, "default_tier", default_tier)}
-    end
-  end
+  defp issue_tier("claude_code", %Issue{labels: labels}),
+    do: label_tier(labels, @default_tier, invalid: :default)
 
-  defp validate_provider(provider, _config, source), do: {:error, {:invalid_reasoning_profile_provider_shape, source, provider}}
+  defp issue_tier(_provider, %Issue{labels: labels}),
+    do: label_tier(labels, @default_tier, invalid: :error)
 
-  defp fetch_default_tier(config, source, provider) do
-    case Map.get(config, "default_tier") do
-      tier when tier in @tiers -> {:ok, tier}
-      tier -> {:error, {:invalid_reasoning_profile_default_tier, source, provider, tier}}
-    end
-  end
-
-  defp validate_roles(provider, roles, source) do
-    reduce_validated(Map.keys(roles), fn role ->
-      validate_role(provider, role, Map.fetch!(roles, role), source)
-    end)
-  end
-
-  defp validate_role(provider, role, cell, source) when is_binary(cell) do
-    validate_cell(provider, cell, source, [role])
-  end
-
-  defp validate_role(provider, role, table, source) when is_map(table) do
-    with :ok <- validate_keys(Map.keys(table), @tiers, {:unknown_reasoning_profile_tier, source, provider, role}),
-         :ok <- validate_required_keys(Map.keys(table), @tiers, {:missing_reasoning_profile_tier, source, provider, role}) do
-      reduce_validated(@tiers, fn tier ->
-        validate_cell(provider, Map.fetch!(table, tier), source, [role, tier])
-      end)
-    end
-  end
-
-  defp validate_role(provider, role, _value, source),
-    do: {:error, {:invalid_reasoning_profile_role_shape, source, provider, role}}
-
-  defp validate_cell(provider, cell, source, path) when is_binary(cell) do
-    with {:ok, model, effort} <- parse_cell(cell, source, provider, path),
-         :ok <- validate_effort(provider, model, effort, source, path),
-         :ok <- validate_model_effort(provider, model, effort, source, path),
-         :ok <- validate_no_thinking(provider, model, effort, source, path) do
-      {:ok, translated_cell(provider, model, effort)}
-    end
-  end
-
-  defp validate_cell(provider, _cell, source, path), do: {:error, {:invalid_reasoning_profile_cell, source, provider, path}}
-
-  defp parse_cell(cell, source, provider, path) do
-    parts = String.split(cell, "/", parts: 3)
-
-    case parts do
-      [effort] ->
-        parse_effort_cell(effort, nil, source, provider, path)
-
-      [model, effort] ->
-        with {:ok, model} <- parse_model(model, source, provider, path) do
-          parse_effort_cell(effort, model, source, provider, path)
-        end
-
-      _ ->
-        {:error, {:invalid_reasoning_profile_cell, source, provider, path}}
-    end
-  end
-
-  defp parse_model(model, source, provider, path) do
-    trimmed = String.trim(model)
-
-    if trimmed == "" do
-      {:error, {:invalid_reasoning_profile_model, source, provider, path}}
-    else
-      {:ok, trimmed}
-    end
-  end
-
-  defp parse_effort_cell(effort, model, source, provider, path) do
-    trimmed = String.trim(effort)
-
-    cond do
-      trimmed == "" -> {:error, {:missing_reasoning_profile_effort, source, provider, path}}
-      trimmed in @shared_efforts -> {:ok, model, trimmed}
-      true -> {:error, {:unsupported_reasoning_profile_effort, source, provider, path, trimmed}}
-    end
-  end
-
-  defp validate_effort("codex", _model, effort, source, path) do
-    if effort in @codex_supported_efforts do
-      :ok
-    else
-      {:error, {:unsupported_reasoning_profile_effort, source, "codex", path, effort}}
-    end
-  end
-
-  defp validate_effort("claude_code", _model, _effort, _source, _path), do: :ok
-
-  defp validate_model_effort("claude_code", model, effort, source, path) when effort in ~w(xhigh max) do
-    supported =
-      case effort do
-        "xhigh" -> @claude_xhigh_supported_models
-        "max" -> @claude_max_supported_models
-      end
-
-    if claude_effort_model_supported?(model, supported) do
-      :ok
-    else
-      {:error, {:unsupported_reasoning_profile_model_effort, source, "claude_code", path, model, effort}}
-    end
-  end
-
-  defp validate_model_effort(_provider, _model, _effort, _source, _path), do: :ok
-
-  defp validate_no_thinking("claude_code", model, "none", source, path) do
-    if claude_effort_model_supported?(model, @claude_no_thinking_supported_models) do
-      :ok
-    else
-      {:error, {:unsupported_reasoning_profile_no_thinking, source, "claude_code", path, model}}
-    end
-  end
-
-  defp validate_no_thinking(_provider, _model, _effort, _source, _path), do: :ok
-
-  defp translated_cell("claude_code", model, "none"),
-    do: %{"model" => model, "effort" => @claude_no_thinking_effort, "no_thinking" => true, "cell_effort" => "none"}
-
-  defp translated_cell(_provider, model, effort),
-    do: %{"model" => model, "effort" => effort, "no_thinking" => false, "cell_effort" => effort}
-
-  defp validate_keys(keys, allowed, error_tuple) do
-    unknown = Enum.reject(keys, &(&1 in allowed))
-
-    if unknown == [] do
-      :ok
-    else
-      {:error, append_tuple(error_tuple, unknown)}
-    end
-  end
-
-  defp validate_required_keys(keys, required, error_tuple) do
-    missing = Enum.reject(required, &(&1 in keys))
-
-    if missing == [] do
-      :ok
-    else
-      {:error, append_tuple(error_tuple, missing)}
-    end
-  end
-
-  defp append_tuple(tuple, value), do: Tuple.insert_at(tuple, tuple_size(tuple), value)
-
-  defp reduce_validated(keys, fun) do
-    Enum.reduce_while(keys, {:ok, %{}}, fn key, {:ok, acc} ->
-      case fun.(key) do
-        {:ok, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-  end
-
-  defp issue_tier("claude_code", profiles, labels) do
-    label_tier(labels, default_tier(profiles, "claude_code"), invalid: :default)
-  end
-
-  defp issue_tier(provider, profiles, labels) do
-    label_tier(labels, default_tier(profiles, provider), invalid: :error)
-  end
+  defp issue_tier(_provider, _issue), do: {:ok, @default_tier, "default"}
 
   defp label_tier(labels, default_tier, opts) when is_list(labels) do
     labels
-    |> implementation_effort_labels()
+    |> Enum.map(&normalize_label/1)
+    |> Enum.filter(&String.starts_with?(&1, @prefix))
     |> classify_labels(default_tier, opts)
   end
 
   defp label_tier(_labels, default_tier, _opts), do: {:ok, default_tier, "default"}
-
-  defp implementation_effort_labels(labels) do
-    labels
-    |> Enum.map(&normalize_label/1)
-    |> Enum.filter(&String.starts_with?(&1, @prefix))
-  end
 
   defp classify_labels([], default_tier, _opts), do: {:ok, default_tier, "default"}
 
   defp classify_labels(labels, default_tier, opts) do
     {supported, unsupported} =
       Enum.split_with(labels, fn label ->
-        label
-        |> String.replace_prefix(@prefix, "")
-        |> then(&(&1 in @tiers))
+        label |> String.replace_prefix(@prefix, "") |> then(&(&1 in @tiers))
       end)
 
     cond do
@@ -372,109 +205,51 @@ defmodule SymphonyElixir.ImplementationEffort do
     end
   end
 
-  defp row_profile(profiles, provider, tier, role, source) do
-    provider_config = Map.fetch!(profiles, provider)
-    role_key = if is_binary(role) and Map.has_key?(provider_config, role), do: role, else: "default"
-    role_profile = Map.fetch!(provider_config, role_key)
-    row = if Map.has_key?(role_profile, tier), do: Map.fetch!(role_profile, tier), else: role_profile
+  defp validate_provider(provider) when provider in @providers, do: :ok
+  defp validate_provider(provider), do: {:error, {:unsupported_agent_profile_provider, provider}}
 
-    effort = Map.fetch!(row, "effort")
-
-    %{
-      provider: provider,
-      effort: tier,
-      source: source,
-      role: role,
-      model: Map.get(row, "model"),
-      no_thinking: Map.get(row, "no_thinking", false),
-      reasoning_effort: effort
-    }
-  end
-
-  defp default_tier(profiles, provider), do: get_in(profiles, [provider, "default_tier"])
-
-  defp normalize_label(label) when is_binary(label) do
-    label
-    |> String.trim()
-    |> String.downcase()
-  end
-
+  defp normalize_label(label) when is_binary(label), do: label |> String.trim() |> String.downcase()
   defp normalize_label(_label), do: ""
 
-  defp normalize_role(role) when is_binary(role) do
-    role
-    |> String.trim()
-    |> String.downcase()
-  end
-
+  defp normalize_role(role) when is_binary(role), do: role |> String.trim() |> String.downcase()
   defp normalize_role(_role), do: nil
 
   defp normalize_provider(provider) when is_atom(provider), do: provider |> Atom.to_string() |> normalize_provider()
-  defp normalize_provider(provider) when provider in @providers, do: provider
   defp normalize_provider(provider) when is_binary(provider), do: provider |> String.trim() |> String.downcase()
+  defp normalize_provider(provider), do: provider
 
-  defp claude_effort_model_supported?(model, supported_models) when is_binary(model) do
-    case normalize_claude_model_id(model) do
-      nil -> false
-      normalized -> normalized in supported_models
-    end
-  end
-
-  defp claude_effort_model_supported?(_model, _supported_models), do: false
-
-  defp normalize_claude_model_id(model) when is_binary(model) do
-    normalized =
-      model
-      |> String.downcase()
-      |> String.trim()
-
-    if Map.has_key?(@claude_model_alias_resolution, normalized) do
-      @claude_model_alias_resolution[normalized] |> strip_model_prefix() |> family_version()
-    else
-      normalized |> strip_model_prefix() |> family_version()
-    end
-  end
-
-  defp strip_model_prefix(model) do
-    case Regex.run(~r/(claude-[a-z0-9.-]+)$/, model) do
-      [_, captured] -> captured
-      _ -> model
-    end
-  end
-
-  defp family_version(model) do
-    case Regex.run(~r/^claude-([a-z]+)-(\d+)(?:-(\d+))?/, model) do
-      [_, family, major, minor] -> "#{family}-#{major}-#{minor}"
-      [_, family, major] -> "#{family}-#{major}"
-      _ -> nil
-    end
-  end
-
-  defp put_codex_profile(command, %{reasoning_effort: reasoning_effort, model: model}) do
+  defp put_codex_profile(command, %{
+         reasoning_effort: reasoning_effort,
+         model: model,
+         instructions: instructions
+       }) do
     command
     |> put_reasoning_effort(reasoning_effort)
     |> put_model(model)
+    |> put_developer_instructions(instructions)
   end
 
-  defp put_model(command, nil), do: command
+  defp put_developer_instructions(command, instructions) do
+    replacement = shell_single_quote("developer_instructions=#{inspect(instructions)}")
+
+    if Regex.match?(~r/\sapp-server(\s*)$/, command) do
+      Regex.replace(~r/\sapp-server(\s*)$/, command, " --config #{replacement} app-server\\1")
+    else
+      "#{command} --config #{replacement}"
+    end
+  end
+
+  defp shell_single_quote(value), do: "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
 
   defp put_model(command, model) do
     replacement = ~s(--config 'model="#{model}"')
 
     cond do
       Regex.match?(~r/--config\s+['"]model="/, command) ->
-        Regex.replace(
-          ~r/(--config\s+['"]model=")[^"]+("['"])/,
-          command,
-          "\\1#{model}\\2"
-        )
+        Regex.replace(~r/(--config\s+['"]model=")[^"]+("['"])/, command, "\\1#{model}\\2")
 
       Regex.match?(~r/--config\s+model="/, command) ->
-        Regex.replace(
-          ~r/(--config\s+model=")[^"]+(")/,
-          command,
-          "\\1#{model}\\2"
-        )
+        Regex.replace(~r/(--config\s+model=")[^"]+(")/, command, "\\1#{model}\\2")
 
       Regex.match?(~r/\sapp-server(\s*)$/, command) ->
         Regex.replace(~r/\sapp-server(\s*)$/, command, " #{replacement} app-server\\1")

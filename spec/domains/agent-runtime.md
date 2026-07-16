@@ -53,12 +53,11 @@ claim that Codex, Claude Code, and Pi are usable as role runtimes, including at
 least one real mixed-runtime execution. Deferred: this profile is not required
 by the re-scoped EMB-166, which delivers the Claude Code slice only.
 
-**Issue reasoning profile**: Symphony maps the durable `Implementation Effort`
-label to a provider-specific reasoning profile for the actual role name and
-current tier. The runtime loads a universal provider-keyed role matrix from the
-optional TOML file named by `SYMPHONY_REASONING_PROFILES`; when that variable
-is absent, the built-in defaults encode the operator-approved Codex and Claude
-Code matrices.
+**Agent profile**: A canonical TOML-frontmatter Markdown file that combines an
+agent's identity, kind, role, capabilities, complete per-provider five-tier
+model/effort matrices, and reusable system workflow. Symphony loads the
+collection named by `SYMPHONY_AGENT_PROFILES` and maps the durable
+`Implementation Effort` label to one tier in the selected profile.
 
 **Top-level role claim lease**: A Linear-visible structured marker that records
 which Symphony role run currently owns a top-level issue/workspace/role
@@ -232,12 +231,12 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   `Implementation Effort` levels onto Claude models. Unsupported combinations
   (for example Sonnet 4.6 with effort `xhigh`) must fail closed at config
   validation, not at runtime.
-- `SYMPHONY_REASONING_PROFILES`, when set, must point to a valid TOML profile
-  matrix. Parse errors, unknown provider keys, unknown role keys, unknown tier
-  keys, missing provider defaults, incomplete tier tables, unsupported effort
-  values, unsupported provider model-effort pairs, and unsupported no-thinking
-  rows fail closed during startup validation. The runtime must not silently fall
-  back to built-in defaults when the file exists but is invalid.
+- `SYMPHONY_AGENT_PROFILES` must point to a valid agent-profile directory.
+  Missing files, parse errors, unknown keys, filename/name mismatch, duplicate
+  names, missing providers or tiers, non-moderate defaults, invalid capability
+  combinations, unsupported efforts, and empty reusable instructions fail
+  closed during startup validation. The runtime has no parallel built-in
+  production matrix.
 
 ## Interfaces/contracts
 
@@ -333,74 +332,65 @@ Provider-specific requirements:
   extension bundle, and converts unattended UI/input requests into normalized
   input-required events.
 
-### Reasoning Profile TOML Contract
+### Agent Profile Contract
 
-The optional `SYMPHONY_REASONING_PROFILES` file uses this provider-keyed,
-role-first TOML shape:
+`SYMPHONY_AGENT_PROFILES` names a directory of canonical `*.agent.md` files.
+Each document begins and ends its strict TOML frontmatter with `+++`; the
+remaining non-empty Markdown body is the reusable agent system workflow. The
+frontmatter contains exactly schema version, name, kind, role, capabilities,
+and provider matrices. Filename and `name` must match and names are unique.
 
-```toml
-[providers.codex]
-default_tier = "high"
-default = "high"
-implementer = { extreme = "high", high = "high", moderate = "medium", low = "low", minimal = "none" }
-reviewer = { extreme = "xhigh", high = "xhigh", moderate = "high", low = "medium", minimal = "low" }
-qa = { extreme = "xhigh", high = "xhigh", moderate = "high", low = "medium", minimal = "low" }
+Only `codex` and `claude_code` are supported. Every provider table declares
+`default_tier = "moderate"` and complete `extreme`, `high`, `moderate`, `low`,
+and `minimal` cells. Every cell contains explicit `model` and
+`reasoning_effort` strings. There are no model-less cells, scalar role rows,
+inheritance rules, aliases, or built-in production fallbacks.
 
-[providers.claude_code]
-default_tier = "moderate"
-default = "opus/high"
-implementer = { extreme = "opus/xhigh", high = "opus/high", moderate = "sonnet/high", low = "sonnet/medium", minimal = "sonnet/none" }
-reviewer = { extreme = "fable/xhigh", high = "fable/high", moderate = "opus/high", low = "sonnet/high", minimal = "sonnet/medium" }
-qa = { extreme = "fable/xhigh", high = "fable/high", moderate = "opus/high", low = "sonnet/high", minimal = "sonnet/medium" }
-```
+Capabilities contain exactly `can_delegate`, `max_delegation_depth`,
+`owns_issue_lifecycle`, `owns_final_validation`, and `owns_handoff`. A
+non-delegating profile has depth zero; a delegating profile has positive bounded
+depth. Implementer uses distinct `implementer-orchestrator` and
+`implementer-worker` profiles. Other runtime roles resolve their named profile,
+and unknown roles resolve `default`.
 
-Only `codex` and `claude_code` providers are currently supported. Each provider
-must declare `default_tier` and `default`. The shared tier vocabulary is
-`extreme`, `high`, `moderate`, `low`, and `minimal`; the shared effort
-vocabulary is `none`, `low`, `medium`, `high`, `xhigh`, and `max`.
+`ImplementationEffort` owns only label parsing and role-to-profile selection.
+The catalog owns identity, capabilities, reusable instructions, and the model
+matrix. Invalid or ambiguous Codex labels fail closed. Claude keeps its
+documented invalid-label fallback, now to the universally moderate default.
 
-The profile contract has four rules:
+For Implementer, Symphony resolves one exact orchestrator/worker contract and
+starts a new isolated named Herdr session containing the selected provider's
+orchestrator and workers. Runtime-owned launchers outside the selected
+repository apply exact model, effort, and reusable profile instructions. Codex
+receives the Markdown body as `developer_instructions`; Claude receives it with
+`--append-system-prompt`. The role `WORKFLOW.md` continues to own issue
+lifecycle. Each orchestrator-authored worker assignment contains only its
+bounded deliverable, relevant context, mutation scope, constraints, expected
+validation, and required result; it does not restate stable worker behavior.
 
-1. A cell is a string in the form `"effort"` or `"model/effort"`. A model-less
-   cell uses the harness base model from the runtime frontmatter/config.
-2. A provider role key maps either to one scalar cell, meaning tier-invariant,
-   or to a complete five-tier inline table. Partial tier tables are invalid.
-3. Each provider must declare `default`, used as the fallback for unlisted
-   actual role names, and `default_tier`, used as the fail-closed tier for
-   missing or malformed labels when that provider defaults invalid labels.
-4. Unknown role keys, unknown tier keys, unsupported model-effort combinations,
-   and Claude `none` cells whose model cannot be validated for disabling
-   thinking are startup errors. The profile schema has no inheritance,
-   aliasing, provider-specific row shape, `fixed` section, `tiers` section,
-   `worker` row, or `no_thinking` key.
+The orchestrator receives the worker launcher path through
+`OCTO_HERDR_WORKER_LAUNCHER`. Missing or incompatible Herdr, unsafe socket
+paths, rejected launchers, and adapter-side model/effort substitution fail
+closed. Every mutating Herdr command is scoped to the run-owned named session
+and private configuration root; cleanup verifies that the operator's default
+server snapshot is unchanged.
 
-Codex resolves by actual role name with `default` fallback. Dynamic Codex roles
-(`implementer`, `reviewer`, and `qa`) rewrite `model_reasoning_effort` from the
-selected cell's effort. When the selected cell also declares a model, they
-rewrite the command's `model="..."` config. Model-less Codex cells leave the
-frontmatter command model unchanged. Codex supports native efforts `none`,
-`low`, `medium`, `high`, and `xhigh`; Codex `max` is invalid at startup.
-Invalid or ambiguous Codex `implementation-effort:` labels fail closed.
+The Codex launcher uses unattended workspace-write/no-approval mode, disables
+`multi_agent`, disables alternate-screen rendering, and supplies the selected
+workspace through the whole `projects={...}` trust map. The Claude launcher
+uses unattended bypass-permissions mode and disables the provider-native
+`Agent` tool. The orchestrator is not ready for its first prompt until Herdr
+observes its identity in an idle/done state. A restricted worker Herdr proxy is
+defense in depth rather than a complete process sandbox; one-generation
+delegation remains a profile invariant backed by evals.
 
-Claude Code resolves the same label to the provider role at session start.
-Model cells set the per-session model, while model-less cells use the
-frontmatter `claude_code.model`. Claude passes `--effort <value>` for
-`low`, `medium`, `high`, `xhigh`, and `max`. A Claude `none` cell translates to
-the verified no-thinking invocation: `--effort low` plus
-`MAX_THINKING_TOKENS=0`. Because that translation is model-sensitive, `none`
-must be paired with a model that startup validation can prove supports
-disabling thinking. Claude defaults missing, malformed, unsupported, or
-ambiguous effort labels to the provider `default_tier`, which is `moderate` in
-the built-in matrix.
-
-The built-in matrices are:
-
-- Codex: `default_tier` `high`; `default` `high`; implementer
-  `high/high/medium/low/none`; reviewer and QA
-  `xhigh/xhigh/high/medium/low`.
-- Claude Code: `default_tier` `moderate`; `default` `opus/high`; implementer
-  `opus-xhigh/opus-high/sonnet-high/sonnet-medium/sonnet-none`; reviewer and QA
-  `fable-xhigh/fable-high/opus-high/sonnet-high/sonnet-medium`.
+Symphony observes Herdr identity/status and emits its existing normalized
+top-level runtime events. Runtime contract tests prove that resolved profiles
+become exact orchestrator and worker launcher arguments, reusable system
+instructions reach each provider, the isolated session is cleaned up without
+replacing or stopping the default server, and incompatible or substituted
+profiles fail closed. Bounded live evaluation—not narration—provides
+session/start/message/result/integration/cleanup evidence for Codex and Claude.
 
 Octo mixed-runtime validation (a real workflow assigning roles to different
 runtimes in one run, for example implementer on Pi, reviewer on Claude Code,
@@ -439,8 +429,8 @@ Verified model x effort support matrix (transcribed from the `claude` CLI
 v2.1.172 effort-gating allow-lists). `low`, `medium`, and `high` are supported
 on every model; `xhigh` and `max` are gated to specific models:
 
-- `xhigh`: Fable 5, Opus 4.8, Opus 4.7.
-- `max`: Fable 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 4.6.
+- `xhigh`: Fable 5, Opus 4.8, Opus 4.7, Sonnet 5.
+- `max`: Fable 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5, Sonnet 4.6.
 
 Config validation resolves bare aliases (`fable`/`opus`/`sonnet`/`haiku`) to the
 current latest model and strips provider routing prefixes (for example
@@ -450,12 +440,10 @@ verifiable against this matrix fails closed at config validation rather than at
 runtime. For example `model: sonnet, effort: xhigh` is rejected at config
 validation.
 
-Runtime Fable availability fallback: when a role profile selects Fable and the
-operator has marked Fable unavailable, the adapter preserves the preferred
-Fable profile in runtime metadata but launches Opus 4.8 at `high` effort. This
-fallback is not a reasoning-profile matrix rewrite; it is a temporary execution
-substitution so the wrapper can keep expressing the preferred profile and
-remove the fallback when Fable access returns.
+Runtime adapters launch the exact model and effort selected by the resolved
+profile. Fable unavailability is a provider failure, not permission for an
+adapter-side Opus substitution; changing the selected model requires a durable
+profile update.
 
 The adapter maps Claude terminal results onto normalized events:
 `result` with `is_error: true` and an auth HTTP status (401/403) fails closed

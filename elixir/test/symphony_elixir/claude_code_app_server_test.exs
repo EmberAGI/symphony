@@ -177,16 +177,18 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       assert completed.usage == %{"input_tokens" => 153, "output_tokens" => 6, "total_tokens" => 159}
       assert completed[:usage]
 
-      # Verified flags and the no-thinking env are actually passed to claude.
+      # Direct legacy-adapter invocation resolves the Implementer Fable row,
+      # then applies the adapter's documented Fable fallback. Production
+      # Implementer sessions use the Herdr launcher instead of this adapter.
       # The fake binary records argv after the shell strips the shell-escaping
       # the shim applies, so assert against the resolved argument values.
       assert trace =~ "--print"
       assert trace =~ "--output-format stream-json"
       assert trace =~ "--verbose"
       assert trace =~ "--permission-mode bypassPermissions"
-      assert trace =~ "--model sonnet"
-      assert trace =~ "--effort low"
-      assert trace =~ "ENV_MAX_THINKING_TOKENS:0"
+      assert trace =~ "--model claude-opus-4-8"
+      assert trace =~ "--effort high"
+      refute trace =~ "ENV_MAX_THINKING_TOKENS:0"
       assert trace =~ "ENV_SYMPHONY_ROLE_RUN_ID:run-claude-env"
       assert trace =~ "ENV_SYMPHONY_ROLE_ISSUE_ID:issue-claude-env"
       assert trace =~ "ENV_SYMPHONY_ROLE_ISSUE_IDENTIFIER:MT-CC"
@@ -196,9 +198,12 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
 
       assert completed.implementation_effort == "minimal"
       assert completed.implementation_effort_source == "label"
-      assert completed.claude_model == "sonnet"
-      assert completed.claude_effort == "low"
-      assert completed.claude_no_thinking == true
+      assert completed.claude_model == "claude-opus-4-8"
+      assert completed.claude_effort == "high"
+      assert completed.claude_no_thinking == false
+      assert completed.claude_preferred_model == "claude-fable-5"
+      assert completed.claude_preferred_effort == "low"
+      assert completed.claude_fallback_reason == "fable_unavailable"
     after
       File.rm_rf(ctx.test_root)
     end
@@ -363,7 +368,7 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     end
   end
 
-  test "uses the Claude fixed row for non-dynamic roles" do
+  test "uses the Claude implementation-effort row for non-dynamic roles" do
     ctx = setup_workspace("MT-CC-fixed")
 
     try do
@@ -373,14 +378,16 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
         run_shim(ctx, "do work", labels: ["implementation-effort:minimal"], role: "landing")
 
       assert {:ok, _turn} = result
-      assert trace =~ "--model opus"
-      assert trace =~ "--effort high"
+      assert trace =~ "--model claude-opus-4-8"
+      assert trace =~ "--effort low"
+      assert trace =~ "--append-system-prompt"
+      assert trace =~ "Reusable landing instructions"
       refute trace =~ "ENV_MAX_THINKING_TOKENS:0"
 
       completed = Enum.find(events, &(&1.event == :turn_completed))
       assert completed.implementation_effort == "minimal"
-      assert completed.claude_model == "opus"
-      assert completed.claude_effort == "high"
+      assert completed.claude_model == "claude-opus-4-8"
+      assert completed.claude_effort == "low"
       assert completed.claude_no_thinking == false
     after
       File.rm_rf(ctx.test_root)
@@ -397,7 +404,7 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
         run_shim(ctx, "do work", labels: ["implementation-effort:bogus"], role: "implementer")
 
       assert {:ok, _turn} = result
-      assert trace =~ "--model sonnet"
+      assert trace =~ "--model claude-opus-4-8"
       assert trace =~ "--effort high"
       refute trace =~ "ENV_MAX_THINKING_TOKENS:0"
 
@@ -432,7 +439,7 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       assert completed.claude_model == "claude-opus-4-8"
       assert completed.claude_effort == "high"
       assert completed.claude_no_thinking == false
-      assert completed.claude_preferred_model == "fable"
+      assert completed.claude_preferred_model == "claude-fable-5"
       assert completed.claude_preferred_effort == "xhigh"
       assert completed.claude_fallback_reason == "fable_unavailable"
     after

@@ -258,8 +258,12 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert {:ok, _result} = AppServer.run(workspace, "Validate effort reasoning", issue)
 
-      assert File.read!(trace_file) =~
-               "ARGV:--config model=\"gpt-5.5\" --config model_reasoning_effort=none app-server"
+      trace = File.read!(trace_file)
+
+      assert trace =~ "ARGV:--config model=\"gpt-5.6-sol\" --config model_reasoning_effort=none"
+      assert trace =~ "developer_instructions=\"# implementer-orchestrator"
+      assert trace =~ "Reusable implementer-orchestrator instructions."
+      assert trace =~ "app-server"
     after
       File.rm_rf(test_root)
     end

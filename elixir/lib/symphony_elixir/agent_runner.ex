@@ -107,12 +107,18 @@ defmodule SymphonyElixir.AgentRunner do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
+    session_opts =
+      [
+        issue: issue,
+        worker_host: worker_host,
+        run_id: Keyword.get(opts, :run_id)
+      ]
+      |> put_optional(:role, Keyword.get(opts, :role))
+      |> put_optional(:delegation_transport, Keyword.get(opts, :delegation_transport))
+      |> put_optional(:delegation_transport_context, Keyword.get(opts, :delegation_transport_context))
+
     with {:ok, session} <-
-           AgentRuntime.start_session(workspace,
-             issue: issue,
-             worker_host: worker_host,
-             run_id: Keyword.get(opts, :run_id)
-           ) do
+           AgentRuntime.start_session(workspace, session_opts) do
       try do
         do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after
@@ -120,6 +126,9 @@ defmodule SymphonyElixir.AgentRunner do
       end
     end
   end
+
+  defp put_optional(opts, _key, nil), do: opts
+  defp put_optional(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
