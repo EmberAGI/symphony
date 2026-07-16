@@ -115,8 +115,8 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
     worker_argv = [
       "codex",
-      "--permission-profile",
-      "octo_herdr",
+      "--config",
+      "default_permissions=\"octo_herdr\"",
       "--config",
       "permissions.octo_herdr.network={enabled=true,unix_sockets={#{inspect(session.socket)}=\"allow\"}}"
     ]
@@ -126,7 +126,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
     assert File.exists?(session.worker_launcher)
     launcher = File.read!(session.worker_launcher)
-    assert launcher =~ "--permission-profile"
+    assert launcher =~ "default_permissions=\"octo_herdr\""
     assert launcher =~ session.socket
 
     restricted_herdr = Path.join(session.runtime_root, "worker-bin/herdr")
