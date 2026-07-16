@@ -154,6 +154,20 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
   def stop_session(_session), do: {:error, :invalid_implementer_delegation_session}
 
+  @doc "Return the transport-owned cleanup capability for external cancellation and recovery."
+  @spec owned_session_ref(session()) :: map() | nil
+  def owned_session_ref(%{
+        transport: transport,
+        transport_context: transport_context,
+        herdr_session: herdr_session
+      }) do
+    if function_exported?(transport, :owned_session_ref, 2),
+      do: transport.owned_session_ref(herdr_session, transport_context),
+      else: nil
+  end
+
+  def owned_session_ref(_session), do: nil
+
   defp start_orchestrator(transport, transport_context, herdr_session, workspace, contract, orchestrator_env) do
     spec = %{
       name: "implementer_orchestrator",

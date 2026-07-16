@@ -4,6 +4,13 @@ defmodule SymphonyElixir.CoreTest do
   alias SymphonyElixir.Runtime.ProcessOwnership
   alias SymphonyElixir.Tracker.ClaimLease
 
+  defmodule RecordingOwnedSessionCleanup do
+    def cleanup_owned_session(%{owner: owner, agent_pid: agent_pid, session_name: session_name}) do
+      send(owner, {:owned_session_cleanup, session_name, Process.alive?(agent_pid)})
+      :ok
+    end
+  end
+
   setup do
     previous_role = System.get_env("SYMPHONY_ROLE")
     System.put_env("SYMPHONY_ROLE", "implementer")
@@ -336,6 +343,12 @@ defmodule SymphonyElixir.CoreTest do
             ref: nil,
             identifier: issue_identifier,
             issue: %Issue{id: issue_id, state: "In Progress", identifier: issue_identifier},
+            owned_session_ref: %{
+              cleanup_module: RecordingOwnedSessionCleanup,
+              owner: self(),
+              agent_pid: agent_pid,
+              session_name: "octo-mt-556-run-1"
+            },
             started_at: DateTime.utc_now()
           }
         },
@@ -357,11 +370,171 @@ defmodule SymphonyElixir.CoreTest do
 
       refute Map.has_key?(updated_state.running, issue_id)
       refute MapSet.member?(updated_state.claimed, issue_id)
+      assert_receive {:owned_session_cleanup, "octo-mt-556-run-1", true}
       refute Process.alive?(agent_pid)
       refute File.exists?(workspace)
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "records a run-owned session cleanup capability before cancellation" do
+    issue_id = "issue-owned-session"
+
+    ownership_ref = %{
+      cleanup_module: RecordingOwnedSessionCleanup,
+      owner: self(),
+      session_name: "octo-mt-owned-session"
+    }
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          issue: %Issue{id: issue_id, identifier: "MT-OWNED"},
+          run_id: "run-owned-session"
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{}
+    }
+
+    assert {:noreply, updated_state} =
+             Orchestrator.handle_info(
+               {:owned_session_runtime_info, issue_id, ownership_ref},
+               state
+             )
+
+    assert updated_state.running[issue_id].owned_session_ref == ownership_ref
+  end
+
+  test "process ownership persists only the narrow Herdr cleanup identity" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-owned-session-record-#{System.unique_integer([:positive])}"
+      )
+
+    workspace = Path.join([test_root, "workspaces", "MT-OWNED-scaling-octo-engine"])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(test_root, "workspaces")
+    )
+
+    issue = %Issue{
+      id: "issue-owned-session-record",
+      identifier: "MT-OWNED",
+      repository: "EmberAGI/scaling-octo-engine"
+    }
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert :ok =
+             ProcessOwnership.record_active(issue, %{
+               role: "implementer",
+               run_id: "run-owned-session-record",
+               workspace_path: workspace,
+               owned_session_ref: %{
+                 kind: "herdr",
+                 session_name: "octo-mt-owned-0123456789abcdef",
+                 cleanup_module: RecordingOwnedSessionCleanup,
+                 owner: self()
+               }
+             })
+
+    status = ProcessOwnership.status_for_issue(issue)
+
+    assert status.owned_session_ref == %{
+             kind: "herdr",
+             session_name: "octo-mt-owned-0123456789abcdef"
+           }
+  end
+
+  test "startup recovery cleans stale run-owned sessions but not live holders" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-owned-session-recovery-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-RECOVER-scaling-octo-engine")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-owned-session-recovery",
+      identifier: "MT-RECOVER",
+      repository: "EmberAGI/scaling-octo-engine"
+    }
+
+    live_issue = %Issue{
+      id: "issue-owned-session-live",
+      identifier: "MT-LIVE",
+      repository: "EmberAGI/scaling-octo-engine"
+    }
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert :ok =
+             ProcessOwnership.record_active(issue, %{
+               role: "implementer",
+               holder: "#{ProcessOwnership.current_host()}:999999:implementer",
+               run_id: "run-owned-session-recovery",
+               workspace_path: workspace,
+               owned_session_ref: %{
+                 kind: "herdr",
+                 session_name: "octo-mt-recover-0123456789abcdef"
+               }
+             })
+
+    assert :ok =
+             ProcessOwnership.record_active(live_issue, %{
+               role: "implementer",
+               holder: "#{ProcessOwnership.current_host()}:#{System.pid()}:implementer",
+               run_id: "run-owned-session-live",
+               workspace_path: Path.join(workspace_root, "MT-LIVE-scaling-octo-engine"),
+               owned_session_ref: %{
+                 kind: "herdr",
+                 session_name: "octo-mt-live-0123456789abcdef"
+               }
+             })
+
+    assert {:ok, 1} =
+             ProcessOwnership.recover_stale_owned_sessions(fn ownership_ref ->
+               send(self(), {:recovered_owned_session, ownership_ref})
+               :ok
+             end)
+
+    assert_receive {:recovered_owned_session, %{kind: "herdr", session_name: "octo-mt-recover-0123456789abcdef"}}
+
+    status = ProcessOwnership.status_for_issue(issue)
+    assert status.state == "cleaned"
+    assert status.cleanup_status == "cleaned"
+    assert ProcessOwnership.status_for_issue(live_issue).state == "active"
+  end
+
+  test "a quarantined record without a live owned process no longer blocks dispatch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stale-quarantine-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(test_root, "workspaces")
+    )
+
+    issue = %Issue{id: "issue-stale-quarantine", identifier: "MT-STALE-QUAR"}
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert :ok =
+             ProcessOwnership.record_quarantined(
+               issue,
+               %{role: "implementer", run_id: "run-stale-quarantine"},
+               "process was live at task exit"
+             )
+
+    assert ProcessOwnership.status_for_issue(issue).state == "quarantined"
+    assert ProcessOwnership.blocking_record(issue) == nil
   end
 
   test "missing running issues stop active agents without cleaning the workspace" do

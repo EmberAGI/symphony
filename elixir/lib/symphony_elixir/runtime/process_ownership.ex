@@ -83,6 +83,22 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   @spec current_role() :: String.t()
   def current_role, do: ClaimLease.role_name()
 
+  @doc "Recover stale local run-owned sessions left by a previous role process generation."
+  @spec recover_stale_owned_sessions((map() -> :ok | {:error, term()})) :: {:ok, non_neg_integer()}
+  def recover_stale_owned_sessions(cleanup_fun) when is_function(cleanup_fun, 1) do
+    recovered =
+      Config.settings!().workspace.root
+      |> owned_record_paths()
+      |> Enum.reduce(0, fn path, count ->
+        case read_record(path) do
+          [record] -> recover_stale_owned_session(path, record, cleanup_fun, count)
+          _ -> count
+        end
+      end)
+
+    {:ok, recovered}
+  end
+
   defp write_record(%Issue{} = issue, attrs, state) do
     normalized_attrs = normalize_attrs(attrs)
     workspace_path = normalized_attrs.workspace_path
@@ -107,6 +123,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
         "app_server_pid" => normalized_attrs.app_server_pid,
         "app_server_pgid" => app_server_pgid,
         "process_tree_pids" => process_tree_pids,
+        "owned_session_ref" => normalized_attrs.owned_session_ref,
         "ownership_env" => Map.new(ownership_env(issue, normalized_attrs)),
         "state" => state,
         "cleanup_status" => state,
@@ -126,6 +143,69 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       {:error, error}
   end
 
+  defp owned_record_paths(workspace_root) when is_binary(workspace_root) do
+    Path.wildcard(
+      Path.join([workspace_root, "**", ".symphony", "process-ownership", "*.json"]),
+      match_dot: true
+    )
+  end
+
+  defp recover_stale_owned_session(path, record, cleanup_fun, count) do
+    if stale_owned_session_record?(record) do
+      ownership_ref = owned_session_ref_value(record)
+
+      case cleanup_fun.(ownership_ref) do
+        :ok ->
+          mark_record_cleaned(path, record)
+          count + 1
+
+        {:error, reason} ->
+          Logger.warning("Failed to recover stale run-owned session #{ownership_ref.session_name}: #{inspect(reason)}")
+          count
+      end
+    else
+      count
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to recover stale run-owned session record #{path}: #{Exception.message(error)}")
+      count
+  end
+
+  defp stale_owned_session_record?(record) when is_map(record) do
+    record["state"] in ["active", "quarantined"] and
+      record["role"] == current_role() and
+      blank_string?(record["worker_host"]) and
+      record["worker_host_id"] == current_host() and
+      is_map(owned_session_ref_value(record)) and
+      not holder_process_live?(record["holder"])
+  end
+
+  defp stale_owned_session_record?(_record), do: false
+
+  defp holder_process_live?(holder) when is_binary(holder) do
+    case holder |> String.split(":") |> Enum.reverse() do
+      [_role, pid | _host_parts] -> pid_live?(pid)
+      _ -> false
+    end
+  end
+
+  defp holder_process_live?(_holder), do: false
+
+  defp blank_string?(value), do: !is_binary(value) or String.trim(value) == ""
+
+  defp mark_record_cleaned(path, record) do
+    updated =
+      record
+      |> Map.put("state", "cleaned")
+      |> Map.put("cleanup_status", "cleaned")
+      |> Map.put("updated_at", DateTime.utc_now() |> DateTime.to_iso8601())
+
+    with {:ok, body} <- Jason.encode(updated) do
+      File.write!(path, body <> "\n")
+    end
+  end
+
   defp normalize_attrs(attrs) when is_map(attrs) do
     %{
       role: attr_string(attrs, :role),
@@ -140,7 +220,8 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       worker_pid: attr_pid(attrs, :worker_pid),
       app_server_pid: attr_pid(attrs, :app_server_pid),
       app_server_pgid: attr_pid(attrs, :app_server_pgid),
-      process_tree_pids: attr_pid_list(attrs, :process_tree_pids)
+      process_tree_pids: attr_pid_list(attrs, :process_tree_pids),
+      owned_session_ref: owned_session_ref_value(attrs)
     }
   end
 
@@ -224,8 +305,12 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     end
   end
 
-  defp blocking_record?(%{"state" => state} = record, %Issue{} = issue) when state in ["active", "quarantined"] do
+  defp blocking_record?(%{"state" => "active"} = record, %Issue{} = issue) do
     record_scope_matches?(record, issue) and active_record_blocks?(record)
+  end
+
+  defp blocking_record?(%{"state" => "quarantined"} = record, %Issue{} = issue) do
+    record_scope_matches?(record, issue) and quarantined_record_blocks?(record)
   end
 
   defp blocking_record?(_record, _issue), do: false
@@ -267,6 +352,12 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     process_pids == [] or Enum.any?(process_pids, &pid_live?/1) or
       process_group_live?(record["app_server_pgid"]) or ownership_env_process_live?(record)
   end
+
+  defp quarantined_record_blocks?(%{"worker_host" => worker_host})
+       when is_binary(worker_host) and worker_host != "",
+       do: true
+
+  defp quarantined_record_blocks?(record), do: local_process_live?(record)
 
   defp local_process_live?(record) do
     Enum.any?(record_process_pids(record), &pid_live?/1) or
@@ -329,6 +420,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       worker_pid: record["worker_pid"],
       run_id: record["run_id"],
       session_id: record["session_id"],
+      owned_session_ref: owned_session_ref_value(record),
       updated_at: record["updated_at"],
       quarantine_reason: record["quarantine_reason"],
       live?: local_process_live?(record)
@@ -364,6 +456,27 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   defp pid_value(_value), do: nil
 
+  defp owned_session_ref_value(attrs) when is_map(attrs) do
+    ref = value_for(attrs, :owned_session_ref)
+
+    if is_map(ref) do
+      kind = string_value(value_for(ref, :kind))
+      session_name = string_value(value_for(ref, :session_name))
+
+      if kind == "herdr" and valid_owned_herdr_session_name?(session_name),
+        do: %{kind: kind, session_name: session_name},
+        else: nil
+    end
+  end
+
+  defp owned_session_ref_value(_attrs), do: nil
+
+  defp valid_owned_herdr_session_name?(session_name) when is_binary(session_name) do
+    byte_size(session_name) <= 44 and Regex.match?(~r/^octo-[a-z0-9][a-z0-9-]*$/, session_name)
+  end
+
+  defp valid_owned_herdr_session_name?(_session_name), do: false
+
   defp merge_existing_process_tree(attrs, nil), do: attrs
 
   defp merge_existing_process_tree(attrs, existing) when is_map(attrs) and is_map(existing) do
@@ -376,6 +489,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     |> put_existing_value(:issue_identifier, existing[:issue_identifier])
     |> put_existing_value(:run_id, existing[:run_id])
     |> put_existing_value(:workspace_path, existing[:workspace_path])
+    |> put_existing_value(:owned_session_ref, existing[:owned_session_ref])
   end
 
   defp put_existing_value(attrs, _key, nil), do: attrs

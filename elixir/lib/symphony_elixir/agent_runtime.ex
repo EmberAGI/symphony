@@ -137,6 +137,30 @@ defmodule SymphonyElixir.AgentRuntime do
   @spec stop_session(map()) :: :ok | {:error, term()}
   def stop_session(session), do: session_runtime_adapter(session).stop_session(session)
 
+  @doc "Clean up a run-owned runtime from outside the task that created it."
+  @spec cleanup_owned_session(map()) :: :ok | {:error, term()}
+  def cleanup_owned_session(%{kind: "herdr"} = ownership_ref) do
+    HerdrTransport.cleanup_owned_session(ownership_ref)
+  end
+
+  def cleanup_owned_session(%{cleanup_module: module} = ownership_ref) when is_atom(module) do
+    if function_exported?(module, :cleanup_owned_session, 1),
+      do: module.cleanup_owned_session(ownership_ref),
+      else: {:error, :unsupported_owned_session_cleanup}
+  end
+
+  def cleanup_owned_session(_ownership_ref), do: {:error, :invalid_owned_session_ref}
+
+  @doc "Return the narrow external-cleanup capability for a runtime session, when supported."
+  @spec owned_session_ref(map()) :: map() | nil
+  def owned_session_ref(session) when is_map(session) do
+    runtime_adapter = session_runtime_adapter(session)
+
+    if function_exported?(runtime_adapter, :owned_session_ref, 1),
+      do: runtime_adapter.owned_session_ref(session),
+      else: nil
+  end
+
   defp session_runtime_adapter(%{runtime_adapter: runtime_adapter}) when is_atom(runtime_adapter),
     do: runtime_adapter
 

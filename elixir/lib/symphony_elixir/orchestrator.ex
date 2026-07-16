@@ -98,6 +98,7 @@ defmodule SymphonyElixir.Orchestrator do
       latest_dispatch_summary: empty_dispatch_summary("not_checked")
     }
 
+    recover_stale_owned_sessions()
     run_terminal_workspace_cleanup()
     state = schedule_tick(state, 0)
 
@@ -253,6 +254,28 @@ defmodule SymphonyElixir.Orchestrator do
           |> maybe_refresh_claim_lease(issue_id, true)
 
         notify_dashboard()
+        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+    end
+  end
+
+  def handle_info(
+        {:owned_session_runtime_info, issue_id, ownership_ref},
+        %{running: running} = state
+      )
+      when is_binary(issue_id) and is_map(ownership_ref) do
+    case Map.get(running, issue_id) do
+      nil ->
+        # The issue can leave the active state between session startup and this
+        # message. Clean the now-unclaimed capability immediately.
+        _ = AgentRuntime.cleanup_owned_session(ownership_ref)
+        {:noreply, state}
+
+      running_entry ->
+        updated_running_entry =
+          running_entry
+          |> Map.put(:owned_session_ref, ownership_ref)
+          |> record_process_ownership(issue_id)
+
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
     end
   end
@@ -565,6 +588,8 @@ defmodule SymphonyElixir.Orchestrator do
           cleanup_issue_workspace(issue_or_identifier, worker_host)
         end
 
+        cleanup_owned_session(running_entry)
+
         if is_pid(pid) do
           terminate_task(pid)
         end
@@ -668,6 +693,30 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp terminate_task(_pid), do: :ok
+
+  defp recover_stale_owned_sessions do
+    case ProcessOwnership.recover_stale_owned_sessions(&AgentRuntime.cleanup_owned_session/1) do
+      {:ok, 0} ->
+        :ok
+
+      {:ok, count} ->
+        Logger.info("Recovered #{count} stale run-owned runtime session(s) from a previous role generation")
+        :ok
+    end
+  end
+
+  defp cleanup_owned_session(%{owned_session_ref: ownership_ref}) when is_map(ownership_ref) do
+    case AgentRuntime.cleanup_owned_session(ownership_ref) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to clean up run-owned runtime before task termination: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp cleanup_owned_session(_running_entry), do: :ok
 
   defp choose_issues(issues, state) do
     active_states = active_state_set()
@@ -2051,7 +2100,8 @@ defmodule SymphonyElixir.Orchestrator do
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path),
       session_id: running_entry_session_id(running_entry),
-      app_server_pid: Map.get(running_entry, :codex_app_server_pid)
+      app_server_pid: Map.get(running_entry, :codex_app_server_pid),
+      owned_session_ref: Map.get(running_entry, :owned_session_ref)
     }
   end
 

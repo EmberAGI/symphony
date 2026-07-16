@@ -119,6 +119,8 @@ defmodule SymphonyElixir.AgentRunner do
 
     with {:ok, session} <-
            AgentRuntime.start_session(workspace, session_opts) do
+      send_owned_session_runtime_info(codex_update_recipient, issue, session)
+
       try do
         do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after
@@ -126,6 +128,20 @@ defmodule SymphonyElixir.AgentRunner do
       end
     end
   end
+
+  defp send_owned_session_runtime_info(recipient, %Issue{id: issue_id}, session)
+       when is_binary(issue_id) and is_pid(recipient) do
+    case AgentRuntime.owned_session_ref(session) do
+      ownership_ref when is_map(ownership_ref) ->
+        send(recipient, {:owned_session_runtime_info, issue_id, ownership_ref})
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp send_owned_session_runtime_info(_recipient, _issue, _session), do: :ok
 
   defp put_optional(opts, _key, nil), do: opts
   defp put_optional(opts, key, value), do: Keyword.put(opts, key, value)

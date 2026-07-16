@@ -170,6 +170,35 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   def stop_session(_session, _context), do: {:error, :invalid_herdr_session_ref}
 
+  @doc "Return the narrow capability needed to clean up this run-owned server outside its owner task."
+  @spec owned_session_ref(map(), map()) :: map()
+  def owned_session_ref(%{name: name, runtime_root: runtime_root}, context)
+      when is_binary(name) and is_binary(runtime_root) and is_map(context) do
+    %{
+      kind: "herdr",
+      session_name: name,
+      runtime_root: runtime_root,
+      cleanup_module: __MODULE__,
+      cleanup_context: Map.take(context, [:herdr_bin, :extra_env, :stop_timeout_ms])
+    }
+  end
+
+  @doc "Idempotently stop one explicitly owned Herdr server without relying on its owner task finalizer."
+  @spec cleanup_owned_session(map()) :: :ok | {:error, term()}
+  def cleanup_owned_session(%{kind: "herdr", session_name: name} = ownership_ref)
+      when is_binary(name) do
+    runtime_root = Map.get(ownership_ref, :runtime_root, short_socket_root(name))
+    context = Map.get(ownership_ref, :cleanup_context, %{})
+
+    with :ok <- validate_owned_runtime_root(name, runtime_root),
+         :ok <- stop_owned_server_if_running(context, name, runtime_root) do
+      File.rm_rf(runtime_root)
+      :ok
+    end
+  end
+
+  def cleanup_owned_session(_ownership_ref), do: {:error, :invalid_herdr_ownership_ref}
+
   defp await_running(context, name, env, server_task) do
     timeout_ms = Map.get(context, :start_timeout_ms, @default_start_timeout_ms)
     interval_ms = Map.get(context, :poll_interval_ms, @default_poll_interval_ms)
@@ -355,6 +384,40 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     if File.exists?(runtime_root),
       do: {:error, {:herdr_runtime_root_exists, runtime_root}},
       else: :ok
+  end
+
+  defp validate_owned_runtime_root(name, runtime_root) do
+    if runtime_root == short_socket_root(name),
+      do: :ok,
+      else: {:error, :invalid_herdr_owned_runtime_root}
+  end
+
+  defp stop_owned_server_if_running(context, name, runtime_root) do
+    env = isolated_env(context, runtime_root)
+
+    case command(context, ["--session", name, "status", "server"], env) do
+      {:ok, output} ->
+        case parse_server_status(output) do
+          {:ok, %{status: "running"}} -> stop_owned_server(context, name, env)
+          {:ok, _status} -> :ok
+          {:error, reason} -> {:error, {:herdr_owned_session_status_failed, reason}}
+        end
+
+      {:error, {:port_exit, _status, output}} ->
+        if String.contains?(String.downcase(output), "not running"),
+          do: :ok,
+          else: {:error, {:herdr_owned_session_status_failed, output}}
+
+      {:error, reason} ->
+        {:error, {:herdr_owned_session_status_failed, reason}}
+    end
+  end
+
+  defp stop_owned_server(context, name, env) do
+    case command(context, ["--session", name, "server", "stop"], env) do
+      {:ok, _output} -> :ok
+      {:error, reason} -> {:error, {:herdr_owned_session_stop_failed, reason}}
+    end
   end
 
   defp materialize_worker_launcher(_runtime_root, nil, _context), do: {:ok, nil}

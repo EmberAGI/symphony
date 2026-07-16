@@ -205,4 +205,36 @@ defmodule SymphonyElixir.HerdrTransportTest do
     commands = File.read!(context.log)
     assert commands =~ "--session octo-emb-1141-incompatible status server"
   end
+
+  test "an ownership reference stops an abandoned run idempotently", context do
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [{"HERDR_FAKE_LOG", context.log}],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 10
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{name: "octo-emb-1141-abandoned", isolated: true, workspace: "/tmp/selected-workspace"},
+               adapter_context
+             )
+
+    ownership_ref = HerdrTransport.owned_session_ref(session, adapter_context)
+
+    assert ownership_ref.kind == "herdr"
+    assert ownership_ref.session_name == "octo-emb-1141-abandoned"
+    assert :ok = HerdrTransport.cleanup_owned_session(ownership_ref)
+
+    assert :ok =
+             HerdrTransport.cleanup_owned_session(%{
+               kind: "herdr",
+               session_name: ownership_ref.session_name
+             })
+
+    refute File.exists?(session.runtime_root)
+
+    commands = File.read!(context.log)
+    assert commands =~ "--session octo-emb-1141-abandoned server stop"
+  end
 end

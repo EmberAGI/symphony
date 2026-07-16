@@ -36,6 +36,20 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       :ok
     end
 
+    def owned_session_ref(session, %{owner: owner}) do
+      %{
+        kind: "recording",
+        session_name: session.name,
+        cleanup_module: __MODULE__,
+        owner: owner
+      }
+    end
+
+    def cleanup_owned_session(%{owner: owner, session_name: session_name}) do
+      send(owner, {:transport, :cleanup_owned_session, session_name})
+      :ok
+    end
+
     def submit(session, agent, prompt, %{owner: owner}) do
       send(owner, {:transport, :submit, session, agent, prompt})
       :ok
@@ -138,6 +152,12 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert session.orchestrator.name == "implementer_orchestrator"
     assert session.contract == contract
     assert session.default_server_before.socket == "/tmp/operator-default/herdr.sock"
+
+    ownership_ref = AgentRuntime.owned_session_ref(session)
+    assert ownership_ref.kind == "recording"
+    assert ownership_ref.session_name == "octo-emb-1141-run-7"
+    assert :ok = AgentRuntime.cleanup_owned_session(ownership_ref)
+    assert_receive {:transport, :cleanup_owned_session, "octo-emb-1141-run-7"}
 
     assert {:ok, turn_result} =
              ImplementerDelegation.run_turn(
