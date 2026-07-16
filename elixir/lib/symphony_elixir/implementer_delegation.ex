@@ -223,6 +223,8 @@ defmodule SymphonyElixir.ImplementerDelegation do
       "--model",
       model,
       "--config",
+      "check_for_update_on_startup=false",
+      "--config",
       "model_reasoning_effort=#{effort}",
       "--config",
       "developer_instructions=#{inspect(instructions)}",

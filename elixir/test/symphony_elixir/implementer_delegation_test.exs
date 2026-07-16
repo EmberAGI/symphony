@@ -259,6 +259,8 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       "--model",
       profile.model,
       "--config",
+      "check_for_update_on_startup=false",
+      "--config",
       "model_reasoning_effort=#{profile.reasoning_effort}",
       "--config",
       "developer_instructions=#{inspect(profile.instructions)}",
