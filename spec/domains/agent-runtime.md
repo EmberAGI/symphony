@@ -373,6 +373,9 @@ issue-derived prefix plus a digest while remaining unique per production run.
 The orchestrator receives the same non-secret issue, repository, and expected-
 branch environment derived for workspace hooks, projected through the runtime
 session Interface rather than reconstructed by the transport Adapter.
+The Codex permission profile keeps the workspace root writable and explicitly
+reopens that root's `.git` metadata for issue-branch and commit operations; the
+isolated Herdr runtime root remains read-only except for its allowed socket.
 
 The orchestrator receives the worker launcher path through
 `OCTO_HERDR_WORKER_LAUNCHER`. Missing or incompatible Herdr, unsafe socket

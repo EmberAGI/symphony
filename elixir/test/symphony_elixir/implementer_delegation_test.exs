@@ -126,6 +126,10 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert orchestrator_spec.argv ==
              codex_argv(contract.orchestrator, "/tmp/selected-workspace", herdr_session)
 
+    assert Enum.any?(orchestrator_spec.argv, fn arg ->
+             String.contains?(arg, "\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"}")
+           end)
+
     assert orchestrator_spec.env == %{
              "OCTO_HERDR_WORKER_LAUNCHER" => "/tmp/octo-emb-1141-run-7/launch-worker"
            }
@@ -351,7 +355,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       "--config",
       "default_permissions=\"octo_herdr\"",
       "--config",
-      "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\"},#{inspect(runtime_root)}=\"read\"}",
+      "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"},#{inspect(runtime_root)}=\"read\"}",
       "--config",
       "permissions.octo_herdr.network={enabled=true,unix_sockets={#{inspect(socket)}=\"allow\"}}",
       "--ask-for-approval",

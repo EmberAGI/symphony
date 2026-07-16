@@ -263,7 +263,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
       "--config",
       "default_permissions=\"octo_herdr\"",
       "--config",
-      "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\"},#{inspect(runtime_root)}=\"read\"}",
+      "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"},#{inspect(runtime_root)}=\"read\"}",
       "--config",
       "permissions.octo_herdr.network={enabled=true,unix_sockets={#{inspect(socket)}=\"allow\"}}",
       "--ask-for-approval",
