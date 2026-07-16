@@ -140,9 +140,12 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert orchestrator.name == "implementer_orchestrator"
     assert orchestrator.pane_id == "w1:p1"
 
-    assert {:ok, ready_orchestrator} =
-             HerdrTransport.await_agent(session, orchestrator, ["idle", "done"], 1_000, adapter_context)
+    ready_started_at = System.monotonic_time(:millisecond)
 
+    assert {:ok, ready_orchestrator} =
+             HerdrTransport.await_agent(session, orchestrator, ["idle", "done"], 3_000, adapter_context)
+
+    assert System.monotonic_time(:millisecond) - ready_started_at >= 1_900
     assert ready_orchestrator.agent == "codex"
     assert ready_orchestrator.agent_status == "idle"
     assert ready_orchestrator.agent_session == nil
