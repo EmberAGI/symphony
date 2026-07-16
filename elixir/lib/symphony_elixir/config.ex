@@ -129,14 +129,14 @@ defmodule SymphonyElixir.Config do
         {:error, :missing_linear_project_slug}
 
       true ->
-        validate_reasoning_profiles()
+        validate_agent_profiles()
     end
   end
 
-  defp validate_reasoning_profiles do
+  defp validate_agent_profiles do
     case ImplementationEffort.profiles() do
       {:ok, _profiles} -> :ok
-      {:error, reason} -> {:error, {:invalid_reasoning_profiles, reason}}
+      {:error, reason} -> {:error, {:invalid_agent_profiles, reason}}
     end
   end
 

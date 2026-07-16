@@ -223,6 +223,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
          model: model,
          effort: effort,
          no_thinking: no_thinking,
+         instructions: profile.instructions,
          permission_mode: claude.permission_mode,
          env: env,
          timeout_ms: claude.turn_timeout_ms,
@@ -302,6 +303,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
       "--permission-mode #{shell_escape(launch.permission_mode)}",
       model_flag(launch.model),
       effort_flag(launch.effort),
+      system_prompt_flag(launch.instructions),
       resume_flag(claude_session_id),
       "--",
       shell_escape(prompt)
@@ -315,6 +317,9 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   defp effort_flag(nil), do: nil
   defp effort_flag(effort) when is_binary(effort), do: "--effort #{shell_escape(effort)}"
+
+  defp system_prompt_flag(instructions) when is_binary(instructions),
+    do: "--append-system-prompt #{shell_escape(instructions)}"
 
   defp resume_flag(nil), do: nil
   defp resume_flag(session_id) when is_binary(session_id), do: "--resume #{shell_escape(session_id)}"

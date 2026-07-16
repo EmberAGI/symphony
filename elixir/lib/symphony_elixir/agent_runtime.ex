@@ -12,7 +12,8 @@ defmodule SymphonyElixir.AgentRuntime do
 
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.ImplementerDelegation.HerdrTransport
+  alias SymphonyElixir.{Config, ImplementationEffort, ImplementerDelegation}
 
   @type provider :: :codex | :claude_code
   @type failure_family ::
@@ -80,6 +81,11 @@ defmodule SymphonyElixir.AgentRuntime do
   def adapter(:claude_code), do: ClaudeAppServer
   def adapter(:codex), do: CodexAppServer
 
+  @doc "Resolve the runtime module for one role session."
+  @spec session_adapter(provider(), String.t() | nil) :: module()
+  def session_adapter(_provider, "implementer"), do: ImplementerDelegation
+  def session_adapter(provider, _role), do: adapter(provider)
+
   @doc "Return the configured runtime provider atom."
   @spec provider() :: provider()
   def provider do
@@ -89,12 +95,25 @@ defmodule SymphonyElixir.AgentRuntime do
     end
   end
 
+  @doc "Resolve one provider's orchestrator/worker runtime contract at the shared runtime seam."
+  @spec resolve_profile(provider() | String.t(), term(), String.t() | nil) :: {:ok, map()} | {:error, term()}
+  def resolve_profile(provider, issue, role) do
+    ImplementationEffort.runtime_profile_for_issue(provider, issue, role)
+  end
+
   @doc """
   Start a runtime session with the configured adapter.
   """
   @spec start_session(Path.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def start_session(workspace, opts) do
-    adapter().start_session(workspace, opts)
+    provider = provider()
+    role = Keyword.get(opts, :role, role_name())
+
+    if role == "implementer" do
+      start_implementer_session(workspace, provider, role, opts)
+    else
+      adapter(provider).start_session(workspace, opts)
+    end
   end
 
   @doc """
@@ -103,7 +122,9 @@ defmodule SymphonyElixir.AgentRuntime do
   """
   @spec run_turn(map(), String.t(), map(), keyword()) :: {:ok, {map(), map()}} | {:error, term()}
   def run_turn(session, prompt, issue, opts) do
-    case adapter().run_turn(session, prompt, issue, opts) do
+    runtime_adapter = session_runtime_adapter(session)
+
+    case runtime_adapter.run_turn(session, prompt, issue, opts) do
       {:ok, turn_result} ->
         {:ok, {advance_session(session, turn_result), turn_result}}
 
@@ -113,8 +134,64 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   @doc "Stop the runtime session with the configured adapter."
-  @spec stop_session(map()) :: :ok
-  def stop_session(session), do: adapter().stop_session(session)
+  @spec stop_session(map()) :: :ok | {:error, term()}
+  def stop_session(session), do: session_runtime_adapter(session).stop_session(session)
+
+  defp session_runtime_adapter(%{runtime_adapter: runtime_adapter}) when is_atom(runtime_adapter),
+    do: runtime_adapter
+
+  defp session_runtime_adapter(_session), do: adapter()
+
+  defp start_implementer_session(workspace, provider, role, opts) do
+    issue = Keyword.get(opts, :issue)
+    worker_host = Keyword.get(opts, :worker_host)
+
+    with :ok <- validate_local_herdr_worker(worker_host),
+         {:ok, run_id} <- required_run_id(opts),
+         {:ok, issue_identifier} <- required_issue_identifier(issue),
+         {:ok, contract} <- resolve_profile(provider, issue, role),
+         {:ok, transport_context} <- herdr_transport_context(opts) do
+      ImplementerDelegation.start_session(
+        workspace,
+        contract,
+        issue_identifier: issue_identifier,
+        run_id: run_id,
+        transport: Keyword.get(opts, :delegation_transport, HerdrTransport),
+        transport_context: transport_context
+      )
+    end
+  end
+
+  defp validate_local_herdr_worker(nil), do: :ok
+  defp validate_local_herdr_worker(worker_host), do: {:error, {:herdr_remote_worker_not_implemented, worker_host}}
+
+  defp required_run_id(opts) do
+    case Keyword.get(opts, :run_id) do
+      run_id when is_binary(run_id) and run_id != "" -> {:ok, run_id}
+      _ -> {:error, :missing_herdr_run_id}
+    end
+  end
+
+  defp required_issue_identifier(%{identifier: identifier}) when is_binary(identifier) and identifier != "",
+    do: {:ok, identifier}
+
+  defp required_issue_identifier(_issue), do: {:error, :missing_herdr_issue_identifier}
+
+  defp herdr_transport_context(opts) do
+    case Keyword.get(opts, :delegation_transport_context) do
+      context when is_map(context) ->
+        {:ok, context}
+
+      nil ->
+        case System.find_executable("herdr") do
+          binary when is_binary(binary) -> {:ok, %{herdr_bin: binary}}
+          _ -> {:error, {:missing_required_tool, "herdr"}}
+        end
+
+      _other ->
+        {:error, :invalid_herdr_transport_context}
+    end
+  end
 
   @doc """
   Classify a provider/runtime failure before retry policy is applied.
@@ -505,6 +582,39 @@ defmodule SymphonyElixir.AgentRuntime do
     {:missing_required_tool_or_cli, %{tool: "bash", message: "bash executable not found"}}
   end
 
+  defp real_irrecoverable_runtime_reason({:missing_required_tool, tool}) do
+    {:missing_required_tool_or_cli, %{tool: safe_detail_fragment(tool), message: "required runtime executable is not installed"}}
+  end
+
+  defp real_irrecoverable_runtime_reason(reason)
+       when reason in [:missing_herdr_run_id, :missing_herdr_issue_identifier, :invalid_herdr_transport_context] do
+    {:missing_required_runtime_configuration,
+     %{
+       name: "implementer.delegation",
+       subtype: Atom.to_string(reason),
+       message: "required Herdr-managed Implementer session configuration is missing or invalid"
+     }}
+  end
+
+  defp real_irrecoverable_runtime_reason({:herdr_remote_worker_not_implemented, worker_host}) do
+    {:missing_required_runtime_configuration,
+     %{
+       name: "implementer.delegation.worker_host",
+       subtype: "herdr_remote_worker_not_implemented",
+       message: "Herdr-managed Implementer delegation is local-only; remote host #{safe_detail_fragment(worker_host)} is unsupported"
+     }}
+  end
+
+  defp real_irrecoverable_runtime_reason({:incompatible_herdr_runtime, details}) when is_map(details) do
+    {:invalid_workspace_or_runtime_protocol,
+     %{
+       subtype: "incompatible_herdr_runtime",
+       message:
+         "Herdr runtime version/protocol mismatch: expected #{safe_detail_fragment(Map.get(details, :expected_version))}/#{safe_detail_fragment(Map.get(details, :expected_protocol))}, " <>
+           "got #{safe_detail_fragment(Map.get(details, :actual_version))}/#{safe_detail_fragment(Map.get(details, :actual_protocol))}"
+     }}
+  end
+
   defp real_irrecoverable_runtime_reason({:port_exit, 127, output}) do
     if missing_tool_output?(output) do
       {:missing_required_tool_or_cli, %{message: workspace_hook_summary(output)}}
@@ -519,6 +629,43 @@ defmodule SymphonyElixir.AgentRuntime do
 
   defp real_irrecoverable_runtime_reason({:unsupported_runtime_provider, provider}) do
     {:missing_required_runtime_configuration, %{name: "agent_runtime.provider", message: "unsupported runtime provider #{safe_detail_fragment(provider)}"}}
+  end
+
+  defp real_irrecoverable_runtime_reason(:missing_implementer_delegation_contract) do
+    {:missing_required_runtime_configuration,
+     %{
+       name: "implementer.delegation",
+       subtype: "missing_implementer_delegation_contract",
+       message: "required Implementer orchestrator/worker contract is missing"
+     }}
+  end
+
+  defp real_irrecoverable_runtime_reason({:implementer_launch_profile_substitution, field, expected, actual}) do
+    {:missing_required_runtime_configuration,
+     %{
+       name: "implementer.delegation",
+       subtype: "implementer_launch_profile_substitution",
+       message: "#{safe_detail_fragment(field)} expected #{safe_detail_fragment(expected)} but resolved #{safe_detail_fragment(actual)}"
+     }}
+  end
+
+  defp real_irrecoverable_runtime_reason({:mixed_implementer_delegation_provider, expected, orchestrator, worker}) do
+    {:missing_required_runtime_configuration,
+     %{
+       name: "implementer.delegation",
+       subtype: "mixed_implementer_delegation_provider",
+       message: "expected #{safe_detail_fragment(expected)} provider for orchestrator and worker, got #{safe_detail_fragment(orchestrator)} and #{safe_detail_fragment(worker)}"
+     }}
+  end
+
+  defp real_irrecoverable_runtime_reason({kind, provider})
+       when kind in [:missing_implementer_delegation_model, :missing_implementer_delegation_effort] do
+    {:missing_required_runtime_configuration,
+     %{
+       name: "implementer.delegation",
+       subtype: Atom.to_string(kind),
+       message: "required #{safe_detail_fragment(provider)} Implementer orchestrator/worker profile is incomplete"
+     }}
   end
 
   defp real_irrecoverable_runtime_reason({:unsafe_turn_sandbox_policy, details}) do
@@ -883,6 +1030,10 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   defp redact_runtime_text(value), do: value
+
+  @doc false
+  @spec sanitize_runtime_text(term()) :: term()
+  def sanitize_runtime_text(value), do: redact_runtime_text(value)
 
   defp role_name do
     case System.get_env("SYMPHONY_ROLE") do

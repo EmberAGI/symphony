@@ -944,11 +944,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   test "third identical no-progress retry escalates across retry timer dispatches with redacted metadata" do
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
-    test_root =
+    test_root_alias =
       Path.join(
         System.tmp_dir!(),
         "symphony-elixir-no-progress-retry-dispatch-#{System.unique_integer([:positive])}"
       )
+
+    File.mkdir_p!(test_root_alias)
+    test_root = File.cd!(test_root_alias, fn -> File.cwd!() end)
 
     try do
       workspace_root = Path.join(test_root, "workspaces")
