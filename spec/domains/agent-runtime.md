@@ -367,6 +367,9 @@ receives the Markdown body as `developer_instructions`; Claude receives it with
 lifecycle. Each orchestrator-authored worker assignment contains only its
 bounded deliverable, relevant context, mutation scope, constraints, expected
 validation, and required result; it does not restate stable worker behavior.
+Short Herdr session identities remain readable; identities that would exceed
+the default cross-platform Unix-socket budget compact deterministically to an
+issue-derived prefix plus a digest while remaining unique per production run.
 
 The orchestrator receives the worker launcher path through
 `OCTO_HERDR_WORKER_LAUNCHER`. Missing or incompatible Herdr, unsafe socket

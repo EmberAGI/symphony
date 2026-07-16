@@ -41,22 +41,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
       case await_running(context, name, env, server_task) do
         {:ok, status} ->
-          session = %{
-            name: name,
-            socket: status.socket,
-            runtime_root: runtime_root,
-            env: env,
-            server_task: server_task
-          }
-
-          case validate_runtime(status) do
-            :ok ->
-              {:ok, session}
-
-            {:error, reason} ->
-              cleanup_started_server(session, context)
-              {:error, reason}
-          end
+          finish_session_start(status, name, runtime_root, env, server_task, context)
 
         {:error, reason} ->
           shutdown_server_task(server_task)
@@ -67,6 +52,26 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   def start_session(_spec, _context), do: {:error, :invalid_herdr_isolated_session_spec}
+
+  defp finish_session_start(status, name, runtime_root, env, server_task, context) do
+    session = %{
+      name: name,
+      socket: status.socket,
+      runtime_root: runtime_root,
+      env: env,
+      server_task: server_task
+    }
+
+    case validate_runtime(status) do
+      :ok -> {:ok, session}
+      {:error, reason} -> reject_started_session(session, context, reason)
+    end
+  end
+
+  defp reject_started_session(session, context, reason) do
+    cleanup_started_server(session, context)
+    {:error, reason}
+  end
 
   @impl true
   def prepare_worker(%{runtime_root: runtime_root} = session, worker, context)
@@ -195,30 +200,25 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   defp do_await_agent(context, session_name, env, agent_name, statuses, deadline, poll_interval_ms) do
     case command(context, ["--session", session_name, "agent", "get", agent_name], env) do
       {:ok, output} ->
-        with {:ok, payload} <- Jason.decode(output),
-             agent when is_map(agent) <- get_in(payload, ["result", "agent"]) do
-          normalized = atomize_known_agent_fields(agent)
-
-          if agent_matches?(normalized, statuses) do
-            confirm_stable_agent(
-              context,
-              session_name,
-              env,
-              agent_name,
-              statuses,
-              normalized,
-              deadline,
-              poll_interval_ms
-            )
-          else
-            continue_await_agent(context, session_name, env, agent_name, statuses, deadline, poll_interval_ms)
-          end
-        else
-          _ -> continue_await_agent(context, session_name, env, agent_name, statuses, deadline, poll_interval_ms)
-        end
+        handle_agent_status(output, context, session_name, env, agent_name, statuses, deadline, poll_interval_ms)
 
       {:error, _reason} ->
         continue_await_agent(context, session_name, env, agent_name, statuses, deadline, poll_interval_ms)
+    end
+  end
+
+  defp handle_agent_status(output, context, session_name, env, agent_name, statuses, deadline, poll_interval_ms) do
+    with {:ok, payload} <- Jason.decode(output),
+         agent when is_map(agent) <- get_in(payload, ["result", "agent"]) do
+      normalized = atomize_known_agent_fields(agent)
+
+      if agent_matches?(normalized, statuses) do
+        confirm_stable_agent(context, session_name, env, agent_name, statuses, normalized, deadline, poll_interval_ms)
+      else
+        continue_await_agent(context, session_name, env, agent_name, statuses, deadline, poll_interval_ms)
+      end
+    else
+      _ -> continue_await_agent(context, session_name, env, agent_name, statuses, deadline, poll_interval_ms)
     end
   end
 
@@ -235,24 +235,22 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     if MapSet.subset?(statuses, MapSet.new(["idle", "done"])) do
       stability_ms = Map.get(context, :ready_stability_ms, @default_ready_stability_ms)
       Process.sleep(stability_ms)
-
-      case command(context, ["--session", session_name, "agent", "get", agent_name], env) do
-        {:ok, output} ->
-          with {:ok, payload} <- Jason.decode(output),
-               agent when is_map(agent) <- get_in(payload, ["result", "agent"]),
-               confirmed = atomize_known_agent_fields(agent),
-               true <- agent_matches?(confirmed, statuses),
-               true <- confirmed.agent_session == normalized.agent_session do
-            {:ok, confirmed}
-          else
-            _ -> continue_await_agent(context, session_name, env, agent_name, statuses, deadline, poll_interval_ms)
-          end
-
-        {:error, _reason} ->
-          continue_await_agent(context, session_name, env, agent_name, statuses, deadline, poll_interval_ms)
-      end
+      confirm_agent_status(context, session_name, env, agent_name, statuses, normalized, deadline, poll_interval_ms)
     else
       {:ok, normalized}
+    end
+  end
+
+  defp confirm_agent_status(context, session_name, env, agent_name, statuses, normalized, deadline, poll_interval_ms) do
+    with {:ok, output} <- command(context, ["--session", session_name, "agent", "get", agent_name], env),
+         {:ok, payload} <- Jason.decode(output),
+         agent when is_map(agent) <- get_in(payload, ["result", "agent"]),
+         confirmed = atomize_known_agent_fields(agent),
+         true <- agent_matches?(confirmed, statuses),
+         true <- confirmed.agent_session == normalized.agent_session do
+      {:ok, confirmed}
+    else
+      _ -> continue_await_agent(context, session_name, env, agent_name, statuses, deadline, poll_interval_ms)
     end
   end
 
@@ -279,19 +277,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         {:error, {:herdr_server_exited_before_ready, output}}
 
       nil ->
-        case command(context, ["--session", name, "status", "server"], env) do
-          {:ok, output} ->
-            case parse_server_status(output) do
-              {:ok, %{status: "running"} = status} ->
-                {:ok, status}
+        await_running_status(context, name, env, server_task, deadline, interval_ms)
+    end
+  end
 
-              _other ->
-                continue_await_running(context, name, env, server_task, deadline, interval_ms)
-            end
-
-          {:error, _reason} ->
-            continue_await_running(context, name, env, server_task, deadline, interval_ms)
-        end
+  defp await_running_status(context, name, env, server_task, deadline, interval_ms) do
+    with {:ok, output} <- command(context, ["--session", name, "status", "server"], env),
+         {:ok, %{status: "running"} = status} <- parse_server_status(output) do
+      {:ok, status}
+    else
+      _ -> continue_await_running(context, name, env, server_task, deadline, interval_ms)
     end
   end
 

@@ -44,6 +44,13 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
   end
 
   test "classifies real adapter and runtime error shapes without pre-normalized families" do
+    incompatible_runtime = %{
+      expected_version: "0.7.4",
+      expected_protocol: 16,
+      actual_version: "0.8.0",
+      actual_protocol: 17
+    }
+
     cases = [
       {:invalid_workspace_or_runtime_protocol, {:invalid_workspace_cwd, :outside_workspace_root, "/tmp/outside", "/tmp/root"}},
       {:invalid_workspace_or_runtime_protocol, {:invalid_workspace_cwd, :invalid_remote_workspace, "worker-1", "/tmp/work\nspace"}},
@@ -55,10 +62,16 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
       {:missing_required_runtime_configuration, :missing_herdr_run_id},
       {:missing_required_runtime_configuration, :missing_herdr_issue_identifier},
       {:missing_required_runtime_configuration, {:herdr_remote_worker_not_implemented, "worker-1"}},
-      {:invalid_workspace_or_runtime_protocol, {:incompatible_herdr_runtime, %{expected_version: "0.7.4", expected_protocol: 16, actual_version: "0.8.0", actual_protocol: 17}}},
+      {:invalid_workspace_or_runtime_protocol, {:incompatible_herdr_runtime, incompatible_runtime}},
       {:missing_required_runtime_configuration, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, 123}}},
       {:unsupported_app_server_contract, {:turn_failed, %{subtype: "unsupported_app_server_contract", message: "unsupported schema token=contract-secret"}}},
-      {:malformed_provider_event_schema, {:turn_failed, %{subtype: "malformed_provider_event_schema", event: "result", message: "missing required session_id token=event-secret"}}}
+      {:malformed_provider_event_schema,
+       {:turn_failed,
+        %{
+          subtype: "malformed_provider_event_schema",
+          event: "result",
+          message: "missing required session_id token=event-secret"
+        }}}
     ]
 
     for {family, reason} <- cases do

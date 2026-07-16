@@ -10,6 +10,9 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
   alias SymphonyElixir.ImplementationEffort
 
+  @max_session_name_bytes 44
+  @session_name_digest_chars 16
+
   @type session :: %{
           required(:name) => String.t(),
           required(:contract) => map(),
@@ -142,9 +145,8 @@ defmodule SymphonyElixir.ImplementerDelegation do
         default_server_before: expected_default
       }) do
     with :ok <- transport.stop_session(herdr_session, transport_context),
-         {:ok, actual_default} <- transport.default_server_snapshot(transport_context),
-         :ok <- verify_default_server(expected_default, actual_default) do
-      :ok
+         {:ok, actual_default} <- transport.default_server_snapshot(transport_context) do
+      verify_default_server(expected_default, actual_default)
     end
   end
 
@@ -303,10 +305,35 @@ defmodule SymphonyElixir.ImplementerDelegation do
   defp session_name(opts) do
     with issue when is_binary(issue) and issue != "" <- Keyword.get(opts, :issue_identifier),
          run_id when is_binary(run_id) and run_id != "" <- Keyword.get(opts, :run_id) do
-      {:ok, "octo-#{slug(issue)}-#{slug(run_id)}"}
+      issue_slug = slug(issue)
+
+      "octo-#{issue_slug}-#{slug(run_id)}"
+      |> compact_session_name(issue_slug)
+      |> then(&{:ok, &1})
     else
       _ -> {:error, :missing_herdr_session_identity}
     end
+  end
+
+  defp compact_session_name(name, _issue_slug) when byte_size(name) <= @max_session_name_bytes, do: name
+
+  defp compact_session_name(name, issue_slug) do
+    digest =
+      :sha256
+      |> :crypto.hash(name)
+      |> Base.encode16(case: :lower)
+      |> binary_part(0, @session_name_digest_chars)
+
+    max_prefix_bytes = @max_session_name_bytes - @session_name_digest_chars - 1
+    readable_prefix = "octo-#{issue_slug}"
+    prefix_bytes = min(byte_size(readable_prefix), max_prefix_bytes)
+
+    prefix =
+      readable_prefix
+      |> binary_part(0, prefix_bytes)
+      |> String.trim_trailing("-")
+
+    "#{prefix}-#{digest}"
   end
 
   defp slug(value) do

@@ -12,8 +12,8 @@ defmodule SymphonyElixir.AgentRuntime do
 
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
-  alias SymphonyElixir.ImplementerDelegation.HerdrTransport
   alias SymphonyElixir.{Config, ImplementationEffort, ImplementerDelegation}
+  alias SymphonyElixir.ImplementerDelegation.HerdrTransport
 
   @type provider :: :codex | :claude_code
   @type failure_family ::

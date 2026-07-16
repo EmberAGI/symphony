@@ -30,19 +30,7 @@ defmodule SymphonyElixir.AgentProfileCatalog do
       |> Path.join("*#{@profile_suffix}")
       |> Path.wildcard()
       |> Enum.sort()
-      |> Enum.reduce_while({:ok, %{}}, fn path, {:ok, catalog} ->
-        case load_profile(path) do
-          {:ok, %{name: name} = profile} ->
-            if Map.has_key?(catalog, name) do
-              {:halt, {:error, {:duplicate_agent_profile, name}}}
-            else
-              {:cont, {:ok, Map.put(catalog, name, profile)}}
-            end
-
-          {:error, reason} ->
-            {:halt, {:error, {:invalid_agent_profile, path, reason}}}
-        end
-      end)
+      |> Enum.reduce_while({:ok, %{}}, &load_catalog_entry/2)
 
     case result do
       {:ok, catalog} when map_size(catalog) == 0 -> {:error, :empty_agent_profile_catalog}
@@ -51,6 +39,21 @@ defmodule SymphonyElixir.AgentProfileCatalog do
   end
 
   def load(root), do: {:error, {:invalid_agent_profile_root, root}}
+
+  defp load_catalog_entry(path, {:ok, catalog}) do
+    case load_profile(path) do
+      {:ok, %{name: name} = profile} -> put_catalog_profile(catalog, name, profile)
+      {:error, reason} -> {:halt, {:error, {:invalid_agent_profile, path, reason}}}
+    end
+  end
+
+  defp put_catalog_profile(catalog, name, profile) do
+    if Map.has_key?(catalog, name) do
+      {:halt, {:error, {:duplicate_agent_profile, name}}}
+    else
+      {:cont, {:ok, Map.put(catalog, name, profile)}}
+    end
+  end
 
   @spec resolve(catalog(), String.t(), String.t() | atom(), String.t() | nil, String.t()) ::
           {:ok, map()} | {:error, term()}

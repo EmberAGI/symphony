@@ -192,6 +192,52 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert Enum.member?(orchestrator_spec.argv, contract.orchestrator.instructions)
   end
 
+  test "compacts production claim-lease run ids into deterministic socket-safe session names" do
+    contract = contract(:codex)
+    run_id = "localhost:1425052:implementer:3763a042-63a8-4b7b-a087-a18913c0a146:1"
+
+    assert {:ok, first} =
+             ImplementerDelegation.start_session(
+               "/tmp/selected-workspace",
+               contract,
+               issue_identifier: "EMB-1156",
+               run_id: run_id,
+               transport: RecordingTransport,
+               transport_context: %{owner: self()}
+             )
+
+    assert byte_size(first.name) <= 44
+    assert first.name =~ ~r/^octo-emb-1156-[0-9a-f]{16}$/
+
+    default_root = "/tmp/octo-herdr-" <> String.duplicate("a", 16)
+    socket_path = Path.join([default_root, "herdr", "sessions", first.name, "herdr.sock"])
+    assert byte_size(socket_path) <= 103
+
+    assert {:ok, repeated} =
+             ImplementerDelegation.start_session(
+               "/tmp/selected-workspace",
+               contract,
+               issue_identifier: "EMB-1156",
+               run_id: run_id,
+               transport: RecordingTransport,
+               transport_context: %{owner: self()}
+             )
+
+    assert repeated.name == first.name
+
+    assert {:ok, different} =
+             ImplementerDelegation.start_session(
+               "/tmp/selected-workspace",
+               contract,
+               issue_identifier: "EMB-1156",
+               run_id: run_id <> ":retry",
+               transport: RecordingTransport,
+               transport_context: %{owner: self()}
+             )
+
+    refute different.name == first.name
+  end
+
   test "AgentRuntime routes and composes only Implementer sessions through Herdr" do
     assert AgentRuntime.session_adapter(:codex, "implementer") == ImplementerDelegation
     assert AgentRuntime.session_adapter(:claude_code, "implementer") == ImplementerDelegation

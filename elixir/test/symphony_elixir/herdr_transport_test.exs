@@ -189,7 +189,14 @@ defmodule SymphonyElixir.HerdrTransportTest do
       poll_interval_ms: 10
     }
 
-    assert {:error, {:incompatible_herdr_runtime, %{expected_version: "0.7.4", expected_protocol: 16, actual_version: "0.8.0", actual_protocol: 17}}} =
+    incompatible_runtime = %{
+      expected_version: "0.7.4",
+      expected_protocol: 16,
+      actual_version: "0.8.0",
+      actual_protocol: 17
+    }
+
+    assert {:error, {:incompatible_herdr_runtime, ^incompatible_runtime}} =
              HerdrTransport.start_session(
                %{name: "octo-emb-1141-incompatible", isolated: true, workspace: "/tmp/selected-workspace"},
                adapter_context
