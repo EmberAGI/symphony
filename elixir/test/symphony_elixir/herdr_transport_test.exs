@@ -66,6 +66,17 @@ defmodule SymphonyElixir.HerdrTransportTest do
       exit 0
     fi
 
+    if [ "$#" -eq 5 ] && [ "$1" = "--session" ] && [ "$3" = "agent" ] && [ "$4" = "get" ]; then
+      ready="$state_root/agent-ready"
+      if [ -f "$ready" ]; then
+        printf '{"id":"cli:agent:get","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"claude","agent_status":"idle","agent_session":{"kind":"claude","value":"claude-session-1"}}}}\n' "$5"
+      else
+        : > "$ready"
+        printf '{"id":"cli:agent:get","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"claude","agent_status":"idle"}}}\n' "$5"
+      fi
+      exit 0
+    fi
+
     printf 'unsupported fake Herdr command: %s\n' "$*" >&2
     exit 64
     """)
@@ -134,6 +145,11 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert {:ok, orchestrator} = HerdrTransport.start_agent(session, orchestrator_spec, adapter_context)
     assert orchestrator.name == "implementer_orchestrator"
     assert orchestrator.pane_id == "w1:p1"
+
+    assert {:ok, ready_orchestrator} =
+             HerdrTransport.await_agent(session, orchestrator, ["idle", "done"], 1_000, adapter_context)
+
+    assert ready_orchestrator.agent_session == %{"kind" => "claude", "value" => "claude-session-1"}
 
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
     refute File.exists?(session.runtime_root)

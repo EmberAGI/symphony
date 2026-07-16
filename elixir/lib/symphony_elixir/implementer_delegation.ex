@@ -79,7 +79,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
            transport.await_agent(
              herdr_session,
              orchestrator,
-             ["working", "idle", "done"],
+             ["working"],
              start_timeout_ms,
              transport_context
            ),

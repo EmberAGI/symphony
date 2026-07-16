@@ -189,8 +189,17 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
              agent when is_map(agent) <- get_in(payload, ["result", "agent"]) do
           normalized = atomize_known_agent_fields(agent)
 
-          if MapSet.member?(statuses, normalized.agent_status) and is_binary(normalized.agent) do
-            {:ok, normalized}
+          if agent_matches?(normalized, statuses) do
+            confirm_stable_agent(
+              context,
+              session_name,
+              env,
+              agent_name,
+              statuses,
+              normalized,
+              deadline,
+              poll_interval_ms
+            )
           else
             continue_await_agent(context, session_name, env, agent_name, statuses, deadline, poll_interval_ms)
           end
@@ -201,6 +210,46 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       {:error, _reason} ->
         continue_await_agent(context, session_name, env, agent_name, statuses, deadline, poll_interval_ms)
     end
+  end
+
+  defp confirm_stable_agent(
+         context,
+         session_name,
+         env,
+         agent_name,
+         statuses,
+         normalized,
+         deadline,
+         poll_interval_ms
+       ) do
+    if MapSet.subset?(statuses, MapSet.new(["idle", "done"])) do
+      stability_ms = Map.get(context, :ready_stability_ms, 750)
+      Process.sleep(stability_ms)
+
+      case command(context, ["--session", session_name, "agent", "get", agent_name], env) do
+        {:ok, output} ->
+          with {:ok, payload} <- Jason.decode(output),
+               agent when is_map(agent) <- get_in(payload, ["result", "agent"]),
+               confirmed = atomize_known_agent_fields(agent),
+               true <- agent_matches?(confirmed, statuses),
+               true <- confirmed.agent_session == normalized.agent_session do
+            {:ok, confirmed}
+          else
+            _ -> continue_await_agent(context, session_name, env, agent_name, statuses, deadline, poll_interval_ms)
+          end
+
+        {:error, _reason} ->
+          continue_await_agent(context, session_name, env, agent_name, statuses, deadline, poll_interval_ms)
+      end
+    else
+      {:ok, normalized}
+    end
+  end
+
+  defp agent_matches?(normalized, statuses) do
+    MapSet.member?(statuses, normalized.agent_status) and
+      is_binary(normalized.agent) and
+      match?(%{"value" => value} when is_binary(value) and value != "", normalized.agent_session)
   end
 
   defp continue_await_agent(context, session_name, env, agent_name, statuses, deadline, poll_interval_ms) do
