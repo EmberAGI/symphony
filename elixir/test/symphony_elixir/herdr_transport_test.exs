@@ -21,7 +21,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     if [ "$#" -eq 2 ] && [ "$1" = "status" ] && [ "$2" = "server" ]; then
       printf '%s\n' \
         'status: running' \
-        'version: 0.7.3' \
+        'version: 0.7.4' \
         'protocol: 16' \
         'compatible: yes' \
         'socket: /tmp/operator-default/herdr.sock'
@@ -45,7 +45,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       if [ -f "$running" ]; then
         printf '%s\n' \
           'status: running' \
-          "version: ${HERDR_FAKE_VERSION:-0.7.3}" \
+          "version: ${HERDR_FAKE_VERSION:-0.7.4}" \
           "protocol: ${HERDR_FAKE_PROTOCOL:-16}" \
           'compatible: yes' \
           "socket: $state_root/herdr.sock"
@@ -171,7 +171,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       poll_interval_ms: 10
     }
 
-    assert {:error, {:incompatible_herdr_runtime, %{expected_version: "0.7.3", expected_protocol: 16, actual_version: "0.8.0", actual_protocol: 17}}} =
+    assert {:error, {:incompatible_herdr_runtime, %{expected_version: "0.7.4", expected_protocol: 16, actual_version: "0.8.0", actual_protocol: 17}}} =
              HerdrTransport.start_session(
                %{name: "octo-emb-1141-incompatible", isolated: true, workspace: "/tmp/selected-workspace"},
                adapter_context
