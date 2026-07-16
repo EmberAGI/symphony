@@ -248,8 +248,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp agent_matches?(normalized, statuses) do
     MapSet.member?(statuses, normalized.agent_status) and
-      is_binary(normalized.agent) and
-      match?(%{"value" => value} when is_binary(value) and value != "", normalized.agent_session)
+      is_binary(normalized.agent)
   end
 
   defp continue_await_agent(context, session_name, env, agent_name, statuses, deadline, poll_interval_ms) do

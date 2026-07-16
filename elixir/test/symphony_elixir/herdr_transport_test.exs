@@ -67,13 +67,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     fi
 
     if [ "$#" -eq 5 ] && [ "$1" = "--session" ] && [ "$3" = "agent" ] && [ "$4" = "get" ]; then
-      ready="$state_root/agent-ready"
-      if [ -f "$ready" ]; then
-        printf '{"id":"cli:agent:get","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"claude","agent_status":"idle","agent_session":{"kind":"claude","value":"claude-session-1"}}}}\n' "$5"
-      else
-        : > "$ready"
-        printf '{"id":"cli:agent:get","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"claude","agent_status":"idle"}}}\n' "$5"
-      fi
+      printf '{"id":"cli:agent:get","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"idle"}}}\n' "$5"
       exit 0
     fi
 
@@ -149,7 +143,9 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert {:ok, ready_orchestrator} =
              HerdrTransport.await_agent(session, orchestrator, ["idle", "done"], 1_000, adapter_context)
 
-    assert ready_orchestrator.agent_session == %{"kind" => "claude", "value" => "claude-session-1"}
+    assert ready_orchestrator.agent == "codex"
+    assert ready_orchestrator.agent_status == "idle"
+    assert ready_orchestrator.agent_session == nil
 
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
     refute File.exists?(session.runtime_root)
