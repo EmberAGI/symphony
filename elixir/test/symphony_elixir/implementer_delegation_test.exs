@@ -55,27 +55,31 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     end
   end
 
-  defmodule EarlyCompletionTransport do
+  defmodule StaleIdleTransport do
     def submit(_session, _agent, _prompt, %{owner: owner}) do
       send(owner, {:early_completion, :submit})
       :ok
     end
 
     def await_agent(_session, agent, statuses, _timeout_ms, %{owner: owner}) do
-      send(owner, {:early_completion, :await_agent, statuses})
+      send(owner, {:stale_idle, :await_agent, statuses, agent})
 
-      {:ok,
-       %{
-         name: agent.name,
-         pane_id: agent.pane_id,
-         agent_status: "done",
-         agent_session: %{value: "fast-session-1"}
-       }}
+      if statuses == ["working"] do
+        {:error, :timeout_waiting_for_working}
+      else
+        {:ok,
+         %{
+           name: agent.name,
+           pane_id: agent.pane_id,
+           agent_status: "done",
+           agent_session: %{value: "stale-session-1"}
+         }}
+      end
     end
 
     def read_agent(_session, _agent, _opts, %{owner: owner}) do
-      send(owner, {:early_completion, :read_agent})
-      {:ok, %{text: "FAST_TURN_COMPLETE"}}
+      send(owner, {:stale_idle, :read_agent})
+      {:ok, %{text: "STALE_IDLE_MUST_NOT_COMPLETE"}}
     end
   end
 
@@ -132,7 +136,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     assert_receive {:transport, :submit, %{name: "octo-emb-1141-run-7"}, %{name: "implementer_orchestrator"}, "Implement the bounded tracer task."}
 
-    assert_receive {:transport, :await_agent, _, _, ["working", "idle", "done"], 30_000}
+    assert_receive {:transport, :await_agent, _, _, ["working"], 30_000}
     assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 90_000}
     assert_receive {:transport, :read_agent, _, _, %{lines: 240, source: :recent_unwrapped}}
 
@@ -212,15 +216,15 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert :ok = AgentRuntime.stop_session(next_session)
   end
 
-  test "a turn completed before the first poll does not wait for working" do
+  test "a stale pre-submit idle state cannot complete a turn" do
     session = %{
-      transport: EarlyCompletionTransport,
+      transport: StaleIdleTransport,
       transport_context: %{owner: self()},
       herdr_session: %{name: "octo-emb-1141-fast"},
       orchestrator: %{name: "implementer_orchestrator", pane_id: "w1:p1"}
     }
 
-    assert {:ok, result} =
+    assert {:error, :timeout_waiting_for_working} =
              ImplementerDelegation.run_turn(
                session,
                "Complete immediately.",
@@ -228,10 +232,8 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
                start_timeout_ms: 25
              )
 
-    assert result.agent_status == "done"
-    assert result.response == "FAST_TURN_COMPLETE"
-    assert_receive {:early_completion, :await_agent, ["working", "idle", "done"]}
-    refute_receive {:early_completion, :await_agent, ["idle", "done"]}
+    assert_receive {:stale_idle, :await_agent, ["working"], _agent}
+    refute_receive {:stale_idle, :read_agent}
   end
 
   defp contract(provider) do
