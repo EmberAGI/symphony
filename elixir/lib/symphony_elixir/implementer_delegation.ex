@@ -34,10 +34,16 @@ defmodule SymphonyElixir.ImplementerDelegation do
              %{
                name: name,
                isolated: true,
-               workspace: workspace,
-               worker: worker_spec(contract, workspace)
+               workspace: workspace
              },
              transport_context
+           ),
+         {:ok, herdr_session} <-
+           prepare_worker(
+             transport,
+             transport_context,
+             herdr_session,
+             worker_spec(contract, workspace, herdr_session)
            ),
          {:ok, orchestrator} <-
            start_orchestrator(transport, transport_context, herdr_session, workspace, contract) do
@@ -151,7 +157,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
       provider: contract.provider,
       profile: contract.orchestrator,
       cwd: workspace,
-      argv: launcher_argv(contract.provider, contract.orchestrator, workspace),
+      argv: launcher_argv(contract.provider, contract.orchestrator, workspace, herdr_session),
       env: %{"OCTO_HERDR_WORKER_LAUNCHER" => Map.fetch!(herdr_session, :worker_launcher)}
     }
 
@@ -180,6 +186,17 @@ defmodule SymphonyElixir.ImplementerDelegation do
       {:error, reason} ->
         _ = transport.stop_session(herdr_session, transport_context)
         {:error, {:implementer_orchestrator_start_failed, reason}}
+    end
+  end
+
+  defp prepare_worker(transport, transport_context, herdr_session, worker_spec) do
+    case transport.prepare_worker(herdr_session, worker_spec, transport_context) do
+      {:ok, prepared_session} ->
+        {:ok, prepared_session}
+
+      {:error, reason} ->
+        _ = transport.stop_session(herdr_session, transport_context)
+        {:error, {:implementer_worker_prepare_failed, reason}}
     end
   end
 
@@ -216,7 +233,8 @@ defmodule SymphonyElixir.ImplementerDelegation do
   defp launcher_argv(
          "codex",
          %{model: model, reasoning_effort: effort, instructions: instructions},
-         workspace
+         workspace,
+         %{runtime_root: runtime_root, socket: socket}
        ) do
     [
       "codex",
@@ -230,8 +248,12 @@ defmodule SymphonyElixir.ImplementerDelegation do
       "developer_instructions=#{inspect(instructions)}",
       "--config",
       "shell_environment_policy.inherit=all",
-      "--sandbox",
-      "workspace-write",
+      "--permission-profile",
+      "octo_herdr",
+      "--config",
+      "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\"},#{inspect(runtime_root)}=\"read\"}",
+      "--config",
+      "permissions.octo_herdr.network={enabled=true,unix_sockets={#{inspect(socket)}=\"allow\"}}",
       "--ask-for-approval",
       "never",
       "--disable",
@@ -246,7 +268,8 @@ defmodule SymphonyElixir.ImplementerDelegation do
   defp launcher_argv(
          "claude_code",
          %{model: model, reasoning_effort: effort, instructions: instructions},
-         _workspace
+         _workspace,
+         _herdr_session
        ) do
     [
       "claude",
@@ -262,17 +285,17 @@ defmodule SymphonyElixir.ImplementerDelegation do
     ]
   end
 
-  defp launcher_argv(provider, _profile, _workspace),
+  defp launcher_argv(provider, _profile, _workspace, _herdr_session),
     do: raise(ArgumentError, "unsupported Implementer provider #{inspect(provider)}")
 
-  defp worker_spec(contract, workspace) do
+  defp worker_spec(contract, workspace, herdr_session) do
     %{
       name: "implementer_worker",
       role: :worker,
       provider: contract.provider,
       profile: contract.worker,
       cwd: workspace,
-      argv: launcher_argv(contract.provider, contract.worker, workspace),
+      argv: launcher_argv(contract.provider, contract.worker, workspace, herdr_session),
       may_spawn_agents: false
     }
   end
