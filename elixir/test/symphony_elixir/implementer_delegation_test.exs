@@ -7,7 +7,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
   defmodule RecordingTransport do
     def default_server_snapshot(%{owner: owner}) do
       send(owner, {:transport, :default_server_snapshot})
-      {:ok, %{status: "running", version: "0.7.3", protocol: 16, socket: "/tmp/operator-default/herdr.sock"}}
+      {:ok, %{status: "running", version: "0.7.4", protocol: 16, socket: "/tmp/operator-default/herdr.sock"}}
     end
 
     def start_session(spec, %{owner: owner}) do

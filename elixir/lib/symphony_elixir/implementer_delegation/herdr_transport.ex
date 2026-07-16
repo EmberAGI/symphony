@@ -12,7 +12,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @default_start_timeout_ms 10_000
   @default_poll_interval_ms 50
   @default_stop_timeout_ms 5_000
-  @required_version "0.7.3"
+  @required_version "0.7.4"
   @required_protocol 16
 
   @impl true
