@@ -83,6 +83,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
       when is_binary(prompt) and prompt != "" and is_list(opts) do
     turn_timeout_ms = Keyword.get(opts, :turn_timeout_ms, 3_600_000)
     start_timeout_ms = Keyword.get(opts, :start_timeout_ms, 30_000)
+    heartbeat_interval_ms = Keyword.get(opts, :heartbeat_interval_ms, 30_000)
     on_message = Keyword.get(opts, :on_message, fn _message -> :ok end)
 
     with :ok <- transport.submit(herdr_session, orchestrator, prompt, transport_context),
@@ -109,7 +110,10 @@ defmodule SymphonyElixir.ImplementerDelegation do
              herdr_session,
              orchestrator,
              observed,
-             turn_timeout_ms
+             turn_timeout_ms,
+             heartbeat_interval_ms,
+             on_message,
+             Map.get(session, :contract, %{})
            ),
          {:ok, read} <-
            transport.read_agent(
@@ -226,16 +230,103 @@ defmodule SymphonyElixir.ImplementerDelegation do
     end
   end
 
-  defp await_completion(_transport, _context, _session, _orchestrator, %{agent_status: status} = agent, _timeout_ms)
+  defp await_completion(
+         _transport,
+         _context,
+         _session,
+         _orchestrator,
+         %{agent_status: status} = agent,
+         _timeout_ms,
+         _heartbeat_interval_ms,
+         _on_message,
+         _contract
+       )
        when status in ["idle", "done"],
        do: {:ok, agent}
 
-  defp await_completion(transport, context, session, orchestrator, %{agent_status: "working"}, timeout_ms) do
-    transport.await_agent(session, orchestrator, ["idle", "done"], timeout_ms, context)
+  defp await_completion(
+         transport,
+         context,
+         session,
+         orchestrator,
+         %{agent_status: "working"},
+         timeout_ms,
+         heartbeat_interval_ms,
+         on_message,
+         contract
+       ) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+    await_completion_with_heartbeat(
+      transport,
+      context,
+      session,
+      orchestrator,
+      deadline,
+      max(1, heartbeat_interval_ms),
+      on_message,
+      contract
+    )
   end
 
-  defp await_completion(_transport, _context, _session, _orchestrator, agent, _timeout_ms),
-    do: {:error, {:unexpected_herdr_agent_status, Map.get(agent, :agent_status)}}
+  defp await_completion(
+         _transport,
+         _context,
+         _session,
+         _orchestrator,
+         agent,
+         _timeout_ms,
+         _heartbeat_interval_ms,
+         _on_message,
+         _contract
+       ),
+       do: {:error, {:unexpected_herdr_agent_status, Map.get(agent, :agent_status)}}
+
+  defp await_completion_with_heartbeat(
+         transport,
+         context,
+         session,
+         orchestrator,
+         deadline,
+         heartbeat_interval_ms,
+         on_message,
+         contract
+       ) do
+    remaining_ms = max(0, deadline - System.monotonic_time(:millisecond))
+    wait_ms = min(remaining_ms, heartbeat_interval_ms)
+
+    case transport.await_agent(session, orchestrator, ["idle", "done"], wait_ms, context) do
+      {:ok, completed} ->
+        {:ok, completed}
+
+      {:error, {:herdr_agent_status_timeout, _agent_name, _statuses}} = timeout ->
+        if remaining_ms <= heartbeat_interval_ms do
+          timeout
+        else
+          emit_message(on_message, :turn_heartbeat, %{
+            provider: Map.get(contract, :provider),
+            herdr_session: Map.get(session, :name),
+            agent: Map.get(orchestrator, :name),
+            agent_status: "working",
+            session_id: nil
+          })
+
+          await_completion_with_heartbeat(
+            transport,
+            context,
+            session,
+            orchestrator,
+            deadline,
+            heartbeat_interval_ms,
+            on_message,
+            contract
+          )
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   defp emit_started(on_message, herdr_session, orchestrator, observed, contract) do
     emit_message(on_message, :session_started, %{

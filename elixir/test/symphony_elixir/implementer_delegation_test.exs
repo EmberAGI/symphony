@@ -102,6 +102,32 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     end
   end
 
+  defmodule HeartbeatTransport do
+    def submit(_session, _agent, _prompt, _context), do: :ok
+
+    def await_agent(_session, agent, ["working"], _timeout_ms, _context) do
+      {:ok, %{name: agent.name, agent_status: "working", agent_session: nil}}
+    end
+
+    def await_agent(_session, agent, ["idle", "done"], _timeout_ms, _context) do
+      attempt = Process.get({__MODULE__, :attempt}, 0) + 1
+      Process.put({__MODULE__, :attempt}, attempt)
+
+      if attempt < 3 do
+        {:error, {:herdr_agent_status_timeout, agent.name, ["done", "idle"]}}
+      else
+        {:ok,
+         %{
+           name: agent.name,
+           agent_status: "idle",
+           agent_session: %{value: "heartbeat-session"}
+         }}
+      end
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "HEARTBEAT_COMPLETE"}}
+  end
+
   test "owns one isolated Herdr session and projects Codex agent profiles exactly" do
     contract = contract(:codex)
 
@@ -171,7 +197,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert_receive {:transport, :submit, %{name: "octo-emb-1141-run-7"}, %{name: "implementer_orchestrator"}, "Implement the bounded tracer task."}
 
     assert_receive {:transport, :await_agent, _, _, ["working"], 30_000}
-    assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 90_000}
+    assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 30_000}
     assert_receive {:transport, :read_agent, _, _, %{lines: 240, source: :recent_unwrapped}}
 
     assert turn_result.session_id == "codex-session-7"
@@ -302,7 +328,9 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
              "SYMPHONY_ISSUE_REPOSITORY_SOURCE" => "linear_label",
              "SYMPHONY_ISSUE_STATE" => "In Progress",
              "SYMPHONY_ISSUE_TITLE" => "Exercise the public runtime seam",
-             "SYMPHONY_ISSUE_URL" => "https://linear.app/emberai/issue/EMB-1141"
+             "SYMPHONY_ISSUE_URL" => "https://linear.app/emberai/issue/EMB-1141",
+             "SYMPHONY_ROLE_NAME" => "implementer",
+             "SYMPHONY_ROLE_RUN_ID" => "runtime-seam"
            }
 
     assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 30_000}
@@ -333,6 +361,32 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     assert_receive {:stale_idle, :await_agent, ["working"], _agent}
     refute_receive {:stale_idle, :read_agent}
+  end
+
+  test "long working turns emit bounded heartbeats while awaiting semantic completion" do
+    Process.delete({HeartbeatTransport, :attempt})
+
+    session = %{
+      transport: HeartbeatTransport,
+      transport_context: %{},
+      contract: %{provider: "codex"},
+      herdr_session: %{name: "octo-emb-1141-heartbeat"},
+      orchestrator: %{name: "implementer_orchestrator", pane_id: "w1:p1"}
+    }
+
+    assert {:ok, %{response: "HEARTBEAT_COMPLETE"}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Complete a long bounded assignment.",
+               %{identifier: "EMB-1141"},
+               heartbeat_interval_ms: 1,
+               turn_timeout_ms: 100,
+               on_message: fn message -> send(self(), {:runtime_message, message}) end
+             )
+
+    assert_receive {:runtime_message, %{event: :turn_heartbeat, agent_status: "working"}}
+    assert_receive {:runtime_message, %{event: :turn_heartbeat, agent_status: "working"}}
+    assert_receive {:runtime_message, %{event: :turn_completed}}
   end
 
   defp contract(provider) do

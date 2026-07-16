@@ -180,7 +180,7 @@ defmodule SymphonyElixir.AgentRuntime do
         contract,
         issue_identifier: issue_identifier,
         run_id: run_id,
-        orchestrator_env: Workspace.issue_environment(issue),
+        orchestrator_env: implementer_run_environment(issue, role, run_id),
         transport: Keyword.get(opts, :delegation_transport, HerdrTransport),
         transport_context: transport_context
       )
@@ -189,6 +189,15 @@ defmodule SymphonyElixir.AgentRuntime do
 
   defp validate_local_herdr_worker(nil), do: :ok
   defp validate_local_herdr_worker(worker_host), do: {:error, {:herdr_remote_worker_not_implemented, worker_host}}
+
+  defp implementer_run_environment(issue, role, run_id) do
+    issue
+    |> Workspace.issue_environment()
+    |> Map.merge(%{
+      "SYMPHONY_ROLE_NAME" => role,
+      "SYMPHONY_ROLE_RUN_ID" => run_id
+    })
+  end
 
   defp required_run_id(opts) do
     case Keyword.get(opts, :run_id) do
