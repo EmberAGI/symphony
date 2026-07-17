@@ -173,6 +173,11 @@ defmodule SymphonyElixir.ImplementerDelegation do
   def owned_session_ref(_session), do: nil
 
   defp start_orchestrator(transport, transport_context, herdr_session, workspace, contract, orchestrator_env) do
+    orchestrator_env =
+      orchestrator_env
+      |> Map.put("OCTO_HERDR_WORKER_LAUNCHER", Map.fetch!(herdr_session, :worker_launcher))
+      |> project_orchestrator_herdr_path(herdr_session)
+
     spec = %{
       name: "implementer_orchestrator",
       role: :orchestrator,
@@ -180,7 +185,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
       profile: contract.orchestrator,
       cwd: workspace,
       argv: launcher_argv(contract_provider(contract, :orchestrator), contract.orchestrator, workspace, herdr_session),
-      env: Map.put(orchestrator_env, "OCTO_HERDR_WORKER_LAUNCHER", Map.fetch!(herdr_session, :worker_launcher))
+      env: orchestrator_env
     }
 
     case transport.start_agent(herdr_session, spec, transport_context) do
@@ -218,6 +223,14 @@ defmodule SymphonyElixir.ImplementerDelegation do
   end
 
   defp validate_orchestrator_env(_env), do: {:error, :invalid_implementer_orchestrator_environment}
+
+  defp project_orchestrator_herdr_path(env, %{orchestrator_bin: orchestrator_bin})
+       when is_binary(orchestrator_bin) and orchestrator_bin != "" do
+    inherited_path = Map.get(env, "PATH") || System.get_env("PATH") || ""
+    Map.put(env, "PATH", orchestrator_bin <> ":" <> inherited_path)
+  end
+
+  defp project_orchestrator_herdr_path(env, _session), do: env
 
   defp prepare_worker(transport, transport_context, herdr_session, worker_spec) do
     case transport.prepare_worker(herdr_session, worker_spec, transport_context) do
