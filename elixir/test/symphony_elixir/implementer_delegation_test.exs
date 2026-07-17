@@ -23,7 +23,11 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     def prepare_worker(session, spec, %{owner: owner}) do
       send(owner, {:transport, :prepare_worker, session, spec})
-      {:ok, Map.put(session, :worker_launcher, "/tmp/#{session.name}/launch-worker")}
+
+      {:ok,
+       session
+       |> Map.put(:worker_launcher, "/tmp/#{session.name}/launch-worker")
+       |> Map.put(:orchestrator_bin, "/tmp/#{session.name}/orchestrator-bin")}
     end
 
     def start_agent(session, spec, %{owner: owner}) do
@@ -170,9 +174,13 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
              String.contains?(arg, "\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"}")
            end)
 
-    assert orchestrator_spec.env == %{
-             "OCTO_HERDR_WORKER_LAUNCHER" => "/tmp/octo-emb-1141-run-7/launch-worker"
-           }
+    assert orchestrator_spec.env["OCTO_HERDR_WORKER_LAUNCHER"] ==
+             "/tmp/octo-emb-1141-run-7/launch-worker"
+
+    assert String.starts_with?(
+             orchestrator_spec.env["PATH"],
+             "/tmp/octo-emb-1141-run-7/orchestrator-bin:"
+           )
 
     assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 30_000}
     assert session.orchestrator.name == "implementer_orchestrator"
@@ -348,7 +356,12 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert orchestrator_spec.profile.name == "implementer-orchestrator"
     assert orchestrator_spec.profile.model == "gpt-5.6-sol"
 
-    assert orchestrator_spec.env == %{
+    assert String.starts_with?(
+             orchestrator_spec.env["PATH"],
+             "/tmp/octo-emb-1141-runtime-seam/orchestrator-bin:"
+           )
+
+    assert Map.delete(orchestrator_spec.env, "PATH") == %{
              "OCTO_HERDR_WORKER_LAUNCHER" => "/tmp/octo-emb-1141-runtime-seam/launch-worker",
              "SYMPHONY_EXPECTED_BRANCH" => "agent/emb-1141-exercise-the-public-runtime-seam",
              "SYMPHONY_ISSUE_BRANCH_NAME" => "sebastianvarela/emb-1141-exercise-the-public-runtime-seam",

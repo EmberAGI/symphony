@@ -71,6 +71,21 @@ defmodule SymphonyElixir.HerdrTransportTest do
       exit 0
     fi
 
+    if [ "$1" = "--session" ] && [ "$3" = "pane" ] && { [ "$4" = "run" ] || [ "$4" = "send-text" ]; }; then
+      exit 0
+    fi
+
+    if [ "$#" -eq 3 ] && [ "$1" = "agent" ] && [ "$2" = "get" ]; then
+      agent=codex
+      if [ "$3" = "w1:p2" ]; then agent=claude; fi
+      printf '{"id":"cli:agent:get","result":{"agent":{"name":"target","pane_id":"%s","agent":"%s","agent_status":"idle"}}}\n' "$3" "$agent"
+      exit 0
+    fi
+
+    if [ "$1" = "pane" ] && { [ "$2" = "run" ] || [ "$2" = "send-text" ]; }; then
+      exit 0
+    fi
+
     printf 'unsupported fake Herdr command: %s\n' "$*" >&2
     exit 64
     """)
@@ -125,6 +140,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
              HerdrTransport.prepare_worker(session, %{argv: worker_argv}, adapter_context)
 
     assert File.exists?(session.worker_launcher)
+    assert File.exists?(Path.join(session.orchestrator_bin, "herdr"))
     launcher = File.read!(session.worker_launcher)
     assert launcher =~ "default_permissions=\"octo_herdr\""
     assert launcher =~ session.socket
@@ -133,6 +149,22 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert File.exists?(restricted_herdr)
     assert {output, 64} = System.cmd(restricted_herdr, ["agent", "start", "descendant"], stderr_to_stdout: true)
     assert output =~ "worker Herdr authority denies"
+
+    assert {"", 0} =
+             System.cmd(
+               restricted_herdr,
+               ["pane", "run", "w1:p2", "worker result"],
+               env: [{"HERDR_FAKE_LOG", context.log}, {"XDG_CONFIG_HOME", session.runtime_root}]
+             )
+
+    orchestrator_herdr = Path.join(session.orchestrator_bin, "herdr")
+
+    assert {"", 0} =
+             System.cmd(
+               orchestrator_herdr,
+               ["pane", "run", "w1:p2", "orchestrator advice"],
+               env: [{"HERDR_FAKE_LOG", context.log}, {"XDG_CONFIG_HOME", session.runtime_root}]
+             )
 
     assert {wait_output, 64} =
              System.cmd(
@@ -147,6 +179,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
     orchestrator_spec = %{
       name: "implementer_orchestrator",
+      provider: "codex",
       cwd: "/tmp/selected-workspace",
       argv: ["codex", "--model", "gpt-5.6-sol", "--config", "model_reasoning_effort=medium"]
     }
@@ -154,6 +187,25 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert {:ok, orchestrator} = HerdrTransport.start_agent(session, orchestrator_spec, adapter_context)
     assert orchestrator.name == "implementer_orchestrator"
     assert orchestrator.pane_id == "w1:p1"
+    assert orchestrator.provider == "codex"
+
+    assert :ok = HerdrTransport.submit(session, orchestrator, "Codex assignment", adapter_context)
+
+    claude_spec = %{
+      name: "claude_orchestrator",
+      provider: "claude_code",
+      cwd: "/tmp/selected-workspace",
+      argv: ["claude", "--model", "claude-fable-5", "--effort", "medium"]
+    }
+
+    assert {:ok, claude} = HerdrTransport.start_agent(session, claude_spec, adapter_context)
+    assert claude.provider == "claude_code"
+
+    assert {:ok, ready_claude} =
+             HerdrTransport.await_agent(session, claude, ["idle", "done"], 3_000, adapter_context)
+
+    assert ready_claude.provider == "claude_code"
+    assert :ok = HerdrTransport.submit(session, ready_claude, "Claude assignment", adapter_context)
 
     ready_started_at = System.monotonic_time(:millisecond)
 
@@ -174,6 +226,12 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert commands =~ "--session octo-emb-1141-run-7 server\n"
     assert commands =~ "--session octo-emb-1141-run-7 agent start implementer_orchestrator"
     assert commands =~ "-- codex --model gpt-5.6-sol --config model_reasoning_effort=medium"
+    assert commands =~ "--session octo-emb-1141-run-7 pane run w1:p1 Codex assignment\n"
+    assert commands =~ "--session octo-emb-1141-run-7 pane run w1:p1 Claude assignment\n"
+    assert commands =~ "--session octo-emb-1141-run-7 pane send-text w1:p1 \e[13;1u\n"
+    assert commands =~ "pane run w1:p2 worker result\n"
+    assert commands =~ "pane run w1:p2 orchestrator advice\n"
+    assert length(:binary.matches(commands, "pane send-text w1:p2 \e[13;1u\n")) == 2
     assert commands =~ "--session octo-emb-1141-run-7 server stop\n"
   end
 

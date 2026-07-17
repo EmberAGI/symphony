@@ -77,8 +77,11 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   def prepare_worker(%{runtime_root: runtime_root} = session, worker, context)
       when is_binary(runtime_root) and is_map(context) do
     case materialize_worker_launcher(runtime_root, worker, context) do
-      {:ok, worker_launcher} -> {:ok, Map.put(session, :worker_launcher, worker_launcher)}
-      {:error, reason} -> {:error, reason}
+      {:ok, worker_launcher, orchestrator_bin} ->
+        {:ok, session |> Map.put(:worker_launcher, worker_launcher) |> Map.put(:orchestrator_bin, orchestrator_bin)}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -96,7 +99,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     with {:ok, output} <- command(context, args, env),
          {:ok, payload} <- Jason.decode(output),
          agent when is_map(agent) <- get_in(payload, ["result", "agent"]) do
-      {:ok, atomize_known_agent_fields(agent)}
+      {:ok, agent |> atomize_known_agent_fields() |> Map.put(:provider, Map.get(spec, :provider))}
     else
       {:error, reason} -> {:error, {:herdr_agent_start_failed, reason}}
       _ -> {:error, :invalid_herdr_agent_start_response}
@@ -106,6 +109,25 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   def start_agent(_session, _spec, _context), do: {:error, :invalid_herdr_agent_spec}
 
   @impl true
+  def submit(
+        %{name: session_name, env: env},
+        %{pane_id: pane_id, provider: provider},
+        prompt,
+        context
+      )
+      when provider in ["claude_code", :claude_code] and is_binary(pane_id) and is_binary(prompt) and prompt != "" do
+    # Claude Code negotiates Kitty keyboard input and requires the protocol form
+    # of Enter. Herdr 0.7.4's pane run still emits a legacy carriage return, so
+    # preserve its bracketed-paste handling and then send the negotiated key.
+    with {:ok, _output} <- command(context, ["--session", session_name, "pane", "run", pane_id, prompt], env),
+         {:ok, _output} <-
+           command(context, ["--session", session_name, "pane", "send-text", pane_id, "\e[13;1u"], env) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:herdr_submit_failed, reason}}
+    end
+  end
+
   def submit(%{name: session_name, env: env}, %{pane_id: pane_id}, prompt, context)
       when is_binary(pane_id) and is_binary(prompt) and prompt != "" do
     case command(context, ["--session", session_name, "pane", "run", pane_id, prompt], env) do
@@ -117,14 +139,22 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   def submit(_session, _agent, _prompt, _context), do: {:error, :invalid_herdr_submit}
 
   @impl true
-  def await_agent(%{name: session_name, env: env}, %{name: agent_name}, statuses, timeout_ms, context)
+  def await_agent(%{name: session_name, env: env}, %{name: agent_name} = agent, statuses, timeout_ms, context)
       when is_list(statuses) and statuses != [] and is_integer(timeout_ms) and timeout_ms >= 0 do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     poll_interval_ms = Map.get(context, :poll_interval_ms, @default_poll_interval_ms)
-    do_await_agent(context, session_name, env, agent_name, MapSet.new(statuses), deadline, poll_interval_ms)
+
+    context
+    |> do_await_agent(session_name, env, agent_name, MapSet.new(statuses), deadline, poll_interval_ms)
+    |> preserve_agent_provider(agent)
   end
 
   def await_agent(_session, _agent, _statuses, _timeout_ms, _context), do: {:error, :invalid_herdr_agent_wait}
+
+  defp preserve_agent_provider({:ok, observed}, %{provider: provider}),
+    do: {:ok, Map.put(observed, :provider, provider)}
+
+  defp preserve_agent_provider(result, _agent), do: result
 
   @impl true
   def read_agent(%{name: session_name, env: env}, %{name: agent_name}, opts, context) when is_map(opts) do
@@ -420,12 +450,14 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     end
   end
 
-  defp materialize_worker_launcher(_runtime_root, nil, _context), do: {:ok, nil}
+  defp materialize_worker_launcher(_runtime_root, nil, _context), do: {:ok, nil, nil}
 
   defp materialize_worker_launcher(runtime_root, %{argv: argv}, context) when is_list(argv) and argv != [] do
     path = Path.join(runtime_root, "launch-worker")
     worker_bin = Path.join(runtime_root, "worker-bin")
+    orchestrator_bin = Path.join(runtime_root, "orchestrator-bin")
     restricted_herdr = Path.join(worker_bin, "herdr")
+    orchestrator_herdr = Path.join(orchestrator_bin, "herdr")
     real_herdr = Map.get(context, :herdr_bin) || System.find_executable("herdr") || "herdr"
 
     launcher_body =
@@ -435,7 +467,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     #!/bin/sh
     set -eu
     case "${1:-}:${2:-}" in
-      agent:get|agent:list|agent:wait|pane:run|wait:agent-status)
+      pane:run)
+        target_info=$(#{shell_escape(real_herdr)} agent get "${3:-}" 2>/dev/null || true)
+        #{shell_escape(real_herdr)} "$@"
+        case "$target_info" in
+          *'"agent":"claude"'*)
+            #{shell_escape(real_herdr)} pane send-text "${3:-}" "$(printf '\\033[13;1u')"
+            ;;
+        esac
+        ;;
+      agent:get|agent:list|agent:wait|wait:agent-status)
         exec #{shell_escape(real_herdr)} "$@"
         ;;
       *)
@@ -445,12 +486,31 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     esac
     """
 
+    orchestrator_body = """
+    #!/bin/sh
+    set -eu
+    if [ "${1:-}:${2:-}" = "pane:run" ]; then
+      target_info=$(#{shell_escape(real_herdr)} agent get "${3:-}" 2>/dev/null || true)
+      #{shell_escape(real_herdr)} "$@"
+      case "$target_info" in
+        *'"agent":"claude"'*)
+          #{shell_escape(real_herdr)} pane send-text "${3:-}" "$(printf '\\033[13;1u')"
+          ;;
+      esac
+      exit 0
+    fi
+    exec #{shell_escape(real_herdr)} "$@"
+    """
+
     with :ok <- File.mkdir_p(worker_bin),
+         :ok <- File.mkdir_p(orchestrator_bin),
          :ok <- File.write(restricted_herdr, restricted_body),
          :ok <- File.chmod(restricted_herdr, 0o500),
+         :ok <- File.write(orchestrator_herdr, orchestrator_body),
+         :ok <- File.chmod(orchestrator_herdr, 0o500),
          :ok <- File.write(path, launcher_body),
          :ok <- File.chmod(path, 0o500) do
-      {:ok, path}
+      {:ok, path, orchestrator_bin}
     else
       {:error, reason} ->
         File.rm_rf(runtime_root)
