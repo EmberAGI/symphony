@@ -117,9 +117,13 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       )
       when provider in ["claude_code", :claude_code] and is_binary(pane_id) and is_binary(prompt) and prompt != "" do
     # Claude Code negotiates Kitty keyboard input and requires the protocol form
-    # of Enter. Herdr 0.7.4's pane run still emits a legacy carriage return, so
-    # preserve its bracketed-paste handling and then send the negotiated key.
-    with {:ok, _output} <- command(context, ["--session", session_name, "pane", "run", pane_id, prompt], env),
+    # of Enter. Herdr 0.7.4's pane run appends a legacy carriage return before
+    # returning, and a follow-up Kitty Enter can overtake Claude's asynchronous
+    # paste handling and submit an empty turn. Send the prompt as literal text,
+    # then the negotiated key, so the PTY receives only the ordered input Claude
+    # understands.
+    with {:ok, _output} <-
+           command(context, ["--session", session_name, "pane", "send-text", pane_id, prompt], env),
          {:ok, _output} <-
            command(context, ["--session", session_name, "pane", "send-text", pane_id, "\e[13;1u"], env) do
       :ok
@@ -469,10 +473,13 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     case "${1:-}:${2:-}" in
       pane:run)
         target_info=$(#{shell_escape(real_herdr)} agent get "${3:-}" 2>/dev/null || true)
-        #{shell_escape(real_herdr)} "$@"
         case "$target_info" in
           *'"agent":"claude"'*)
+            #{shell_escape(real_herdr)} pane send-text "${3:-}" "${4:-}"
             #{shell_escape(real_herdr)} pane send-text "${3:-}" "$(printf '\\033[13;1u')"
+            ;;
+          *)
+            exec #{shell_escape(real_herdr)} "$@"
             ;;
         esac
         ;;
@@ -491,10 +498,13 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     set -eu
     if [ "${1:-}:${2:-}" = "pane:run" ]; then
       target_info=$(#{shell_escape(real_herdr)} agent get "${3:-}" 2>/dev/null || true)
-      #{shell_escape(real_herdr)} "$@"
       case "$target_info" in
         *'"agent":"claude"'*)
+          #{shell_escape(real_herdr)} pane send-text "${3:-}" "${4:-}"
           #{shell_escape(real_herdr)} pane send-text "${3:-}" "$(printf '\\033[13;1u')"
+          ;;
+        *)
+          exec #{shell_escape(real_herdr)} "$@"
           ;;
       esac
       exit 0

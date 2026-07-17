@@ -227,10 +227,13 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert commands =~ "--session octo-emb-1141-run-7 agent start implementer_orchestrator"
     assert commands =~ "-- codex --model gpt-5.6-sol --config model_reasoning_effort=medium"
     assert commands =~ "--session octo-emb-1141-run-7 pane run w1:p1 Codex assignment\n"
-    assert commands =~ "--session octo-emb-1141-run-7 pane run w1:p1 Claude assignment\n"
+    assert commands =~ "--session octo-emb-1141-run-7 pane send-text w1:p1 Claude assignment\n"
     assert commands =~ "--session octo-emb-1141-run-7 pane send-text w1:p1 \e[13;1u\n"
-    assert commands =~ "pane run w1:p2 worker result\n"
-    assert commands =~ "pane run w1:p2 orchestrator advice\n"
+    refute commands =~ "--session octo-emb-1141-run-7 pane run w1:p1 Claude assignment\n"
+    assert commands =~ "pane send-text w1:p2 worker result\n"
+    assert commands =~ "pane send-text w1:p2 orchestrator advice\n"
+    refute commands =~ "pane run w1:p2 worker result\n"
+    refute commands =~ "pane run w1:p2 orchestrator advice\n"
     assert length(:binary.matches(commands, "pane send-text w1:p2 \e[13;1u\n")) == 2
     assert commands =~ "--session octo-emb-1141-run-7 server stop\n"
   end
