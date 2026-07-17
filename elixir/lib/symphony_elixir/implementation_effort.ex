@@ -72,16 +72,27 @@ defmodule SymphonyElixir.ImplementationEffort do
           {:ok, %{provider: String.t(), role: String.t() | nil, orchestrator: profile(), worker: profile() | nil}}
           | {:error, term()}
   def runtime_profile_for_issue(provider, issue, role) do
-    provider = normalize_provider(provider)
+    runtime_profile_for_issue(provider, provider, issue, role)
+  end
+
+  @doc "Resolve orchestrator and worker providers independently for one role run."
+  @spec runtime_profile_for_issue(String.t() | atom(), String.t() | atom(), term(), String.t() | nil) ::
+          {:ok, map()} | {:error, term()}
+  def runtime_profile_for_issue(orchestrator_provider, worker_provider, issue, role) do
+    orchestrator_provider = normalize_provider(orchestrator_provider)
+    worker_provider = normalize_provider(worker_provider)
     role = normalize_role(role)
 
-    with :ok <- validate_provider(provider),
+    with :ok <- validate_provider(orchestrator_provider),
+         :ok <- validate_provider(worker_provider),
          {:ok, catalog} <- profiles(),
-         {:ok, tier, source} <- issue_tier(provider, issue),
-         {:ok, orchestrator} <- resolve(catalog, profile_name(role), provider, tier, source),
-         {:ok, worker} <- resolve_worker(catalog, role, provider, tier, source) do
+         {:ok, tier, source} <- issue_tier(orchestrator_provider, issue),
+         {:ok, orchestrator} <- resolve(catalog, profile_name(role), orchestrator_provider, tier, source),
+         {:ok, worker} <- resolve_worker(catalog, role, worker_provider, tier, source) do
       validate_runtime_contract(%{
-        provider: provider,
+        provider: orchestrator_provider,
+        orchestrator_provider: orchestrator_provider,
+        worker_provider: worker_provider,
         role: role,
         orchestrator: orchestrator,
         worker: worker
@@ -89,14 +100,15 @@ defmodule SymphonyElixir.ImplementationEffort do
     end
   end
 
-  @doc "Reject missing, mixed-provider, or capability-inconsistent delegation contracts."
+  @doc "Reject missing or capability-inconsistent delegation contracts."
   @spec validate_runtime_contract(map()) :: {:ok, map()} | {:error, term()}
   def validate_runtime_contract(
         %{
-          provider: provider,
+          orchestrator_provider: orchestrator_provider,
+          worker_provider: worker_provider,
           role: "implementer",
-          orchestrator: %{provider: provider, kind: "orchestrator"} = orchestrator,
-          worker: %{provider: provider, kind: "worker"} = worker
+          orchestrator: %{provider: orchestrator_provider, kind: "orchestrator"} = orchestrator,
+          worker: %{provider: worker_provider, kind: "worker"} = worker
         } = contract
       ) do
     cond do

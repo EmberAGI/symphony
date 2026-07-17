@@ -125,7 +125,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
       session_id = agent_session_id(completed)
 
       emit_message(on_message, :turn_completed, %{
-        provider: get_in(session, [:contract, :provider]),
+        provider: contract_provider(Map.get(session, :contract, %{}), :orchestrator),
         herdr_session: Map.get(herdr_session, :name),
         agent: Map.get(orchestrator, :name),
         agent_status: Map.get(completed, :agent_status),
@@ -176,10 +176,10 @@ defmodule SymphonyElixir.ImplementerDelegation do
     spec = %{
       name: "implementer_orchestrator",
       role: :orchestrator,
-      provider: contract.provider,
+      provider: contract_provider(contract, :orchestrator),
       profile: contract.orchestrator,
       cwd: workspace,
-      argv: launcher_argv(contract.provider, contract.orchestrator, workspace, herdr_session),
+      argv: launcher_argv(contract_provider(contract, :orchestrator), contract.orchestrator, workspace, herdr_session),
       env: Map.put(orchestrator_env, "OCTO_HERDR_WORKER_LAUNCHER", Map.fetch!(herdr_session, :worker_launcher))
     }
 
@@ -304,7 +304,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
           timeout
         else
           emit_message(on_message, :turn_heartbeat, %{
-            provider: Map.get(contract, :provider),
+            provider: contract_provider(contract, :orchestrator),
             herdr_session: Map.get(session, :name),
             agent: Map.get(orchestrator, :name),
             agent_status: "working",
@@ -330,7 +330,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
   defp emit_started(on_message, herdr_session, orchestrator, observed, contract) do
     emit_message(on_message, :session_started, %{
-      provider: Map.get(contract, :provider),
+      provider: contract_provider(contract, :orchestrator),
       herdr_session: Map.get(herdr_session, :name),
       agent: Map.get(orchestrator, :name),
       agent_status: Map.get(observed, :agent_status),
@@ -409,13 +409,19 @@ defmodule SymphonyElixir.ImplementerDelegation do
     %{
       name: "implementer_worker",
       role: :worker,
-      provider: contract.provider,
+      provider: contract_provider(contract, :worker),
       profile: contract.worker,
       cwd: workspace,
-      argv: launcher_argv(contract.provider, contract.worker, workspace, herdr_session),
+      argv: launcher_argv(contract_provider(contract, :worker), contract.worker, workspace, herdr_session),
       may_spawn_agents: false
     }
   end
+
+  defp contract_provider(contract, :orchestrator),
+    do: Map.get(contract, :orchestrator_provider) || Map.get(contract, :provider)
+
+  defp contract_provider(contract, :worker),
+    do: Map.get(contract, :worker_provider) || Map.get(contract, :provider)
 
   defp session_name(opts) do
     with issue when is_binary(issue) and issue != "" <- Keyword.get(opts, :issue_identifier),

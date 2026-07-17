@@ -131,6 +131,23 @@ defmodule SymphonyElixir.ImplementationEffortTest do
              |> ImplementationEffort.validate_runtime_contract()
   end
 
+  test "Implementer runtime contract resolves providers independently per participant" do
+    assert {:ok, contract} =
+             ImplementationEffort.runtime_profile_for_issue(
+               :claude_code,
+               :codex,
+               issue_with_labels(["implementation-effort:moderate"]),
+               "implementer"
+             )
+
+    assert contract.orchestrator_provider == "claude_code"
+    assert contract.worker_provider == "codex"
+    assert contract.orchestrator.provider == "claude_code"
+    assert contract.orchestrator.model == "claude-fable-5"
+    assert contract.worker.provider == "codex"
+    assert contract.worker.model == "gpt-5.6-luna"
+  end
+
   test "Codex command projection applies complete agent profiles" do
     issue = issue_with_labels(["implementation-effort:minimal"])
     command = "codex --config shell_environment_policy.inherit=all --config 'model=\"gpt-5.5\"' app-server"

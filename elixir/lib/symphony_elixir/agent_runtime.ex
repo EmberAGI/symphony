@@ -89,16 +89,26 @@ defmodule SymphonyElixir.AgentRuntime do
   @doc "Return the configured runtime provider atom."
   @spec provider() :: provider()
   def provider do
-    case Config.settings!().agent_runtime.provider do
+    case System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER") || Config.settings!().agent_runtime.provider do
       "claude_code" -> :claude_code
       _ -> :codex
+    end
+  end
+
+  @doc "Return the configured worker provider, defaulting to the orchestrator provider."
+  @spec worker_provider() :: provider()
+  def worker_provider do
+    case System.get_env("OCTO_RUNTIME_WORKER_PROVIDER") do
+      "claude_code" -> :claude_code
+      "codex" -> :codex
+      _ -> provider()
     end
   end
 
   @doc "Resolve one provider's orchestrator/worker runtime contract at the shared runtime seam."
   @spec resolve_profile(provider() | String.t(), term(), String.t() | nil) :: {:ok, map()} | {:error, term()}
   def resolve_profile(provider, issue, role) do
-    ImplementationEffort.runtime_profile_for_issue(provider, issue, role)
+    ImplementationEffort.runtime_profile_for_issue(provider, worker_provider(), issue, role)
   end
 
   @doc """

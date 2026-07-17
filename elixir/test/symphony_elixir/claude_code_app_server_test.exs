@@ -507,6 +507,27 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     assert SymphonyElixir.AgentRuntime.adapter() == SymphonyElixir.ClaudeCode.AppServer
   end
 
+  test "runtime participant provider environment overrides workflow selection" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+      agent_runtime_provider: "codex"
+    )
+
+    previous_orchestrator = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    previous_worker = System.get_env("OCTO_RUNTIME_WORKER_PROVIDER")
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "claude_code")
+    System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", "codex")
+
+    try do
+      assert AgentRuntime.provider() == :claude_code
+      assert AgentRuntime.worker_provider() == :codex
+      assert AgentRuntime.adapter() == SymphonyElixir.ClaudeCode.AppServer
+    after
+      restore_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_orchestrator)
+      restore_env("OCTO_RUNTIME_WORKER_PROVIDER", previous_worker)
+    end
+  end
+
   test "config validation fails closed on an unsupported effort level" do
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),

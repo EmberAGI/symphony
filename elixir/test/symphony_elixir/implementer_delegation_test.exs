@@ -242,6 +242,36 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert Enum.member?(orchestrator_spec.argv, contract.orchestrator.instructions)
   end
 
+  test "mixed provider contract launches Claude orchestrator and Codex worker adapters" do
+    assert {:ok, contract} =
+             ImplementationEffort.runtime_profile_for_issue(
+               :claude_code,
+               :codex,
+               issue(),
+               "implementer"
+             )
+
+    assert {:ok, _session} =
+             ImplementerDelegation.start_session(
+               "/tmp/selected-workspace",
+               contract,
+               issue_identifier: "EMB-1163",
+               run_id: "mixed-run",
+               transport: RecordingTransport,
+               transport_context: %{owner: self()}
+             )
+
+    assert_receive {:transport, :default_server_snapshot}
+    assert_receive {:transport, :start_session, _}
+    assert_receive {:transport, :prepare_worker, herdr_session, worker_spec}
+    assert_receive {:transport, :start_agent, _, orchestrator_spec}
+
+    assert worker_spec.provider == "codex"
+    assert worker_spec.argv == codex_argv(contract.worker, "/tmp/selected-workspace", herdr_session)
+    assert orchestrator_spec.provider == "claude_code"
+    assert orchestrator_spec.argv == claude_argv(contract.orchestrator)
+  end
+
   test "compacts production claim-lease run ids into deterministic socket-safe session names" do
     contract = contract(:codex)
     run_id = "localhost:1425052:implementer:3763a042-63a8-4b7b-a087-a18913c0a146:1"
