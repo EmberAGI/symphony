@@ -147,6 +147,27 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "HEARTBEAT_COMPLETE"}}
   end
 
+  defmodule ClaudeAuthFailureTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok,
+       %{
+         phase: :working,
+         agent: %{name: agent.name, agent_status: "working", agent_session: nil}
+       }}
+    end
+
+    def await_agent(_session, agent, ["idle", "done"], _timeout_ms, _context) do
+      {:ok, %{name: agent.name, agent_status: "idle", agent_session: nil}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context) do
+      {:ok,
+       %{
+         text: "Please run /login\nAPI Error: 401 Invalid authentication credentials"
+       }}
+    end
+  end
+
   test "owns one isolated Herdr session and projects Codex agent profiles exactly" do
     contract = contract(:codex)
 
@@ -445,6 +466,24 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert_receive {:runtime_message, %{event: :turn_heartbeat, agent_status: "working"}}
     assert_receive {:runtime_message, %{event: :turn_heartbeat, agent_status: "working"}}
     assert_receive {:runtime_message, %{event: :turn_completed}}
+  end
+
+  test "Claude terminal authentication failures fail the delegated turn closed" do
+    session = %{
+      transport: ClaudeAuthFailureTransport,
+      transport_context: %{},
+      contract: %{provider: "claude_code"},
+      herdr_session: %{name: "octo-emb-1180-auth"},
+      orchestrator: %{name: "implementer_orchestrator", pane_id: "w1:p1"}
+    }
+
+    assert {:error, {:auth_failed, %{api_error_status: 401, subtype: "invalid_authentication_credentials"}}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Implement the bounded issue.",
+               %{identifier: "EMB-1180"},
+               turn_timeout_ms: 100
+             )
   end
 
   defp contract(provider) do

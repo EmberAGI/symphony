@@ -131,7 +131,9 @@ defmodule SymphonyElixir.ImplementerDelegation do
              orchestrator,
              %{source: :recent_unwrapped, lines: 240},
              transport_context
-           ) do
+           ),
+         response = Map.get(read, :text, ""),
+         :ok <- terminal_turn_status(contract_provider(Map.get(session, :contract, %{}), :orchestrator), response) do
       session_id = agent_session_id(completed)
 
       emit_message(on_message, :turn_completed, %{
@@ -146,7 +148,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
        %{
          session_id: session_id,
          agent_status: Map.get(completed, :agent_status),
-         response: Map.get(read, :text, "")
+         response: response
        }}
     end
   end
@@ -408,6 +410,31 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
   defp contract_provider(contract, :worker),
     do: Map.get(contract, :worker_provider) || Map.get(contract, :provider)
+
+  defp terminal_turn_status("claude_code", response) when is_binary(response) do
+    case Regex.run(
+           ~r/API Error:\s*(401|403)\b[^\n]*(?:auth|credential|unauthor|forbidden)/i,
+           response,
+           capture: :all_but_first
+         ) do
+      [status] ->
+        {:error,
+         {:auth_failed,
+          %{
+            api_error_status: String.to_integer(status),
+            subtype: "invalid_authentication_credentials"
+          }}}
+
+      nil ->
+        if Regex.match?(~r/Please run \/login\b/i, response) do
+          {:error, {:auth_failed, %{api_error_status: nil, subtype: "login_required"}}}
+        else
+          :ok
+        end
+    end
+  end
+
+  defp terminal_turn_status(_provider, _response), do: :ok
 
   defp session_name(opts) do
     with issue when is_binary(issue) and issue != "" <- Keyword.get(opts, :issue_identifier),
