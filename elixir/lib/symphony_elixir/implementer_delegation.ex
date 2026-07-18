@@ -86,15 +86,16 @@ defmodule SymphonyElixir.ImplementerDelegation do
     heartbeat_interval_ms = Keyword.get(opts, :heartbeat_interval_ms, 30_000)
     on_message = Keyword.get(opts, :on_message, fn _message -> :ok end)
 
-    with :ok <- transport.submit(herdr_session, orchestrator, prompt, transport_context),
-         {:ok, observed} <-
-           transport.await_agent(
+    with {:ok, turn_start} <-
+           begin_turn(
+             transport,
+             transport_context,
              herdr_session,
              orchestrator,
-             ["working"],
-             start_timeout_ms,
-             transport_context
+             prompt,
+             start_timeout_ms
            ),
+         observed = turn_start.agent,
          :ok <-
            emit_started(
              on_message,
@@ -104,17 +105,26 @@ defmodule SymphonyElixir.ImplementerDelegation do
              Map.get(session, :contract, %{})
            ),
          {:ok, completed} <-
-           await_completion(
-             transport,
-             transport_context,
-             herdr_session,
-             orchestrator,
-             observed,
-             turn_timeout_ms,
-             heartbeat_interval_ms,
-             on_message,
-             Map.get(session, :contract, %{})
-           ),
+           (case turn_start.phase do
+              :completed ->
+                {:ok, observed}
+
+              :working ->
+                await_completion(
+                  %{
+                    transport: transport,
+                    context: transport_context,
+                    session: herdr_session,
+                    orchestrator: orchestrator,
+                    timeout_ms: turn_timeout_ms,
+                    deadline: nil,
+                    heartbeat_interval_ms: heartbeat_interval_ms,
+                    on_message: on_message,
+                    contract: Map.get(session, :contract, %{})
+                  },
+                  observed
+                )
+            end),
          {:ok, read} <-
            transport.read_agent(
              herdr_session,
@@ -142,6 +152,18 @@ defmodule SymphonyElixir.ImplementerDelegation do
   end
 
   def run_turn(_session, _prompt, _issue, _opts), do: {:error, :invalid_implementer_delegation_turn}
+
+  defp begin_turn(transport, context, session, orchestrator, prompt, timeout_ms) do
+    if function_exported?(transport, :begin_turn, 5) do
+      transport.begin_turn(session, orchestrator, prompt, timeout_ms, context)
+    else
+      with :ok <- transport.submit(session, orchestrator, prompt, context),
+           {:ok, observed} <-
+             transport.await_agent(session, orchestrator, ["working"], timeout_ms, context) do
+        {:ok, %{phase: :working, agent: observed}}
+      end
+    end
+  end
 
   @spec stop_session(session()) :: :ok | {:error, term()}
   def stop_session(%{
@@ -243,97 +265,48 @@ defmodule SymphonyElixir.ImplementerDelegation do
     end
   end
 
-  defp await_completion(
-         _transport,
-         _context,
-         _session,
-         _orchestrator,
-         %{agent_status: status} = agent,
-         _timeout_ms,
-         _heartbeat_interval_ms,
-         _on_message,
-         _contract
-       )
+  defp await_completion(_state, %{agent_status: status} = agent)
        when status in ["idle", "done"],
        do: {:ok, agent}
 
-  defp await_completion(
-         transport,
-         context,
-         session,
-         orchestrator,
-         %{agent_status: "working"},
-         timeout_ms,
-         heartbeat_interval_ms,
-         on_message,
-         contract
-       ) do
-    deadline = System.monotonic_time(:millisecond) + timeout_ms
-
-    await_completion_with_heartbeat(
-      transport,
-      context,
-      session,
-      orchestrator,
-      deadline,
-      max(1, heartbeat_interval_ms),
-      on_message,
-      contract
-    )
+  defp await_completion(state, %{agent_status: "working"}) do
+    await_completion_with_heartbeat(%{
+      state
+      | deadline: System.monotonic_time(:millisecond) + state.timeout_ms,
+        heartbeat_interval_ms: max(1, state.heartbeat_interval_ms)
+    })
   end
 
-  defp await_completion(
-         _transport,
-         _context,
-         _session,
-         _orchestrator,
-         agent,
-         _timeout_ms,
-         _heartbeat_interval_ms,
-         _on_message,
-         _contract
-       ),
-       do: {:error, {:unexpected_herdr_agent_status, Map.get(agent, :agent_status)}}
+  defp await_completion(_state, agent),
+    do: {:error, {:unexpected_herdr_agent_status, Map.get(agent, :agent_status)}}
 
-  defp await_completion_with_heartbeat(
-         transport,
-         context,
-         session,
-         orchestrator,
-         deadline,
-         heartbeat_interval_ms,
-         on_message,
-         contract
-       ) do
-    remaining_ms = max(0, deadline - System.monotonic_time(:millisecond))
-    wait_ms = min(remaining_ms, heartbeat_interval_ms)
+  defp await_completion_with_heartbeat(state) do
+    remaining_ms = max(0, state.deadline - System.monotonic_time(:millisecond))
+    wait_ms = min(remaining_ms, state.heartbeat_interval_ms)
 
-    case transport.await_agent(session, orchestrator, ["idle", "done"], wait_ms, context) do
+    case state.transport.await_agent(
+           state.session,
+           state.orchestrator,
+           ["idle", "done"],
+           wait_ms,
+           state.context
+         ) do
       {:ok, completed} ->
         {:ok, completed}
 
       {:error, {:herdr_agent_status_timeout, _agent_name, _statuses}} = timeout ->
-        if remaining_ms <= heartbeat_interval_ms do
+        if remaining_ms <= state.heartbeat_interval_ms do
           timeout
         else
-          emit_message(on_message, :turn_heartbeat, %{
-            provider: contract_provider(contract, :orchestrator),
-            herdr_session: Map.get(session, :name),
-            agent: Map.get(orchestrator, :name),
+          emit_message(state.on_message, :turn_heartbeat, %{
+            provider: contract_provider(state.contract, :orchestrator),
+            herdr_session: Map.get(state.session, :name),
+            agent: Map.get(state.orchestrator, :name),
             agent_status: "working",
             session_id: nil
           })
 
-          await_completion_with_heartbeat(
-            transport,
-            context,
-            session,
-            orchestrator,
-            deadline,
-            heartbeat_interval_ms,
-            on_message,
-            contract
-          )
+          await_completion_with_heartbeat(state)
         end
 
       {:error, reason} ->

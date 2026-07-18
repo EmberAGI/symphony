@@ -67,11 +67,27 @@ defmodule SymphonyElixir.HerdrTransportTest do
     fi
 
     if [ "$#" -eq 5 ] && [ "$1" = "--session" ] && [ "$3" = "agent" ] && [ "$4" = "get" ]; then
-      printf '{"id":"cli:agent:get","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"idle"}}}\n' "$5"
+      status=idle
+      revision=1
+      if [ "${HERDR_FAKE_CONFIRM_REQUIRED:-}" = "1" ] && [ -f "$state_root/submission-confirmed" ]; then
+        status=working
+        revision=2
+      fi
+      if [ "${HERDR_FAKE_FAST_COMPLETION:-}" = "1" ] && [ -f "$state_root/submission-completed" ]; then
+        status=idle
+        revision=2
+      fi
+      printf '{"id":"cli:agent:get","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"%s","revision":%s}}}\n' "$5" "$status" "$revision"
       exit 0
     fi
 
     if [ "$1" = "--session" ] && [ "$3" = "pane" ] && { [ "$4" = "run" ] || [ "$4" = "send-text" ]; }; then
+      if [ "${HERDR_FAKE_CONFIRM_REQUIRED:-}" = "1" ] && [ "$4" = "run" ] && [ -z "${6:-}" ]; then
+        : > "$state_root/submission-confirmed"
+      fi
+      if [ "${HERDR_FAKE_FAST_COMPLETION:-}" = "1" ] && [ "$4" = "run" ] && [ -n "${6:-}" ]; then
+        : > "$state_root/submission-completed"
+      fi
       exit 0
     fi
 
@@ -227,14 +243,10 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert commands =~ "--session octo-emb-1141-run-7 agent start implementer_orchestrator"
     assert commands =~ "-- codex --model gpt-5.6-sol --config model_reasoning_effort=medium"
     assert commands =~ "--session octo-emb-1141-run-7 pane run w1:p1 Codex assignment\n"
-    assert commands =~ "--session octo-emb-1141-run-7 pane send-text w1:p1 Claude assignment\n"
-    assert commands =~ "--session octo-emb-1141-run-7 pane send-text w1:p1 \e[13;1u\n"
-    refute commands =~ "--session octo-emb-1141-run-7 pane run w1:p1 Claude assignment\n"
-    assert commands =~ "pane send-text w1:p2 worker result\n"
-    assert commands =~ "pane send-text w1:p2 orchestrator advice\n"
-    refute commands =~ "pane run w1:p2 worker result\n"
-    refute commands =~ "pane run w1:p2 orchestrator advice\n"
-    assert length(:binary.matches(commands, "pane send-text w1:p2 \e[13;1u\n")) == 2
+    assert commands =~ "--session octo-emb-1141-run-7 pane run w1:p1 Claude assignment\n"
+    assert commands =~ "pane run w1:p2 worker result\n"
+    assert commands =~ "pane run w1:p2 orchestrator advice\n"
+    refute commands =~ "pane send-text"
     assert commands =~ "--session octo-emb-1141-run-7 server stop\n"
   end
 
@@ -265,6 +277,105 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
     commands = File.read!(context.log)
     assert commands =~ "--session octo-emb-1141-incompatible status server"
+  end
+
+  test "begins a turn by confirming an unchanged idle submission through pane run", context do
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_FAKE_CONFIRM_REQUIRED", "1"}
+      ],
+      start_timeout_ms: 2_000,
+      submission_settle_ms: 10,
+      poll_interval_ms: 5
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{name: "octo-emb-1141-confirm", isolated: true, workspace: "/tmp/selected-workspace"},
+               adapter_context
+             )
+
+    on_exit(fn ->
+      if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
+    end)
+
+    assert {:ok, agent} =
+             HerdrTransport.start_agent(
+               session,
+               %{
+                 name: "implementer_orchestrator",
+                 provider: "claude_code",
+                 cwd: "/tmp/selected-workspace",
+                 argv: ["claude", "--model", "claude-fable-5"]
+               },
+               adapter_context
+             )
+
+    assert {:ok, ready} =
+             HerdrTransport.await_agent(session, agent, ["idle", "done"], 3_000, adapter_context)
+
+    assert {:ok, %{phase: :working, agent: observed}} =
+             HerdrTransport.begin_turn(session, ready, "Complete the assignment.", 1_000, adapter_context)
+
+    assert observed.agent_status == "working"
+    assert observed.revision == 2
+    assert observed.provider == "claude_code"
+
+    commands = File.read!(context.log)
+    assert length(:binary.matches(commands, "pane run w1:p1")) == 2
+    refute commands =~ "pane send-text"
+    refute commands =~ "pane send-keys"
+    assert :ok = HerdrTransport.stop_session(session, adapter_context)
+  end
+
+  test "recognizes an advanced idle revision as fast turn completion without confirmation", context do
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_FAKE_FAST_COMPLETION", "1"}
+      ],
+      start_timeout_ms: 2_000,
+      submission_settle_ms: 10,
+      poll_interval_ms: 5
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{name: "octo-emb-1141-fast", isolated: true, workspace: "/tmp/selected-workspace"},
+               adapter_context
+             )
+
+    on_exit(fn ->
+      if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
+    end)
+
+    assert {:ok, agent} =
+             HerdrTransport.start_agent(
+               session,
+               %{
+                 name: "implementer_orchestrator",
+                 provider: "claude_code",
+                 cwd: "/tmp/selected-workspace",
+                 argv: ["claude", "--model", "claude-fable-5"]
+               },
+               adapter_context
+             )
+
+    assert {:ok, ready} =
+             HerdrTransport.await_agent(session, agent, ["idle", "done"], 3_000, adapter_context)
+
+    assert {:ok, %{phase: :completed, agent: observed}} =
+             HerdrTransport.begin_turn(session, ready, "Complete immediately.", 1_000, adapter_context)
+
+    assert observed.agent_status == "idle"
+    assert observed.revision == 2
+
+    commands = File.read!(context.log)
+    assert length(:binary.matches(commands, "pane run w1:p1")) == 1
+    assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
   test "an ownership reference stops an abandoned run idempotently", context do

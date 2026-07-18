@@ -59,6 +59,21 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       :ok
     end
 
+    def begin_turn(session, agent, prompt, timeout_ms, %{owner: owner}) do
+      send(owner, {:transport, :begin_turn, session, agent, prompt, timeout_ms})
+
+      {:ok,
+       %{
+         phase: :working,
+         agent: %{
+           name: agent.name,
+           pane_id: agent.pane_id,
+           agent_status: "working",
+           agent_session: %{value: "codex-session-7"}
+         }
+       }}
+    end
+
     def await_agent(session, agent, statuses, timeout_ms, %{owner: owner}) do
       send(owner, {:transport, :await_agent, session, agent, statuses, timeout_ms})
       status = if "working" in statuses, do: "working", else: "done"
@@ -202,9 +217,9 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
                on_message: fn message -> send(self(), {:runtime_message, message}) end
              )
 
-    assert_receive {:transport, :submit, %{name: "octo-emb-1141-run-7"}, %{name: "implementer_orchestrator"}, "Implement the bounded tracer task."}
+    assert_receive {:transport, :begin_turn, %{name: "octo-emb-1141-run-7"}, %{name: "implementer_orchestrator"}, "Implement the bounded tracer task.", 30_000}
 
-    assert_receive {:transport, :await_agent, _, _, ["working"], 30_000}
+    refute_receive {:transport, :submit, _, _, _}
     assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 30_000}
     assert_receive {:transport, :read_agent, _, _, %{lines: 240, source: :recent_unwrapped}}
 
