@@ -84,6 +84,10 @@ defmodule SymphonyElixir.NonLiveTrackerGuardTest do
 
     refute marker.supervisor_already_alive_before_boot?
     assert marker.linear_client_module_installed_before_boot == SymphonyElixir.TestSupport.NonLiveLinearClient
+
+    assert marker.delegation_transport_module_installed_before_boot ==
+             SymphonyElixir.TestSupport.NonLiveDelegationTransport
+
     assert marker.boot_workflow_file_path != Path.join(File.cwd!(), "WORKFLOW.md")
     assert String.starts_with?(marker.boot_workflow_file_path, System.tmp_dir!())
   end

@@ -34,6 +34,7 @@ defmodule SymphonyElixir.MixProject do
         "test/support/test_support.exs",
         "test/support/agent_profile_fixture.exs",
         "test/support/non_live_linear_client.exs",
+        "test/support/non_live_delegation_transport.exs",
         "test/support/linear_traffic_sentinel.exs"
       ],
       dialyzer: [

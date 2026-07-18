@@ -350,6 +350,22 @@ occur in any phase of the gate. The suite MUST measure real tracker HTTP
 attempts at the Adapter's single network seam, report the count in the gate
 output, and fail on any nonzero count.
 
+The same seal covers the implementer delegation transport: the runtime
+resolves its default transport through a public configuration seam, and the
+suite MUST install a sealed transport there — at boot and for every test —
+that rejects any session start with a typed error before a real herdr server,
+session, worker, or provider process can exist. Only an explicit per-call
+transport injection may override it. A run whose effective workflow
+configuration was bypassed or degraded mid-suite therefore fails fast and
+deterministically instead of launching real infrastructure.
+
+Shared mutable configuration seams MUST NOT degrade silently inside the gate:
+when a test writes its workflow fixture, the write seam MUST verify the
+configuration store observed the just-written content before the test
+proceeds, and every between-test window MUST keep the effective workflow
+pinned to the non-live boot fixture rather than falling back to the
+committed repository workflow.
+
 When EMB-1180 changes a large test or validation file, the affected behavior
 MUST be moved progressively into focused ExUnit modules organized by the
 production Interface being proved. Restoring this Symphony gate does not own

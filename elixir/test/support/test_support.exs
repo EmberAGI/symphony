@@ -43,6 +43,18 @@ defmodule SymphonyElixir.TestSupport do
           SymphonyElixir.TestSupport.NonLiveLinearClient
         )
 
+        # Same seal for the implementer delegation seam: even a run whose
+        # workflow config was bypassed mid-suite must fail typed at the
+        # transport default instead of launching a real herdr session.
+        previous_delegation_transport =
+          Application.get_env(:symphony_elixir, :delegation_transport_module)
+
+        Application.put_env(
+          :symphony_elixir,
+          :delegation_transport_module,
+          SymphonyElixir.TestSupport.NonLiveDelegationTransport
+        )
+
         workflow_root =
           Path.join(
             System.tmp_dir!(),
@@ -62,7 +74,12 @@ defmodule SymphonyElixir.TestSupport do
             module -> Application.put_env(:symphony_elixir, :linear_client_module, module)
           end
 
-          Application.delete_env(:symphony_elixir, :workflow_file_path)
+          case previous_delegation_transport do
+            nil -> Application.delete_env(:symphony_elixir, :delegation_transport_module)
+            module -> Application.put_env(:symphony_elixir, :delegation_transport_module, module)
+          end
+
+          SymphonyElixir.TestSupport.restore_boot_workflow_path()
           Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
@@ -77,20 +94,72 @@ defmodule SymphonyElixir.TestSupport do
   def write_workflow_file!(path, overrides \\ []) do
     workflow = workflow_content(overrides)
     File.write!(path, workflow)
+    ensure_workflow_store_observed!(path)
+    :ok
+  end
 
-    if Process.whereis(SymphonyElixir.WorkflowStore) do
+  # The EMB-1180 fall-through: a swallowed reload failure here left the
+  # WorkflowStore serving the previous (hook-less) workflow while the test
+  # exercised its just-written hook config, so the run escaped into the
+  # real delegation transport. The write seam now proves the store observed
+  # this path's new content before returning, and fails the test loudly at
+  # the fixture write when it cannot. Writes to a path the store is not
+  # currently pointed at are left for the later `set_workflow_file_path`
+  # reload, which reloads synchronously on the path change.
+  defp ensure_workflow_store_observed!(path) do
+    store_alive? = is_pid(Process.whereis(SymphonyElixir.WorkflowStore))
+
+    if store_alive? and SymphonyElixir.Workflow.workflow_file_path() == path do
+      force_store_reload!(path, 100)
+    else
+      :ok
+    end
+  end
+
+  defp force_store_reload!(path, attempts_left) do
+    result =
       try do
         SymphonyElixir.WorkflowStore.force_reload()
       catch
-        :exit, _reason -> :ok
+        :exit, reason -> {:error, {:exit, reason}}
       end
-    end
 
-    :ok
+    case result do
+      :ok ->
+        :ok
+
+      {:error, _reason} when attempts_left > 0 ->
+        Process.sleep(50)
+
+        # A store that died mid-write is not a failed observation: readers
+        # fall back to direct file loads, which see the new content.
+        if is_pid(Process.whereis(SymphonyElixir.WorkflowStore)),
+          do: force_store_reload!(path, attempts_left - 1),
+          else: :ok
+
+      {:error, reason} ->
+        raise "workflow store failed to observe just-written workflow at #{path}: #{inspect(reason)}"
+    end
   end
 
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
+
+  # Between-test hygiene: deleting `:workflow_file_path` used to make the
+  # WorkflowStore's 1s poll fall back to the committed live `WORKFLOW.md`
+  # until the next setup repointed it. Restoring the boot-seal fixture path
+  # keeps every between-test window on the deterministic non-live workflow.
+  def restore_boot_workflow_path do
+    case :persistent_term.get(:symphony_elixir_boot_seal, nil) do
+      %{boot_workflow_file_path: boot_path} when is_binary(boot_path) ->
+        Application.put_env(:symphony_elixir, :workflow_file_path, boot_path)
+
+      _ ->
+        Application.delete_env(:symphony_elixir, :workflow_file_path)
+    end
+
+    :ok
+  end
 
   def stop_default_http_server do
     children =

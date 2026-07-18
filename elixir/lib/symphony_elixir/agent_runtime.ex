@@ -180,21 +180,31 @@ defmodule SymphonyElixir.AgentRuntime do
     issue = Keyword.get(opts, :issue)
     worker_host = Keyword.get(opts, :worker_host)
 
+    transport = Keyword.get(opts, :delegation_transport, default_delegation_transport())
+
     with :ok <- validate_local_herdr_worker(worker_host),
          {:ok, run_id} <- required_run_id(opts),
          {:ok, issue_identifier} <- required_issue_identifier(issue),
          {:ok, contract} <- resolve_profile(provider, issue, role),
-         {:ok, transport_context} <- herdr_transport_context(opts) do
+         {:ok, transport_context} <- delegation_transport_context(opts, transport) do
       ImplementerDelegation.start_session(
         workspace,
         contract,
         issue_identifier: issue_identifier,
         run_id: run_id,
         orchestrator_env: implementer_run_environment(issue, role, run_id),
-        transport: Keyword.get(opts, :delegation_transport, HerdrTransport),
+        transport: transport,
         transport_context: transport_context
       )
     end
+  end
+
+  # Public seam mirroring `:linear_client_module`: the non-live test gate
+  # installs a sealed transport here so no suite ordering or configuration
+  # slip can launch a real herdr session. Production resolves to the real
+  # Herdr adapter.
+  defp default_delegation_transport do
+    Application.get_env(:symphony_elixir, :delegation_transport_module, HerdrTransport)
   end
 
   defp validate_local_herdr_worker(nil), do: :ok
@@ -221,21 +231,29 @@ defmodule SymphonyElixir.AgentRuntime do
 
   defp required_issue_identifier(_issue), do: {:error, :missing_herdr_issue_identifier}
 
-  defp herdr_transport_context(opts) do
+  defp delegation_transport_context(opts, transport) do
     case Keyword.get(opts, :delegation_transport_context) do
       context when is_map(context) ->
         {:ok, context}
 
       nil ->
-        case System.find_executable("herdr") do
-          binary when is_binary(binary) -> {:ok, %{herdr_bin: binary}}
-          _ -> {:error, {:missing_required_tool, "herdr"}}
-        end
+        default_delegation_transport_context(transport)
 
       _other ->
         {:error, :invalid_herdr_transport_context}
     end
   end
+
+  # Only the real Herdr adapter needs the herdr binary; probing for it under
+  # a sealed or fake transport would fail runs that must never shell out.
+  defp default_delegation_transport_context(HerdrTransport) do
+    case System.find_executable("herdr") do
+      binary when is_binary(binary) -> {:ok, %{herdr_bin: binary}}
+      _ -> {:error, {:missing_required_tool, "herdr"}}
+    end
+  end
+
+  defp default_delegation_transport_context(_transport), do: {:ok, %{}}
 
   @doc """
   Classify a provider/runtime failure before retry policy is applied.
