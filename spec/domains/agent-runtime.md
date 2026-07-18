@@ -467,8 +467,11 @@ real run, not guessed):
 - The verified no-thinking invocation is the environment variable
   `MAX_THINKING_TOKENS=0` (the Claude Code CLI equivalent of the API-level
   `thinking: {type: "disabled"}` invocation). Fable 5 cannot disable thinking,
-  so requesting no-thinking with a Fable model fails closed at config
-  validation.
+  so requesting no-thinking with a Fable config model fails closed at config
+  validation; a catalog row that resolves a Fable model while the config
+  declares no-thinking is only known at launch and fails closed there as a
+  visible adapter launch error rather than silently dropping either the
+  selected model or the declared no-thinking invocation.
 
 Verified model x effort support matrix (transcribed from the `claude` CLI
 v2.1.172 effort-gating allow-lists). `low`, `medium`, and `high` are supported
@@ -523,22 +526,35 @@ alone.
 ### Skills/tools release gate contract (EMB-1029)
 
 The non-negotiable gate (ADR 0001) for Claude Code unattended Octo role
-enablement is proved by two deterministic test modules in the Symphony Elixir
-test suite, both driven by a fake `claude` binary replaying recorded stream-json
-without a live Claude subscription:
+enablement is proved by three deterministic test modules in the Symphony
+Elixir test suite, all driven by a fake `claude` binary replaying recorded
+stream-json without a live Claude subscription:
 
 - `elixir/test/symphony_elixir/claude_code_app_server_test.exs` — shim-level
   contract checks: verified invocation flags (`--print`, `--output-format
-  stream-json`, `--verbose`, `--permission-mode bypassPermissions`), no-thinking
-  env (`MAX_THINKING_TOKENS=0`), normalized event vocabulary
-  (`session_started`, `text_delta`, `notification`, `tool_finished`,
-  `tool_failed`, `turn_completed`, `turn_failed`, `turn_input_required`),
-  fail-closed auth classification (401/403 `is_error` → `auth_failed`),
-  max-turns input-required classification (`error_max_turns` →
-  `turn_input_required`), tool failure surfacing, secret redaction
-  (`oauth_token`, `api_key`, and other `@redacted_keys` stripped to
-  `[REDACTED]` in payload and raw line), workspace-cwd guarding, and runtime
-  selection defaulting to Codex.
+  stream-json`, `--verbose`, `--permission-mode bypassPermissions`),
+  exact-profile launch on the default path (the resolved catalog model and
+  effort appear verbatim in the invocation with no substitution metadata),
+  normalized event vocabulary (`session_started`, `text_delta`,
+  `notification`, `tool_finished`, `tool_failed`, `turn_completed`,
+  `turn_failed`, `turn_input_required`), fail-closed auth classification
+  (401/403 `is_error` → `auth_failed`), max-turns input-required
+  classification (`error_max_turns` → `turn_input_required`), tool failure
+  surfacing, secret redaction (`oauth_token`, `api_key`, and other
+  `@redacted_keys` stripped to `[REDACTED]` in payload and raw line),
+  workspace-cwd guarding, and runtime selection defaulting to Codex.
+
+- `elixir/test/symphony_elixir/claude_code_launch_config_test.exs` —
+  launch-configuration checks split out of the shim module: catalog
+  implementation-effort row selection (fixed-role rows and the moderate
+  default for malformed labels), the exact-profile launch invariant
+  (a resolved Fable row launches Fable with its selected effort; no
+  adapter-side substitution), the fail-closed launch error when a resolved
+  Fable row conflicts with config-declared no-thinking, no-thinking env
+  propagation (`MAX_THINKING_TOKENS=0` present for non-Fable launches when
+  configured, absent otherwise), and local provider auth env inheritance
+  without tracing secret values. Shared fake-`claude` plumbing lives in
+  `elixir/test/support/claude_shim_fixture.exs`.
 
 - `elixir/test/symphony_elixir/claude_code_gate_test.exs` — gate-level checks
   proving all four ADR 0001 gate dimensions:
@@ -591,10 +607,10 @@ without a live Claude subscription:
      produces only `tool_finished` events and `tool_failed: false` on
      `turn_completed`.
 
-Both test modules run under `make all` (via `mix test`) and require no live
-Claude subscription, Linear API key, or external service. The gate result is
-repeatable in CI. Claude Code MUST NOT be enabled for unattended Octo roles
-until both test modules pass under `make all`.
+All three test modules run under `make all` (via `mix test`) and require no
+live Claude subscription, Linear API key, or external service. The gate result
+is repeatable in CI. Claude Code MUST NOT be enabled for unattended Octo roles
+until all three test modules pass under `make all`.
 
 ## Edge cases
 

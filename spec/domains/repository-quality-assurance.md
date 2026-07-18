@@ -351,7 +351,10 @@ EMB-1162.
 
 The same `make all` contract MUST run on supported Linux and macOS development
 and CI environments without platform-specific interpreter paths or tool
-assumptions.
+assumptions. The gate result MUST NOT depend on ambient terminal geometry:
+`make all` succeeds or fails identically in ordinary TTY and non-TTY
+executions, and tests that assert rendered terminal output MUST pin an
+explicit width instead of inheriting the ambient terminal's.
 
 ## Edge Cases
 
