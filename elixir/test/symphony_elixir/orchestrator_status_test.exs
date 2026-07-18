@@ -2246,7 +2246,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       }
     end)
 
-    payload = Presenter.state_payload(orchestrator_name, 50)
+    payload = Presenter.state_payload(orchestrator_name, 5_000)
 
     assert %{
              polling_diagnostics: %{
@@ -2306,7 +2306,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         %{state | last_poll_result: expected_result, latest_dispatch_summary: summary}
       end)
 
-      payload = Presenter.state_payload(orchestrator_name, 50)
+      payload = Presenter.state_payload(orchestrator_name, 5_000)
 
       assert %{
                polling_diagnostics: %{
@@ -2379,7 +2379,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                  dispatched_identifiers: []
                }
              }
-           } = Presenter.state_payload(orchestrator_name, 50)
+           } = Presenter.state_payload(orchestrator_name, 5_000)
   end
 
   test "role state presenter exposes candidate fetch failure diagnostics from polling" do
@@ -2415,7 +2415,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                  failure_reason_families: ["missing_tracker_kind"]
                }
              }
-           } = Presenter.state_payload(orchestrator_name, 50)
+           } = Presenter.state_payload(orchestrator_name, 5_000)
   end
 
   test "orchestrator restarts stalled workers with retry backoff" do
