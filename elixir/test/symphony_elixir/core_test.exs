@@ -2041,6 +2041,15 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   @tag skip: is_nil(System.find_executable("setsid")) && "requires setsid"
+  # Late-detached detection is Linux-hosted runtime behavior: it needs /proc
+  # for env scanning and setsid to stage a detached fixture process. The guard
+  # keeps the non-live gate contract identical on platforms without them; CI
+  # and production role hosts always run this test.
+  @tag skip:
+         if(File.dir?("/proc") and is_binary(System.find_executable("setsid")),
+           do: false,
+           else: "requires /proc and setsid (Linux late-detached process detection)"
+         )
   test "dispatch refuses when a late-detached app-server descendant inherits run ownership" do
     test_root =
       Path.join(
