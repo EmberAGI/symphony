@@ -52,6 +52,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       url: "https://example.org/issues/MT-188"
     }
 
+    # Non-live gate: keep this orchestrator's startup poll and synthetic-DOWN
+    # continuation checks on the deterministic memory tracker seam.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
     orchestrator_name = Module.concat(__MODULE__, :SnapshotOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -1215,6 +1219,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       url: "https://example.org/issues/MT-201"
     }
 
+    # Non-live gate: keep this orchestrator's startup poll and synthetic-DOWN
+    # continuation checks on the deterministic memory tracker seam.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    # Seed the running issue so the post-DOWN continuation check still sees
+    # it in an active state instead of stopping the fake agent (this test).
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
     orchestrator_name = Module.concat(__MODULE__, :UsageOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -1313,6 +1324,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       url: "https://example.org/issues/MT-202"
     }
 
+    # Non-live gate: keep this orchestrator's startup poll and synthetic-DOWN
+    # continuation checks on the deterministic memory tracker seam.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    # Seed the running issue so the post-DOWN continuation check still sees
+    # it in an active state instead of stopping the fake agent (this test).
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
     orchestrator_name = Module.concat(__MODULE__, :TurnCompletedUsageOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -1387,6 +1405,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       state: "In Progress",
       url: "https://example.org/issues/MT-203"
     }
+
+    # Non-live gate: keep this orchestrator's startup poll and synthetic-DOWN
+    # continuation checks on the deterministic memory tracker seam.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    # Seed the running issue so the post-DOWN continuation check still sees
+    # it in an active state instead of stopping the fake agent (this test).
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
     orchestrator_name = Module.concat(__MODULE__, :ClaudeNormalizedUsageOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -1496,6 +1521,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       state: "In Progress",
       url: "https://example.org/issues/MT-220"
     }
+
+    # Non-live gate: keep this orchestrator's startup poll and synthetic-DOWN
+    # continuation checks on the deterministic memory tracker seam.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    # Seed the running issue so the post-DOWN continuation check still sees
+    # it in an active state instead of stopping the fake agent (this test).
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
     orchestrator_name = Module.concat(__MODULE__, :TokenCountOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -1610,6 +1642,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       url: "https://example.org/issues/MT-221"
     }
 
+    # Non-live gate: keep this orchestrator's startup poll and synthetic-DOWN
+    # continuation checks on the deterministic memory tracker seam.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
     orchestrator_name = Module.concat(__MODULE__, :RateLimitOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -1690,6 +1726,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       state: "In Progress",
       url: "https://example.org/issues/MT-222"
     }
+
+    # Non-live gate: keep this orchestrator's startup poll and synthetic-DOWN
+    # continuation checks on the deterministic memory tracker seam.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
     orchestrator_name = Module.concat(__MODULE__, :TokenPrecedenceOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -1779,6 +1819,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       url: "https://example.org/issues/MT-223"
     }
 
+    # Non-live gate: keep this orchestrator's startup poll and synthetic-DOWN
+    # continuation checks on the deterministic memory tracker seam.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
     orchestrator_name = Module.concat(__MODULE__, :ThreadTokenUsageOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -1853,6 +1897,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       url: "https://example.org/issues/MT-224"
     }
 
+    # Non-live gate: keep this orchestrator's startup poll and synthetic-DOWN
+    # continuation checks on the deterministic memory tracker seam.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
     orchestrator_name = Module.concat(__MODULE__, :LastTokenIgnoredOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -1925,6 +1973,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator snapshot includes retry backoff entries" do
+    # Non-live gate: keep this orchestrator's startup poll and synthetic-DOWN
+    # continuation checks on the deterministic memory tracker seam.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
     orchestrator_name = Module.concat(__MODULE__, :RetryOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -1963,6 +2015,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator snapshot includes poll countdown and checking status" do
+    # Non-live gate: keep this orchestrator's startup poll and synthetic-DOWN
+    # continuation checks on the deterministic memory tracker seam.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
     orchestrator_name = Module.concat(__MODULE__, :PollingSnapshotOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
