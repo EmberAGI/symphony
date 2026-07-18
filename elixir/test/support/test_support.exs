@@ -1,6 +1,11 @@
 defmodule SymphonyElixir.TestSupport do
   @workflow_prompt "You are an agent for this repository."
 
+  # Mirrors the production schema default so an omitted endpoint is treated
+  # as the external host it would resolve to.
+  @schema_default_linear_endpoint "https://api.linear.app/graphql"
+  @loopback_hosts ["127.0.0.1", "localhost", "::1"]
+
   defmacro __using__(_opts) do
     quote do
       use ExUnit.Case
@@ -94,12 +99,35 @@ defmodule SymphonyElixir.TestSupport do
     end
   end
 
+  # Non-live gate guard: the default suite must never point the Linear
+  # tracker at a real host with a usable token. A test attempting that fails
+  # here, at the shared config write seam, instead of issuing network I/O.
+  # Memory-tracker and token-less configs stay allowed so parse-level
+  # assertions of the production endpoint default keep working.
+  defp assert_non_live_tracker!("memory", _endpoint, _token), do: :ok
+  defp assert_non_live_tracker!(_kind, _endpoint, token) when is_nil(token), do: :ok
+
+  defp assert_non_live_tracker!(_kind, endpoint, _token) do
+    effective_endpoint = endpoint || @schema_default_linear_endpoint
+
+    if URI.parse(effective_endpoint).host in @loopback_hosts do
+      :ok
+    else
+      raise ArgumentError,
+            "non-live gate: test workflow config points the linear tracker at " <>
+              "#{effective_endpoint} with a usable token; keep tracker endpoints on " <>
+              "loopback or use tracker_kind: \"memory\""
+    end
+  end
+
   defp workflow_content(overrides) do
     config =
       Keyword.merge(
         [
           tracker_kind: "linear",
-          tracker_endpoint: "https://api.linear.app/graphql",
+          # Loopback discard port: any accidental tracker request fails fast
+          # and locally; the non-live gate must never reach api.linear.app.
+          tracker_endpoint: "http://127.0.0.1:9/graphql",
           tracker_api_token: "token",
           tracker_project_slug: "project",
           tracker_assignee: nil,
@@ -151,6 +179,7 @@ defmodule SymphonyElixir.TestSupport do
     tracker_kind = Keyword.get(config, :tracker_kind)
     tracker_endpoint = Keyword.get(config, :tracker_endpoint)
     tracker_api_token = Keyword.get(config, :tracker_api_token)
+    assert_non_live_tracker!(tracker_kind, tracker_endpoint, tracker_api_token)
     tracker_project_slug = Keyword.get(config, :tracker_project_slug)
     tracker_assignee = Keyword.get(config, :tracker_assignee)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
