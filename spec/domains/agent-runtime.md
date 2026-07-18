@@ -67,6 +67,12 @@ started/refreshed/expiry timestamps, retry or recovery reason when applicable,
 and a state such as `active`, `retrying`, `recoverable`, `blocked`,
 `quarantined`, `released`, or `expired`.
 
+**Ambiguous claim-lease write**: A claim-lease create or update whose transport
+failed before Symphony received an authoritative response, so the mutation may
+or may not have committed. The Linear tracker Adapter reconciles this outcome
+through an authoritative issue refetch before the orchestrator may decide
+whether to dispatch.
+
 **Irrecoverable runtime failure**: A runtime failure whose next successful
 step requires human, credential, configuration, host, tool, permission,
 protocol, or implementation repair rather than another ordinary role retry.
@@ -196,6 +202,19 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   must not be blocked by the duplicate-dispatch gate.
 - Claim lease refreshes must update structured marker state without producing
   unbounded heartbeat comments or role-authored Symphony Handoff comments.
+- A transport-ambiguous claim-lease create or update must trigger one
+  authoritative issue refetch before acquisition is classified. If the
+  refetched active lease exactly matches the attempted issue, workspace, role,
+  holder, and run identity, the tracker Adapter returns that lease as confirmed
+  ownership and the orchestrator may dispatch exactly once. It must not replay
+  the mutation first.
+- If the authoritative refetch after an ambiguous write finds no exact lease,
+  finds a competing or malformed lease, or fails, dispatch must fail closed.
+  The outcome must name the reconciliation result and next recovery action.
+  An absent lease may be retried by the next normal poll; another run's lease
+  must never be released; and a current-holder lease from another run may be
+  released only through existing recovery after local process ownership proves
+  no live or quarantined run remains.
 - Worker termination, stall restart, abnormal exit, operator restart, and
   orchestrator restart paths must either clean the owned app-server process
   tree or preserve/quarantine process ownership metadata so replacement
@@ -311,6 +330,10 @@ Top-level dispatch must perform these steps before spawning a worker:
   matching inherited role-run ownership marker remains live;
 - write or update the claim lease for the selected holder/run and refetch the
   issue to verify ownership before spawning the worker; and
+- when that write has a transport-ambiguous outcome, perform the same
+  authoritative verification without blindly replaying the mutation, return a
+  typed reconciliation outcome, and expose its trigger, ownership result, and
+  next action through dispatch status; and
 - refresh the same marker from runtime updates rather than creating heartbeat
   comment streams.
 
@@ -590,6 +613,15 @@ until both test modules pass under `make all`.
   irrecoverable.
 - A provider-native payload contains secret-bearing fields adjacent to useful
   classification evidence.
+- A claim-lease create or update commits in Linear but its response times out;
+  the authoritative refetch confirms the exact attempted run and dispatch
+  continues once without waiting for lease expiry.
+- A claim-lease response times out before the mutation commits, the refetch
+  returns no matching lease, and the next normal poll retries acquisition
+  without an immediate blind mutation replay.
+- An ambiguous claim-lease write is followed by a conflicting holder, malformed
+  marker, or failed authoritative refetch; dispatch stays closed and status
+  reports the bounded recovery action without exposing raw transport payloads.
 
 ## Constraints
 
@@ -668,6 +700,12 @@ slices without weakening the skills/tools release gate.
   shared retry/escalation seam; provider adapters are concrete adapters into
   that seam, and orchestrator/tracker/status code consume the normalized
   family rather than parsing provider-specific raw payloads.
+- EMB-1171 intake: A transport failure after a claim-lease mutation is an
+  ambiguous write, not proof that acquisition failed. The existing tracker
+  Adapter remains the deep ownership-verification Module: it performs one
+  authoritative refetch, confirms only the exact attempted scope and run, and
+  returns a typed reconciliation outcome for orchestrator diagnostics. Blind
+  mutation replay and an orchestrator-only polling workaround were rejected.
 
 ## References to source issues
 
@@ -675,3 +713,4 @@ slices without weakening the skills/tools release gate.
   (re-scoped 2026-06-10 from "Implement multi-runtime Symphony support for
   Codex, Claude Code, and Pi")
 - [EMB-1127: Generalize irrecoverable runtime failure escalation](https://linear.app/emberai/issue/EMB-1127/generalize-irrecoverable-runtime-failure-escalation)
+- [EMB-1171: Reconcile timeout-ambiguous claim-lease writes](https://linear.app/emberai/issue/EMB-1171/reconcile-timeout-ambiguous-claim-lease-writes)
