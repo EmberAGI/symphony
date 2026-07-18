@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   alias SymphonyElixir.Linear.Client
   alias SymphonyElixir.Tracker.ClaimLease
+  alias SymphonyElixir.Tracker.ClaimLeaseReconciliation
 
   @create_comment_mutation """
   mutation SymphonyCreateComment($issueId: String!, $body: String!) {
@@ -107,26 +108,25 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
-  @spec upsert_claim_lease(String.t(), map()) :: {:ok, ClaimLease.t() | nil} | {:error, term()}
+  @spec upsert_claim_lease(String.t(), map()) ::
+          {:ok, ClaimLease.t() | nil}
+          | {:ok, ClaimLease.t(), ClaimLeaseReconciliation.t()}
+          | {:error, term()}
   def upsert_claim_lease(issue_id, lease_attrs) when is_binary(issue_id) and is_map(lease_attrs) do
     lease =
       lease_attrs
       |> Map.put(:issue_id, issue_id)
       |> ClaimLease.new()
 
-    with :ok <- write_claim_lease_comment(lease),
-         {:ok, [refetched_issue | _]} <- client_module().fetch_issue_states_by_ids([issue_id]),
-         candidates <- claim_lease_candidates(refetched_issue),
-         %ClaimLease{} = verified <- verified_claim_lease(candidates, lease),
-         :ok <- verify_exclusive_claim_lease_owner(candidates, verified) do
-      {:ok, verified}
-    else
-      {:ok, []} -> {:error, :claim_lease_issue_not_found}
-      false -> {:error, :claim_lease_ownership_verification_failed}
-      nil -> {:error, :claim_lease_missing_after_upsert}
-      {:error, :claim_lease_competing_owner} -> {:error, :claim_lease_competing_owner}
-      {:error, reason} -> {:error, reason}
-      _ -> {:error, :claim_lease_upsert_failed}
+    case write_claim_lease_comment(lease) do
+      :ok ->
+        verify_written_claim_lease(issue_id, lease)
+
+      {:error, {:linear_api_request, transport_reason}} ->
+        reconcile_ambiguous_claim_lease_write(issue_id, lease, transport_reason)
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -163,6 +163,101 @@ defmodule SymphonyElixir.Linear.Adapter do
   defp client_module do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
   end
+
+  defp verify_written_claim_lease(issue_id, %ClaimLease{} = lease) do
+    with {:ok, [refetched_issue | _]} <- client_module().fetch_issue_states_by_ids([issue_id]),
+         candidates <- claim_lease_candidates(refetched_issue),
+         %ClaimLease{} = verified <- verified_claim_lease(candidates, lease),
+         :ok <- verify_exclusive_claim_lease_owner(candidates, verified) do
+      {:ok, verified}
+    else
+      {:ok, []} -> {:error, :claim_lease_issue_not_found}
+      nil -> {:error, :claim_lease_missing_after_upsert}
+      {:error, :claim_lease_competing_owner} -> {:error, :claim_lease_competing_owner}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :claim_lease_upsert_failed}
+    end
+  end
+
+  defp reconcile_ambiguous_claim_lease_write(issue_id, %ClaimLease{} = lease, transport_reason) do
+    mutation = if is_binary(lease.comment_id), do: :update, else: :create
+
+    case client_module().fetch_issue_states_by_ids([issue_id]) do
+      {:ok, [refetched_issue | _]} ->
+        classify_ambiguous_claim_lease(mutation, transport_reason, refetched_issue, lease)
+
+      _refetch_failure ->
+        ambiguous_fail_closed(mutation, transport_reason, :refetch_failed)
+    end
+  end
+
+  defp classify_ambiguous_claim_lease(mutation, transport_reason, refetched_issue, %ClaimLease{} = lease) do
+    now = DateTime.utc_now()
+    candidates = claim_lease_candidates(refetched_issue)
+    exact = Enum.find(candidates, &exact_attempted_claim_lease?(&1, lease, now))
+
+    blocking =
+      Enum.filter(candidates, fn candidate ->
+        candidate != exact and
+          ClaimLease.active_or_recoverable?(candidate, now) and
+          same_claim_lease_scope?(candidate, lease)
+      end)
+
+    competing = Enum.find(blocking, &(&1.holder != lease.holder))
+    stale_same_holder = Enum.find(blocking, &(&1.holder == lease.holder))
+
+    cond do
+      malformed_claim_lease_marker?(refetched_issue) ->
+        ambiguous_fail_closed(mutation, transport_reason, :malformed_lease)
+
+      match?(%ClaimLease{}, competing) ->
+        ambiguous_fail_closed(mutation, transport_reason, :competing_holder, competing)
+
+      match?(%ClaimLease{}, stale_same_holder) ->
+        ambiguous_fail_closed(mutation, transport_reason, :same_holder_different_run, stale_same_holder)
+
+      match?(%ClaimLease{}, exact) ->
+        {:ok, exact, ClaimLeaseReconciliation.confirmed(mutation, transport_reason, exact)}
+
+      true ->
+        ambiguous_fail_closed(mutation, transport_reason, :no_lease_found)
+    end
+  end
+
+  defp ambiguous_fail_closed(mutation, transport_reason, outcome, lease \\ nil) do
+    {:error, ClaimLeaseReconciliation.fail_closed(mutation, transport_reason, outcome, lease)}
+  end
+
+  defp exact_attempted_claim_lease?(%ClaimLease{} = candidate, %ClaimLease{} = attempted, now) do
+    is_binary(attempted.holder) and is_binary(attempted.run_id) and
+      candidate.holder == attempted.holder and
+      candidate.run_id == attempted.run_id and
+      candidate.role == attempted.role and
+      exact_workspace_path_match?(candidate.workspace_path, attempted.workspace_path) and
+      (is_nil(attempted.comment_id) or candidate.comment_id == attempted.comment_id) and
+      ClaimLease.active_or_recoverable?(candidate, now)
+  end
+
+  defp exact_workspace_path_match?(left, right) when is_binary(left) and is_binary(right) do
+    normalize_workspace_path(left) == normalize_workspace_path(right)
+  end
+
+  defp exact_workspace_path_match?(left, right), do: blank?(left) and blank?(right)
+
+  defp malformed_claim_lease_marker?(refetched_issue) do
+    refetched_issue
+    |> Map.get(:comments)
+    |> List.wrap()
+    |> Enum.any?(fn comment ->
+      is_binary(comment_body(comment)) and
+        String.contains?(comment_body(comment), "symphony-claim-lease") and
+        is_nil(ClaimLease.from_comment(comment))
+    end)
+  end
+
+  defp comment_body(%{body: body}), do: body
+  defp comment_body(%{"body" => body}), do: body
+  defp comment_body(_comment), do: nil
 
   defp verified_claim_lease(candidates, %ClaimLease{} = lease) when is_list(candidates) do
     Enum.find(candidates, &same_claim_lease?(&1, lease))

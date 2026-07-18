@@ -2268,6 +2268,92 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_integer(next_poll_in_ms) or is_nil(next_poll_in_ms)
   end
 
+  test "dispatch summary and presenter expose ambiguous claim-lease reconciliation diagnostics" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      poll_interval_ms: 30_000
+    )
+
+    confirmed_issue = %Issue{
+      id: "issue-amb-confirmed",
+      identifier: "MT-AMB-OK",
+      title: "Ambiguous confirmed",
+      state: "Todo"
+    }
+
+    failed_issue = %Issue{
+      id: "issue-amb-failed",
+      identifier: "MT-AMB-FAIL",
+      title: "Ambiguous failed",
+      state: "Todo"
+    }
+
+    confirmed_diagnostic = %{
+      issue_id: "issue-amb-confirmed",
+      issue_identifier: "MT-AMB-OK",
+      trigger: "ambiguous_create_transport_error",
+      mutation: "create",
+      transport_reason: "timeout",
+      refetch: "verified",
+      outcome: "confirmed_ownership",
+      next_action: "dispatch_once"
+    }
+
+    failed_diagnostic = %{
+      issue_id: "issue-amb-failed",
+      issue_identifier: "MT-AMB-FAIL",
+      trigger: "ambiguous_update_transport_error",
+      mutation: "update",
+      transport_reason: "closed",
+      refetch: "verified",
+      outcome: "competing_holder",
+      next_action: "defer_to_current_holder"
+    }
+
+    summary =
+      Orchestrator.dispatch_summary_for_test(
+        [confirmed_issue, failed_issue],
+        [
+          {:dispatched, confirmed_diagnostic},
+          {:failed, "claim_lease_ambiguous_competing_holder", failed_diagnostic}
+        ]
+      )
+
+    assert summary.result == "dispatch_succeeded"
+    assert "MT-AMB-OK" in summary.dispatched_identifiers
+    assert "claim_lease_ambiguous_competing_holder" in summary.failure_reason_families
+    refute "claim_lease_blocked" in summary.failure_reason_families
+    refute "claim_lease_blocked" in summary.skip_reason_families
+    assert summary.claim_lease_reconciliations == [confirmed_diagnostic, failed_diagnostic]
+
+    orchestrator_name = Module.concat(__MODULE__, :AmbiguousReconciliationPresenterOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      %{state | last_poll_result: summary.result, latest_dispatch_summary: summary}
+    end)
+
+    payload = Presenter.state_payload(orchestrator_name, 50)
+
+    assert %{
+             polling_diagnostics: %{
+               latest_dispatch_summary: %{
+                 result: "dispatch_succeeded",
+                 claim_lease_reconciliations: [projected_confirmed, projected_failed]
+               }
+             }
+           } = payload
+
+    assert projected_confirmed == confirmed_diagnostic
+    assert projected_failed == failed_diagnostic
+  end
+
   test "role state presenter exposes every dispatch diagnostic result family" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",

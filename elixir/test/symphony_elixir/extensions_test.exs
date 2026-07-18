@@ -7,6 +7,7 @@ defmodule SymphonyElixir.ExtensionsTest do
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Tracker.ClaimLease
+  alias SymphonyElixir.Tracker.ClaimLeaseReconciliation
   alias SymphonyElixir.Tracker.Memory
 
   @endpoint SymphonyElixirWeb.Endpoint
@@ -492,6 +493,266 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert_receive {:graphql_called, update_query, %{commentId: "comment-written-lease"}}
     assert update_query =~ "commentUpdate"
     assert_receive {:fetch_issue_states_by_ids_called, ["issue-competing-lease"]}
+  end
+
+  test "linear adapter confirms ownership after a create-applied claim lease write times out" do
+    setup_ambiguous_claim_lease_client()
+    lease_attrs = ambiguous_lease_attrs("issue-amb-create", "MT-AMB-CREATE", comment_id: nil)
+    committed_lease = ClaimLease.new(Map.put(lease_attrs, :comment_id, "comment-committed"))
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:error, {:linear_api_request, %{reason: :timeout}}}
+    ])
+
+    Process.put(
+      {FakeLinearClient, :fetch_issue_states_result},
+      {:ok, [%Issue{id: "issue-amb-create", claim_lease: committed_lease, claim_leases: [committed_lease]}]}
+    )
+
+    assert {:ok, ^committed_lease, %ClaimLeaseReconciliation{} = reconciliation} =
+             Adapter.upsert_claim_lease("issue-amb-create", lease_attrs)
+
+    assert reconciliation.mutation == :create
+    assert reconciliation.transport_reason == "timeout"
+    assert reconciliation.refetch == :verified
+    assert reconciliation.outcome == :confirmed_ownership
+    assert reconciliation.next_action == :dispatch_once
+    assert reconciliation.lease == committed_lease
+
+    assert_receive {:graphql_called, create_query, %{issueId: "issue-amb-create"}}
+    assert create_query =~ "commentCreate"
+    refute_receive {:graphql_called, _query, _variables}
+    assert_receive {:fetch_issue_states_by_ids_called, ["issue-amb-create"]}
+    refute_receive {:fetch_issue_states_by_ids_called, _issue_ids}
+  end
+
+  test "linear adapter confirms ownership after an update-applied claim lease write times out" do
+    setup_ambiguous_claim_lease_client()
+    lease_attrs = ambiguous_lease_attrs("issue-amb-update", "MT-AMB-UPDATE", comment_id: "comment-lease")
+    committed_lease = ClaimLease.new(lease_attrs)
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:error, {:linear_api_request, :closed}}
+    ])
+
+    Process.put(
+      {FakeLinearClient, :fetch_issue_states_result},
+      {:ok, [%Issue{id: "issue-amb-update", claim_lease: committed_lease, claim_leases: [committed_lease]}]}
+    )
+
+    assert {:ok, ^committed_lease, %ClaimLeaseReconciliation{} = reconciliation} =
+             Adapter.upsert_claim_lease("issue-amb-update", lease_attrs)
+
+    assert reconciliation.mutation == :update
+    assert reconciliation.transport_reason == "closed"
+    assert reconciliation.outcome == :confirmed_ownership
+    assert reconciliation.next_action == :dispatch_once
+
+    assert_receive {:graphql_called, update_query, %{commentId: "comment-lease"}}
+    assert update_query =~ "commentUpdate"
+    refute_receive {:graphql_called, _query, _variables}
+    assert_receive {:fetch_issue_states_by_ids_called, ["issue-amb-update"]}
+    refute_receive {:fetch_issue_states_by_ids_called, _issue_ids}
+  end
+
+  test "linear adapter fails closed for next-poll retry when an ambiguous write left no lease" do
+    setup_ambiguous_claim_lease_client()
+    lease_attrs = ambiguous_lease_attrs("issue-amb-missing", "MT-AMB-MISSING", comment_id: nil)
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:error, {:linear_api_request, :timeout}}
+    ])
+
+    Process.put(
+      {FakeLinearClient, :fetch_issue_states_result},
+      {:ok, [%Issue{id: "issue-amb-missing", claim_lease: nil, claim_leases: [], comments: []}]}
+    )
+
+    assert {:error, %ClaimLeaseReconciliation{} = reconciliation} =
+             Adapter.upsert_claim_lease("issue-amb-missing", lease_attrs)
+
+    assert reconciliation.mutation == :create
+    assert reconciliation.refetch == :verified
+    assert reconciliation.outcome == :no_lease_found
+    assert reconciliation.next_action == :retry_next_poll
+    assert reconciliation.lease == nil
+
+    assert_receive {:graphql_called, _create_query, _variables}
+    refute_receive {:graphql_called, _query, _replayed_variables}
+    assert_receive {:fetch_issue_states_by_ids_called, ["issue-amb-missing"]}
+    refute_receive {:fetch_issue_states_by_ids_called, _issue_ids}
+  end
+
+  test "linear adapter treats an expired exact lease after an ambiguous write as no lease" do
+    setup_ambiguous_claim_lease_client()
+    lease_attrs = ambiguous_lease_attrs("issue-amb-expired", "MT-AMB-EXPIRED", comment_id: nil)
+
+    expired_lease =
+      lease_attrs
+      |> Map.put(:comment_id, "comment-expired")
+      |> Map.put(:expires_at, DateTime.add(DateTime.utc_now(), -60, :second))
+      |> ClaimLease.new()
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:error, {:linear_api_request, :timeout}}
+    ])
+
+    Process.put(
+      {FakeLinearClient, :fetch_issue_states_result},
+      {:ok, [%Issue{id: "issue-amb-expired", claim_lease: expired_lease, claim_leases: [expired_lease]}]}
+    )
+
+    assert {:error, %ClaimLeaseReconciliation{outcome: :no_lease_found, next_action: :retry_next_poll}} =
+             Adapter.upsert_claim_lease("issue-amb-expired", lease_attrs)
+  end
+
+  test "linear adapter fails closed when an ambiguous write reconciles to a conflicting holder" do
+    setup_ambiguous_claim_lease_client()
+    lease_attrs = ambiguous_lease_attrs("issue-amb-conflict", "MT-AMB-CONFLICT", comment_id: nil)
+
+    competing_lease =
+      lease_attrs
+      |> Map.merge(%{comment_id: "comment-competing", holder: "holder-2", run_id: "run-2"})
+      |> ClaimLease.new()
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:error, {:linear_api_request, :timeout}}
+    ])
+
+    Process.put(
+      {FakeLinearClient, :fetch_issue_states_result},
+      {:ok, [%Issue{id: "issue-amb-conflict", claim_lease: competing_lease, claim_leases: [competing_lease]}]}
+    )
+
+    assert {:error, %ClaimLeaseReconciliation{} = reconciliation} =
+             Adapter.upsert_claim_lease("issue-amb-conflict", lease_attrs)
+
+    assert reconciliation.outcome == :competing_holder
+    assert reconciliation.next_action == :defer_to_current_holder
+    assert reconciliation.lease == competing_lease
+    assert_receive {:graphql_called, _create_query, _variables}
+    refute_receive {:graphql_called, _query, _replayed_variables}
+  end
+
+  test "linear adapter fails closed when an ambiguous write reconciles to the same holder on another run" do
+    setup_ambiguous_claim_lease_client()
+    lease_attrs = ambiguous_lease_attrs("issue-amb-stale-run", "MT-AMB-STALE", comment_id: nil)
+
+    stale_run_lease =
+      lease_attrs
+      |> Map.merge(%{comment_id: "comment-stale-run", run_id: "run-earlier"})
+      |> ClaimLease.new()
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:error, {:linear_api_request, :timeout}}
+    ])
+
+    Process.put(
+      {FakeLinearClient, :fetch_issue_states_result},
+      {:ok, [%Issue{id: "issue-amb-stale-run", claim_lease: stale_run_lease, claim_leases: [stale_run_lease]}]}
+    )
+
+    assert {:error, %ClaimLeaseReconciliation{} = reconciliation} =
+             Adapter.upsert_claim_lease("issue-amb-stale-run", lease_attrs)
+
+    assert reconciliation.outcome == :same_holder_different_run
+    assert reconciliation.next_action == :recover_stale_current_holder_lease
+    assert reconciliation.lease == stale_run_lease
+  end
+
+  test "linear adapter fails closed when an ambiguous write reconciles to a malformed lease marker" do
+    setup_ambiguous_claim_lease_client()
+    lease_attrs = ambiguous_lease_attrs("issue-amb-malformed", "MT-AMB-MALFORMED", comment_id: nil)
+
+    malformed_comment = %{
+      id: "comment-malformed",
+      body: "<!-- symphony-claim-lease:v1 -->\nnot-a-json-payload\n<!-- /symphony-claim-lease -->"
+    }
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:error, {:linear_api_request, :timeout}}
+    ])
+
+    Process.put(
+      {FakeLinearClient, :fetch_issue_states_result},
+      {:ok,
+       [
+         %Issue{
+           id: "issue-amb-malformed",
+           claim_lease: nil,
+           claim_leases: [],
+           comments: [malformed_comment]
+         }
+       ]}
+    )
+
+    assert {:error, %ClaimLeaseReconciliation{} = reconciliation} =
+             Adapter.upsert_claim_lease("issue-amb-malformed", lease_attrs)
+
+    assert reconciliation.outcome == :malformed_lease
+    assert reconciliation.next_action == :requires_lease_recovery
+  end
+
+  test "linear adapter fails closed when the authoritative refetch after an ambiguous write fails" do
+    setup_ambiguous_claim_lease_client()
+    lease_attrs = ambiguous_lease_attrs("issue-amb-refetch", "MT-AMB-REFETCH", comment_id: nil)
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:error, {:linear_api_request, :timeout}}
+    ])
+
+    Process.put(
+      {FakeLinearClient, :fetch_issue_states_result},
+      {:error, {:linear_api_request, :nxdomain}}
+    )
+
+    assert {:error, %ClaimLeaseReconciliation{} = reconciliation} =
+             Adapter.upsert_claim_lease("issue-amb-refetch", lease_attrs)
+
+    assert reconciliation.refetch == :failed
+    assert reconciliation.outcome == :refetch_failed
+    assert reconciliation.next_action == :retry_next_poll
+    assert_receive {:graphql_called, _create_query, _variables}
+    refute_receive {:graphql_called, _query, _replayed_variables}
+  end
+
+  test "linear adapter fails closed when the ambiguous-write refetch cannot find the issue" do
+    setup_ambiguous_claim_lease_client()
+    lease_attrs = ambiguous_lease_attrs("issue-amb-gone", "MT-AMB-GONE", comment_id: nil)
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:error, {:linear_api_request, :timeout}}
+    ])
+
+    Process.put({FakeLinearClient, :fetch_issue_states_result}, {:ok, []})
+
+    assert {:error, %ClaimLeaseReconciliation{refetch: :failed, outcome: :refetch_failed}} =
+             Adapter.upsert_claim_lease("issue-amb-gone", lease_attrs)
+  end
+
+  test "linear adapter does not reclassify ordinary claim lease write failures as ambiguous" do
+    setup_ambiguous_claim_lease_client()
+    lease_attrs = ambiguous_lease_attrs("issue-amb-semantic", "MT-AMB-SEMANTIC", comment_id: nil)
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:ok, %{"data" => %{"commentCreate" => %{"success" => false}}}}
+    ])
+
+    assert {:error, :claim_lease_comment_create_failed} =
+             Adapter.upsert_claim_lease("issue-amb-semantic", lease_attrs)
+
+    assert_receive {:graphql_called, _create_query, _variables}
+    refute_receive {:fetch_issue_states_by_ids_called, _issue_ids}
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:error, {:linear_api_status, 500}}
+    ])
+
+    assert {:error, {:linear_api_status, 500}} =
+             Adapter.upsert_claim_lease("issue-amb-semantic", lease_attrs)
+
+    assert_receive {:graphql_called, _retry_query, _retry_variables}
+    refute_receive {:fetch_issue_states_by_ids_called, _issue_ids}
   end
 
   test "phoenix observability api preserves state, issue, and refresh responses" do
@@ -1078,6 +1339,33 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert method_not_allowed_response.body["error"]["code"] == "method_not_allowed"
 
     assert {:error, _reason} = HttpServer.start_link(host: "bad host", port: 0)
+  end
+
+  defp setup_ambiguous_claim_lease_client do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    on_exit(fn ->
+      Process.delete({FakeLinearClient, :graphql_results})
+      Process.delete({FakeLinearClient, :fetch_issue_states_result})
+    end)
+  end
+
+  defp ambiguous_lease_attrs(issue_id, issue_identifier, overrides) do
+    now = DateTime.utc_now()
+
+    %{
+      comment_id: nil,
+      issue_id: issue_id,
+      issue_identifier: issue_identifier,
+      role: "implementer",
+      holder: "holder-1",
+      run_id: "run-1",
+      workspace_path: "/tmp/workspaces/#{issue_identifier}",
+      state: "active",
+      refreshed_at: now,
+      expires_at: DateTime.add(now, 60, :second)
+    }
+    |> Map.merge(Map.new(overrides))
   end
 
   defp start_test_endpoint(overrides) do

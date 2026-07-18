@@ -23,6 +23,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Notifications.Telegram
   alias SymphonyElixir.Tracker.ClaimLease
+  alias SymphonyElixir.Tracker.ClaimLeaseReconciliation
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -67,7 +68,8 @@ defmodule SymphonyElixir.Orchestrator do
         candidate_identifiers: [],
         dispatched_identifiers: [],
         skip_reason_families: [],
-        skipped_candidates: []
+        skipped_candidates: [],
+        claim_lease_reconciliations: []
       }
     ]
   end
@@ -448,7 +450,27 @@ defmodule SymphonyElixir.Orchestrator do
         record_dispatch_result(acc, issue, dispatch_result)
       end)
 
-    dispatch_cycle_summary(issues, result.skipped, result.dispatched, result.failed, result.attempted)
+    dispatch_cycle_summary(
+      issues,
+      result.skipped,
+      result.dispatched,
+      result.failed,
+      result.attempted,
+      Map.get(result, :claim_lease_reconciliations, [])
+    )
+  end
+
+  @doc false
+  @spec claim_lease_dispatch_decision_for_test(term(), Issue.t()) ::
+          {:spawn, ClaimLease.t() | nil, map() | nil} | {:fail_closed, String.t(), map()} | {:fail_generic, term()}
+  def claim_lease_dispatch_decision_for_test(upsert_result, %Issue{} = issue) do
+    claim_lease_dispatch_decision(upsert_result, issue)
+  end
+
+  @doc false
+  @spec dispatch_skip_summary_for_test(Issue.t(), term()) :: map() | nil
+  def dispatch_skip_summary_for_test(%Issue{} = issue, %State{} = state) do
+    dispatch_skip_summary(issue, state, active_state_set(), terminal_state_set())
   end
 
   @doc false
@@ -739,8 +761,14 @@ defmodule SymphonyElixir.Orchestrator do
       end)
 
     summary =
-      sorted_issues
-      |> dispatch_cycle_summary(result.skipped, result.dispatched, result.failed, result.attempted)
+      dispatch_cycle_summary(
+        sorted_issues,
+        result.skipped,
+        result.dispatched,
+        result.failed,
+        result.attempted,
+        Map.get(result, :claim_lease_reconciliations, [])
+      )
 
     record_dispatch_summary(result.state, summary)
   end
@@ -813,6 +841,12 @@ defmodule SymphonyElixir.Orchestrator do
       todo_issue_blocked_by_non_terminal?(issue, terminal_states) ->
         skipped_candidate_summary(issue, "blocked_by_non_terminal")
 
+      MapSet.member?(claimed, issue.id) ->
+        skipped_candidate_summary(issue, "already_claimed")
+
+      Map.has_key?(running, issue.id) ->
+        skipped_candidate_summary(issue, "already_running")
+
       claim_leases != [] ->
         claim_lease_skipped_candidate_summary(issue, claim_leases)
 
@@ -827,14 +861,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_skip_summary(_issue, _state, _active_states, _terminal_states),
     do: skipped_candidate_summary(nil, "not_candidate")
 
-  defp dispatch_capacity_skip_summary(issue, state, running, claimed) do
+  defp dispatch_capacity_skip_summary(issue, state, running, _claimed) do
     cond do
-      MapSet.member?(claimed, issue.id) ->
-        skipped_candidate_summary(issue, "already_claimed")
-
-      Map.has_key?(running, issue.id) ->
-        skipped_candidate_summary(issue, "already_running")
-
       available_slots(state) <= 0 ->
         skipped_candidate_summary(issue, "role_capacity_blocked")
 
@@ -993,19 +1021,67 @@ defmodule SymphonyElixir.Orchestrator do
       worker_host ->
         run_id = new_run_id(issue)
 
-        case upsert_dispatch_claim_lease(issue, attempt, worker_host, run_id) do
-          {:ok, %ClaimLease{} = claim_lease} ->
+        case claim_lease_dispatch_decision(upsert_dispatch_claim_lease(issue, attempt, worker_host, run_id), issue) do
+          {:spawn, claim_lease, nil} ->
             spawn_issue_on_worker_host_with_result(state, issue, attempt, recipient, worker_host, claim_lease)
 
-          {:ok, nil} ->
-            spawn_issue_on_worker_host_with_result(state, issue, attempt, recipient, worker_host, nil)
+          {:spawn, %ClaimLease{} = claim_lease, %{} = reconciliation_diagnostic} ->
+            Logger.info(
+              "Confirmed exact claim-lease ownership after ambiguous #{reconciliation_diagnostic.mutation} write for #{issue_context(issue)} transport_reason=#{reconciliation_diagnostic.transport_reason}"
+            )
 
-          {:error, reason} ->
+            {next_state, spawn_result} =
+              spawn_issue_on_worker_host_with_result(state, issue, attempt, recipient, worker_host, claim_lease)
+
+            {next_state, attach_claim_lease_reconciliation(spawn_result, reconciliation_diagnostic)}
+
+          {:fail_closed, reason_family, %{} = reconciliation_diagnostic} ->
+            Logger.warning(
+              "Failing closed on ambiguous claim-lease #{reconciliation_diagnostic.mutation} write for #{issue_context(issue)} outcome=#{reconciliation_diagnostic.outcome} next_action=#{reconciliation_diagnostic.next_action} transport_reason=#{reconciliation_diagnostic.transport_reason}"
+            )
+
+            {state, {:failed, reason_family, reconciliation_diagnostic}}
+
+          {:fail_generic, reason} ->
             Logger.warning("Skipping dispatch; claim lease upsert failed for #{issue_context(issue)}: #{inspect(reason)}")
             {state, {:failed, "claim_lease_upsert_failed"}}
         end
     end
   end
+
+  defp claim_lease_dispatch_decision(upsert_result, %Issue{} = issue) do
+    case upsert_result do
+      {:ok, %ClaimLease{} = claim_lease} ->
+        {:spawn, claim_lease, nil}
+
+      {:ok, nil} ->
+        {:spawn, nil, nil}
+
+      {:ok, %ClaimLease{} = claim_lease, %ClaimLeaseReconciliation{} = reconciliation} ->
+        {:spawn, claim_lease, claim_lease_reconciliation_diagnostic(issue, reconciliation)}
+
+      {:error, %ClaimLeaseReconciliation{} = reconciliation} ->
+        diagnostic = claim_lease_reconciliation_diagnostic(issue, reconciliation)
+        {:fail_closed, ClaimLeaseReconciliation.reason_family(reconciliation), diagnostic}
+
+      {:error, reason} ->
+        {:fail_generic, reason}
+    end
+  end
+
+  defp claim_lease_reconciliation_diagnostic(%Issue{} = issue, %ClaimLeaseReconciliation{} = reconciliation) do
+    reconciliation
+    |> ClaimLeaseReconciliation.diagnostic()
+    |> Map.merge(%{issue_id: issue.id, issue_identifier: safe_issue_identifier(issue)})
+  end
+
+  defp attach_claim_lease_reconciliation(:dispatched, %{} = reconciliation_diagnostic),
+    do: {:dispatched, reconciliation_diagnostic}
+
+  defp attach_claim_lease_reconciliation({:failed, reason_family}, %{} = reconciliation_diagnostic),
+    do: {:failed, reason_family, reconciliation_diagnostic}
+
+  defp attach_claim_lease_reconciliation(spawn_result, _reconciliation_diagnostic), do: spawn_result
 
   defp spawn_issue_on_worker_host_with_result(%State{} = state, issue, attempt, recipient, worker_host, claim_lease) do
     record_pending_turn_start(issue, worker_host)
@@ -1453,6 +1529,9 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, %ClaimLease{} = blocked_lease} ->
         blocked_lease
 
+      {:ok, %ClaimLease{} = blocked_lease, %ClaimLeaseReconciliation{}} ->
+        blocked_lease
+
       {:error, upsert_reason} ->
         Logger.warning("Failed to update irrecoverable blocked claim lease for #{issue_context(issue)}: #{inspect(upsert_reason)}")
         nil
@@ -1776,6 +1855,9 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, %ClaimLease{} = retry_claim_lease} ->
         retry_claim_lease
 
+      {:ok, %ClaimLease{} = retry_claim_lease, %ClaimLeaseReconciliation{}} ->
+        retry_claim_lease
+
       {:error, reason} ->
         Logger.warning("Failed to update retry claim lease for #{issue_context(issue)}: #{inspect(reason)}")
         nil
@@ -1808,6 +1890,11 @@ defmodule SymphonyElixir.Orchestrator do
 
       case Tracker.upsert_claim_lease(issue_id, refreshed_attrs) do
         {:ok, %ClaimLease{} = refreshed_lease} ->
+          running_entry
+          |> Map.put(:claim_lease, refreshed_lease)
+          |> Map.put(:claim_lease_refreshed_at_ms, System.monotonic_time(:millisecond))
+
+        {:ok, %ClaimLease{} = refreshed_lease, %ClaimLeaseReconciliation{}} ->
           running_entry
           |> Map.put(:claim_lease, refreshed_lease)
           |> Map.put(:claim_lease_refreshed_at_ms, System.monotonic_time(:millisecond))
@@ -1909,6 +1996,16 @@ defmodule SymphonyElixir.Orchestrator do
 
     case Tracker.upsert_claim_lease(issue.id, attrs) do
       {:ok, _claim_lease} ->
+        :ok
+
+      {:ok, _claim_lease, %ClaimLeaseReconciliation{} = reconciliation} ->
+        Logger.warning("Ambiguous claim lease release for #{issue_context(issue)} reconciled to outcome=#{reconciliation.outcome} next_action=#{reconciliation.next_action}")
+
+        :ok
+
+      {:error, %ClaimLeaseReconciliation{} = reconciliation} ->
+        Logger.warning("Ambiguous claim lease release for #{issue_context(issue)} failed closed with outcome=#{reconciliation.outcome} next_action=#{reconciliation.next_action}")
+
         :ok
 
       {:error, reason} ->
@@ -2338,6 +2435,18 @@ defmodule SymphonyElixir.Orchestrator do
     |> Map.update!(:dispatched, &[safe_issue_identifier(issue) | &1])
   end
 
+  defp record_dispatch_result(acc, issue, {:dispatched, %{} = reconciliation_diagnostic}) do
+    acc
+    |> record_dispatch_result(issue, :dispatched)
+    |> record_claim_lease_reconciliation(reconciliation_diagnostic)
+  end
+
+  defp record_dispatch_result(acc, issue, {:failed, reason_family, %{} = reconciliation_diagnostic}) do
+    acc
+    |> record_dispatch_result(issue, {:failed, reason_family})
+    |> record_claim_lease_reconciliation(reconciliation_diagnostic)
+  end
+
   defp record_dispatch_result(acc, _issue, :attempted) do
     Map.update!(acc, :attempted, &(&1 + 1))
   end
@@ -2352,10 +2461,15 @@ defmodule SymphonyElixir.Orchestrator do
     Map.update!(acc, :skipped, &[skip_summary | &1])
   end
 
-  defp dispatch_cycle_summary(issues, skipped, dispatched, failed, attempted) do
+  defp record_claim_lease_reconciliation(acc, %{} = reconciliation_diagnostic) do
+    Map.update(acc, :claim_lease_reconciliations, [reconciliation_diagnostic], &[reconciliation_diagnostic | &1])
+  end
+
+  defp dispatch_cycle_summary(issues, skipped, dispatched, failed, attempted, claim_lease_reconciliations \\ []) do
     skipped = Enum.reverse(skipped)
     dispatched = dispatched |> Enum.reverse() |> Enum.reject(&is_nil/1)
     failed = Enum.reverse(failed)
+    claim_lease_reconciliations = Enum.reverse(claim_lease_reconciliations)
     candidate_identifiers = issues |> Enum.map(&safe_issue_identifier/1) |> Enum.reject(&is_nil/1)
 
     result =
@@ -2377,7 +2491,8 @@ defmodule SymphonyElixir.Orchestrator do
       dispatched_identifiers: Enum.take(dispatched, 10),
       skip_reason_families: skipped |> Enum.map(& &1.reason_family) |> Enum.uniq() |> Enum.take(10),
       skipped_candidates: Enum.take(skipped, 10),
-      failure_reason_families: failed |> Enum.uniq() |> Enum.take(10)
+      failure_reason_families: failed |> Enum.uniq() |> Enum.take(10),
+      claim_lease_reconciliations: Enum.take(claim_lease_reconciliations, 10)
     }
   end
 
@@ -2391,7 +2506,8 @@ defmodule SymphonyElixir.Orchestrator do
       dispatched_identifiers: [],
       skip_reason_families: [],
       skipped_candidates: [],
-      failure_reason_families: []
+      failure_reason_families: [],
+      claim_lease_reconciliations: []
     }
   end
 

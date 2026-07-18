@@ -3729,4 +3729,131 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   defp assert_eventually(_fun, 0), do: flunk("condition not met in time")
+
+  describe "ambiguous claim-lease dispatch decisions" do
+    test "confirmed reconciliation spawns once and fail-closed outcomes stay closed" do
+      alias SymphonyElixir.Tracker.ClaimLeaseReconciliation
+
+      issue = %Issue{id: "issue-amb-decision", identifier: "MT-AMB-DECIDE", title: "Ambiguous decision", state: "Todo"}
+
+      lease =
+        ClaimLease.new(%{
+          issue_id: "issue-amb-decision",
+          issue_identifier: "MT-AMB-DECIDE",
+          role: "implementer",
+          holder: "holder-1",
+          run_id: "run-1",
+          refreshed_at: DateTime.utc_now(),
+          expires_at: DateTime.add(DateTime.utc_now(), 60, :second),
+          state: "active"
+        })
+
+      confirmed = ClaimLeaseReconciliation.confirmed(:create, :timeout, lease)
+
+      assert {:spawn, ^lease, %{} = confirmed_diagnostic} =
+               Orchestrator.claim_lease_dispatch_decision_for_test({:ok, lease, confirmed}, issue)
+
+      assert confirmed_diagnostic.trigger == "ambiguous_create_transport_error"
+      assert confirmed_diagnostic.transport_reason == "timeout"
+      assert confirmed_diagnostic.refetch == "verified"
+      assert confirmed_diagnostic.outcome == "confirmed_ownership"
+      assert confirmed_diagnostic.next_action == "dispatch_once"
+      assert confirmed_diagnostic.issue_identifier == "MT-AMB-DECIDE"
+
+      assert {:spawn, ^lease, nil} = Orchestrator.claim_lease_dispatch_decision_for_test({:ok, lease}, issue)
+      assert {:spawn, nil, nil} = Orchestrator.claim_lease_dispatch_decision_for_test({:ok, nil}, issue)
+
+      assert {:fail_generic, :boom} =
+               Orchestrator.claim_lease_dispatch_decision_for_test({:error, :boom}, issue)
+
+      fail_closed_expectations = [
+        {:no_lease_found, "claim_lease_ambiguous_no_lease_found", "retry_next_poll"},
+        {:competing_holder, "claim_lease_ambiguous_competing_holder", "defer_to_current_holder"},
+        {:same_holder_different_run, "claim_lease_ambiguous_same_holder_different_run", "recover_stale_current_holder_lease"},
+        {:malformed_lease, "claim_lease_ambiguous_malformed_lease", "requires_lease_recovery"},
+        {:refetch_failed, "claim_lease_ambiguous_refetch_failed", "retry_next_poll"}
+      ]
+
+      for {outcome, expected_family, expected_next_action} <- fail_closed_expectations do
+        reconciliation = ClaimLeaseReconciliation.fail_closed(:update, :timeout, outcome)
+
+        assert {:fail_closed, ^expected_family, %{} = diagnostic} =
+                 Orchestrator.claim_lease_dispatch_decision_for_test({:error, reconciliation}, issue)
+
+        assert diagnostic.outcome == Atom.to_string(outcome)
+        assert diagnostic.next_action == expected_next_action
+        assert diagnostic.issue_identifier == "MT-AMB-DECIDE"
+      end
+    end
+
+    test "a confirmed dispatched issue reports already running instead of claim_lease_blocked" do
+      previous_holder = Application.get_env(:symphony_elixir, :claim_lease_holder)
+
+      on_exit(fn ->
+        restore_app_env(:claim_lease_holder, previous_holder)
+      end)
+
+      Application.put_env(:symphony_elixir, :claim_lease_holder, "this-worker")
+
+      own_lease =
+        ClaimLease.new(%{
+          issue_id: "issue-amb-running",
+          issue_identifier: "MT-AMB-RUNNING",
+          role: "implementer",
+          holder: "this-worker",
+          run_id: "run-confirmed",
+          refreshed_at: DateTime.utc_now(),
+          expires_at: DateTime.add(DateTime.utc_now(), 60, :second),
+          state: "active"
+        })
+
+      issue = %Issue{
+        id: "issue-amb-running",
+        identifier: "MT-AMB-RUNNING",
+        title: "Ambiguous running",
+        state: "In Progress",
+        claim_lease: own_lease,
+        claim_leases: [own_lease]
+      }
+
+      running_state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{"issue-amb-running" => %{identifier: "MT-AMB-RUNNING"}},
+        claimed: MapSet.new(["issue-amb-running"])
+      }
+
+      assert %{reason_family: "already_claimed"} =
+               Orchestrator.dispatch_skip_summary_for_test(issue, running_state)
+
+      unclaimed_running_state = %Orchestrator.State{
+        max_concurrent_agents: 1,
+        running: %{"issue-amb-running" => %{identifier: "MT-AMB-RUNNING"}},
+        claimed: MapSet.new()
+      }
+
+      assert %{reason_family: "already_running"} =
+               Orchestrator.dispatch_skip_summary_for_test(issue, unclaimed_running_state)
+
+      idle_state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      assert %{reason_family: "claim_lease_blocked"} =
+               Orchestrator.dispatch_skip_summary_for_test(issue, idle_state)
+    end
+
+    test "a fail-closed ambiguous no-lease outcome leaves the candidate eligible for the next poll" do
+      issue = %Issue{
+        id: "issue-amb-next-poll",
+        identifier: "MT-AMB-NEXT",
+        title: "Ambiguous next poll",
+        state: "Todo",
+        labels: ["implementation-effort:high"],
+        claim_lease: nil,
+        claim_leases: []
+      }
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    end
+  end
 end
