@@ -13,6 +13,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @default_poll_interval_ms 50
   @default_stop_timeout_ms 5_000
   @default_ready_stability_ms 2_000
+  @default_submission_settle_ms 1_000
   @required_version "0.7.4"
   @required_protocol 16
 
@@ -120,6 +121,42 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   def submit(_session, _agent, _prompt, _context), do: {:error, :invalid_herdr_submit}
 
   @impl true
+  def begin_turn(
+        %{name: session_name, env: env} = session,
+        %{name: agent_name, pane_id: pane_id} = agent,
+        prompt,
+        timeout_ms,
+        context
+      )
+      when is_binary(agent_name) and agent_name != "" and is_binary(pane_id) and
+             is_binary(prompt) and prompt != "" and is_integer(timeout_ms) and timeout_ms >= 0 and
+             is_map(context) do
+    now = System.monotonic_time(:millisecond)
+    deadline = now + timeout_ms
+
+    state = %{
+      context: context,
+      session_name: session_name,
+      env: env,
+      agent_name: agent_name,
+      pane_id: pane_id,
+      provider: Map.get(agent, :provider),
+      baseline_revision: Map.get(agent, :revision),
+      deadline: deadline,
+      settle_deadline: min(deadline, now + Map.get(context, :submission_settle_ms, @default_submission_settle_ms)),
+      poll_interval_ms: Map.get(context, :poll_interval_ms, @default_poll_interval_ms),
+      confirmed: false
+    }
+
+    with :ok <- submit(session, agent, prompt, context) do
+      await_turn_edge(state)
+    end
+  end
+
+  def begin_turn(_session, _agent, _prompt, _timeout_ms, _context),
+    do: {:error, :invalid_herdr_begin_turn}
+
+  @impl true
   def await_agent(%{name: session_name, env: env}, %{name: agent_name} = agent, statuses, timeout_ms, context)
       when is_list(statuses) and statuses != [] and is_integer(timeout_ms) and timeout_ms >= 0 do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
@@ -136,6 +173,79 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     do: {:ok, Map.put(observed, :provider, provider)}
 
   defp preserve_agent_provider(result, _agent), do: result
+
+  defp await_turn_edge(state) do
+    case fetch_agent(state.context, state.session_name, state.env, state.agent_name) do
+      {:ok, observed} -> classify_turn_edge(observed, state)
+      {:error, _reason} -> continue_turn_edge(state)
+    end
+  end
+
+  defp classify_turn_edge(%{agent_status: "working"} = observed, state),
+    do: turn_edge_result(:working, observed, state)
+
+  defp classify_turn_edge(%{agent_status: status} = observed, state)
+       when status in ["idle", "done"] do
+    if revision_advanced?(observed.revision, state.baseline_revision),
+      do: turn_edge_result(:completed, observed, state),
+      else: continue_turn_edge(state)
+  end
+
+  defp classify_turn_edge(_observed, state), do: continue_turn_edge(state)
+
+  defp continue_turn_edge(state) do
+    now = System.monotonic_time(:millisecond)
+
+    cond do
+      now >= state.deadline ->
+        {:error, {:herdr_agent_status_timeout, state.agent_name, ["working"]}}
+
+      !state.confirmed and now >= state.settle_deadline ->
+        confirm_turn_submission(state)
+
+      true ->
+        Process.sleep(state.poll_interval_ms)
+        await_turn_edge(state)
+    end
+  end
+
+  defp confirm_turn_submission(state) do
+    case command(
+           state.context,
+           ["--session", state.session_name, "pane", "run", state.pane_id, ""],
+           state.env
+         ) do
+      {:ok, _output} ->
+        Process.sleep(state.poll_interval_ms)
+        await_turn_edge(%{state | confirmed: true})
+
+      {:error, reason} ->
+        {:error, {:herdr_submit_confirmation_failed, reason}}
+    end
+  end
+
+  defp turn_edge_result(phase, observed, %{provider: nil}),
+    do: {:ok, %{phase: phase, agent: observed}}
+
+  defp turn_edge_result(phase, observed, %{provider: provider}),
+    do: {:ok, %{phase: phase, agent: Map.put(observed, :provider, provider)}}
+
+  defp revision_advanced?(revision, baseline)
+       when is_integer(revision) and is_integer(baseline),
+       do: revision > baseline
+
+  defp revision_advanced?(_revision, _baseline), do: false
+
+  defp fetch_agent(context, session_name, env, agent_name) do
+    with {:ok, output} <- command(context, ["--session", session_name, "agent", "get", agent_name], env),
+         {:ok, payload} <- Jason.decode(output),
+         agent when is_map(agent) <- get_in(payload, ["result", "agent"]) do
+      {:ok, atomize_known_agent_fields(agent)}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_herdr_agent_response}
+    end
+  end
 
   @impl true
   def read_agent(%{name: session_name, env: env}, %{name: agent_name}, opts, context) when is_map(opts) do
@@ -538,7 +648,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       pane_id: Map.get(agent, "pane_id"),
       agent_status: Map.get(agent, "agent_status"),
       agent: Map.get(agent, "agent"),
-      agent_session: Map.get(agent, "agent_session")
+      agent_session: Map.get(agent, "agent_session"),
+      revision: Map.get(agent, "revision")
     }
   end
 end
