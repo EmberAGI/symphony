@@ -382,13 +382,15 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       assert trace =~ "--effort low"
       assert trace =~ "--append-system-prompt"
       assert trace =~ "Reusable landing instructions"
-      refute trace =~ "ENV_MAX_THINKING_TOKENS:0"
+      # Non-Fable resolved row: the config-declared no_thinking flag propagates
+      # as the verified MAX_THINKING_TOKENS=0 invocation (agent-runtime spec).
+      assert trace =~ "ENV_MAX_THINKING_TOKENS:0"
 
       completed = Enum.find(events, &(&1.event == :turn_completed))
       assert completed.implementation_effort == "minimal"
       assert completed.claude_model == "claude-opus-4-8"
       assert completed.claude_effort == "low"
-      assert completed.claude_no_thinking == false
+      assert completed.claude_no_thinking == true
     after
       File.rm_rf(ctx.test_root)
     end

@@ -50,6 +50,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   @fable_fallback_reason "fable_unavailable"
 
   @no_thinking_env "MAX_THINKING_TOKENS"
+
   @local_provider_auth_env_names ~w(CLAUDE_CODE_OAUTH_TOKEN)
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
@@ -240,11 +241,17 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     end
   end
 
+  # The catalog validates a non-empty model and reasoning effort for every
+  # tier cell, so the resolved profile always carries both. The config-declared
+  # `no_thinking` flag is the no-thinking source of truth (agent-runtime spec);
+  # catalog rows carry no such dimension.
   defp resolve_fallback(profile, claude) do
-    preferred_model = profile.model || claude.model
+    preferred_model = profile.model
     preferred_effort = profile.reasoning_effort
-    preferred_no_thinking = profile.no_thinking
+    preferred_no_thinking = claude.no_thinking
 
+    # A Fable row is selected for full-thinking capability; its documented
+    # fallback keeps thinking enabled rather than inheriting the config flag.
     if fable_model?(preferred_model) do
       {@fable_fallback_model, @fable_fallback_effort, false,
        %{
@@ -267,10 +274,8 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     normalized == "fable" or String.contains?(normalized, "claude-fable-")
   end
 
-  defp fable_model?(_model), do: false
-
   defp maybe_put_no_thinking_env(env, true), do: [{@no_thinking_env, "0"} | env]
-  defp maybe_put_no_thinking_env(env, _false), do: env
+  defp maybe_put_no_thinking_env(env, false), do: env
 
   defp local_provider_auth_env(nil) do
     Enum.flat_map(@local_provider_auth_env_names, &local_provider_auth_env_value/1)
