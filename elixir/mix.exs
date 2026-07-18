@@ -32,7 +32,9 @@ defmodule SymphonyElixir.MixProject do
         "test/support/snapshot_support.exs",
         "test/support/claude_shim_fixture.exs",
         "test/support/test_support.exs",
-        "test/support/agent_profile_fixture.exs"
+        "test/support/agent_profile_fixture.exs",
+        "test/support/non_live_linear_client.exs",
+        "test/support/linear_traffic_sentinel.exs"
       ],
       dialyzer: [
         plt_add_apps: [:mix]
@@ -75,7 +77,12 @@ defmodule SymphonyElixir.MixProject do
     [
       setup: ["deps.get"],
       build: ["escript.build"],
-      lint: ["specs.check", "credo --strict"]
+      lint: ["specs.check", "credo --strict"],
+      # Non-live gate boot seal (EMB-1180): the application must never
+      # auto-start before test_helper.exs has sealed the Linear client
+      # module and pinned a non-repo workflow file, so every `mix test`
+      # entrypoint (including `mix test --cover`) starts the app itself.
+      test: ["test --no-start"]
     ]
   end
 

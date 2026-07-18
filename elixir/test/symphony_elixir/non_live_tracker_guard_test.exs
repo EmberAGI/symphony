@@ -1,5 +1,13 @@
+defmodule SymphonyElixir.NonLiveTrackerGuardTest.SentinelProbeTarget do
+  @moduledoc false
+  def probe, do: :ok
+end
+
 defmodule SymphonyElixir.NonLiveTrackerGuardTest do
   use SymphonyElixir.TestSupport
+
+  alias SymphonyElixir.NonLiveTrackerGuardTest.SentinelProbeTarget
+  alias SymphonyElixir.TestSupport.LinearTrafficSentinel
 
   @moduledoc """
   Non-live gate guard at the shared workflow-config write seam: the default
@@ -69,5 +77,27 @@ defmodule SymphonyElixir.NonLiveTrackerGuardTest do
     )
 
     assert Config.settings!().tracker.endpoint == "https://api.linear.app/graphql"
+  end
+
+  test "boot seal marker proves the app booted with the sealed client and a pinned non-repo workflow" do
+    marker = :persistent_term.get(:symphony_elixir_boot_seal)
+
+    refute marker.supervisor_already_alive_before_boot?
+    assert marker.linear_client_module_installed_before_boot == SymphonyElixir.TestSupport.NonLiveLinearClient
+    assert marker.boot_workflow_file_path != Path.join(File.cwd!(), "WORKFLOW.md")
+    assert String.starts_with?(marker.boot_workflow_file_path, System.tmp_dir!())
+  end
+
+  test "linear traffic sentinel recorded zero real Linear HTTP attempts" do
+    assert LinearTrafficSentinel.count() == 0
+  end
+
+  test "linear traffic sentinel counter increments for a traced local function call" do
+    mfa = {SentinelProbeTarget, :probe, 0}
+    LinearTrafficSentinel.trace_pattern!(mfa)
+
+    assert LinearTrafficSentinel.count_for(mfa) == 0
+    SentinelProbeTarget.probe()
+    assert LinearTrafficSentinel.count_for(mfa) == 1
   end
 end
