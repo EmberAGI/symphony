@@ -602,12 +602,20 @@ defmodule SymphonyElixir.CoreTest do
       end)
 
       send(pid, :tick)
-      Process.sleep(100)
-      state = :sys.get_state(pid)
 
-      refute Map.has_key?(state.running, issue_id)
-      refute MapSet.member?(state.claimed, issue_id)
-      refute Process.alive?(agent_pid)
+      # Reconciliation runs asynchronously after the tick; poll instead of
+      # racing it with a fixed sleep.
+      assert_eventually(
+        fn ->
+          state = :sys.get_state(pid)
+
+          not Map.has_key?(state.running, issue_id) and
+            not MapSet.member?(state.claimed, issue_id) and
+            not Process.alive?(agent_pid)
+        end,
+        100
+      )
+
       assert File.exists?(workspace)
     after
       restore_app_env(:memory_tracker_issues, previous_memory_issues)

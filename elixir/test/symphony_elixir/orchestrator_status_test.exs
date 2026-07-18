@@ -2464,8 +2464,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     before_tick_ms = System.monotonic_time(:millisecond)
     send(pid, :tick)
-    Process.sleep(100)
-    state = :sys.get_state(pid)
+
+    # Tick reconciliation completes asynchronously; poll instead of racing it.
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        not Map.has_key?(state.running, issue_id) and not Process.alive?(worker_pid)
+      end)
+
     after_state_ms = System.monotonic_time(:millisecond)
 
     refute Process.alive?(worker_pid)
@@ -2563,9 +2568,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     send(pid, :tick)
-    Process.sleep(100)
 
-    state = :sys.get_state(pid)
+    # Tick reconciliation completes asynchronously; poll instead of racing it.
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        not Map.has_key?(state.running, issue_id) and not Process.alive?(worker_pid)
+      end)
+
     refute Process.alive?(worker_pid)
     refute Map.has_key?(state.running, issue_id)
     assert %{attempt: 1} = state.retry_attempts[issue_id]
@@ -3274,6 +3283,26 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           Process.sleep(5)
           do_wait_for_running_entry(pid, issue_id, deadline_ms)
         end
+    end
+  end
+
+  defp wait_for_orchestrator_state(pid, predicate, timeout_ms \\ 5_000) when is_function(predicate, 1) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_orchestrator_state(pid, predicate, deadline_ms)
+  end
+
+  defp do_wait_for_orchestrator_state(pid, predicate, deadline_ms) do
+    state = :sys.get_state(pid)
+
+    if predicate.(state) do
+      state
+    else
+      if System.monotonic_time(:millisecond) >= deadline_ms do
+        flunk("timed out waiting for orchestrator state: #{inspect(Map.take(state, [:running, :claimed, :retry_attempts]))}")
+      else
+        Process.sleep(5)
+        do_wait_for_orchestrator_state(pid, predicate, deadline_ms)
+      end
     end
   end
 
