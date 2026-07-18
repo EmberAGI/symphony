@@ -12,17 +12,38 @@ defmodule SymphonyElixir.NonLiveTrackerGuardTest do
   intact for token-less parse assertions.
   """
 
-  test "suite-default tracker config keeps the dummy token on a loopback endpoint" do
+  test "suite default runs the memory tracker fixture with the dummy token shape" do
     write_workflow_file!(Workflow.workflow_file_path())
 
     config = Config.settings!()
+    assert config.tracker.kind == "memory"
     assert config.tracker.api_key == "token"
     assert URI.parse(config.tracker.endpoint).host in ["127.0.0.1", "localhost", "::1"]
+  end
+
+  test "linear adapter resolves to the deterministic non-live client by default" do
+    assert Application.get_env(:symphony_elixir, :linear_client_module) ==
+             SymphonyElixir.TestSupport.NonLiveLinearClient
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
+
+    # Fetches drain quietly with no socket; mutations fail locally so a test
+    # exercising Linear mutation contracts must install its own fake client.
+    assert {:ok, []} = SymphonyElixir.Tracker.fetch_candidate_issues()
+    assert {:error, _reason} = SymphonyElixir.Tracker.create_comment("issue-1", "body")
+  end
+
+  test "linear opt-ins are allowed only against loopback endpoints" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
+
+    assert Config.settings!().tracker.kind == "linear"
+    assert URI.parse(Config.settings!().tracker.endpoint).host in ["127.0.0.1", "localhost", "::1"]
   end
 
   test "write seam fails a linear tracker pointed at api.linear.app with a token" do
     assert_raise ArgumentError, ~r/non-live gate/, fn ->
       write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "linear",
         tracker_endpoint: "https://api.linear.app/graphql",
         tracker_api_token: "token"
       )
@@ -32,6 +53,7 @@ defmodule SymphonyElixir.NonLiveTrackerGuardTest do
   test "write seam fails an implicit external endpoint via the schema default with a token" do
     assert_raise ArgumentError, ~r/non-live gate/, fn ->
       write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "linear",
         tracker_endpoint: nil,
         tracker_api_token: "token"
       )

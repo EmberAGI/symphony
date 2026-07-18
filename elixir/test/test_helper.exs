@@ -8,6 +8,7 @@ System.delete_env("OCTO_RUNTIME_WORKER_PROVIDER")
 
 ExUnit.start()
 Code.require_file("support/snapshot_support.exs", __DIR__)
+Code.require_file("support/non_live_linear_client.exs", __DIR__)
 Code.require_file("support/test_support.exs", __DIR__)
 Code.require_file("support/claude_shim_fixture.exs", __DIR__)
 Code.require_file("support/agent_profile_fixture.exs", __DIR__)

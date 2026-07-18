@@ -63,6 +63,7 @@ defmodule SymphonyElixir.CoreTest do
     assert message =~ "tracker.active_states"
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
       tracker_api_token: "token",
       tracker_project_slug: nil
     )
@@ -1267,7 +1268,10 @@ defmodule SymphonyElixir.CoreTest do
     assert event["retry"]["delay_ms"] == 20_000
     assert event["retry"]["due_at_ms"] == due_at_ms
     assert event["retry"]["lease_state"] == "retrying"
-    assert event["retry"]["claim_lease_state"] == nil
+    # Under the deterministic memory tracker the lease upsert succeeds, so the
+    # tracker-confirmed state records; nil here was an artifact of the former
+    # suite default issuing a live Linear call that failed with 401.
+    assert event["retry"]["claim_lease_state"] == "retrying"
     assert is_binary(event["timestamp"])
   end
 

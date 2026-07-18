@@ -2441,6 +2441,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   test "role state presenter exposes candidate fetch failure diagnostics from polling" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: nil,
+      # No token: the kind-less config must fail before any tracker I/O,
+      # keeping even loopback socket churn out of the non-live gate.
+      tracker_api_token: nil,
       poll_interval_ms: 30_000
     )
 

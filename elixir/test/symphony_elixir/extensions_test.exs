@@ -206,7 +206,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert :ok = Memory.update_issue_state("issue-1", "Quiet")
     assert :ok = Memory.add_issue_label("issue-1", "Quiet")
 
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
+    # Token-less: adapter selection needs only the kind, and an accidental
+    # fetch inside this linear window must fail before any socket I/O.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear", tracker_api_token: nil)
     assert SymphonyElixir.Tracker.adapter() == Adapter
   end
 

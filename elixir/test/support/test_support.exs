@@ -30,6 +30,19 @@ defmodule SymphonyElixir.TestSupport do
         only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
 
       setup do
+        # Close the Adapter seam before any workflow reload: the non-live
+        # gate resolves the Linear client to a deterministic in-process
+        # module, so even direct-file workflow fixtures that select the
+        # linear kind can never open a socket. Genuine Adapter delegation
+        # tests install their own fake client over this default.
+        previous_linear_client = Application.get_env(:symphony_elixir, :linear_client_module)
+
+        Application.put_env(
+          :symphony_elixir,
+          :linear_client_module,
+          SymphonyElixir.TestSupport.NonLiveLinearClient
+        )
+
         workflow_root =
           Path.join(
             System.tmp_dir!(),
@@ -44,6 +57,11 @@ defmodule SymphonyElixir.TestSupport do
         stop_default_http_server()
 
         on_exit(fn ->
+          case previous_linear_client do
+            nil -> Application.delete_env(:symphony_elixir, :linear_client_module)
+            module -> Application.put_env(:symphony_elixir, :linear_client_module, module)
+          end
+
           Application.delete_env(:symphony_elixir, :workflow_file_path)
           Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
@@ -124,9 +142,12 @@ defmodule SymphonyElixir.TestSupport do
     config =
       Keyword.merge(
         [
-          tracker_kind: "linear",
-          # Loopback discard port: any accidental tracker request fails fast
-          # and locally; the non-live gate must never reach api.linear.app.
+          # The default suite runs on the deterministic in-memory tracker
+          # fixture; real Linear contract tests opt into kind "linear"
+          # explicitly with a fake/local client. The dummy token shape stays
+          # for secret-redaction proofs, and the loopback endpoint keeps even
+          # a misconfigured opt-in off the network.
+          tracker_kind: "memory",
           tracker_endpoint: "http://127.0.0.1:9/graphql",
           tracker_api_token: "token",
           tracker_project_slug: "project",
