@@ -3,10 +3,12 @@ defmodule SymphonyElixir.ClaudeCodeLaunchConfigTest do
 
   @moduledoc """
   Launch-configuration behavior of the first-party Claude Code shim: catalog
-  implementation-effort row selection, the documented Fable fallback, the
-  config-declared no-thinking env propagation, and local provider auth env
-  inheritance — all proved against a fake `claude` binary replaying recorded
-  stream-json, with no live Claude subscription.
+  implementation-effort row selection, the exact-profile launch invariant
+  (agent-runtime spec: the adapter launches the resolved model and effort or
+  fails visibly, never substituting another model), the config-declared
+  no-thinking env propagation, and local provider auth env inheritance — all
+  proved against a fake `claude` binary replaying recorded stream-json, with
+  no live Claude subscription.
   """
 
   import SymphonyElixir.ClaudeShimFixture
@@ -78,14 +80,14 @@ defmodule SymphonyElixir.ClaudeCodeLaunchConfigTest do
     ctx = setup_workspace("MT-CC-default-effort")
 
     try do
-      configure!(ctx, stream_success(), claude_code_model: "opus", claude_code_effort: "low", claude_code_no_thinking: true)
+      configure!(ctx, stream_success(), claude_code_model: "opus", claude_code_effort: "low", claude_code_no_thinking: false)
 
       {result, events, trace} =
         run_shim(ctx, "do work", labels: ["implementation-effort:bogus"], role: "implementer")
 
       assert {:ok, _turn} = result
-      assert trace =~ "--model claude-opus-4-8"
-      assert trace =~ "--effort high"
+      assert trace =~ "--model claude-fable-5"
+      assert trace =~ "--effort medium"
       refute trace =~ "ENV_MAX_THINKING_TOKENS:0"
 
       completed = Enum.find(events, &(&1.event == :turn_completed))
@@ -96,32 +98,56 @@ defmodule SymphonyElixir.ClaudeCodeLaunchConfigTest do
     end
   end
 
-  test "falls back from preferred Fable profiles to Opus high at launch" do
-    ctx = setup_workspace("MT-CC-fable-fallback")
+  test "launches the exact Fable profile row without adapter-side substitution" do
+    ctx = setup_workspace("MT-CC-fable-exact")
 
     try do
-      configure!(ctx, stream_success(), claude_code_model: "sonnet", claude_code_effort: "low", claude_code_no_thinking: true)
+      configure!(ctx, stream_success(), claude_code_model: "sonnet", claude_code_effort: "low", claude_code_no_thinking: false)
 
       {result, events, trace} =
         run_shim(ctx, "do work", labels: ["implementation-effort:extreme"], role: "qa")
 
       assert {:ok, _turn} = result
-      assert trace =~ "--model claude-opus-4-8"
-      assert trace =~ "--effort high"
-      refute trace =~ "--model fable"
-      refute trace =~ "--model claude-fable-5"
-      refute trace =~ "--effort xhigh"
+      assert trace =~ "--model claude-fable-5"
+      assert trace =~ "--effort xhigh"
+      refute trace =~ "--model claude-opus-4-8"
       refute trace =~ "ENV_MAX_THINKING_TOKENS:0"
 
       completed = Enum.find(events, &(&1.event == :turn_completed))
       assert completed.implementation_effort == "extreme"
       assert completed.implementation_effort_source == "label"
-      assert completed.claude_model == "claude-opus-4-8"
-      assert completed.claude_effort == "high"
+      assert completed.claude_model == "claude-fable-5"
+      assert completed.claude_effort == "xhigh"
       assert completed.claude_no_thinking == false
-      assert completed.claude_preferred_model == "claude-fable-5"
-      assert completed.claude_preferred_effort == "xhigh"
-      assert completed.claude_fallback_reason == "fable_unavailable"
+      refute Map.has_key?(completed, :claude_preferred_model)
+      refute Map.has_key?(completed, :claude_preferred_effort)
+      refute Map.has_key?(completed, :claude_fallback_reason)
+    after
+      File.rm_rf(ctx.test_root)
+    end
+  end
+
+  test "fails closed when the resolved Fable row conflicts with config-declared no-thinking" do
+    ctx = setup_workspace("MT-CC-fable-no-thinking")
+
+    try do
+      configure!(ctx, stream_success(), claude_code_model: "sonnet", claude_code_effort: "low", claude_code_no_thinking: true)
+
+      {result, events, trace} =
+        run_shim(ctx, "do work",
+          labels: ["implementation-effort:extreme"],
+          role: "qa",
+          trace: :not_launched
+        )
+
+      # Fable cannot disable thinking. A Fable row resolved at runtime cannot
+      # be caught by config validation (which sees only the config model), so
+      # the adapter fails visibly instead of silently dropping either the
+      # selected model or the declared no-thinking invocation.
+      assert {:error, {:no_thinking_unsupported, "claude-fable-5"}} = result
+      assert events == []
+      assert trace == :not_launched
+      refute File.exists?(ctx.trace_file)
     after
       File.rm_rf(ctx.test_root)
     end

@@ -134,7 +134,7 @@ defmodule SymphonyElixir.ClaudeShimFixture do
     events = agent |> Agent.get(& &1) |> Enum.reverse()
     Agent.stop(agent)
 
-    {result, events, Keyword.get(overrides, :trace, File.read!(ctx.trace_file))}
+    {result, events, Keyword.get_lazy(overrides, :trace, fn -> File.read!(ctx.trace_file) end)}
   end
 
   def configure!(ctx, lines, claude_overrides) do

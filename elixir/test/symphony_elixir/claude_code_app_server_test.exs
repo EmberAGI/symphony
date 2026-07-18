@@ -18,7 +18,7 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     ctx = setup_workspace("MT-CC-success")
 
     try do
-      configure!(ctx, stream_success(), claude_code_model: "sonnet", claude_code_effort: "low", claude_code_no_thinking: true)
+      configure!(ctx, stream_success(), claude_code_model: "sonnet", claude_code_effort: "low", claude_code_no_thinking: false)
 
       {result, events, trace} =
         run_shim(ctx, "Reply with exactly: SHIMOK",
@@ -41,17 +41,18 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       assert completed.usage == %{"input_tokens" => 153, "output_tokens" => 6, "total_tokens" => 159}
       assert completed[:usage]
 
-      # Direct legacy-adapter invocation resolves the Implementer Fable row,
-      # then applies the adapter's documented Fable fallback. Production
-      # Implementer sessions use the Herdr launcher instead of this adapter.
-      # The fake binary records argv after the shell strips the shell-escaping
-      # the shim applies, so assert against the resolved argument values.
+      # Direct legacy-adapter invocation resolves the Implementer Fable row and
+      # launches it exactly (agent-runtime spec: no adapter-side substitution).
+      # Production Implementer sessions use the Herdr launcher instead of this
+      # adapter. The fake binary records argv after the shell strips the
+      # shell-escaping the shim applies, so assert against the resolved
+      # argument values.
       assert trace =~ "--print"
       assert trace =~ "--output-format stream-json"
       assert trace =~ "--verbose"
       assert trace =~ "--permission-mode bypassPermissions"
-      assert trace =~ "--model claude-opus-4-8"
-      assert trace =~ "--effort high"
+      assert trace =~ "--model claude-fable-5"
+      assert trace =~ "--effort low"
       refute trace =~ "ENV_MAX_THINKING_TOKENS:0"
       assert trace =~ "ENV_SYMPHONY_ROLE_RUN_ID:run-claude-env"
       assert trace =~ "ENV_SYMPHONY_ROLE_ISSUE_ID:issue-claude-env"
@@ -62,12 +63,12 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
 
       assert completed.implementation_effort == "minimal"
       assert completed.implementation_effort_source == "label"
-      assert completed.claude_model == "claude-opus-4-8"
-      assert completed.claude_effort == "high"
+      assert completed.claude_model == "claude-fable-5"
+      assert completed.claude_effort == "low"
       assert completed.claude_no_thinking == false
-      assert completed.claude_preferred_model == "claude-fable-5"
-      assert completed.claude_preferred_effort == "low"
-      assert completed.claude_fallback_reason == "fable_unavailable"
+      refute Map.has_key?(completed, :claude_preferred_model)
+      refute Map.has_key?(completed, :claude_preferred_effort)
+      refute Map.has_key?(completed, :claude_fallback_reason)
     after
       File.rm_rf(ctx.test_root)
     end
