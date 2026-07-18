@@ -70,9 +70,6 @@ defmodule SymphonyElixir.Tracker.ClaimLeaseReconciliation do
     }
   end
 
-  @spec dispatchable?(t()) :: boolean()
-  def dispatchable?(%__MODULE__{outcome: outcome}), do: outcome == :confirmed_ownership
-
   @spec reason_family(t()) :: String.t()
   def reason_family(%__MODULE__{outcome: outcome}) do
     "claim_lease_ambiguous_" <> Atom.to_string(outcome)

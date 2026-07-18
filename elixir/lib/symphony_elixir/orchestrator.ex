@@ -1081,8 +1081,6 @@ defmodule SymphonyElixir.Orchestrator do
   defp attach_claim_lease_reconciliation({:failed, reason_family}, %{} = reconciliation_diagnostic),
     do: {:failed, reason_family, reconciliation_diagnostic}
 
-  defp attach_claim_lease_reconciliation(spawn_result, _reconciliation_diagnostic), do: spawn_result
-
   defp spawn_issue_on_worker_host_with_result(%State{} = state, issue, attempt, recipient, worker_host, claim_lease) do
     record_pending_turn_start(issue, worker_host)
 
@@ -1999,7 +1997,9 @@ defmodule SymphonyElixir.Orchestrator do
         :ok
 
       {:ok, _claim_lease, %ClaimLeaseReconciliation{} = reconciliation} ->
-        Logger.warning("Ambiguous claim lease release for #{issue_context(issue)} reconciled to outcome=#{reconciliation.outcome} next_action=#{reconciliation.next_action}")
+        Logger.warning(
+          "Ambiguous claim lease release for #{issue_context(issue)} still observes an exact active lease; the release write did not provably commit (outcome=#{reconciliation.outcome} next_action=#{reconciliation.next_action}) and existing recovery owns the remaining lease"
+        )
 
         :ok
 
@@ -2465,7 +2465,7 @@ defmodule SymphonyElixir.Orchestrator do
     Map.update(acc, :claim_lease_reconciliations, [reconciliation_diagnostic], &[reconciliation_diagnostic | &1])
   end
 
-  defp dispatch_cycle_summary(issues, skipped, dispatched, failed, attempted, claim_lease_reconciliations \\ []) do
+  defp dispatch_cycle_summary(issues, skipped, dispatched, failed, attempted, claim_lease_reconciliations) do
     skipped = Enum.reverse(skipped)
     dispatched = dispatched |> Enum.reverse() |> Enum.reject(&is_nil/1)
     failed = Enum.reverse(failed)

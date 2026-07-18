@@ -211,6 +211,10 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
 - If the authoritative refetch after an ambiguous write finds no exact lease,
   finds a competing or malformed lease, or fails, dispatch must fail closed.
   The outcome must name the reconciliation result and next recovery action.
+  A malformed marker blocks confirmation only when it cannot be attributed to
+  a different role or workspace scope; a readable field proving another scope
+  preserves the multi-role coexistence contract, while an unattributable
+  marker still fails closed.
   An absent lease may be retried by the next normal poll; another run's lease
   must never be released; and a current-holder lease from another run may be
   released only through existing recovery after local process ownership proves

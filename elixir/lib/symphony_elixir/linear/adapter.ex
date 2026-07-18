@@ -207,7 +207,7 @@ defmodule SymphonyElixir.Linear.Adapter do
     stale_same_holder = Enum.find(blocking, &(&1.holder == lease.holder))
 
     cond do
-      malformed_claim_lease_marker?(refetched_issue) ->
+      blocking_malformed_claim_lease_marker?(refetched_issue, lease) ->
         ambiguous_fail_closed(mutation, transport_reason, :malformed_lease)
 
       match?(%ClaimLease{}, competing) ->
@@ -244,15 +244,39 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   defp exact_workspace_path_match?(left, right), do: blank?(left) and blank?(right)
 
-  defp malformed_claim_lease_marker?(refetched_issue) do
+  defp blocking_malformed_claim_lease_marker?(refetched_issue, %ClaimLease{} = lease) do
     refetched_issue
     |> Map.get(:comments)
     |> List.wrap()
     |> Enum.any?(fn comment ->
-      is_binary(comment_body(comment)) and
-        String.contains?(comment_body(comment), "symphony-claim-lease") and
-        is_nil(ClaimLease.from_comment(comment))
+      body = comment_body(comment)
+
+      is_binary(body) and String.contains?(body, "<!-- symphony-claim-lease") and
+        is_nil(ClaimLease.from_comment(comment)) and
+        !provably_other_scope_marker?(body, lease)
     end)
+  end
+
+  # A malformed marker blocks unless a readable field affirmatively proves it
+  # belongs to a different role or workspace than the attempted lease.
+  defp provably_other_scope_marker?(body, %ClaimLease{} = lease) do
+    role = malformed_marker_field(body, "role")
+    workspace = malformed_marker_field(body, "workspace_path")
+
+    other_role? = is_binary(role) and !blank?(role) and !blank?(lease.role) and role != lease.role
+
+    other_workspace? =
+      is_binary(workspace) and !blank?(workspace) and !blank?(lease.workspace_path) and
+        normalize_workspace_path(workspace) != normalize_workspace_path(lease.workspace_path)
+
+    other_role? or other_workspace?
+  end
+
+  defp malformed_marker_field(body, field) do
+    case Regex.run(~r/"#{field}"\s*:\s*"([^"]*)"/, body) do
+      [_, value] -> value
+      _ -> nil
+    end
   end
 
   defp comment_body(%{body: body}), do: body

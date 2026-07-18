@@ -693,6 +693,74 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert reconciliation.next_action == :requires_lease_recovery
   end
 
+  test "linear adapter confirms an exact ambiguous write despite another scope's malformed lease marker" do
+    setup_ambiguous_claim_lease_client()
+    lease_attrs = ambiguous_lease_attrs("issue-amb-other-scope", "MT-AMB-OTHER-SCOPE", comment_id: nil)
+    committed_lease = ClaimLease.new(Map.put(lease_attrs, :comment_id, "comment-committed"))
+
+    other_scope_malformed_comment = %{
+      id: "comment-other-role-malformed",
+      body: "<!-- symphony-claim-lease:v1 -->\n{\"role\": \"reviewer\", \"workspace_path\": \"/tmp/workspaces/OTHER\", truncated-garbage\n<!-- /symphony-claim-lease -->"
+    }
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:error, {:linear_api_request, :timeout}}
+    ])
+
+    Process.put(
+      {FakeLinearClient, :fetch_issue_states_result},
+      {:ok,
+       [
+         %Issue{
+           id: "issue-amb-other-scope",
+           claim_lease: committed_lease,
+           claim_leases: [committed_lease],
+           comments: [other_scope_malformed_comment]
+         }
+       ]}
+    )
+
+    assert {:ok, ^committed_lease, %ClaimLeaseReconciliation{} = reconciliation} =
+             Adapter.upsert_claim_lease("issue-amb-other-scope", lease_attrs)
+
+    assert reconciliation.outcome == :confirmed_ownership
+    assert reconciliation.next_action == :dispatch_once
+  end
+
+  test "linear adapter still fails closed on a malformed lease marker naming the attempted scope" do
+    setup_ambiguous_claim_lease_client()
+    lease_attrs = ambiguous_lease_attrs("issue-amb-same-scope", "MT-AMB-SAME-SCOPE", comment_id: nil)
+    committed_lease = ClaimLease.new(Map.put(lease_attrs, :comment_id, "comment-committed"))
+
+    same_scope_malformed_comment = %{
+      id: "comment-same-role-malformed",
+      body: "<!-- symphony-claim-lease:v1 -->\n{\"role\": \"implementer\", \"workspace_path\": \"/tmp/workspaces/MT-AMB-SAME-SCOPE\", truncated-garbage\n<!-- /symphony-claim-lease -->"
+    }
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:error, {:linear_api_request, :timeout}}
+    ])
+
+    Process.put(
+      {FakeLinearClient, :fetch_issue_states_result},
+      {:ok,
+       [
+         %Issue{
+           id: "issue-amb-same-scope",
+           claim_lease: committed_lease,
+           claim_leases: [committed_lease],
+           comments: [same_scope_malformed_comment]
+         }
+       ]}
+    )
+
+    assert {:error, %ClaimLeaseReconciliation{} = reconciliation} =
+             Adapter.upsert_claim_lease("issue-amb-same-scope", lease_attrs)
+
+    assert reconciliation.outcome == :malformed_lease
+    assert reconciliation.next_action == :requires_lease_recovery
+  end
+
   test "linear adapter fails closed when the authoritative refetch after an ambiguous write fails" do
     setup_ambiguous_claim_lease_client()
     lease_attrs = ambiguous_lease_attrs("issue-amb-refetch", "MT-AMB-REFETCH", comment_id: nil)
@@ -728,6 +796,20 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert {:error, %ClaimLeaseReconciliation{refetch: :failed, outcome: :refetch_failed}} =
              Adapter.upsert_claim_lease("issue-amb-gone", lease_attrs)
+  end
+
+  test "claim lease reconciliation summarizes transport reasons into bounded strings" do
+    lease = ClaimLease.new(%{issue_id: "issue-r", holder: "holder-1", run_id: "run-1"})
+
+    confirmed = ClaimLeaseReconciliation.confirmed(:update, %{reason: :timeout}, lease)
+    assert confirmed.transport_reason == "timeout"
+
+    long_binary = ClaimLeaseReconciliation.fail_closed(:create, String.duplicate("x", 500), :no_lease_found)
+    assert long_binary.transport_reason == String.duplicate("x", 120)
+
+    structured = ClaimLeaseReconciliation.fail_closed(:create, {:unexpected, %{"detail" => "value"}}, :refetch_failed)
+    assert String.starts_with?(structured.transport_reason, "{:unexpected")
+    assert String.length(structured.transport_reason) <= 120
   end
 
   test "linear adapter does not reclassify ordinary claim lease write failures as ambiguous" do
