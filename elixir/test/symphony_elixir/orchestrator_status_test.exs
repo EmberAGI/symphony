@@ -20,6 +20,79 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  defmodule AmbiguousDispatchLinearClient do
+    alias SymphonyElixir.Tracker.ClaimLease
+
+    def fetch_candidate_issues do
+      Agent.get(state_pid(), fn state -> {:ok, [state.candidate]} end)
+    end
+
+    def fetch_issues_by_states(_states), do: {:ok, []}
+
+    def fetch_issue_states_by_ids(_issue_ids) do
+      Agent.get(state_pid(), fn state ->
+        issue =
+          case state.committed_lease do
+            %ClaimLease{} = lease -> %{state.candidate | claim_lease: lease, claim_leases: [lease]}
+            nil -> %{state.candidate | claim_lease: nil, claim_leases: []}
+          end
+
+        {:ok, [issue]}
+      end)
+    end
+
+    def graphql(query, %{body: body} = variables) do
+      if String.contains?(query, "SymphonyCreateClaimLeaseComment") or
+           String.contains?(query, "SymphonyUpdateClaimLeaseComment") do
+        ambiguous_claim_write(query, body, variables)
+      else
+        {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}}
+      end
+    end
+
+    defp ambiguous_claim_write(query, body, variables) do
+      Agent.get_and_update(state_pid(), fn state ->
+        create? = String.contains?(query, "SymphonyCreateClaimLeaseComment")
+        comment_id = Map.get(variables, :commentId, "claim-comment-#{state.create_count + 1}")
+        [mode | remaining_modes] = Map.get(state, :modes, [:commit_timeout])
+
+        lease =
+          case mode do
+            :commit_timeout -> ClaimLease.parse(body, comment_id)
+            :drop_timeout -> state.committed_lease
+          end
+
+        next_state = %{
+          state
+          | committed_lease: lease,
+            mutation_count: state.mutation_count + 1,
+            create_count: state.create_count + if(create?, do: 1, else: 0),
+            modes: if(remaining_modes == [], do: [mode], else: remaining_modes)
+        }
+
+        {{:error, {:linear_api_request, "Authorization: Bearer fake-transport-secret api_key=fake-linear-key"}}, next_state}
+      end)
+    end
+
+    defp state_pid do
+      Application.fetch_env!(:symphony_elixir, :ambiguous_dispatch_client_state)
+    end
+  end
+
+  defmodule StateSnapshotOrchestrator do
+    use GenServer
+
+    def start_link(opts) do
+      GenServer.start_link(__MODULE__, Keyword.fetch!(opts, :state), name: Keyword.fetch!(opts, :name))
+    end
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def handle_call(:snapshot, from, state), do: SymphonyElixir.Orchestrator.handle_call(:snapshot, from, state)
+  end
+
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
     parent = self()
@@ -2354,6 +2427,122 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert projected_failed == failed_diagnostic
   end
 
+  test "live poll composes tracker reconciliation with exactly one task dispatch and projected diagnostics" do
+    candidate = %Issue{
+      id: "issue-amb-live",
+      identifier: "MT-AMB-LIVE",
+      title: "Ambiguous live dispatch",
+      state: "Todo",
+      labels: ["implementation-effort:high"]
+    }
+
+    {client_state, state} =
+      setup_ambiguous_live_dispatch(candidate, [:commit_timeout], "ambiguous-live-holder")
+
+    log =
+      capture_log(fn ->
+        send(self(), {:ambiguous_live_poll, Orchestrator.handle_info(:run_poll_cycle, state)})
+      end)
+
+    assert_receive {:ambiguous_live_poll, {:noreply, live_state}}
+
+    assert %{candidate_count: 1, dispatched_count: 1, claim_lease_reconciliations: [diagnostic]} =
+             live_state.latest_dispatch_summary
+
+    assert map_size(live_state.running) == 1
+    assert Agent.get(client_state, & &1.create_count) == 1
+    assert diagnostic.trigger == "ambiguous_create_transport_error"
+    assert diagnostic.refetch == "verified"
+    assert diagnostic.outcome == "confirmed_ownership"
+    assert diagnostic.next_action == "dispatch_once"
+    refute inspect(diagnostic) =~ "fake-transport-secret"
+    refute inspect(diagnostic) =~ "fake-linear-key"
+
+    snapshot_name = Module.concat(__MODULE__, :LiveAmbiguousConfirmedSnapshot)
+    start_supervised!({StateSnapshotOrchestrator, name: snapshot_name, state: live_state})
+
+    assert %{
+             polling_diagnostics: %{
+               latest_dispatch_summary: %{
+                 dispatched_count: 1,
+                 claim_lease_reconciliations: [^diagnostic]
+               }
+             }
+           } = Presenter.state_payload(snapshot_name, 50)
+
+    assert log =~ "trigger=ambiguous_create_transport_error"
+    assert log =~ "refetch=verified"
+    assert log =~ "outcome=confirmed_ownership"
+    assert log =~ "next_action=dispatch_once"
+    refute log =~ "fake-transport-secret"
+    refute log =~ "fake-linear-key"
+
+    stop_live_dispatch(live_state)
+  end
+
+  test "live poll does not replay a dropped ambiguous mutation and a later normal poll retries" do
+    candidate = %Issue{
+      id: "issue-amb-next-live",
+      identifier: "MT-AMB-NEXT-LIVE",
+      title: "Ambiguous next live poll",
+      state: "Todo",
+      labels: ["implementation-effort:high"]
+    }
+
+    {client_state, state} =
+      setup_ambiguous_live_dispatch(
+        candidate,
+        [:drop_timeout, :commit_timeout],
+        "ambiguous-next-live-holder"
+      )
+
+    first_log =
+      capture_log(fn ->
+        send(self(), {:ambiguous_first_poll, Orchestrator.handle_info(:run_poll_cycle, state)})
+      end)
+
+    assert_receive {:ambiguous_first_poll, {:noreply, first_state}}
+    assert first_state.running == %{}
+    assert first_state.latest_dispatch_summary.dispatched_count == 0
+    assert first_state.latest_dispatch_summary.failure_reason_families == ["claim_lease_ambiguous_no_lease_found"]
+    assert Agent.get(client_state, & &1.create_count) == 1
+
+    [first_diagnostic] = first_state.latest_dispatch_summary.claim_lease_reconciliations
+    snapshot_name = Module.concat(__MODULE__, :LiveAmbiguousFailClosedSnapshot)
+    start_supervised!({StateSnapshotOrchestrator, name: snapshot_name, state: first_state})
+
+    assert %{
+             polling_diagnostics: %{
+               latest_dispatch_summary: %{
+                 dispatched_count: 0,
+                 claim_lease_reconciliations: [^first_diagnostic]
+               }
+             }
+           } = Presenter.state_payload(snapshot_name, 50)
+
+    assert first_log =~ "trigger=ambiguous_create_transport_error"
+    assert first_log =~ "refetch=verified"
+    assert first_log =~ "outcome=no_lease_found"
+    assert first_log =~ "next_action=retry_next_poll"
+    refute first_log =~ "fake-transport-secret"
+
+    cancel_poll_timer(first_state)
+
+    second_log =
+      capture_log(fn ->
+        send(self(), {:ambiguous_second_poll, Orchestrator.handle_info(:run_poll_cycle, first_state)})
+      end)
+
+    assert_receive {:ambiguous_second_poll, {:noreply, second_state}}
+    assert second_state.latest_dispatch_summary.dispatched_count == 1
+    assert map_size(second_state.running) == 1
+    assert Agent.get(client_state, & &1.create_count) == 2
+    assert second_log =~ "outcome=confirmed_ownership"
+    assert second_log =~ "next_action=dispatch_once"
+
+    stop_live_dispatch(second_state)
+  end
+
   test "role state presenter exposes every dispatch diagnostic result family" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -3308,6 +3497,75 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_snapshot(pid, predicate, deadline_ms)
   end
+
+  defp setup_ambiguous_live_dispatch(candidate, modes, holder) do
+    previous_client = Application.get_env(:symphony_elixir, :linear_client_module)
+    previous_holder = Application.get_env(:symphony_elixir, :claim_lease_holder)
+    previous_recovery_dir = Application.get_env(:symphony_elixir, :role_turn_recovery_dir)
+    recovery_dir = Path.join(System.tmp_dir!(), "symphony-ambiguous-dispatch-#{System.unique_integer([:positive])}")
+    false_command = System.find_executable("false")
+    assert is_binary(false_command)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_api_token: "token",
+      tracker_project_slug: "project",
+      poll_interval_ms: 60_000,
+      max_concurrent_agents: 1,
+      codex_command: "#{false_command} app-server"
+    )
+
+    {:ok, client_state} =
+      Agent.start_link(fn ->
+        %{
+          candidate: candidate,
+          committed_lease: nil,
+          mutation_count: 0,
+          create_count: 0,
+          modes: modes
+        }
+      end)
+
+    Application.put_env(:symphony_elixir, :linear_client_module, AmbiguousDispatchLinearClient)
+    Application.put_env(:symphony_elixir, :ambiguous_dispatch_client_state, client_state)
+    Application.put_env(:symphony_elixir, :claim_lease_holder, holder)
+    Application.put_env(:symphony_elixir, :role_turn_recovery_dir, recovery_dir)
+
+    on_exit(fn ->
+      restore_app_env(:linear_client_module, previous_client)
+      restore_app_env(:claim_lease_holder, previous_holder)
+      restore_app_env(:role_turn_recovery_dir, previous_recovery_dir)
+      Application.delete_env(:symphony_elixir, :ambiguous_dispatch_client_state)
+      File.rm_rf(recovery_dir)
+    end)
+
+    state = %Orchestrator.State{
+      poll_interval_ms: 60_000,
+      max_concurrent_agents: 1,
+      poll_check_in_progress: true,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    {client_state, state}
+  end
+
+  defp stop_live_dispatch(state) do
+    Enum.each(state.running, fn {_issue_id, running} ->
+      if Process.alive?(running.pid), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, running.pid)
+    end)
+
+    cancel_poll_timer(state)
+  end
+
+  defp cancel_poll_timer(%{tick_timer_ref: timer_ref}) when is_reference(timer_ref),
+    do: Process.cancel_timer(timer_ref)
+
+  defp cancel_poll_timer(_state), do: false
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 
   defp receive_claim_lease_state!(issue_id, expected_state, timeout_ms \\ 1_000) do
     receive do

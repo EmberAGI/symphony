@@ -3767,6 +3767,8 @@ defmodule SymphonyElixir.CoreTest do
                Orchestrator.claim_lease_dispatch_decision_for_test({:error, :boom}, issue)
 
       fail_closed_expectations = [
+        {:issue_identity_mismatch, "claim_lease_ambiguous_issue_identity_mismatch", "requires_lease_recovery"},
+        {:lease_not_active, "claim_lease_ambiguous_lease_not_active", "recover_stale_current_holder_lease"},
         {:no_lease_found, "claim_lease_ambiguous_no_lease_found", "retry_next_poll"},
         {:competing_holder, "claim_lease_ambiguous_competing_holder", "defer_to_current_holder"},
         {:same_holder_different_run, "claim_lease_ambiguous_same_holder_different_run", "recover_stale_current_holder_lease"},

@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Tracker.ClaimLeaseReconciliation do
   fail closed with an observable next recovery action.
   """
 
+  alias SymphonyElixir.AgentRuntime
   alias SymphonyElixir.Tracker.ClaimLease
 
   defstruct [:mutation, :transport_reason, :refetch, :outcome, :next_action, :lease]
@@ -16,6 +17,8 @@ defmodule SymphonyElixir.Tracker.ClaimLeaseReconciliation do
   @type mutation :: :create | :update
   @type outcome ::
           :confirmed_ownership
+          | :issue_identity_mismatch
+          | :lease_not_active
           | :no_lease_found
           | :competing_holder
           | :same_holder_different_run
@@ -38,6 +41,8 @@ defmodule SymphonyElixir.Tracker.ClaimLeaseReconciliation do
         }
 
   @fail_closed_next_actions %{
+    issue_identity_mismatch: :requires_lease_recovery,
+    lease_not_active: :recover_stale_current_holder_lease,
     no_lease_found: :retry_next_poll,
     competing_holder: :defer_to_current_holder,
     same_holder_different_run: :recover_stale_current_holder_lease,
@@ -87,11 +92,18 @@ defmodule SymphonyElixir.Tracker.ClaimLeaseReconciliation do
     }
   end
 
-  defp summarize_transport_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp summarize_transport_reason(reason) when is_atom(reason), do: reason |> Atom.to_string() |> sanitize_and_bound()
 
-  defp summarize_transport_reason(%{reason: reason}) when is_atom(reason), do: Atom.to_string(reason)
+  defp summarize_transport_reason(%{reason: reason}) when is_atom(reason),
+    do: reason |> Atom.to_string() |> sanitize_and_bound()
 
-  defp summarize_transport_reason(reason) when is_binary(reason), do: String.slice(reason, 0, 120)
+  defp summarize_transport_reason(reason) when is_binary(reason), do: sanitize_and_bound(reason)
 
-  defp summarize_transport_reason(reason), do: reason |> inspect() |> String.slice(0, 120)
+  defp summarize_transport_reason(reason), do: reason |> inspect() |> sanitize_and_bound()
+
+  defp sanitize_and_bound(reason) do
+    reason
+    |> AgentRuntime.sanitize_runtime_text()
+    |> String.slice(0, 120)
+  end
 end

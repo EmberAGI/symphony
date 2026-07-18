@@ -1026,9 +1026,7 @@ defmodule SymphonyElixir.Orchestrator do
             spawn_issue_on_worker_host_with_result(state, issue, attempt, recipient, worker_host, claim_lease)
 
           {:spawn, %ClaimLease{} = claim_lease, %{} = reconciliation_diagnostic} ->
-            Logger.info(
-              "Confirmed exact claim-lease ownership after ambiguous #{reconciliation_diagnostic.mutation} write for #{issue_context(issue)} transport_reason=#{reconciliation_diagnostic.transport_reason}"
-            )
+            Logger.info("Confirmed exact claim-lease ownership for #{issue_context(issue)} #{claim_lease_reconciliation_log_fields(reconciliation_diagnostic)}")
 
             {next_state, spawn_result} =
               spawn_issue_on_worker_host_with_result(state, issue, attempt, recipient, worker_host, claim_lease)
@@ -1036,9 +1034,7 @@ defmodule SymphonyElixir.Orchestrator do
             {next_state, attach_claim_lease_reconciliation(spawn_result, reconciliation_diagnostic)}
 
           {:fail_closed, reason_family, %{} = reconciliation_diagnostic} ->
-            Logger.warning(
-              "Failing closed on ambiguous claim-lease #{reconciliation_diagnostic.mutation} write for #{issue_context(issue)} outcome=#{reconciliation_diagnostic.outcome} next_action=#{reconciliation_diagnostic.next_action} transport_reason=#{reconciliation_diagnostic.transport_reason}"
-            )
+            Logger.warning("Failing closed on claim-lease reconciliation for #{issue_context(issue)} #{claim_lease_reconciliation_log_fields(reconciliation_diagnostic)}")
 
             {state, {:failed, reason_family, reconciliation_diagnostic}}
 
@@ -1073,6 +1069,11 @@ defmodule SymphonyElixir.Orchestrator do
     reconciliation
     |> ClaimLeaseReconciliation.diagnostic()
     |> Map.merge(%{issue_id: issue.id, issue_identifier: safe_issue_identifier(issue)})
+  end
+
+  defp claim_lease_reconciliation_log_fields(diagnostic) do
+    "trigger=#{diagnostic.trigger} mutation=#{diagnostic.mutation} transport_reason=#{diagnostic.transport_reason} " <>
+      "refetch=#{diagnostic.refetch} outcome=#{diagnostic.outcome} next_action=#{diagnostic.next_action}"
   end
 
   defp attach_claim_lease_reconciliation(:dispatched, %{} = reconciliation_diagnostic),

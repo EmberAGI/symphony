@@ -184,17 +184,34 @@ defmodule SymphonyElixir.Linear.Adapter do
 
     case client_module().fetch_issue_states_by_ids([issue_id]) do
       {:ok, [refetched_issue | _]} ->
-        classify_ambiguous_claim_lease(mutation, transport_reason, refetched_issue, lease)
+        if refetched_issue_id(refetched_issue) == issue_id do
+          classify_ambiguous_claim_lease(mutation, transport_reason, refetched_issue, lease)
+        else
+          ambiguous_fail_closed(mutation, transport_reason, :issue_identity_mismatch)
+        end
 
       _refetch_failure ->
         ambiguous_fail_closed(mutation, transport_reason, :refetch_failed)
     end
   end
 
+  defp refetched_issue_id(refetched_issue) when is_map(refetched_issue) do
+    Map.get(refetched_issue, :id) || Map.get(refetched_issue, "id")
+  end
+
+  defp refetched_issue_id(_refetched_issue), do: nil
+
   defp classify_ambiguous_claim_lease(mutation, transport_reason, refetched_issue, %ClaimLease{} = lease) do
     now = DateTime.utc_now()
     candidates = claim_lease_candidates(refetched_issue)
     exact = Enum.find(candidates, &exact_attempted_claim_lease?(&1, lease, now))
+
+    non_active_exact =
+      Enum.find(candidates, fn candidate ->
+        same_attempted_claim_lease_identity?(candidate, lease) and
+          !ClaimLease.expired?(candidate, now) and
+          !active_claim_lease?(candidate, now)
+      end)
 
     blocking =
       Enum.filter(candidates, fn candidate ->
@@ -205,38 +222,73 @@ defmodule SymphonyElixir.Linear.Adapter do
 
     competing = Enum.find(blocking, &(&1.holder != lease.holder))
     stale_same_holder = Enum.find(blocking, &(&1.holder == lease.holder))
+    issue_identity_mismatch = Enum.find(blocking, &(&1.issue_id != lease.issue_id))
 
-    cond do
-      blocking_malformed_claim_lease_marker?(refetched_issue, lease) ->
-        ambiguous_fail_closed(mutation, transport_reason, :malformed_lease)
+    classification =
+      classify_ambiguous_claim_lease_evidence(%{
+        malformed?: blocking_malformed_claim_lease_marker?(refetched_issue, lease),
+        issue_identity_mismatch: issue_identity_mismatch,
+        non_active_exact: non_active_exact,
+        competing: competing,
+        stale_same_holder: stale_same_holder,
+        exact: exact
+      })
 
-      match?(%ClaimLease{}, competing) ->
-        ambiguous_fail_closed(mutation, transport_reason, :competing_holder, competing)
+    case classification do
+      {:confirmed, confirmed_lease} ->
+        {:ok, confirmed_lease, ClaimLeaseReconciliation.confirmed(mutation, transport_reason, confirmed_lease)}
 
-      match?(%ClaimLease{}, stale_same_holder) ->
-        ambiguous_fail_closed(mutation, transport_reason, :same_holder_different_run, stale_same_holder)
-
-      match?(%ClaimLease{}, exact) ->
-        {:ok, exact, ClaimLeaseReconciliation.confirmed(mutation, transport_reason, exact)}
-
-      true ->
-        ambiguous_fail_closed(mutation, transport_reason, :no_lease_found)
+      {:fail_closed, outcome, blocking_lease} ->
+        ambiguous_fail_closed(mutation, transport_reason, outcome, blocking_lease)
     end
   end
+
+  defp classify_ambiguous_claim_lease_evidence(%{malformed?: true}),
+    do: {:fail_closed, :malformed_lease, nil}
+
+  defp classify_ambiguous_claim_lease_evidence(%{
+         issue_identity_mismatch: %ClaimLease{} = lease
+       }),
+       do: {:fail_closed, :issue_identity_mismatch, lease}
+
+  defp classify_ambiguous_claim_lease_evidence(%{non_active_exact: %ClaimLease{} = lease}),
+    do: {:fail_closed, :lease_not_active, lease}
+
+  defp classify_ambiguous_claim_lease_evidence(%{competing: %ClaimLease{} = lease}),
+    do: {:fail_closed, :competing_holder, lease}
+
+  defp classify_ambiguous_claim_lease_evidence(%{stale_same_holder: %ClaimLease{} = lease}),
+    do: {:fail_closed, :same_holder_different_run, lease}
+
+  defp classify_ambiguous_claim_lease_evidence(%{exact: %ClaimLease{} = lease}),
+    do: {:confirmed, lease}
+
+  defp classify_ambiguous_claim_lease_evidence(_evidence),
+    do: {:fail_closed, :no_lease_found, nil}
 
   defp ambiguous_fail_closed(mutation, transport_reason, outcome, lease \\ nil) do
     {:error, ClaimLeaseReconciliation.fail_closed(mutation, transport_reason, outcome, lease)}
   end
 
   defp exact_attempted_claim_lease?(%ClaimLease{} = candidate, %ClaimLease{} = attempted, now) do
+    same_attempted_claim_lease_identity?(candidate, attempted) and active_claim_lease?(candidate, now)
+  end
+
+  defp same_attempted_claim_lease_identity?(%ClaimLease{} = candidate, %ClaimLease{} = attempted) do
     is_binary(attempted.holder) and is_binary(attempted.run_id) and
+      candidate.issue_id == attempted.issue_id and
       candidate.holder == attempted.holder and
       candidate.run_id == attempted.run_id and
       candidate.role == attempted.role and
       exact_workspace_path_match?(candidate.workspace_path, attempted.workspace_path) and
-      (is_nil(attempted.comment_id) or candidate.comment_id == attempted.comment_id) and
-      ClaimLease.active_or_recoverable?(candidate, now)
+      (is_nil(attempted.comment_id) or candidate.comment_id == attempted.comment_id)
   end
+
+  defp active_claim_lease?(%ClaimLease{state: state} = lease, now) when is_binary(state) do
+    String.downcase(String.trim(state)) == "active" and !ClaimLease.expired?(lease, now)
+  end
+
+  defp active_claim_lease?(%ClaimLease{}, _now), do: false
 
   defp exact_workspace_path_match?(left, right) when is_binary(left) and is_binary(right) do
     normalize_workspace_path(left) == normalize_workspace_path(right)

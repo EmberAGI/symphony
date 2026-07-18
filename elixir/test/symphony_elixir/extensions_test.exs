@@ -555,6 +555,85 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute_receive {:fetch_issue_states_by_ids_called, _issue_ids}
   end
 
+  test "linear adapter fails closed when the authoritative issue carries an exact-looking lease for another issue" do
+    setup_ambiguous_claim_lease_client()
+    lease_attrs = ambiguous_lease_attrs("issue-amb-expected", "MT-AMB-EXPECTED", comment_id: nil)
+
+    wrong_issue_lease =
+      lease_attrs
+      |> Map.merge(%{comment_id: "comment-wrong-issue", issue_id: "issue-amb-other"})
+      |> ClaimLease.new()
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:error, {:linear_api_request, :timeout}}
+    ])
+
+    Process.put(
+      {FakeLinearClient, :fetch_issue_states_result},
+      {:ok,
+       [
+         %Issue{
+           id: "issue-amb-expected",
+           claim_lease: wrong_issue_lease,
+           claim_leases: [wrong_issue_lease]
+         }
+       ]}
+    )
+
+    assert {:error, %ClaimLeaseReconciliation{outcome: :issue_identity_mismatch}} =
+             Adapter.upsert_claim_lease("issue-amb-expected", lease_attrs)
+  end
+
+  test "linear adapter confirms ambiguous ownership only for an active exact lease" do
+    for state <- ["retrying", "recoverable", "blocked", "quarantined"] do
+      setup_ambiguous_claim_lease_client()
+      issue_id = "issue-amb-#{state}"
+      lease_attrs = ambiguous_lease_attrs(issue_id, "MT-AMB-#{String.upcase(state)}", comment_id: nil)
+
+      non_active_lease =
+        lease_attrs
+        |> Map.merge(%{comment_id: "comment-#{state}", state: state})
+        |> ClaimLease.new()
+
+      Process.put({FakeLinearClient, :graphql_results}, [
+        {:error, {:linear_api_request, :timeout}}
+      ])
+
+      Process.put(
+        {FakeLinearClient, :fetch_issue_states_result},
+        {:ok, [%Issue{id: issue_id, claim_lease: non_active_lease, claim_leases: [non_active_lease]}]}
+      )
+
+      assert {:error, %ClaimLeaseReconciliation{outcome: :lease_not_active}} =
+               Adapter.upsert_claim_lease(issue_id, lease_attrs)
+    end
+  end
+
+  test "linear adapter fails closed when the authoritative refetch returns a different issue" do
+    setup_ambiguous_claim_lease_client()
+    lease_attrs = ambiguous_lease_attrs("issue-amb-requested", "MT-AMB-REQUESTED", comment_id: nil)
+    committed_lease = ClaimLease.new(Map.put(lease_attrs, :comment_id, "comment-committed"))
+
+    Process.put({FakeLinearClient, :graphql_results}, [
+      {:error, {:linear_api_request, :timeout}}
+    ])
+
+    Process.put(
+      {FakeLinearClient, :fetch_issue_states_result},
+      {:ok,
+       [
+         %Issue{
+           id: "issue-amb-unrelated",
+           claim_lease: committed_lease,
+           claim_leases: [committed_lease]
+         }
+       ]}
+    )
+
+    assert {:error, %ClaimLeaseReconciliation{outcome: :issue_identity_mismatch}} =
+             Adapter.upsert_claim_lease("issue-amb-requested", lease_attrs)
+  end
+
   test "linear adapter fails closed for next-poll retry when an ambiguous write left no lease" do
     setup_ambiguous_claim_lease_client()
     lease_attrs = ambiguous_lease_attrs("issue-amb-missing", "MT-AMB-MISSING", comment_id: nil)
@@ -810,6 +889,26 @@ defmodule SymphonyElixir.ExtensionsTest do
     structured = ClaimLeaseReconciliation.fail_closed(:create, {:unexpected, %{"detail" => "value"}}, :refetch_failed)
     assert String.starts_with?(structured.transport_reason, "{:unexpected")
     assert String.length(structured.transport_reason) <= 120
+
+    credential_text =
+      ClaimLeaseReconciliation.fail_closed(
+        :create,
+        "Authorization: Bearer fake-transport-secret api_key=fake-linear-key",
+        :refetch_failed
+      )
+
+    refute credential_text.transport_reason =~ "fake-transport-secret"
+    refute credential_text.transport_reason =~ "fake-linear-key"
+
+    structured_credential =
+      ClaimLeaseReconciliation.fail_closed(
+        :create,
+        {:timeout, %{authorization: "Bearer fake-structured-secret", token: "fake-token"}},
+        :refetch_failed
+      )
+
+    refute structured_credential.transport_reason =~ "fake-structured-secret"
+    refute structured_credential.transport_reason =~ "fake-token"
   end
 
   test "linear adapter does not reclassify ordinary claim lease write failures as ambiguous" do

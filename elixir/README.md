@@ -204,16 +204,18 @@ create or update fails at the request layer before a response arrives, the
 mutation may still have committed in Linear. The Linear tracker adapter treats
 that write as ambiguous: it performs exactly one authoritative issue refetch
 and returns a typed reconciliation outcome instead of blindly replaying the
-mutation. When the refetched active lease exactly matches the attempted issue,
-workspace, role, holder, and run identity, the orchestrator continues with
-exactly one dispatch. When the lease is absent, held by another holder or run,
-malformed, or unreadable, dispatch fails closed: an absent lease may be retried
-by the next normal poll, another run's lease is never released, and a stale
-current-holder lease is released only through existing process-ownership
-recovery. Each reconciliation is reported in the dispatch summary under
+mutation. Confirmation requires the returned issue id and the embedded lease
+issue id to match the attempt, plus a strictly active, unexpired lease matching
+workspace, role, holder, and run identity; retrying, recoverable, blocked, and
+quarantined leases fail closed. When the lease is absent, belongs to another
+issue, is held by another holder or run, is non-active, malformed, or
+unreadable, dispatch fails closed: an absent lease may be retried by the next
+normal poll, another run's lease is never released, and a stale current-holder
+lease is released only through existing process-ownership recovery. Each
+reconciliation is reported in logs and the dispatch summary under
 `polling_diagnostics.latest_dispatch_summary.claim_lease_reconciliations` in
-`/api/v1/state`, naming the mutation, transport reason, refetch result,
-ownership outcome, and next recovery action.
+`/api/v1/state`, naming the trigger, mutation, redacted and bounded transport
+reason, refetch result, ownership outcome, and next recovery action.
 
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the

@@ -204,13 +204,16 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   unbounded heartbeat comments or role-authored Symphony Handoff comments.
 - A transport-ambiguous claim-lease create or update must trigger one
   authoritative issue refetch before acquisition is classified. If the
-  refetched active lease exactly matches the attempted issue, workspace, role,
-  holder, and run identity, the tracker Adapter returns that lease as confirmed
-  ownership and the orchestrator may dispatch exactly once. It must not replay
-  the mutation first.
+  returned issue id and the embedded lease issue id match the attempted issue,
+  and the lease is strictly `active`, unexpired, and exactly matches the
+  attempted workspace, role, holder, and run identity, the tracker Adapter
+  returns that lease as confirmed ownership and the orchestrator may dispatch
+  exactly once. `retrying`, `recoverable`, `blocked`, and `quarantined` leases
+  are not confirmation. The Adapter must not replay the mutation first.
 - If the authoritative refetch after an ambiguous write finds no exact lease,
-  finds a competing or malformed lease, or fails, dispatch must fail closed.
-  The outcome must name the reconciliation result and next recovery action.
+  returns a different issue identity, finds a non-active, competing, or
+  malformed lease, or fails, dispatch must fail closed. The outcome must name
+  the reconciliation result and next recovery action.
   A malformed marker blocks confirmation only when it cannot be attributed to
   a different role or workspace scope; a readable field proving another scope
   preserves the multi-role coexistence contract, while an unattributable
@@ -654,14 +657,18 @@ until both test modules pass under `make all`.
 - A provider-native payload contains secret-bearing fields adjacent to useful
   classification evidence.
 - A claim-lease create or update commits in Linear but its response times out;
-  the authoritative refetch confirms the exact attempted run and dispatch
-  continues once without waiting for lease expiry.
+  the authoritative refetch confirms the exact attempted active issue and run,
+  and the real Orchestrator-to-Tracker-to-task path dispatches once without
+  waiting for lease expiry.
 - A claim-lease response times out before the mutation commits, the refetch
   returns no matching lease, and the next normal poll retries acquisition
   without an immediate blind mutation replay.
-- An ambiguous claim-lease write is followed by a conflicting holder, malformed
-  marker, or failed authoritative refetch; dispatch stays closed and status
-  reports the bounded recovery action without exposing raw transport payloads.
+- An ambiguous claim-lease write is followed by a wrong issue identity,
+  non-active lease, conflicting holder, malformed marker, or failed
+  authoritative refetch; dispatch stays closed and live poll status plus logs
+  report the trigger, refetch, outcome, and bounded recovery action after
+  credential-shaped binary or structured transport details are redacted and
+  bounded.
 
 ## Constraints
 
@@ -743,8 +750,9 @@ slices without weakening the skills/tools release gate.
 - EMB-1171 intake: A transport failure after a claim-lease mutation is an
   ambiguous write, not proof that acquisition failed. The existing tracker
   Adapter remains the deep ownership-verification Module: it performs one
-  authoritative refetch, confirms only the exact attempted scope and run, and
-  returns a typed reconciliation outcome for orchestrator diagnostics. Blind
+  authoritative refetch, confirms only a strictly active lease whose returned
+  and embedded issue identity plus scope and run match the attempt, and returns
+  a typed, redacted reconciliation outcome for orchestrator diagnostics. Blind
   mutation replay and an orchestrator-only polling workaround were rejected.
 
 ## References to source issues
