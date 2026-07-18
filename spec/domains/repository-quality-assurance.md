@@ -342,6 +342,14 @@ with meaningless doubles merely to touch lines. Provider and tracker Adapters
 MUST use deterministic fixtures at their public boundaries; the non-live gate
 MUST remain secret-free and MUST NOT call live providers.
 
+The non-live seal applies to the whole test run, including test application
+boot: the suite MUST install its deterministic tracker Adapter and a pinned
+non-repository workflow configuration before the application (and its
+Orchestrator) starts, so no real tracker request — successful or failed — can
+occur in any phase of the gate. The suite MUST measure real tracker HTTP
+attempts at the Adapter's single network seam, report the count in the gate
+output, and fail on any nonzero count.
+
 When EMB-1180 changes a large test or validation file, the affected behavior
 MUST be moved progressively into focused ExUnit modules organized by the
 production Interface being proved. Restoring this Symphony gate does not own
