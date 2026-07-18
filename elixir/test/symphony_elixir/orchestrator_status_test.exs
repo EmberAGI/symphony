@@ -61,7 +61,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid, 15_000)
+    initial_state = :sys.get_state(pid)
     started_at = DateTime.utc_now()
 
     running_entry = %{
@@ -986,7 +986,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         end
       end)
 
-      initial_state = :sys.get_state(pid, 15_000)
+      initial_state = :sys.get_state(pid)
       first_ref = make_ref()
 
       :sys.replace_state(pid, fn _ ->
@@ -1044,7 +1044,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}, 1_000
           assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}, 1_000
 
-          state = :sys.get_state(pid, 15_000)
+          state = :sys.get_state(pid)
           assert state.running == %{}
           assert state.retry_attempts == %{}
           assert state.failure_observations[issue_id].count == 3
@@ -1186,7 +1186,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}, 1_000
           assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}, 1_000
 
-          state = :sys.get_state(pid, 15_000)
+          state = :sys.get_state(pid)
           assert state.retry_attempts == %{}
           assert MapSet.member?(state.claimed, issue_id)
         end)
@@ -1224,7 +1224,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid, 15_000)
+    initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -1293,7 +1293,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_integer(snapshot_entry.runtime_seconds)
 
     send(pid, {:DOWN, process_ref, :process, self(), :normal})
-    completed_state = :sys.get_state(pid, 15_000)
+    completed_state = :sys.get_state(pid)
 
     assert completed_state.codex_totals.input_tokens == 12
     assert completed_state.codex_totals.output_tokens == 4
@@ -1322,7 +1322,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid, 15_000)
+    initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -1370,7 +1370,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.codex_total_tokens == 16
 
     send(pid, {:DOWN, process_ref, :process, self(), :normal})
-    completed_state = :sys.get_state(pid, 15_000)
+    completed_state = :sys.get_state(pid)
     assert completed_state.codex_totals.input_tokens == 12
     assert completed_state.codex_totals.output_tokens == 4
     assert completed_state.codex_totals.total_tokens == 16
@@ -1397,7 +1397,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid, 15_000)
+    initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -1479,7 +1479,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.last_codex_event == :turn_completed
 
     send(pid, {:DOWN, process_ref, :process, self(), :normal})
-    completed_state = :sys.get_state(pid, 15_000)
+    completed_state = :sys.get_state(pid)
     assert completed_state.codex_totals.input_tokens == 153
     assert completed_state.codex_totals.output_tokens == 6
     assert completed_state.codex_totals.total_tokens == 159
@@ -1506,7 +1506,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid, 15_000)
+    initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -1591,7 +1591,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.codex_total_tokens == 15
 
     send(pid, {:DOWN, process_ref, :process, self(), :normal})
-    completed_state = :sys.get_state(pid, 15_000)
+    completed_state = :sys.get_state(pid)
 
     assert completed_state.codex_totals.input_tokens == 10
     assert completed_state.codex_totals.output_tokens == 5
@@ -1619,7 +1619,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid, 15_000)
+    initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -1700,7 +1700,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid, 15_000)
+    initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -1788,7 +1788,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid, 15_000)
+    initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -1862,7 +1862,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid, 15_000)
+    initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -1942,7 +1942,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       error: "agent exited: :boom"
     }
 
-    initial_state = :sys.get_state(pid, 15_000)
+    initial_state = :sys.get_state(pid)
     new_state = %{initial_state | retry_attempts: %{"mt-500" => retry_entry}}
     :sys.replace_state(pid, fn _ -> new_state end)
 
@@ -2442,7 +2442,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end)
 
     stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
-    initial_state = :sys.get_state(pid, 15_000)
+    initial_state = :sys.get_state(pid)
 
     running_entry = %{
       pid: worker_pid,
@@ -2544,7 +2544,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end)
 
     stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
-    initial_state = :sys.get_state(pid, 15_000)
+    initial_state = :sys.get_state(pid)
 
     running_entry = %{
       pid: worker_pid,
@@ -3277,7 +3277,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   defp do_wait_for_running_entry(pid, issue_id, deadline_ms) do
-    case :sys.get_state(pid, 15_000).running do
+    case :sys.get_state(pid).running do
       %{^issue_id => %{pid: running_pid, workspace_path: workspace_path} = running_entry}
       when is_pid(running_pid) and is_binary(workspace_path) ->
         running_entry
@@ -3298,7 +3298,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   defp do_wait_for_orchestrator_state(pid, predicate, deadline_ms) do
-    state = :sys.get_state(pid, 15_000)
+    state = :sys.get_state(pid)
 
     if predicate.(state) do
       state
