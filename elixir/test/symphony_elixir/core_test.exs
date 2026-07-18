@@ -2040,7 +2040,6 @@ defmodule SymphonyElixir.CoreTest do
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
-  @tag skip: is_nil(System.find_executable("setsid")) && "requires setsid"
   # Late-detached detection is Linux-hosted runtime behavior: it needs /proc
   # for env scanning and setsid to stage a detached fixture process. The guard
   # keeps the non-live gate contract identical on platforms without them; CI
