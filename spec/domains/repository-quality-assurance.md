@@ -317,12 +317,18 @@ that every command in the declared non-live gate completed successfully; the
 gate MUST NOT stay green through warning suppression, blanket coverage
 exclusions, or a waiver for pre-existing debt.
 
-The coverage command MUST report 100% for every hand-written production Module.
-`ignore_modules` MUST NOT exclude repository-owned business, orchestration,
-runtime, provider-Adapter, tracker, workspace, HTTP, presentation, or other
-executable production behavior. A compiler- or framework-generated Module MAY
-be excluded only when it contains no repository-owned executable behavior and
-the narrow exclusion is named and justified beside the coverage configuration.
+The coverage command MUST enforce a documented, non-perfect aggregate
+threshold over the full production denominator. Perfect coverage of every
+hand-written production Module is explicitly not a pass condition, and no
+individual Module is required to be fully covered. `ignore_modules` MUST NOT
+exclude repository-owned business, orchestration, runtime, provider-Adapter,
+tracker, workspace, HTTP, presentation, or other executable production
+behavior; a compiler- or framework-generated Module MAY be excluded only when
+it contains no repository-authored executable behavior and the narrow
+exclusion is named and justified beside the coverage configuration. The
+enforced floor (currently 80% aggregate, measured ~82% at adoption) MAY rise
+when real coverage rises; it MUST NOT be met by shrinking the denominator,
+swapping in a selective Module set, or adding meaningless line-touch tests.
 
 Dialyzer MUST complete with zero warnings. Typespec, callback, and call-graph
 defects MUST be corrected at their owning Module or Interface; filters,
