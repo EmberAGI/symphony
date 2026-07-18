@@ -384,6 +384,15 @@ closed. Every mutating Herdr command is scoped to the run-owned named session
 and private configuration root; cleanup verifies that the operator's default
 server snapshot is unchanged.
 
+Herdr owns terminal input and provider keyboard-protocol semantics behind its
+atomic `pane run` Interface. Symphony submits every orchestrator assignment,
+worker result, and consultation response through that Interface unchanged.
+Symphony transport Adapters and runtime launchers must not branch on the target
+provider to decompose a turn into `send-text`, synthesized key sequences, or
+other PTY writes. After submission, Symphony separately requires a Herdr
+`working` observation before an idle/done state can count as semantic turn
+completion, preventing a stale pre-submit idle state from completing the turn.
+
 The Codex launcher uses unattended workspace-write/no-approval mode, disables
 `multi_agent`, disables alternate-screen rendering, and supplies the selected
 workspace through the whole `projects={...}` trust map. The Claude launcher
@@ -398,7 +407,9 @@ top-level runtime events. Runtime contract tests prove that resolved profiles
 become exact orchestrator and worker launcher arguments, reusable system
 instructions reach each provider, the isolated session is cleaned up without
 replacing or stopping the default server, and incompatible or substituted
-profiles fail closed. Bounded live evaluation—not narration—provides
+profiles fail closed. The same contract tests prove every allowed direction of
+delegation preserves one atomic `pane run` and never reconstructs provider
+terminal input inside Symphony. Bounded live evaluation—not narration—provides
 session/start/message/result/integration/cleanup evidence for Codex and Claude.
 
 Octo mixed-runtime validation (a real workflow assigning roles to different
