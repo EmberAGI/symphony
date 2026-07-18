@@ -109,29 +109,6 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   def start_agent(_session, _spec, _context), do: {:error, :invalid_herdr_agent_spec}
 
   @impl true
-  def submit(
-        %{name: session_name, env: env},
-        %{pane_id: pane_id, provider: provider},
-        prompt,
-        context
-      )
-      when provider in ["claude_code", :claude_code] and is_binary(pane_id) and is_binary(prompt) and prompt != "" do
-    # Claude Code negotiates Kitty keyboard input and requires the protocol form
-    # of Enter. Herdr 0.7.4's pane run appends a legacy carriage return before
-    # returning, and a follow-up Kitty Enter can overtake Claude's asynchronous
-    # paste handling and submit an empty turn. Send the prompt as literal text,
-    # then the negotiated key, so the PTY receives only the ordered input Claude
-    # understands.
-    with {:ok, _output} <-
-           command(context, ["--session", session_name, "pane", "send-text", pane_id, prompt], env),
-         {:ok, _output} <-
-           command(context, ["--session", session_name, "pane", "send-text", pane_id, "\e[13;1u"], env) do
-      :ok
-    else
-      {:error, reason} -> {:error, {:herdr_submit_failed, reason}}
-    end
-  end
-
   def submit(%{name: session_name, env: env}, %{pane_id: pane_id}, prompt, context)
       when is_binary(pane_id) and is_binary(prompt) and prompt != "" do
     case command(context, ["--session", session_name, "pane", "run", pane_id, prompt], env) do
@@ -472,16 +449,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     set -eu
     case "${1:-}:${2:-}" in
       pane:run)
-        target_info=$(#{shell_escape(real_herdr)} agent get "${3:-}" 2>/dev/null || true)
-        case "$target_info" in
-          *'"agent":"claude"'*)
-            #{shell_escape(real_herdr)} pane send-text "${3:-}" "${4:-}"
-            #{shell_escape(real_herdr)} pane send-text "${3:-}" "$(printf '\\033[13;1u')"
-            ;;
-          *)
-            exec #{shell_escape(real_herdr)} "$@"
-            ;;
-        esac
+        exec #{shell_escape(real_herdr)} "$@"
         ;;
       agent:get|agent:list|agent:wait|wait:agent-status)
         exec #{shell_escape(real_herdr)} "$@"
@@ -496,19 +464,6 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     orchestrator_body = """
     #!/bin/sh
     set -eu
-    if [ "${1:-}:${2:-}" = "pane:run" ]; then
-      target_info=$(#{shell_escape(real_herdr)} agent get "${3:-}" 2>/dev/null || true)
-      case "$target_info" in
-        *'"agent":"claude"'*)
-          #{shell_escape(real_herdr)} pane send-text "${3:-}" "${4:-}"
-          #{shell_escape(real_herdr)} pane send-text "${3:-}" "$(printf '\\033[13;1u')"
-          ;;
-        *)
-          exec #{shell_escape(real_herdr)} "$@"
-          ;;
-      esac
-      exit 0
-    fi
     exec #{shell_escape(real_herdr)} "$@"
     """
 
