@@ -8,6 +8,11 @@ Use this index when deciding where durable behavior belongs. `spec/` and
 
 ## Domains
 
+- [Documentation Authority](../docs/specs/domains/documentation-authority.md):
+  EMB-1161 readiness authority for the atomic migration to `docs/specs` and
+  `docs/adr`; this direct branch-local link moves into the final context map in
+  the truth-making implementation commit.
+
 - [Symphony Service](./domains/symphony-service.md): Language-agnostic service
   specification for the workflow loader, config layer, tracker integration,
   orchestrator, workspace manager, agent runner, observability, validation, and
@@ -33,3 +38,4 @@ reverse, surprising without context, and the result of a real trade-off.
 
 - [0001: Provider-Neutral Agent Runtimes](./adr/0001-provider-neutral-agent-runtimes.md)
 - [0002: Claude Code Unattended Runtime Authentication and Permission Posture](./adr/0002-claude-code-unattended-auth-and-permission-posture.md)
+- [0003: Canonical Documentation Authority](../docs/adr/0003-canonical-documentation-authority.md)
