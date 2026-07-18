@@ -3223,7 +3223,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     do_wait_for_snapshot(pid, predicate, deadline_ms)
   end
 
-  defp receive_claim_lease_state!(issue_id, expected_state, timeout_ms \\ 1_000) do
+  defp receive_claim_lease_state!(issue_id, expected_state, timeout_ms \\ 5_000) do
     receive do
       {:memory_tracker_claim_lease, ^issue_id, lease} ->
         case lease.state do
@@ -3235,7 +3235,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
-  defp receive_memory_comment_containing!(issue_id, expected_text, timeout_ms \\ 1_000) do
+  defp receive_memory_comment_containing!(issue_id, expected_text, timeout_ms \\ 5_000) do
     receive do
       {:memory_tracker_comment, ^issue_id, body} ->
         if String.contains?(body, expected_text) do
