@@ -92,13 +92,19 @@ defmodule SymphonyElixir.HerdrTransportTest do
     fi
 
     if [ "$#" -eq 3 ] && [ "$1" = "agent" ] && [ "$2" = "get" ]; then
-      agent=codex
-      if [ "$3" = "w1:p2" ]; then agent=claude; fi
-      printf '{"id":"cli:agent:get","result":{"agent":{"name":"target","pane_id":"%s","agent":"%s","agent_status":"idle"}}}\n' "$3" "$agent"
+      agent="${HERDR_FAKE_WRAPPER_AGENT:-codex}"
+      status="${HERDR_FAKE_WRAPPER_STATUS:-idle}"
+      revision="${HERDR_FAKE_WRAPPER_REVISION:-1}"
+      if [ "${HERDR_FAKE_WRAPPER_ADVANCE:-}" = "1" ]; then
+        counter="$XDG_CONFIG_HOME/wrapper-agent-get-count"
+        if [ -f "$counter" ]; then revision=2; else : > "$counter"; fi
+      fi
+      printf '{"id":"cli:agent:get","result":{"agent":{"name":"target","pane_id":"%s","agent":"%s","agent_status":"%s","revision":%s}}}\n' "$3" "$agent" "$status" "$revision"
       exit 0
     fi
 
     if [ "$1" = "pane" ] && { [ "$2" = "run" ] || [ "$2" = "send-text" ]; }; then
+      if [ "${HERDR_FAKE_WRAPPER_RUN_FAIL:-}" = "1" ] && [ -n "${4:-}" ]; then exit 44; fi
       exit 0
     fi
 
@@ -110,6 +116,114 @@ defmodule SymphonyElixir.HerdrTransportTest do
     on_exit(fn -> File.rm_rf!(root) end)
 
     %{bin: bin, log: log, runtime_root: deliberately_long_runtime_root}
+  end
+
+  test "generated role adapters durably acknowledge only Claude submissions that require it", context do
+    session_name = "octo-emb-1175-message-ack-#{System.unique_integer([:positive])}"
+
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [{"HERDR_FAKE_LOG", context.log}],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 10
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{name: session_name, isolated: true, workspace: "/tmp/selected-workspace"},
+               adapter_context
+             )
+
+    on_exit(fn ->
+      if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
+    end)
+
+    assert {:ok, session} =
+             HerdrTransport.prepare_worker(session, %{argv: ["claude", "--model", "claude-sonnet-5"]}, adapter_context)
+
+    worker_herdr = Path.join(session.runtime_root, "worker-bin/herdr")
+    orchestrator_herdr = Path.join(session.orchestrator_bin, "herdr")
+    base_env = [{"HERDR_FAKE_LOG", context.log}, {"XDG_CONFIG_HOME", session.runtime_root}]
+
+    for role_herdr <- [worker_herdr, orchestrator_herdr] do
+      File.write!(context.log, "")
+
+      assert {"", 0} =
+               System.cmd(role_herdr, ["pane", "run", "w1:p2", "line one\nline two"], env: base_env ++ [{"HERDR_FAKE_WRAPPER_AGENT", "claude"}, {"HERDR_FAKE_WRAPPER_STATUS", "working"}])
+
+      commands = File.read!(context.log)
+      assert length(:binary.matches(commands, "pane run w1:p2")) == 2
+      refute commands =~ "pane send-text"
+      refute commands =~ "pane send-keys"
+
+      File.write!(context.log, "")
+
+      assert {"", 0} =
+               System.cmd(role_herdr, ["pane", "run", "w1:p2", "single-line steering"], env: base_env ++ [{"HERDR_FAKE_WRAPPER_AGENT", "claude"}, {"HERDR_FAKE_WRAPPER_STATUS", "working"}])
+
+      assert length(:binary.matches(File.read!(context.log), "pane run w1:p2")) == 1
+
+      File.write!(context.log, "")
+
+      assert {"", 0} =
+               System.cmd(role_herdr, ["pane", "run", "w1:p2", "idle follow-up"],
+                 env:
+                   base_env ++
+                     [
+                       {"HERDR_FAKE_WRAPPER_AGENT", "claude"},
+                       {"HERDR_FAKE_WRAPPER_STATUS", "idle"},
+                       {"OCTO_HERDR_SUBMISSION_SETTLE_SECONDS", "0"}
+                     ]
+               )
+
+      commands = File.read!(context.log)
+
+      assert length(:binary.matches(commands, "agent get w1:p2")) == 2, commands
+
+      assert length(:binary.matches(commands, "pane run w1:p2")) == 2
+
+      File.write!(context.log, "")
+      File.rm(Path.join(session.runtime_root, "wrapper-agent-get-count"))
+
+      assert {"", 0} =
+               System.cmd(role_herdr, ["pane", "run", "w1:p2", "fast completion"],
+                 env:
+                   base_env ++
+                     [
+                       {"HERDR_FAKE_WRAPPER_AGENT", "claude"},
+                       {"HERDR_FAKE_WRAPPER_STATUS", "idle"},
+                       {"HERDR_FAKE_WRAPPER_ADVANCE", "1"},
+                       {"OCTO_HERDR_SUBMISSION_SETTLE_SECONDS", "0"}
+                     ]
+               )
+
+      assert length(:binary.matches(File.read!(context.log), "pane run w1:p2")) == 1
+
+      File.write!(context.log, "")
+
+      assert {"", 0} =
+               System.cmd(role_herdr, ["pane", "run", "w1:p2", "line one\nline two"], env: base_env ++ [{"HERDR_FAKE_WRAPPER_AGENT", "codex"}, {"HERDR_FAKE_WRAPPER_STATUS", "idle"}])
+
+      assert length(:binary.matches(File.read!(context.log), "pane run w1:p2")) == 1
+
+      File.write!(context.log, "")
+
+      assert {_output, 44} =
+               System.cmd(role_herdr, ["pane", "run", "w1:p2", "must fail"],
+                 env:
+                   base_env ++
+                     [
+                       {"HERDR_FAKE_WRAPPER_AGENT", "claude"},
+                       {"HERDR_FAKE_WRAPPER_STATUS", "idle"},
+                       {"HERDR_FAKE_WRAPPER_RUN_FAIL", "1"}
+                     ],
+                 stderr_to_stdout: true
+               )
+
+      assert length(:binary.matches(File.read!(context.log), "pane run w1:p2")) == 1
+    end
+
+    assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
   test "creates, controls, and cleans up only the named isolated session", context do

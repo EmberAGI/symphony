@@ -549,17 +549,58 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     orchestrator_bin = Path.join(runtime_root, "orchestrator-bin")
     restricted_herdr = Path.join(worker_bin, "herdr")
     orchestrator_herdr = Path.join(orchestrator_bin, "herdr")
+    submission_adapter = Path.join(runtime_root, "herdr-pane-run")
     real_herdr = Map.get(context, :herdr_bin) || System.find_executable("herdr") || "herdr"
 
     launcher_body =
       "#!/bin/sh\nset -eu\nexport PATH=#{shell_escape(worker_bin)}:\"${PATH:-}\"\nexec #{Enum.map_join(argv, " ", &shell_escape/1)}\n"
+
+    submission_adapter_body = """
+    #!/bin/sh
+    set -eu
+    target="${3:-}"
+    message="${4:-}"
+    newline='
+    '
+    target_before=$(#{shell_escape(real_herdr)} agent get "$target" 2>/dev/null || true)
+
+    #{shell_escape(real_herdr)} "$@" || exit $?
+
+    case "$target_before" in
+      *'"agent":"claude"'*) ;;
+      *) exit 0 ;;
+    esac
+
+    case "$message" in
+      *"$newline"*) exec #{shell_escape(real_herdr)} pane run "$target" "" ;;
+    esac
+
+    case "$target_before" in
+      *'"agent_status":"idle"'*|*'"agent_status":"done"'*|*'"agent_status":"blocked"'*) ;;
+      *) exit 0 ;;
+    esac
+
+    before_revision=$(printf '%s\\n' "$target_before" | sed -n 's/.*"revision":\\([0-9][0-9]*\\).*/\\1/p')
+    [ -n "$before_revision" ] || exit 0
+    sleep "${OCTO_HERDR_SUBMISSION_SETTLE_SECONDS:-1}"
+    target_after=$(#{shell_escape(real_herdr)} agent get "$target" 2>/dev/null || true)
+    after_revision=$(printf '%s\\n' "$target_after" | sed -n 's/.*"revision":\\([0-9][0-9]*\\).*/\\1/p')
+
+    case "$target_after" in
+      *'"agent_status":"idle"'*|*'"agent_status":"done"'*|*'"agent_status":"blocked"'*) ;;
+      *) exit 0 ;;
+    esac
+
+    [ "$after_revision" = "$before_revision" ] || exit 0
+    exec #{shell_escape(real_herdr)} pane run "$target" ""
+    """
 
     restricted_body = """
     #!/bin/sh
     set -eu
     case "${1:-}:${2:-}" in
       pane:run)
-        exec #{shell_escape(real_herdr)} "$@"
+        exec #{shell_escape(submission_adapter)} "$@"
         ;;
       agent:get|agent:list|agent:wait|wait:agent-status)
         exec #{shell_escape(real_herdr)} "$@"
@@ -574,11 +615,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     orchestrator_body = """
     #!/bin/sh
     set -eu
+    if [ "${1:-}:${2:-}" = "pane:run" ]; then
+      exec #{shell_escape(submission_adapter)} "$@"
+    fi
     exec #{shell_escape(real_herdr)} "$@"
     """
 
     with :ok <- File.mkdir_p(worker_bin),
          :ok <- File.mkdir_p(orchestrator_bin),
+         :ok <- File.write(submission_adapter, submission_adapter_body),
+         :ok <- File.chmod(submission_adapter, 0o500),
          :ok <- File.write(restricted_herdr, restricted_body),
          :ok <- File.chmod(restricted_herdr, 0o500),
          :ok <- File.write(orchestrator_herdr, orchestrator_body),

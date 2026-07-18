@@ -401,6 +401,19 @@ already present at the harness input, then resumes bounded observation. An
 unchanged stale idle state never completes the turn, and confirmation is never
 repeated.
 
+Inter-agent message submission uses the same public Herdr Interface through one
+runtime-owned CLI Adapter shared by the worker-restricted and orchestrator
+projections. The projections may inspect Herdr's target identity, status, and
+revision; they must not inspect or synthesize terminal protocol. With the
+pinned Herdr 0.7.4 contract, healthy working-target single-line steering passes
+through unchanged. A Claude-target multiline paste receives exactly one empty
+`pane run` confirmation so the paste becomes a queued message. A Claude target
+that remains idle, done, or blocked at its original revision after the bounded
+settlement also receives exactly one confirmation. Advanced revisions,
+started turns, and non-Claude targets are not confirmed again. This is a thin
+provider compatibility Adapter over Herdr's public Interface, not a second
+terminal-input implementation.
+
 The Codex launcher uses unattended workspace-write/no-approval mode, disables
 `multi_agent`, disables alternate-screen rendering, and supplies the selected
 workspace through the whole `projects={...}` trust map. The Claude launcher
@@ -418,7 +431,10 @@ replacing or stopping the default server, and incompatible or substituted
 profiles fail closed. The same contract tests prove every allowed direction of
 delegation preserves `pane run`, never reconstructs provider terminal input
 inside Symphony, and permits at most one empty confirmation after an unchanged
-idle revision. Bounded live evaluation—not narration—provides
+idle revision. Generated-wrapper tests additionally execute both role
+projections against the same message-submission Adapter and prove multiline,
+unchanged-idle, healthy working-steering, advanced-revision, non-Claude, and
+command-failure cases without raw input commands. Bounded live evaluation—not narration—provides
 session/start/message/result/integration/cleanup evidence for Codex and Claude.
 
 Octo mixed-runtime validation (a real workflow assigning roles to different
