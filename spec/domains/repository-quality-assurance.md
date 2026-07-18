@@ -310,6 +310,43 @@ the TDD loop by pointing agents to repo-declared placement, task runner,
 affected-cache, validation, and output-control contracts, but test taxonomy and
 workflow activation must remain in the appropriate skill or role workflow.
 
+## Truthful Repository Gate
+
+`make all` is the repository acceptance Interface. A successful exit MUST mean
+that every command in the declared non-live gate completed successfully; the
+gate MUST NOT stay green through warning suppression, blanket coverage
+exclusions, or a waiver for pre-existing debt.
+
+The coverage command MUST report 100% for every hand-written production Module.
+`ignore_modules` MUST NOT exclude repository-owned business, orchestration,
+runtime, provider-Adapter, tracker, workspace, HTTP, presentation, or other
+executable production behavior. A compiler- or framework-generated Module MAY
+be excluded only when it contains no repository-owned executable behavior and
+the narrow exclusion is named and justified beside the coverage configuration.
+
+Dialyzer MUST complete with zero warnings. Typespec, callback, and call-graph
+defects MUST be corrected at their owning Module or Interface; filters,
+nowarn annotations, and broad type weakening MUST NOT be used to make the gate
+appear green.
+
+Coverage and static-analysis repairs MUST be proved through public Interfaces
+and real Seams. Tests MUST NOT couple to private implementation structure,
+duplicate production policy in test helpers, or replace business collaborators
+with meaningless doubles merely to touch lines. Provider and tracker Adapters
+MUST use deterministic fixtures at their public boundaries; the non-live gate
+MUST remain secret-free and MUST NOT call live providers.
+
+When EMB-1180 changes a large test or validation file, the affected behavior
+MUST be moved progressively into focused ExUnit modules organized by the
+production Interface being proved. Restoring this Symphony gate does not own
+Octo's `scripts/validate-symphony-config`; documentation-path policy in that
+Octo validation script is migrated into focused `uv`/`pytest` tests by
+EMB-1162.
+
+The same `make all` contract MUST run on supported Linux and macOS development
+and CI environments without platform-specific interpreter paths or tool
+assumptions.
+
 ## Edge Cases
 
 - Browser binary is missing.
@@ -349,3 +386,4 @@ contract.
 - [ADR 0001: Provider-Neutral Agent Runtimes](../adr/0001-provider-neutral-agent-runtimes.md)
 - [EMB-187: Add no-key Browser Use capability for Agent QA](https://linear.app/emberai/issue/EMB-187/add-no-key-browser-use-capability-for-agent-qa)
 - [EMB-1065: Merge son-of-anton TDD execution contract into the shared tdd skill and restore default-on doctrine](https://linear.app/emberai/issue/EMB-1065/merge-son-of-anton-tdd-execution-contract-into-the-shared-tdd-skill)
+- [EMB-1180: Restore a fully green Symphony make all baseline](https://linear.app/emberai/issue/EMB-1180/restore-a-fully-green-symphony-make-all-baseline)
