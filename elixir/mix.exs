@@ -30,6 +30,7 @@ defmodule SymphonyElixir.MixProject do
       ],
       test_ignore_filters: [
         "test/support/snapshot_support.exs",
+        "test/support/claude_shim_fixture.exs",
         "test/support/test_support.exs",
         "test/support/agent_profile_fixture.exs"
       ],
