@@ -386,12 +386,20 @@ server snapshot is unchanged.
 
 Herdr owns terminal input and provider keyboard-protocol semantics behind its
 atomic `pane run` Interface. Symphony submits every orchestrator assignment,
-worker result, and consultation response through that Interface unchanged.
-Symphony transport Adapters and runtime launchers must not branch on the target
-provider to decompose a turn into `send-text`, synthesized key sequences, or
-other PTY writes. After submission, Symphony separately requires a Herdr
-`working` observation before an idle/done state can count as semantic turn
-completion, preventing a stale pre-submit idle state from completing the turn.
+worker result, and consultation response through that Interface. Symphony
+transport Adapters and runtime launchers must not branch on the target provider
+to decompose a turn into `send-text`, synthesized key sequences, or other PTY
+writes.
+
+Initial turn submission uses a provider-neutral acknowledgement state machine.
+The Adapter records the ready agent revision, submits the prompt with `pane
+run`, and observes status plus revision. `working` proves an active turn; an
+idle/done state with an advanced revision proves a fast completed turn. If the
+agent remains idle with the original revision after the bounded settlement
+window, the Adapter sends exactly one empty `pane run` to confirm the prompt
+already present at the harness input, then resumes bounded observation. An
+unchanged stale idle state never completes the turn, and confirmation is never
+repeated.
 
 The Codex launcher uses unattended workspace-write/no-approval mode, disables
 `multi_agent`, disables alternate-screen rendering, and supplies the selected
@@ -408,8 +416,9 @@ become exact orchestrator and worker launcher arguments, reusable system
 instructions reach each provider, the isolated session is cleaned up without
 replacing or stopping the default server, and incompatible or substituted
 profiles fail closed. The same contract tests prove every allowed direction of
-delegation preserves one atomic `pane run` and never reconstructs provider
-terminal input inside Symphony. Bounded live evaluation—not narration—provides
+delegation preserves `pane run`, never reconstructs provider terminal input
+inside Symphony, and permits at most one empty confirmation after an unchanged
+idle revision. Bounded live evaluation—not narration—provides
 session/start/message/result/integration/cleanup evidence for Codex and Claude.
 
 Octo mixed-runtime validation (a real workflow assigning roles to different

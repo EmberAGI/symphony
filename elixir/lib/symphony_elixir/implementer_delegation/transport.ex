@@ -21,9 +21,14 @@ defmodule SymphonyElixir.ImplementerDelegation.Transport do
   @callback prepare_worker(session_ref(), map(), context()) ::
               {:ok, session_ref()} | {:error, term()}
   @callback start_agent(session_ref(), map(), context()) :: {:ok, agent_ref()} | {:error, term()}
+  @callback begin_turn(session_ref(), agent_ref(), String.t(), non_neg_integer(), context()) ::
+              {:ok, %{required(:phase) => :working | :completed, required(:agent) => agent_ref()}}
+              | {:error, term()}
   @callback submit(session_ref(), agent_ref(), String.t(), context()) :: :ok | {:error, term()}
   @callback await_agent(session_ref(), agent_ref(), [String.t()], non_neg_integer(), context()) ::
               {:ok, agent_ref()} | {:error, term()}
   @callback read_agent(session_ref(), agent_ref(), map(), context()) :: {:ok, map()} | {:error, term()}
   @callback stop_session(session_ref(), context()) :: :ok | {:error, term()}
+
+  @optional_callbacks begin_turn: 5
 end
