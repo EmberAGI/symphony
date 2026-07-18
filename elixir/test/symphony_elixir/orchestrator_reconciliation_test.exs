@@ -29,9 +29,7 @@ defmodule SymphonyElixir.OrchestratorReconciliationTest do
       on_exit(fn ->
         restore_app_env(:memory_tracker_issues, previous_memory_issues)
 
-        if Process.alive?(pid) do
-          Process.exit(pid, :normal)
-        end
+        stop_orchestrator!(pid)
       end)
 
       Process.sleep(50)

@@ -27,7 +27,13 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Workspace
 
       import SymphonyElixir.TestSupport,
-        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
+        only: [
+          write_workflow_file!: 1,
+          write_workflow_file!: 2,
+          restore_env: 2,
+          stop_default_http_server: 0,
+          stop_orchestrator!: 1
+        ]
 
       setup do
         # Close the Adapter seam before any workflow reload: the non-live
@@ -144,6 +150,32 @@ defmodule SymphonyElixir.TestSupport do
 
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
+
+  # Cross-test isolation: `Process.exit(pid, :normal)` is a no-op for a
+  # non-trapping GenServer, and the `start_link` link is equally inert once
+  # the test process itself exits normally, so an orchestrator "cleaned up"
+  # that way outlives its test. A leaked orchestrator keeps its tick timer,
+  # re-reads whatever workflow config the currently running test installed,
+  # and dispatches that test's seeded memory-tracker issues from outside the
+  # test's own orchestrator. Kill outright and wait for the DOWN so the next
+  # test can never overlap a live poll cycle from this one.
+  def stop_orchestrator!(pid) when is_pid(pid) do
+    if Process.alive?(pid) do
+      # The caller usually reached the orchestrator via start_link; drop the
+      # link so the kill below cannot propagate back into the test process.
+      Process.unlink(pid)
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+      after
+        5_000 -> raise "orchestrator #{inspect(pid)} did not stop within 5s"
+      end
+    end
+
+    :ok
+  end
 
   # Between-test hygiene: deleting `:workflow_file_path` used to make the
   # WorkflowStore's 1s poll fall back to the committed live `WORKFLOW.md`

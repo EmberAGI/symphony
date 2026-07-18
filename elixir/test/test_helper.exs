@@ -39,7 +39,19 @@ boot_workflow_root =
 
 File.mkdir_p!(boot_workflow_root)
 boot_workflow_file = Path.join(boot_workflow_root, "WORKFLOW.md")
-SymphonyElixir.TestSupport.write_workflow_file!(boot_workflow_file)
+
+# The app-boot Orchestrator captures its poll interval from this boot
+# workflow at init and keeps it for its whole life. A production-like 30s
+# interval lets that global singleton poll mid-suite, read whatever
+# `:memory_tracker_issues` the currently running test seeded, and dispatch
+# the test's issue from outside the test's own orchestrator (observed as an
+# order-dependent retry-dispatch loop at seed 613012). A dormant interval
+# keeps the boot-sealed singleton alive but inert; polling behavior is
+# always proved on per-test orchestrators with their own config.
+SymphonyElixir.TestSupport.write_workflow_file!(boot_workflow_file,
+  poll_interval_ms: 1_000_000_000
+)
+
 Application.put_env(:symphony_elixir, :workflow_file_path, boot_workflow_file)
 
 boot_delegation_transport = Application.get_env(:symphony_elixir, :delegation_transport_module)

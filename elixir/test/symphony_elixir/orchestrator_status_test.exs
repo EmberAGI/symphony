@@ -39,9 +39,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -939,9 +937,18 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     try do
       workspace_root = Path.join(test_root, "workspaces")
 
+      # Retry-timer-driven test: polling must never dispatch here. The
+      # orchestrator polls once immediately at init, so the issue is seeded
+      # only after that poll has completed against an empty tracker and the
+      # fake running entry is installed; the dormant interval keeps every
+      # later tick out of the test. Without this ordering, an init poll that
+      # wins the race against :sys.replace_state dispatches a real runner
+      # whose claim lease starves the asserted retry dispatches (seed
+      # 613012 under full-suite load).
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
         workspace_root: workspace_root,
+        poll_interval_ms: 1_000_000_000,
         max_retry_backoff_ms: 1,
         hook_before_run: "sleep 30"
       )
@@ -957,16 +964,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         url: "https://linear.app/example/EMB-1127"
       }
 
-      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
       issue_workspace_path = Path.join(workspace_root, issue.identifier)
 
       orchestrator_name = Module.concat(__MODULE__, :NoProgressRetryDispatchOrchestrator)
       {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
+      wait_for_snapshot(pid, fn
+        %{polling: %{checking?: false, last_poll_completed_at: completed_at}} ->
+          completed_at != nil
+
+        _snapshot ->
+          false
+      end)
+
       on_exit(fn ->
-        if Process.alive?(pid) do
-          Process.exit(pid, :normal)
-        end
+        stop_orchestrator!(pid)
       end)
 
       initial_state = :sys.get_state(pid)
@@ -991,6 +1003,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
             retry_attempts: %{}
         }
       end)
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
       reason = {:empty_turn_completed, %{message: "same no progress token=hidden"}}
 
@@ -1133,9 +1147,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
       on_exit(fn ->
-        if Process.alive?(pid) do
-          Process.exit(pid, :normal)
-        end
+        stop_orchestrator!(pid)
       end)
 
       :sys.replace_state(pid, fn state ->
@@ -1202,9 +1214,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -1283,9 +1293,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -1371,9 +1379,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -1445,9 +1451,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -1517,9 +1521,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     retry_entry = %{
@@ -1555,9 +1557,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     now_ms = System.monotonic_time(:millisecond)
@@ -1605,9 +1605,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     startup_snapshot =
@@ -1662,9 +1660,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     :sys.replace_state(pid, fn state ->
@@ -1741,9 +1737,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     :sys.replace_state(pid, fn state ->
@@ -1987,9 +1981,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     StatusDashboard.notify_update(dashboard_name)

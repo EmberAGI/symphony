@@ -467,9 +467,7 @@ defmodule SymphonyElixir.CoreTest do
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
 
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -539,9 +537,7 @@ defmodule SymphonyElixir.CoreTest do
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
 
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
 
       try do
         Port.close(port)
@@ -780,9 +776,7 @@ defmodule SymphonyElixir.CoreTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -845,9 +839,7 @@ defmodule SymphonyElixir.CoreTest do
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
 
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
 
       try do
         Port.close(port)
@@ -902,9 +894,7 @@ defmodule SymphonyElixir.CoreTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -940,9 +930,7 @@ defmodule SymphonyElixir.CoreTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -1033,9 +1021,7 @@ defmodule SymphonyElixir.CoreTest do
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
 
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
 
       try do
         Port.close(port)
@@ -1126,9 +1112,7 @@ defmodule SymphonyElixir.CoreTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     issue = %Issue{

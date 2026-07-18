@@ -21,9 +21,7 @@ defmodule SymphonyElixir.OrchestratorUsageSnapshotTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -123,9 +121,7 @@ defmodule SymphonyElixir.OrchestratorUsageSnapshotTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -202,9 +198,7 @@ defmodule SymphonyElixir.OrchestratorUsageSnapshotTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -315,9 +309,7 @@ defmodule SymphonyElixir.OrchestratorUsageSnapshotTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)

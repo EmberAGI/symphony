@@ -29,9 +29,7 @@ defmodule SymphonyElixir.RoleStatePresenterPollingTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     wait_for_snapshot(pid, fn
@@ -106,9 +104,7 @@ defmodule SymphonyElixir.RoleStatePresenterPollingTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     Enum.each(cases, fn {expected_result, issues, dispatch_results} ->
@@ -168,9 +164,7 @@ defmodule SymphonyElixir.RoleStatePresenterPollingTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     send(pid, :run_poll_cycle)
@@ -208,9 +202,7 @@ defmodule SymphonyElixir.RoleStatePresenterPollingTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     wait_for_snapshot(pid, fn

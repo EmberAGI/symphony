@@ -366,6 +366,18 @@ proceeds, and every between-test window MUST keep the effective workflow
 pinned to the non-live boot fixture rather than falling back to the
 committed repository workflow.
 
+Test-owned orchestration processes MUST NOT outlive the test that started
+them: because a `:normal` exit signal to a non-trapping process is a no-op,
+the suite releases orchestrators through a monitored kill that waits for the
+process to go down, so a leaked orchestrator can never tick against a later
+test's workflow configuration and claim that test's seeded tracker issues.
+The boot workflow fixture pins a dormant poll interval so the supervised boot
+Orchestrator polls exactly once, at application boot, against the sealed
+empty tracker; polling-cadence behavior is proved on per-test orchestrators
+with explicit intervals. A test that drives dispatch through retry timers
+seeds its tracker issues only after its own orchestrator's startup poll has
+completed against an empty tracker.
+
 When EMB-1180 changes a large test or validation file, the affected behavior
 MUST be moved progressively into focused ExUnit modules organized by the
 production Interface being proved. Restoring this Symphony gate does not own

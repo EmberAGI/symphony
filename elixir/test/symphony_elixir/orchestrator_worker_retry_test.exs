@@ -21,9 +21,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
       restore_app_env(:run_log_root, previous_run_log_root)
       File.rm_rf(run_log_root)
 
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     Application.put_env(:symphony_elixir, :run_log_root, run_log_root)
@@ -93,9 +91,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     worker_pid =
@@ -187,9 +183,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
       Application.put_env(:symphony_elixir, :memory_tracker_recipient, previous_memory_recipient)
       Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_memory_issues)
 
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
 
       try do
         Port.close(port)
