@@ -9,7 +9,7 @@ defmodule SymphonyElixir.DocumentationAuthority do
 
   @type inspection :: %{errors: [String.t()], warnings: [String.t()]}
 
-  @scanned_extensions ~w(.md .ex .exs)
+  @scanned_extensions ~w(.md .ex .exs .toml .json .yml .yaml)
   @excluded_dirs ~w(_build deps .git .symphony node_modules)
   @legacy_top_level ~w(spec specs)
   @upstream_marker "scaling-octo-engine"
@@ -139,10 +139,8 @@ defmodule SymphonyElixir.DocumentationAuthority do
       file
       |> File.read!()
       |> extract_link_targets()
-      |> Enum.reject(fn target -> skip_link_target?(target) or link_target_exists?(target, file) end)
-      |> Enum.map(fn target ->
-        "#{relative_path(file, root)} has a broken relative link to #{target}"
-      end)
+      |> Enum.reject(&skip_link_target?/1)
+      |> Enum.flat_map(fn target -> link_target_errors(target, file, root) end)
     end)
   end
 
@@ -162,19 +160,35 @@ defmodule SymphonyElixir.DocumentationAuthority do
       String.starts_with?(target, "/")
   end
 
-  defp link_target_exists?(target, source_file) do
-    target
-    |> String.split("#", parts: 2)
-    |> List.first()
-    |> then(fn path -> path == "" or resolves?(source_file, path) end)
+  defp link_target_errors(target, source_file, root) do
+    case target |> String.split("#", parts: 2) |> List.first() do
+      "" -> []
+      path -> resolved_link_errors(path, target, source_file, root)
+    end
   end
 
-  defp resolves?(source_file, relative_path) do
-    source_file
-    |> Path.dirname()
-    |> Path.join(relative_path)
-    |> Path.expand()
-    |> File.exists?()
+  defp resolved_link_errors(path, target, source_file, root) do
+    resolved =
+      source_file
+      |> Path.dirname()
+      |> Path.join(path)
+      |> Path.expand()
+
+    cond do
+      not inside_root?(resolved, root) ->
+        ["#{relative_path(source_file, root)} has a relative link to #{target} that escapes the repository"]
+
+      not File.exists?(resolved) ->
+        ["#{relative_path(source_file, root)} has a broken relative link to #{target}"]
+
+      true ->
+        []
+    end
+  end
+
+  defp inside_root?(path, root) do
+    expanded_root = Path.expand(root)
+    path == expanded_root or String.starts_with?(path, expanded_root <> "/")
   end
 
   defp nonstandard_path_warnings(root) do
@@ -199,7 +213,7 @@ defmodule SymphonyElixir.DocumentationAuthority do
         File.regular?(path) and String.ends_with?(entry, ".spec.html") ->
           ["nonstandard spec-like file: #{relative_path(path, root)}"]
 
-        File.dir?(path) and entry in ~w(adr specs) and Path.dirname(path) != root ->
+        File.dir?(path) and entry in ~w(adr spec specs) and Path.dirname(path) != root ->
           ["nonstandard #{entry} directory outside the canonical hierarchy: #{relative_path(path, root)}"]
 
         true ->
@@ -230,14 +244,38 @@ defmodule SymphonyElixir.DocumentationAuthority do
 
   defp excluded?(entry), do: entry in @excluded_dirs
 
+  # Stale-reference scanning covers only active surfaces: inside a Git work
+  # tree that is the tracked file set; outside one (bounded fixture roots)
+  # the directory walk stands in for it.
   defp scanned_files(root) do
+    root
+    |> active_files()
+    |> Enum.filter(fn path -> File.regular?(path) and not symlink?(path) and scanned_extension?(path) end)
+  end
+
+  defp active_files(root) do
+    case tracked_files(root) do
+      {:ok, files} -> files
+      :error -> walked_files(root)
+    end
+  end
+
+  defp tracked_files(root) do
+    with true <- exists?(Path.join(root, ".git")),
+         {listing, 0} <- System.cmd("git", ["-C", root, "ls-files", "-z"], stderr_to_stdout: true) do
+      {:ok, listing |> String.split(<<0>>, trim: true) |> Enum.map(&Path.join(root, &1))}
+    else
+      _ -> :error
+    end
+  end
+
+  defp walked_files(root) do
     root
     |> walk_directories()
     |> Enum.flat_map(fn dir ->
       dir
       |> File.ls!()
       |> Enum.map(&Path.join(dir, &1))
-      |> Enum.filter(fn path -> File.regular?(path) and not symlink?(path) and scanned_extension?(path) end)
     end)
   end
 

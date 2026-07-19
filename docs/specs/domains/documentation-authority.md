@@ -44,18 +44,23 @@ degradation — when any of the following holds:
 
 Validation is bounded and deterministic:
 
-- Nonstandard spec-like files — for example `*.spec.html` files or `adr`
-  directories outside `docs/specs/` and `docs/adr/` — produce warnings that
-  name the offending paths. They are never loaded as alternate authority.
+- Nonstandard spec-like files — for example `*.spec.html` files or nested
+  `spec`, `specs`, or `adr` directories outside `docs/specs/` and
+  `docs/adr/` — produce warnings that name the offending paths. They are
+  never loaded as alternate authority.
 - Active references are scanned for stale legacy authority paths. A
   reference to a top-level `spec`-or-`specs` path segment is stale unless
   the referencing line names the upstream `scaling-octo-engine` repository,
   whose own documentation migration is owned by that repository.
 - Relative links inside canonical authority documents must resolve to
-  existing files within the repository.
-- The scan reads only tracked source and documentation file types and
-  excludes build, dependency, and VCS directories. It does not follow
-  symlinks and does not consult any location outside the repository root.
+  existing files within the repository; a link that escapes the repository
+  root is rejected even when its target exists.
+- Stale-reference scanning covers only active surfaces: inside a Git work
+  tree, the tracked source, documentation, and metadata file types
+  (Markdown, Elixir sources, TOML, JSON, YAML). Outside a Git work tree it
+  falls back to a bounded directory walk that excludes build, dependency,
+  and VCS directories. It does not follow symlinks and does not consult any
+  location outside the repository root.
 
 ## Consumers
 

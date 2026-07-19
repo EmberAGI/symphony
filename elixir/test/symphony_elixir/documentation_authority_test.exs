@@ -114,6 +114,72 @@ defmodule SymphonyElixir.DocumentationAuthorityTest do
     assert result.errors == []
   end
 
+  test "an untracked stale reference in a git work tree is not an active surface" do
+    root = build_canonical_fixture()
+    git_init_and_commit!(root)
+    legacy_segment = Enum.join(["s", "pec"], "")
+
+    write_file(root, ["SCRATCH.md"], "See #{legacy_segment}/domains/thing.md for details.\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert result.errors == []
+  end
+
+  test "a tracked stale reference in a git work tree is rejected" do
+    root = build_canonical_fixture()
+    legacy_segment = Enum.join(["s", "pec"], "")
+
+    write_file(root, ["README.md"], "See #{legacy_segment}/domains/thing.md for details.\n")
+    git_init_and_commit!(root)
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "stale legacy documentation authority path"))
+    assert Enum.any?(result.errors, &String.contains?(&1, "README.md:1"))
+  end
+
+  test "stale references in TOML and JSON metadata files are rejected" do
+    root = build_canonical_fixture()
+    legacy_segment = Enum.join(["s", "pec"], "")
+
+    write_file(root, ["contract.toml"], ~s(contract_ref = "#{legacy_segment}/domains/thing.md"\n))
+    write_file(root, ["metadata.json"], ~s({"path": "#{legacy_segment}/domains/thing.md"}\n))
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "contract.toml:1"))
+    assert Enum.any?(result.errors, &String.contains?(&1, "metadata.json:1"))
+  end
+
+  test "a relative link that escapes the repository root is rejected even when the target exists" do
+    root = build_canonical_fixture()
+
+    outside_target = Path.join(Path.dirname(root), "#{Path.basename(root)}-escape-target.md")
+    File.write!(outside_target, "# Outside\n")
+    on_exit(fn -> File.rm_rf!(outside_target) end)
+
+    write_file(root, ["docs", "specs", "domains", "escaping.md"], """
+    See [outside](../../../../#{Path.basename(outside_target)}) for details.
+    """)
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "escapes the repository"))
+  end
+
+  test "a nested spec directory outside the canonical hierarchy produces a warning" do
+    root = build_canonical_fixture()
+    legacy_segment = Enum.join(["s", "pec"], "")
+
+    write_file(root, ["elixir", legacy_segment, "sample.md"], "# Sample\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert result.errors == []
+    assert Enum.any?(result.warnings, &String.contains?(&1, Path.join(["elixir", legacy_segment])))
+  end
+
   test "a broken relative link inside a canonical document is rejected" do
     root = build_canonical_fixture()
 
@@ -179,6 +245,27 @@ defmodule SymphonyElixir.DocumentationAuthorityTest do
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf!(dir) end)
     dir
+  end
+
+  defp git_init_and_commit!(root) do
+    git!(root, ["init", "-q"])
+    git!(root, ["add", "-A"])
+
+    git!(root, [
+      "-c",
+      "user.name=fixture",
+      "-c",
+      "user.email=fixture@example.com",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-qm",
+      "fixture"
+    ])
+  end
+
+  defp git!(root, args) do
+    {_output, 0} = System.cmd("git", args, cd: root, stderr_to_stdout: true)
   end
 
   defp write_file(root, segments, content) do
