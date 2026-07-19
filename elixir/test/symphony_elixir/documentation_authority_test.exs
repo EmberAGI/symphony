@@ -79,6 +79,54 @@ defmodule SymphonyElixir.DocumentationAuthorityTest do
     assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/index.md is a symlink"))
   end
 
+  test "an alternate symlink pointing into the canonical hierarchy is rejected" do
+    root = build_canonical_fixture()
+
+    File.ln_s!(Path.join([root, "docs", "specs"]), Path.join(root, "authority-alias"))
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "aliases canonical documentation authority"))
+    assert Enum.any?(result.errors, &String.contains?(&1, "authority-alias"))
+  end
+
+  test "a symlinked authority file beneath the canonical hierarchy is rejected" do
+    root = build_canonical_fixture()
+    target = Path.join([root, "docs", "specs", "domains", "sample.md"])
+    alias_path = Path.join([root, "docs", "specs", "domains", "sample-alias.md"])
+
+    File.ln_s!(target, alias_path)
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "sample-alias.md"))
+    assert Enum.any?(result.errors, &String.contains?(&1, "symlink"))
+  end
+
+  test "a symlinked ancestor of the canonical hierarchy is rejected" do
+    root = build_canonical_fixture()
+    docs = Path.join(root, "docs")
+    real_docs = Path.join(root, "real-docs")
+
+    File.rename!(docs, real_docs)
+    File.ln_s!(real_docs, docs)
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "docs is a symlink"))
+  end
+
+  test "a symlink unrelated to canonical authority is allowed" do
+    root = build_canonical_fixture()
+
+    write_file(root, ["assets", "source.txt"], "source\n")
+    File.ln_s!(Path.join([root, "assets", "source.txt"]), Path.join(root, "source-alias.txt"))
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    refute Enum.any?(result.errors, &String.contains?(&1, "source-alias.txt"))
+  end
+
   test "stale active references to a legacy authority path are rejected" do
     root = build_canonical_fixture()
     legacy_segment = Enum.join(["s", "pec"], "")

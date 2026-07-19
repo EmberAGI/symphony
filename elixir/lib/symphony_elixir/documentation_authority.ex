@@ -82,16 +82,58 @@ defmodule SymphonyElixir.DocumentationAuthority do
   end
 
   defp symlink_errors(root) do
-    canonical_paths = [
-      {Path.join([root, "docs", "specs"]), "docs/specs"},
-      {Path.join([root, "docs", "specs", "index.md"]), "docs/specs/index.md"},
-      {Path.join([root, "docs", "specs", "domains"]), "docs/specs/domains"},
-      {Path.join([root, "docs", "adr"]), "docs/adr"}
-    ]
+    canonical_paths = [Path.join([root, "docs", "specs"]), Path.join([root, "docs", "adr"])]
 
-    for {path, label} <- canonical_paths, symlink?(path) do
-      "#{label} is a symlink, which is not permitted for canonical documentation authority"
+    physical_canonical_paths =
+      Enum.flat_map(canonical_paths, fn path ->
+        case resolve_physical_path(path) do
+          {:ok, resolved} -> [resolved]
+          {:error, _reason} -> []
+        end
+      end)
+
+    root
+    |> repository_symlinks()
+    |> Enum.flat_map(fn path ->
+      cond do
+        overlaps_any?(path, canonical_paths) ->
+          [
+            "#{relative_path(path, root)} is a symlink, which is not permitted for canonical documentation authority"
+          ]
+
+        resolves_into_any?(path, physical_canonical_paths) ->
+          [
+            "#{relative_path(path, root)} aliases canonical documentation authority, which is not permitted"
+          ]
+
+        true ->
+          []
+      end
+    end)
+  end
+
+  defp resolves_into_any?(path, canonical_paths) do
+    case resolve_physical_path(path) do
+      {:ok, resolved} -> overlaps_any?(resolved, canonical_paths)
+      {:error, _reason} -> false
     end
+  end
+
+  defp repository_symlinks(root) do
+    root
+    |> walk_directories()
+    |> Enum.flat_map(fn dir ->
+      dir
+      |> File.ls!()
+      |> Enum.map(&Path.join(dir, &1))
+    end)
+    |> Enum.filter(&symlink?/1)
+  end
+
+  defp overlaps_any?(path, canonical_paths) do
+    Enum.any?(canonical_paths, fn canonical_path ->
+      inside_root?(path, canonical_path) or inside_root?(canonical_path, path)
+    end)
   end
 
   defp symlink?(path) do
@@ -225,43 +267,43 @@ defmodule SymphonyElixir.DocumentationAuthority do
     |> Path.expand()
     |> Path.split()
     |> Enum.reject(&(&1 == "/"))
-    |> resolve_physical_segments("/", [])
+    |> resolve_physical_segments("/", 0)
   end
 
-  defp resolve_physical_segments([], resolved, _seen), do: {:ok, resolved}
+  defp resolve_physical_segments([], resolved, _symlink_hops), do: {:ok, resolved}
 
-  defp resolve_physical_segments([segment | rest], resolved, seen) do
+  defp resolve_physical_segments([segment | rest], resolved, symlink_hops) do
     candidate = Path.join(resolved, segment)
 
     case File.lstat(candidate) do
       {:ok, %File.Stat{type: :symlink}} ->
-        resolve_symlink(candidate, rest, seen)
+        resolve_symlink(candidate, rest, symlink_hops)
 
       {:ok, _stat} ->
-        resolve_physical_segments(rest, candidate, seen)
+        resolve_physical_segments(rest, candidate, symlink_hops)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp resolve_symlink(candidate, rest, seen) do
-    if candidate in seen do
-      {:error, :eloop}
-    else
-      with {:ok, target} <- File.read_link(candidate) do
-        target_segments =
-          target
-          |> Path.expand(Path.dirname(candidate))
-          |> Path.split()
-          |> Enum.reject(&(&1 == "/"))
+  defp resolve_symlink(_candidate, _rest, symlink_hops) when symlink_hops >= 64 do
+    {:error, :eloop}
+  end
 
-        resolve_physical_segments(
-          target_segments ++ rest,
-          "/",
-          [candidate | seen]
-        )
-      end
+  defp resolve_symlink(candidate, rest, symlink_hops) do
+    with {:ok, target} <- File.read_link(candidate) do
+      target_segments =
+        target
+        |> Path.expand(Path.dirname(candidate))
+        |> Path.split()
+        |> Enum.reject(&(&1 == "/"))
+
+      resolve_physical_segments(
+        target_segments ++ rest,
+        "/",
+        symlink_hops + 1
+      )
     end
   end
 

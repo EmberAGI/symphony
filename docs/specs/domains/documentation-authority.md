@@ -37,8 +37,10 @@ degradation — when any of the following holds:
   including as a symlink or an empty directory. A legacy-only hierarchy is
   not a fallback authority; a legacy tree next to the canonical one is a
   duplicate authority. Both are rejected.
-- Any canonical authority path is a symlink. Aliasing the canonical
-  hierarchy from or to another path is rejected.
+- Any canonical authority path, ancestor, or contained authority entry is a
+  symlink. Aliasing the canonical hierarchy from or to another path is
+  rejected, while symlinks unrelated to canonical authority remain outside
+  this invariant.
 
 ## Bounded validation
 
