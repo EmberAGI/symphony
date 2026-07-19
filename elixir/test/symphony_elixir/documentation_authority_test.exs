@@ -1,0 +1,189 @@
+defmodule SymphonyElixir.DocumentationAuthorityTest do
+  use ExUnit.Case, async: true
+
+  alias SymphonyElixir.DocumentationAuthority
+
+  test "canonical fixture repository reports no errors or warnings" do
+    root = build_canonical_fixture()
+
+    assert DocumentationAuthority.inspect_repository(root) == %{errors: [], warnings: []}
+    assert DocumentationAuthority.validate!(root) == {:ok, []}
+  end
+
+  test "the real repository root passes validation" do
+    root = repo_root()
+
+    assert {:ok, _warnings} = DocumentationAuthority.validate!(root)
+  end
+
+  test "missing hierarchy reports errors for each absent canonical path" do
+    root = create_tmp_dir()
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/index.md"))
+    assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/domains"))
+    assert Enum.any?(result.errors, &String.contains?(&1, "docs/adr"))
+
+    assert_raise RuntimeError, fn -> DocumentationAuthority.validate!(root) end
+  end
+
+  test "legacy-only hierarchy is rejected" do
+    root = create_tmp_dir()
+    legacy_segment = Enum.join(["s", "pec"], "")
+
+    write_file(root, [legacy_segment, "index.md"], "# Legacy index\n")
+    write_file(root, [legacy_segment, "domains", "sample.md"], "# Sample\n")
+    write_file(root, [legacy_segment, "adr", "0001-sample.md"], "# ADR\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "legacy documentation authority hierarchy"))
+    assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/index.md"))
+  end
+
+  test "a legacy hierarchy alongside the canonical one is rejected as a duplicate authority" do
+    root = build_canonical_fixture()
+    legacy_segment = Enum.join(["s", "pecs"], "")
+
+    write_file(root, [legacy_segment, "index.md"], "# Duplicate index\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "legacy documentation authority hierarchy"))
+  end
+
+  test "a symlinked canonical directory is rejected as an alias" do
+    root = build_canonical_fixture()
+
+    real_domains = Path.join([root, "docs", "specs", "domains"])
+    alias_target = Path.join([root, "docs", "specs", "domains-alias"])
+    File.rename!(real_domains, alias_target)
+    File.ln_s!(alias_target, real_domains)
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/domains is a symlink"))
+  end
+
+  test "a symlinked canonical file is rejected as an alias" do
+    root = build_canonical_fixture()
+
+    real_index = Path.join([root, "docs", "specs", "index.md"])
+    alias_target = Path.join([root, "docs", "specs", "index-alias.md"])
+    File.rename!(real_index, alias_target)
+    File.ln_s!(alias_target, real_index)
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/index.md is a symlink"))
+  end
+
+  test "stale active references to a legacy authority path are rejected" do
+    root = build_canonical_fixture()
+    legacy_segment = Enum.join(["s", "pec"], "")
+
+    write_file(root, ["README.md"], "See #{legacy_segment}/domains/thing.md for details.\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "stale legacy documentation authority path"))
+    assert Enum.any?(result.errors, &String.contains?(&1, "README.md:1"))
+  end
+
+  test "a stale relative link to a legacy authority path is rejected" do
+    root = build_canonical_fixture()
+    legacy_segment = Enum.join(["s", "pec"], "")
+
+    write_file(root, ["elixir", "README.md"], "Start with [the index](../#{legacy_segment}/index.md).\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "stale legacy documentation authority path"))
+  end
+
+  test "a stale-looking reference is allowed when the line names the upstream repository" do
+    root = build_canonical_fixture()
+    legacy_segment = Enum.join(["s", "pec"], "")
+    upstream = Enum.join(["scaling", "-", "octo", "-", "engine"], "")
+
+    write_file(root, ["README.md"], "The #{upstream} repository still uses #{legacy_segment}/domains/thing.md.\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert result.errors == []
+  end
+
+  test "a broken relative link inside a canonical document is rejected" do
+    root = build_canonical_fixture()
+
+    write_file(root, ["docs", "specs", "domains", "broken.md"], "See [missing](./nowhere.md) for details.\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "broken relative link"))
+    assert Enum.any?(result.errors, &String.contains?(&1, "nowhere.md"))
+  end
+
+  test "relative links that resolve, plus http/mailto/anchor/absolute links, are accepted" do
+    root = build_canonical_fixture()
+
+    write_file(root, ["docs", "specs", "domains", "other.md"], "# Other\n")
+
+    write_file(root, ["docs", "specs", "domains", "linking.md"], """
+    # Linking
+
+    - [sibling](./other.md)
+    - [external](https://example.com/thing)
+    - [mail](mailto:someone@example.com)
+    - [anchor](#section)
+    - [absolute](/etc/hosts)
+    """)
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert result.errors == []
+  end
+
+  test "nonstandard spec-like files and directories outside the canonical hierarchy produce warnings" do
+    root = build_canonical_fixture()
+
+    write_file(root, ["lib", "widgets", "widget.spec.html"], "<html></html>\n")
+    write_file(root, ["lib", "widgets", "adr", "note.md"], "# Note\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert result.errors == []
+    assert Enum.any?(result.warnings, &String.contains?(&1, "widget.spec.html"))
+    assert Enum.any?(result.warnings, &String.contains?(&1, Path.join(["lib", "widgets", "adr"])))
+  end
+
+  defp build_canonical_fixture do
+    root = create_tmp_dir()
+
+    write_file(root, ["docs", "specs", "index.md"], "# Spec Index\n")
+    write_file(root, ["docs", "specs", "domains", "sample.md"], "# Sample\n")
+    write_file(root, ["docs", "adr", "0001-sample.md"], "# ADR\n")
+
+    root
+  end
+
+  defp repo_root do
+    Path.expand(Path.join([File.cwd!(), ".."]))
+  end
+
+  defp create_tmp_dir do
+    unique = :erlang.unique_integer([:positive, :monotonic])
+    dir = Path.join(System.tmp_dir!(), "documentation-authority-test-#{unique}")
+    File.rm_rf!(dir)
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf!(dir) end)
+    dir
+  end
+
+  defp write_file(root, segments, content) do
+    path = Path.join([root | segments])
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, content)
+  end
+end
