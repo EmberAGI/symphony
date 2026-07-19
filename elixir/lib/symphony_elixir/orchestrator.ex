@@ -326,7 +326,27 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, state}
   end
 
+  # Config.settings!/0 raise sites inside the dispatch path (state-set reads,
+  # tracker fetch, agent dispatch) can observe a WORKFLOW.md rewritten into an
+  # invalid state after this cycle's own validation passed. That transient
+  # invalidity skips the cycle visibly instead of terminating the
+  # orchestrator: a raise here crash-loops the GenServer until the root
+  # supervisor gives up and stops the whole application.
   defp maybe_dispatch(%State{} = state) do
+    dispatch_candidates(state)
+  rescue
+    error in ArgumentError ->
+      message = Exception.message(error)
+
+      if String.starts_with?(message, "Invalid WORKFLOW.md config:") do
+        Logger.error("Skipping poll dispatch cycle; #{message}")
+        record_dispatch_summary(state, candidate_fetch_failure_summary(:invalid_workflow_config))
+      else
+        reraise error, __STACKTRACE__
+      end
+  end
+
+  defp dispatch_candidates(%State{} = state) do
     RoleTurnRecovery.recover_pending_turns(active_state_set(), terminal_state_set(), Map.keys(state.running))
     state = reconcile_running_issues(state)
     state = reconcile_orphaned_claims(state)
@@ -2607,14 +2627,23 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_session_completion_totals(state, _running_entry), do: state
 
+  # Keeps the last-known-good runtime values when WORKFLOW.md is transiently
+  # invalid (an operator or test rewriting the file between validations).
+  # Visibility for the invalid state is owned by the WorkflowStore reload log
+  # and the skipped poll-cycle error; raising here would crash-loop the
+  # orchestrator until the root supervisor stops the whole application.
   defp refresh_runtime_config(%State{} = state) do
-    config = Config.settings!()
+    case Config.settings() do
+      {:ok, config} ->
+        %{
+          state
+          | poll_interval_ms: config.polling.interval_ms,
+            max_concurrent_agents: config.agent.max_concurrent_agents
+        }
 
-    %{
-      state
-      | poll_interval_ms: config.polling.interval_ms,
-        max_concurrent_agents: config.agent.max_concurrent_agents
-    }
+      {:error, _reason} ->
+        state
+    end
   end
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do

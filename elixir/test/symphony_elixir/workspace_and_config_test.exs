@@ -1197,6 +1197,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       codex_turn_timeout_ms: nil,
       codex_read_timeout_ms: nil,
       codex_stall_timeout_ms: nil,
+      tracker_endpoint: nil,
       tracker_api_token: nil,
       tracker_project_slug: nil
     )

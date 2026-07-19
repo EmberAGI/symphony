@@ -160,11 +160,8 @@ defmodule SymphonyElixir.ImplementationEffort do
   def valid_labels?(%Issue{} = issue), do: match?({:ok, _profile}, profile_for_issue(issue, nil))
   def valid_labels?(_issue), do: true
 
-  defp resolve(catalog, name, provider, tier, source) do
-    with {:ok, profile} <- AgentProfileCatalog.resolve(catalog, name, provider, tier, source) do
-      {:ok, Map.put(profile, :no_thinking, false)}
-    end
-  end
+  defp resolve(catalog, name, provider, tier, source),
+    do: AgentProfileCatalog.resolve(catalog, name, provider, tier, source)
 
   defp resolve_worker(catalog, "implementer", provider, tier, source),
     do: resolve(catalog, "implementer-worker", provider, tier, source)

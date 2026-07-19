@@ -653,6 +653,10 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     end
   end
 
+  # Late-detached descendant detection reads /proc, which only exists on the
+  # Linux role hosts that run production dispatch. On other supported dev
+  # platforms the read fails and detection degrades gracefully to the
+  # pid/pgid liveness checks above.
   defp process_env(pid) when is_integer(pid) and pid > 0 do
     path = Path.join(["/proc", Integer.to_string(pid), "environ"])
 

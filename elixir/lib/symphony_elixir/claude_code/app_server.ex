@@ -25,8 +25,15 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     selects the reasoning effort.
   - No-thinking is the verified env invocation `MAX_THINKING_TOKENS=0`, the
     Claude-Code CLI equivalent of the API-level `thinking: {type: "disabled"}`.
-    (Fable 5 cannot disable thinking; that combination is rejected at config
-    validation in `SymphonyElixir.Config.Schema.ClaudeCode`.)
+    (Fable 5 cannot disable thinking; the config-model combination is rejected
+    at config validation in `SymphonyElixir.Config.Schema.ClaudeCode`, and a
+    catalog row that resolves a Fable model while the config declares
+    no-thinking fails closed here at launch.)
+
+  The adapter launches the exact model and effort selected by the resolved
+  implementation-effort profile (agent-runtime spec). Fable unavailability is
+  a provider failure surfaced by the `claude` CLI, never permission for an
+  adapter-side substitution.
 
   Authentication uses operator-managed Claude subscription OAuth that lives on
   the role host (ADR 0002). This adapter never provisions, reads, or logs an
@@ -45,11 +52,8 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   # an HTTP auth status. Both paths must fail closed.
   @auth_error_statuses [401, 403]
 
-  @fable_fallback_model "claude-opus-4-8"
-  @fable_fallback_effort "high"
-  @fable_fallback_reason "fable_unavailable"
-
   @no_thinking_env "MAX_THINKING_TOKENS"
+
   @local_provider_auth_env_names ~w(CLAUDE_CODE_OAUTH_TOKEN)
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
@@ -207,11 +211,15 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   @spec launch_command_for_test(Issue.t() | nil, String.t() | nil) :: {:ok, map()} | {:error, term()}
   def launch_command_for_test(issue \\ nil, role \\ nil), do: launch_config(issue, role)
 
+  # The catalog validates a non-empty model and reasoning effort for every
+  # tier cell, so the resolved profile always carries both, and the adapter
+  # launches them exactly (agent-runtime spec: Fable unavailability is a
+  # provider failure, never permission for an adapter-side substitution).
   defp launch_config(issue, role) do
     with {:ok, settings} <- Config.settings(),
-         {:ok, profile} <- ImplementationEffort.profile_for_issue("claude_code", issue, role) do
+         {:ok, profile} <- ImplementationEffort.profile_for_issue("claude_code", issue, role),
+         {:ok, no_thinking} <- resolve_no_thinking(profile.model, settings.claude_code.no_thinking) do
       claude = settings.claude_code
-      {model, effort, no_thinking, fallback_metadata} = resolve_fallback(profile, claude)
 
       env =
         []
@@ -220,43 +228,39 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
       {:ok,
        %{
          base_command: claude.command,
-         model: model,
-         effort: effort,
+         model: profile.model,
+         effort: profile.reasoning_effort,
          no_thinking: no_thinking,
          instructions: profile.instructions,
          permission_mode: claude.permission_mode,
          env: env,
          timeout_ms: claude.turn_timeout_ms,
-         metadata:
-           %{
-             implementation_effort: profile.effort,
-             implementation_effort_source: profile.source,
-             claude_model: model,
-             claude_effort: effort,
-             claude_no_thinking: no_thinking
-           }
-           |> Map.merge(fallback_metadata)
+         metadata: %{
+           implementation_effort: profile.effort,
+           implementation_effort_source: profile.source,
+           claude_model: profile.model,
+           claude_effort: profile.reasoning_effort,
+           claude_no_thinking: no_thinking
+         }
        }}
     end
   end
 
-  defp resolve_fallback(profile, claude) do
-    preferred_model = profile.model || claude.model
-    preferred_effort = profile.reasoning_effort
-    preferred_no_thinking = profile.no_thinking
-
-    if fable_model?(preferred_model) do
-      {@fable_fallback_model, @fable_fallback_effort, false,
-       %{
-         claude_preferred_model: preferred_model,
-         claude_preferred_effort: preferred_effort,
-         claude_preferred_no_thinking: preferred_no_thinking,
-         claude_fallback_reason: @fable_fallback_reason
-       }}
+  # The config-declared `no_thinking` flag is the no-thinking source of truth
+  # (agent-runtime spec); catalog rows carry no such dimension. Fable cannot
+  # disable thinking: the config-model combination is rejected at config
+  # validation, but a catalog row resolving a Fable model is only known here,
+  # so it fails closed as a visible launch error instead of silently dropping
+  # either the selected model or the declared no-thinking invocation.
+  defp resolve_no_thinking(model, true) do
+    if fable_model?(model) do
+      {:error, {:no_thinking_unsupported, model}}
     else
-      {preferred_model, preferred_effort, preferred_no_thinking, %{}}
+      {:ok, true}
     end
   end
+
+  defp resolve_no_thinking(_model, false), do: {:ok, false}
 
   defp fable_model?(model) when is_binary(model) do
     normalized =
@@ -267,10 +271,8 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     normalized == "fable" or String.contains?(normalized, "claude-fable-")
   end
 
-  defp fable_model?(_model), do: false
-
   defp maybe_put_no_thinking_env(env, true), do: [{@no_thinking_env, "0"} | env]
-  defp maybe_put_no_thinking_env(env, _false), do: env
+  defp maybe_put_no_thinking_env(env, false), do: env
 
   defp local_provider_auth_env(nil) do
     Enum.flat_map(@local_provider_auth_env_names, &local_provider_auth_env_value/1)

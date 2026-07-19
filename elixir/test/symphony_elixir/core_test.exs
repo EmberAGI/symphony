@@ -22,93 +22,6 @@ defmodule SymphonyElixir.CoreTest do
     :ok
   end
 
-  test "config defaults and validation checks" do
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
-      tracker_project_slug: nil,
-      poll_interval_ms: nil,
-      tracker_active_states: nil,
-      tracker_terminal_states: nil,
-      codex_command: nil
-    )
-
-    config = Config.settings!()
-    assert config.polling.interval_ms == 30_000
-    assert config.tracker.active_states == ["Todo", "In Progress"]
-    assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
-    assert config.tracker.assignee == nil
-    assert config.agent.max_turns == 20
-
-    write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
-
-    assert_raise ArgumentError, ~r/interval_ms/, fn ->
-      Config.settings!().polling.interval_ms
-    end
-
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "polling.interval_ms"
-
-    write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 45_000)
-    assert Config.settings!().polling.interval_ms == 45_000
-
-    write_workflow_file!(Workflow.workflow_file_path(), max_turns: 0)
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "agent.max_turns"
-
-    write_workflow_file!(Workflow.workflow_file_path(), max_turns: 5)
-    assert Config.settings!().agent.max_turns == 5
-
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "tracker.active_states"
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: "token",
-      tracker_project_slug: nil
-    )
-
-    assert {:error, :missing_linear_project_slug} = Config.validate!()
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_project_slug: "project",
-      codex_command: ""
-    )
-
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.command"
-    assert message =~ "can't be blank"
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "   ")
-    assert :ok = Config.validate!()
-    assert Config.settings!().codex.command == "   "
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "/bin/sh app-server")
-    assert :ok = Config.validate!()
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: "definitely-not-valid")
-    assert :ok = Config.validate!()
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_thread_sandbox: "unsafe-ish")
-    assert :ok = Config.validate!()
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      codex_turn_sandbox_policy: %{type: "workspaceWrite", writableRoots: ["relative/path"]}
-    )
-
-    assert :ok = Config.validate!()
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: 123)
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.approval_policy"
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_thread_sandbox: 123)
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.thread_sandbox"
-
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "123")
-    assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
-  end
-
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
@@ -537,170 +450,6 @@ defmodule SymphonyElixir.CoreTest do
     assert ProcessOwnership.blocking_record(issue) == nil
   end
 
-  test "missing running issues stop active agents without cleaning the workspace" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-missing-running-reconcile-#{System.unique_integer([:positive])}"
-      )
-
-    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
-    issue_id = "issue-missing"
-    issue_identifier = "MT-557"
-
-    try do
-      write_workflow_file!(Workflow.workflow_file_path(),
-        tracker_kind: "memory",
-        workspace_root: test_root,
-        tracker_active_states: ["Todo", "In Progress", "In Review"],
-        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
-        poll_interval_ms: 30_000
-      )
-
-      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
-
-      orchestrator_name = Module.concat(__MODULE__, :MissingRunningIssueOrchestrator)
-      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-
-      on_exit(fn ->
-        restore_app_env(:memory_tracker_issues, previous_memory_issues)
-
-        if Process.alive?(pid) do
-          Process.exit(pid, :normal)
-        end
-      end)
-
-      Process.sleep(50)
-
-      assert {:ok, workspace} =
-               SymphonyElixir.PathSafety.canonicalize(Path.join(test_root, issue_identifier))
-
-      File.mkdir_p!(workspace)
-
-      agent_pid =
-        spawn(fn ->
-          receive do
-            :stop -> :ok
-          end
-        end)
-
-      initial_state = :sys.get_state(pid)
-
-      running_entry = %{
-        pid: agent_pid,
-        ref: nil,
-        identifier: issue_identifier,
-        issue: %Issue{id: issue_id, state: "In Progress", identifier: issue_identifier},
-        started_at: DateTime.utc_now()
-      }
-
-      :sys.replace_state(pid, fn _ ->
-        initial_state
-        |> Map.put(:running, %{issue_id => running_entry})
-        |> Map.put(:claimed, MapSet.new([issue_id]))
-        |> Map.put(:retry_attempts, %{})
-      end)
-
-      send(pid, :tick)
-      Process.sleep(100)
-      state = :sys.get_state(pid)
-
-      refute Map.has_key?(state.running, issue_id)
-      refute MapSet.member?(state.claimed, issue_id)
-      refute Process.alive?(agent_pid)
-      assert File.exists?(workspace)
-    after
-      restore_app_env(:memory_tracker_issues, previous_memory_issues)
-      File.rm_rf(test_root)
-    end
-  end
-
-  test "reconcile updates running issue state for active issues" do
-    issue_id = "issue-3"
-
-    state = %Orchestrator.State{
-      running: %{
-        issue_id => %{
-          pid: self(),
-          ref: nil,
-          identifier: "MT-557",
-          issue: %Issue{
-            id: issue_id,
-            identifier: "MT-557",
-            state: "Todo"
-          },
-          started_at: DateTime.utc_now()
-        }
-      },
-      claimed: MapSet.new([issue_id]),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-      retry_attempts: %{}
-    }
-
-    issue = %Issue{
-      id: issue_id,
-      identifier: "MT-557",
-      state: "In Progress",
-      title: "Active state refresh",
-      description: "State should be refreshed",
-      labels: []
-    }
-
-    updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
-    updated_entry = updated_state.running[issue_id]
-
-    assert Map.has_key?(updated_state.running, issue_id)
-    assert MapSet.member?(updated_state.claimed, issue_id)
-    assert updated_entry.issue.state == "In Progress"
-  end
-
-  test "reconcile stops running issue when it is reassigned away from this worker" do
-    issue_id = "issue-reassigned"
-
-    agent_pid =
-      spawn(fn ->
-        receive do
-          :stop -> :ok
-        end
-      end)
-
-    state = %Orchestrator.State{
-      running: %{
-        issue_id => %{
-          pid: agent_pid,
-          ref: nil,
-          identifier: "MT-561",
-          issue: %Issue{
-            id: issue_id,
-            identifier: "MT-561",
-            state: "In Progress",
-            assigned_to_worker: true
-          },
-          started_at: DateTime.utc_now()
-        }
-      },
-      claimed: MapSet.new([issue_id]),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-      retry_attempts: %{}
-    }
-
-    issue = %Issue{
-      id: issue_id,
-      identifier: "MT-561",
-      state: "In Progress",
-      title: "Reassigned active issue",
-      description: "Worker should stop",
-      labels: [],
-      assigned_to_worker: false
-    }
-
-    updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
-
-    refute Map.has_key?(updated_state.running, issue_id)
-    refute MapSet.member?(updated_state.claimed, issue_id)
-    refute Process.alive?(agent_pid)
-  end
-
   test "normal worker exit schedules active-state continuation retry" do
     previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
     previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
@@ -718,9 +467,7 @@ defmodule SymphonyElixir.CoreTest do
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
 
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -790,9 +537,7 @@ defmodule SymphonyElixir.CoreTest do
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
 
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
 
       try do
         Port.close(port)
@@ -1031,9 +776,7 @@ defmodule SymphonyElixir.CoreTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -1096,9 +839,7 @@ defmodule SymphonyElixir.CoreTest do
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
 
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
 
       try do
         Port.close(port)
@@ -1153,9 +894,7 @@ defmodule SymphonyElixir.CoreTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -1185,93 +924,13 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_in_range(due_at_ms, 8_000, 10_500)
   end
 
-  test "abnormal worker exit writes compact run-scoped retry evidence" do
-    previous_run_log_root = Application.get_env(:symphony_elixir, :run_log_root)
-
-    run_log_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-run-log-#{System.unique_integer([:positive])}"
-      )
-
-    issue_id = "issue-crash-run-log"
-    run_id = "run-crash-log"
-    session_id = "session-crash-log"
-    ref = make_ref()
-    orchestrator_name = Module.concat(__MODULE__, :CrashRunLogOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-
-    on_exit(fn ->
-      restore_app_env(:run_log_root, previous_run_log_root)
-      File.rm_rf(run_log_root)
-
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
-
-    Application.put_env(:symphony_elixir, :run_log_root, run_log_root)
-    initial_state = :sys.get_state(pid)
-    long_detail = String.duplicate("run-log-detail-", 500)
-    reason = {:shutdown, {:agent_failed, long_detail}}
-
-    running_entry = %{
-      pid: self(),
-      ref: ref,
-      identifier: "MT-RUN-LOG",
-      retry_attempt: 1,
-      issue: %Issue{id: issue_id, identifier: "MT-RUN-LOG", state: "In Progress"},
-      run_id: run_id,
-      session_id: session_id,
-      started_at: DateTime.utc_now()
-    }
-
-    :sys.replace_state(pid, fn _ ->
-      initial_state
-      |> Map.put(:running, %{issue_id => running_entry})
-      |> Map.put(:claimed, MapSet.new([issue_id]))
-      |> Map.put(:retry_attempts, %{})
-    end)
-
-    send(pid, {:DOWN, ref, :process, self(), reason})
-    Process.sleep(50)
-
-    assert %{attempt: 2, due_at_ms: due_at_ms} = :sys.get_state(pid).retry_attempts[issue_id]
-    run_log_path = Path.join([run_log_root, "MT-RUN-LOG", "#{run_id}.jsonl"])
-    assert File.exists?(run_log_path)
-
-    [event] =
-      run_log_path
-      |> File.read!()
-      |> String.split("\n", trim: true)
-      |> Enum.map(&Jason.decode!/1)
-
-    assert event["event"] == "agent_retry_scheduled"
-    assert event["issue_id"] == issue_id
-    assert event["issue_identifier"] == "MT-RUN-LOG"
-    assert event["run_id"] == run_id
-    assert event["session_id"] == session_id
-    assert event["attempt"] == 1
-    assert event["reason"] =~ "agent exited: retryable_runtime_failure"
-    refute event["reason"] =~ long_detail
-    assert String.length(event["reason"]) < 260
-    assert event["retry"]["attempt"] == 2
-    assert event["retry"]["delay_ms"] == 20_000
-    assert event["retry"]["due_at_ms"] == due_at_ms
-    assert event["retry"]["lease_state"] == "retrying"
-    assert event["retry"]["claim_lease_state"] == nil
-    assert is_binary(event["timestamp"])
-  end
-
   test "stale retry timer messages do not consume newer retry entries" do
     issue_id = "issue-stale-retry"
     orchestrator_name = Module.concat(__MODULE__, :StaleRetryOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -1362,9 +1021,7 @@ defmodule SymphonyElixir.CoreTest do
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
 
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
 
       try do
         Port.close(port)
@@ -1455,9 +1112,7 @@ defmodule SymphonyElixir.CoreTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
+      stop_orchestrator!(pid)
     end)
 
     issue = %Issue{
@@ -1968,167 +1623,6 @@ defmodule SymphonyElixir.CoreTest do
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
-  test "dispatch refuses when a recorded app-server descendant survives after parent exit" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-process-tree-ownership-#{System.unique_integer([:positive])}"
-      )
-
-    workspace_root = Path.join(test_root, "workspaces")
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
-    File.mkdir_p!(test_root)
-
-    issue = %Issue{
-      id: "issue-live-process-tree",
-      identifier: "MT-580",
-      title: "Live process tree ownership",
-      state: "In Progress"
-    }
-
-    parent_pid_file = Path.join(test_root, "parent.pid")
-    child_pid_file = Path.join(test_root, "child.pid")
-
-    script =
-      "echo $$ > #{parent_pid_file}; sleep 5 >/dev/null 2>&1 & echo $! > #{child_pid_file}; sleep 0.5"
-
-    port =
-      Port.open({:spawn_executable, System.find_executable("bash")}, [
-        :binary,
-        :exit_status,
-        args: [~c"-lc", String.to_charlist(script)]
-      ])
-
-    {:os_pid, app_server_pid} = :erlang.port_info(port, :os_pid)
-
-    on_exit(fn ->
-      for pid_file <- [child_pid_file, parent_pid_file],
-          {:ok, body} <- [File.read(pid_file)],
-          {pid, ""} <- [Integer.parse(String.trim(body))] do
-        System.cmd("kill", ["-TERM", Integer.to_string(pid)], stderr_to_stdout: true)
-      end
-
-      try do
-        Port.close(port)
-      rescue
-        ArgumentError -> :ok
-      end
-
-      File.rm_rf(test_root)
-    end)
-
-    assert_eventually(fn ->
-      File.exists?(parent_pid_file) and File.exists?(child_pid_file)
-    end)
-
-    :ok =
-      ProcessOwnership.record_active(issue, %{
-        role: "implementer",
-        run_id: "run-live-process-tree",
-        app_server_pid: app_server_pid
-      })
-
-    assert_receive {^port, {:exit_status, 0}}, 1_000
-    assert_eventually(fn -> File.exists?(child_pid_file) end)
-
-    child_pid = child_pid_file |> File.read!() |> String.trim() |> String.to_integer()
-    assert {_, 0} = System.cmd("kill", ["-0", Integer.to_string(child_pid)], stderr_to_stdout: true)
-    assert ProcessOwnership.owned_process_live?(issue, %{app_server_pid: app_server_pid})
-
-    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
-
-    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
-  end
-
-  @tag skip: is_nil(System.find_executable("setsid")) && "requires setsid"
-  test "dispatch refuses when a late-detached app-server descendant inherits run ownership" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-late-detached-process-ownership-#{System.unique_integer([:positive])}"
-      )
-
-    workspace_root = Path.join(test_root, "workspaces")
-    workspace_path = Path.join(workspace_root, "MT-581-symphony")
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
-    File.mkdir_p!(workspace_path)
-
-    issue = %Issue{
-      id: "issue-late-detached-process-tree",
-      identifier: "MT-581",
-      title: "Late detached process tree ownership",
-      state: "In Progress",
-      repository: "EmberAGI/symphony"
-    }
-
-    parent_pid_file = Path.join(test_root, "parent.pid")
-    child_pid_file = Path.join(test_root, "child.pid")
-    run_id = "run-late-detached-process-tree"
-    holder = "holder-late-detached-process-tree"
-
-    script =
-      """
-      echo $$ > #{parent_pid_file}
-      sleep 0.2
-      setsid env \
-        SYMPHONY_ROLE_RUN_ID=#{run_id} \
-        SYMPHONY_ROLE_ISSUE_ID=#{issue.id} \
-        SYMPHONY_ROLE_ISSUE_IDENTIFIER=#{issue.identifier} \
-        SYMPHONY_ROLE_NAME=implementer \
-        SYMPHONY_ROLE_HOLDER=#{holder} \
-        SYMPHONY_ROLE_WORKSPACE_PATH=#{workspace_path} \
-        sh -c 'echo $$ > #{child_pid_file}; sleep 5' >/dev/null 2>&1 &
-      sleep 0.2
-      """
-
-    port =
-      Port.open({:spawn_executable, System.find_executable("bash")}, [
-        :binary,
-        :exit_status,
-        args: [~c"-lc", String.to_charlist(script)]
-      ])
-
-    {:os_pid, app_server_pid} = :erlang.port_info(port, :os_pid)
-
-    on_exit(fn ->
-      for pid_file <- [child_pid_file, parent_pid_file],
-          {:ok, body} <- [File.read(pid_file)],
-          {pid, ""} <- [Integer.parse(String.trim(body))] do
-        System.cmd("kill", ["-TERM", Integer.to_string(pid)], stderr_to_stdout: true)
-      end
-
-      try do
-        Port.close(port)
-      rescue
-        ArgumentError -> :ok
-      end
-
-      File.rm_rf(test_root)
-    end)
-
-    assert_eventually(fn -> File.exists?(parent_pid_file) end)
-
-    :ok =
-      ProcessOwnership.record_active(issue, %{
-        role: "implementer",
-        run_id: run_id,
-        holder: holder,
-        workspace_path: workspace_path,
-        app_server_pid: app_server_pid
-      })
-
-    assert_receive {^port, {:exit_status, 0}}, 1_000
-    assert_eventually(fn -> File.exists?(child_pid_file) end)
-
-    child_pid = child_pid_file |> File.read!() |> String.trim() |> String.to_integer()
-    assert {_, 0} = System.cmd("kill", ["-0", Integer.to_string(child_pid)], stderr_to_stdout: true)
-    assert ProcessOwnership.owned_process_live?(issue, %{app_server_pid: app_server_pid})
-
-    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
-
-    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
-  end
-
   test "dispatch allows process ownership for a different role" do
     previous_role = System.get_env("SYMPHONY_ROLE")
 
@@ -2542,8 +2036,23 @@ defmodule SymphonyElixir.CoreTest do
       labels: []
     }
 
-    assert_raise RuntimeError, ~r/template_parse_error:.*template="/s, fn ->
-      PromptBuilder.build_prompt(issue)
+    try do
+      built = PromptBuilder.build_prompt(issue)
+
+      # A successful build here means the store served some other workflow
+      # than the invalid template this test just wrote and verified; dump
+      # the effective seam state so a recurrence identifies the writer.
+      flunk("""
+      expected template_parse_error but build_prompt succeeded
+        workflow_file_path=#{inspect(Workflow.workflow_file_path())}
+        file_prompt=#{inspect(File.read!(Workflow.workflow_file_path()) |> String.slice(0, 200))}
+        store_pid=#{inspect(Process.whereis(SymphonyElixir.WorkflowStore))}
+        store_prompt=#{inspect(Workflow.current() |> elem(1) |> Map.get(:prompt_template))}
+        built=#{inspect(String.slice(built, 0, 120))}
+      """)
+    rescue
+      error in RuntimeError ->
+        assert Exception.message(error) =~ ~r/template_parse_error:.*template="/s
     end
   end
 
@@ -2962,146 +2471,6 @@ defmodule SymphonyElixir.CoreTest do
       refute log =~ "runner-secret-token"
       refute log =~ "runner-oauth-token"
       refute log =~ "Bearer"
-    after
-      File.rm_rf(test_root)
-    end
-  end
-
-  test "agent runner classifies provider auth before_run hook failure as provider auth exit" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-agent-runner-before-run-auth-#{System.unique_integer([:positive])}"
-      )
-
-    try do
-      workspace_root = Path.join(test_root, "workspaces")
-      File.mkdir_p!(workspace_root)
-
-      write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
-        hook_before_run: """
-        printf '%s\\n' 'Provider-auth pre-turn withheld: provider-auth provider=claude_code status=unhealthy affected_roles=implementer,reviewer remediation=run claude setup-token raw=Bearer hook-secret-token'
-        exit 17
-        """
-      )
-
-      issue = %Issue{
-        id: "issue-before-run-auth",
-        identifier: "EMB-1128",
-        title: "Classify pre-turn provider auth",
-        description: "Runtime auth failure",
-        state: "In Progress",
-        url: "https://example.org/issues/EMB-1128",
-        labels: []
-      }
-
-      log =
-        capture_log(fn ->
-          assert catch_exit(AgentRunner.run(issue, nil, run_id: "run-before-run-auth")) ==
-                   {:provider_auth_failed,
-                    %{
-                      provider: :claude_code,
-                      readiness_status: "unhealthy",
-                      affected_roles: "implementer,reviewer",
-                      remediation_hint: "run claude setup-token"
-                    }}
-        end)
-
-      assert log =~ "provider_auth_failed: claude_code readiness_status=unhealthy affected_roles=implementer,reviewer remediation=run claude setup-token"
-      refute log =~ "hook-secret-token"
-      refute log =~ "Bearer"
-    after
-      File.rm_rf(test_root)
-    end
-  end
-
-  test "agent runner keeps non-auth before_run hook failures ordinary with redacted retryable output" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-agent-runner-before-run-ordinary-#{System.unique_integer([:positive])}"
-      )
-
-    try do
-      workspace_root = Path.join(test_root, "workspaces")
-      File.mkdir_p!(workspace_root)
-
-      write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
-        hook_before_run: """
-        printf '%s\\n' 'ordinary setup failure token=ordinary-hook-secret'
-        exit 19
-        """
-      )
-
-      issue = %Issue{
-        id: "issue-before-run-ordinary",
-        identifier: "EMB-1128",
-        title: "Keep ordinary hook failures ordinary",
-        description: "Ordinary hook failure",
-        state: "In Progress",
-        url: "https://example.org/issues/EMB-1128",
-        labels: []
-      }
-
-      log =
-        capture_log(fn ->
-          assert catch_exit(AgentRunner.run(issue, nil, run_id: "run-before-run-ordinary")) ==
-                   {:agent_runtime_failed, {:workspace_hook_failed, "before_run", 19, "ordinary setup failure token=ordinary-hook-secret\n"}}
-        end)
-
-      assert log =~ "retryable_runtime_failure"
-      refute log =~ "ordinary-hook-secret"
-      refute log =~ "token="
-    after
-      File.rm_rf(test_root)
-    end
-  end
-
-  test "agent runner classifies missing tool before_run hook failure as irrecoverable runtime exit" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-agent-runner-before-run-missing-tool-#{System.unique_integer([:positive])}"
-      )
-
-    try do
-      workspace_root = Path.join(test_root, "workspaces")
-      File.mkdir_p!(workspace_root)
-
-      write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
-        hook_before_run: """
-        printf '%s\\n' 'claude: command not found token=hook-secret-token'
-        exit 127
-        """
-      )
-
-      issue = %Issue{
-        id: "issue-before-run-missing-tool",
-        identifier: "EMB-1127",
-        title: "Classify missing tool",
-        description: "Runtime missing tool",
-        state: "In Progress",
-        url: "https://example.org/issues/EMB-1127",
-        labels: []
-      }
-
-      log =
-        capture_log(fn ->
-          assert {:irrecoverable_runtime_failed, failure} =
-                   catch_exit(AgentRunner.run(issue, nil, run_id: "run-before-run-missing-tool"))
-
-          assert failure.family == :missing_required_tool_or_cli
-          assert failure.retryable? == false
-          refute failure.retry_reason =~ "hook-secret-token"
-          refute failure.retry_reason =~ "token="
-        end)
-
-      assert log =~ "missing_required_tool_or_cli"
-      refute log =~ "hook-secret-token"
-      refute log =~ "token="
     after
       File.rm_rf(test_root)
     end

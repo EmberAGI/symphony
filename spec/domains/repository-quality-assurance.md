@@ -310,6 +310,88 @@ the TDD loop by pointing agents to repo-declared placement, task runner,
 affected-cache, validation, and output-control contracts, but test taxonomy and
 workflow activation must remain in the appropriate skill or role workflow.
 
+## Truthful Repository Gate
+
+`make all` is the repository acceptance Interface. A successful exit MUST mean
+that every command in the declared non-live gate completed successfully; the
+gate MUST NOT stay green through warning suppression, blanket coverage
+exclusions, or a waiver for pre-existing debt.
+
+The coverage command MUST enforce a documented, non-perfect aggregate
+threshold over the full production denominator. Perfect coverage of every
+hand-written production Module is explicitly not a pass condition, and no
+individual Module is required to be fully covered. `ignore_modules` MUST NOT
+exclude repository-owned business, orchestration, runtime, provider-Adapter,
+tracker, workspace, HTTP, presentation, or other executable production
+behavior; a compiler- or framework-generated Module MAY be excluded only when
+it contains no repository-authored executable behavior and the narrow
+exclusion is named and justified beside the coverage configuration. The
+enforced floor (currently 80% aggregate, measured ~82% at adoption) MAY rise
+when real coverage rises; it MUST NOT be met by shrinking the denominator,
+swapping in a selective Module set, or adding meaningless line-touch tests.
+
+Dialyzer MUST complete with zero warnings. Typespec, callback, and call-graph
+defects MUST be corrected at their owning Module or Interface; filters,
+nowarn annotations, and broad type weakening MUST NOT be used to make the gate
+appear green.
+
+Coverage and static-analysis repairs MUST be proved through public Interfaces
+and real Seams. Tests MUST NOT couple to private implementation structure,
+duplicate production policy in test helpers, or replace business collaborators
+with meaningless doubles merely to touch lines. Provider and tracker Adapters
+MUST use deterministic fixtures at their public boundaries; the non-live gate
+MUST remain secret-free and MUST NOT call live providers.
+
+The non-live seal applies to the whole test run, including test application
+boot: the suite MUST install its deterministic tracker Adapter and a pinned
+non-repository workflow configuration before the application (and its
+Orchestrator) starts, so no real tracker request — successful or failed — can
+occur in any phase of the gate. The suite MUST measure real tracker HTTP
+attempts at the Adapter's single network seam, report the count in the gate
+output, and fail on any nonzero count.
+
+The same seal covers the implementer delegation transport: the runtime
+resolves its default transport through a public configuration seam, and the
+suite MUST install a sealed transport there — at boot and for every test —
+that rejects any session start with a typed error before a real herdr server,
+session, worker, or provider process can exist. Only an explicit per-call
+transport injection may override it. A run whose effective workflow
+configuration was bypassed or degraded mid-suite therefore fails fast and
+deterministically instead of launching real infrastructure.
+
+Shared mutable configuration seams MUST NOT degrade silently inside the gate:
+when a test writes its workflow fixture, the write seam MUST verify the
+configuration store observed the just-written content before the test
+proceeds, and every between-test window MUST keep the effective workflow
+pinned to the non-live boot fixture rather than falling back to the
+committed repository workflow.
+
+Test-owned orchestration processes MUST NOT outlive the test that started
+them: because a `:normal` exit signal to a non-trapping process is a no-op,
+the suite releases orchestrators through a monitored kill that waits for the
+process to go down, so a leaked orchestrator can never tick against a later
+test's workflow configuration and claim that test's seeded tracker issues.
+The boot workflow fixture pins a dormant poll interval so the supervised boot
+Orchestrator polls exactly once, at application boot, against the sealed
+empty tracker; polling-cadence behavior is proved on per-test orchestrators
+with explicit intervals. A test that drives dispatch through retry timers
+seeds its tracker issues only after its own orchestrator's startup poll has
+completed against an empty tracker.
+
+When EMB-1180 changes a large test or validation file, the affected behavior
+MUST be moved progressively into focused ExUnit modules organized by the
+production Interface being proved. Restoring this Symphony gate does not own
+Octo's `scripts/validate-symphony-config`; documentation-path policy in that
+Octo validation script is migrated into focused `uv`/`pytest` tests by
+EMB-1162.
+
+The same `make all` contract MUST run on supported Linux and macOS development
+and CI environments without platform-specific interpreter paths or tool
+assumptions. The gate result MUST NOT depend on ambient terminal geometry:
+`make all` succeeds or fails identically in ordinary TTY and non-TTY
+executions, and tests that assert rendered terminal output MUST pin an
+explicit width instead of inheriting the ambient terminal's.
+
 ## Edge Cases
 
 - Browser binary is missing.
@@ -349,3 +431,4 @@ contract.
 - [ADR 0001: Provider-Neutral Agent Runtimes](../adr/0001-provider-neutral-agent-runtimes.md)
 - [EMB-187: Add no-key Browser Use capability for Agent QA](https://linear.app/emberai/issue/EMB-187/add-no-key-browser-use-capability-for-agent-qa)
 - [EMB-1065: Merge son-of-anton TDD execution contract into the shared tdd skill and restore default-on doctrine](https://linear.app/emberai/issue/EMB-1065/merge-son-of-anton-tdd-execution-contract-into-the-shared-tdd-skill)
+- [EMB-1180: Restore a fully green Symphony make all baseline](https://linear.app/emberai/issue/EMB-1180/restore-a-fully-green-symphony-make-all-baseline)

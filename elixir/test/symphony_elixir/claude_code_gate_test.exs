@@ -115,7 +115,8 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
     minimal_prompt_template = """
     ---
     tracker:
-      kind: linear
+      kind: memory
+      endpoint: "http://127.0.0.1:9/graphql"
       api_key: "#{@fake_tracker_token}"
     workspace:
       root: "#{Path.join(System.tmp_dir!(), "symphony_workspaces")}"

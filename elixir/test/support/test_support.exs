@@ -1,6 +1,11 @@
 defmodule SymphonyElixir.TestSupport do
   @workflow_prompt "You are an agent for this repository."
 
+  # Mirrors the production schema default so an omitted endpoint is treated
+  # as the external host it would resolve to.
+  @schema_default_linear_endpoint "https://api.linear.app/graphql"
+  @loopback_hosts ["127.0.0.1", "localhost", "::1"]
+
   defmacro __using__(_opts) do
     quote do
       use ExUnit.Case
@@ -22,9 +27,40 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Workspace
 
       import SymphonyElixir.TestSupport,
-        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
+        only: [
+          write_workflow_file!: 1,
+          write_workflow_file!: 2,
+          restore_env: 2,
+          stop_default_http_server: 0,
+          stop_orchestrator!: 1
+        ]
 
       setup do
+        # Close the Adapter seam before any workflow reload: the non-live
+        # gate resolves the Linear client to a deterministic in-process
+        # module, so even direct-file workflow fixtures that select the
+        # linear kind can never open a socket. Genuine Adapter delegation
+        # tests install their own fake client over this default.
+        previous_linear_client = Application.get_env(:symphony_elixir, :linear_client_module)
+
+        Application.put_env(
+          :symphony_elixir,
+          :linear_client_module,
+          SymphonyElixir.TestSupport.NonLiveLinearClient
+        )
+
+        # Same seal for the implementer delegation seam: even a run whose
+        # workflow config was bypassed mid-suite must fail typed at the
+        # transport default instead of launching a real herdr session.
+        previous_delegation_transport =
+          Application.get_env(:symphony_elixir, :delegation_transport_module)
+
+        Application.put_env(
+          :symphony_elixir,
+          :delegation_transport_module,
+          SymphonyElixir.TestSupport.NonLiveDelegationTransport
+        )
+
         workflow_root =
           Path.join(
             System.tmp_dir!(),
@@ -39,7 +75,17 @@ defmodule SymphonyElixir.TestSupport do
         stop_default_http_server()
 
         on_exit(fn ->
-          Application.delete_env(:symphony_elixir, :workflow_file_path)
+          case previous_linear_client do
+            nil -> Application.delete_env(:symphony_elixir, :linear_client_module)
+            module -> Application.put_env(:symphony_elixir, :linear_client_module, module)
+          end
+
+          case previous_delegation_transport do
+            nil -> Application.delete_env(:symphony_elixir, :delegation_transport_module)
+            module -> Application.put_env(:symphony_elixir, :delegation_transport_module, module)
+          end
+
+          SymphonyElixir.TestSupport.restore_boot_workflow_path()
           Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
@@ -54,20 +100,98 @@ defmodule SymphonyElixir.TestSupport do
   def write_workflow_file!(path, overrides \\ []) do
     workflow = workflow_content(overrides)
     File.write!(path, workflow)
+    ensure_workflow_store_observed!(path)
+    :ok
+  end
 
-    if Process.whereis(SymphonyElixir.WorkflowStore) do
+  # The EMB-1180 fall-through: a swallowed reload failure here left the
+  # WorkflowStore serving the previous (hook-less) workflow while the test
+  # exercised its just-written hook config, so the run escaped into the
+  # real delegation transport. The write seam now proves the store observed
+  # this path's new content before returning, and fails the test loudly at
+  # the fixture write when it cannot. Writes to a path the store is not
+  # currently pointed at are left for the later `set_workflow_file_path`
+  # reload, which reloads synchronously on the path change.
+  defp ensure_workflow_store_observed!(path) do
+    store_alive? = is_pid(Process.whereis(SymphonyElixir.WorkflowStore))
+
+    if store_alive? and SymphonyElixir.Workflow.workflow_file_path() == path do
+      force_store_reload!(path, 100)
+    else
+      :ok
+    end
+  end
+
+  defp force_store_reload!(path, attempts_left) do
+    result =
       try do
         SymphonyElixir.WorkflowStore.force_reload()
       catch
-        :exit, _reason -> :ok
+        :exit, reason -> {:error, {:exit, reason}}
+      end
+
+    case result do
+      :ok ->
+        :ok
+
+      {:error, _reason} when attempts_left > 0 ->
+        Process.sleep(50)
+
+        # A store that died mid-write is not a failed observation: readers
+        # fall back to direct file loads, which see the new content.
+        if is_pid(Process.whereis(SymphonyElixir.WorkflowStore)),
+          do: force_store_reload!(path, attempts_left - 1),
+          else: :ok
+
+      {:error, reason} ->
+        raise "workflow store failed to observe just-written workflow at #{path}: #{inspect(reason)}"
+    end
+  end
+
+  def restore_env(key, nil), do: System.delete_env(key)
+  def restore_env(key, value), do: System.put_env(key, value)
+
+  # Cross-test isolation: `Process.exit(pid, :normal)` is a no-op for a
+  # non-trapping GenServer, and the `start_link` link is equally inert once
+  # the test process itself exits normally, so an orchestrator "cleaned up"
+  # that way outlives its test. A leaked orchestrator keeps its tick timer,
+  # re-reads whatever workflow config the currently running test installed,
+  # and dispatches that test's seeded memory-tracker issues from outside the
+  # test's own orchestrator. Kill outright and wait for the DOWN so the next
+  # test can never overlap a live poll cycle from this one.
+  def stop_orchestrator!(pid) when is_pid(pid) do
+    if Process.alive?(pid) do
+      # The caller usually reached the orchestrator via start_link; drop the
+      # link so the kill below cannot propagate back into the test process.
+      Process.unlink(pid)
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+      after
+        5_000 -> raise "orchestrator #{inspect(pid)} did not stop within 5s"
       end
     end
 
     :ok
   end
 
-  def restore_env(key, nil), do: System.delete_env(key)
-  def restore_env(key, value), do: System.put_env(key, value)
+  # Between-test hygiene: deleting `:workflow_file_path` used to make the
+  # WorkflowStore's 1s poll fall back to the committed live `WORKFLOW.md`
+  # until the next setup repointed it. Restoring the boot-seal fixture path
+  # keeps every between-test window on the deterministic non-live workflow.
+  def restore_boot_workflow_path do
+    case :persistent_term.get(:symphony_elixir_boot_seal, nil) do
+      %{boot_workflow_file_path: boot_path} when is_binary(boot_path) ->
+        Application.put_env(:symphony_elixir, :workflow_file_path, boot_path)
+
+      _ ->
+        Application.delete_env(:symphony_elixir, :workflow_file_path)
+    end
+
+    :ok
+  end
 
   def stop_default_http_server do
     children =
@@ -94,12 +218,38 @@ defmodule SymphonyElixir.TestSupport do
     end
   end
 
+  # Non-live gate guard: the default suite must never point the Linear
+  # tracker at a real host with a usable token. A test attempting that fails
+  # here, at the shared config write seam, instead of issuing network I/O.
+  # Memory-tracker and token-less configs stay allowed so parse-level
+  # assertions of the production endpoint default keep working.
+  defp assert_non_live_tracker!("memory", _endpoint, _token), do: :ok
+  defp assert_non_live_tracker!(_kind, _endpoint, token) when is_nil(token), do: :ok
+
+  defp assert_non_live_tracker!(_kind, endpoint, _token) do
+    effective_endpoint = endpoint || @schema_default_linear_endpoint
+
+    if URI.parse(effective_endpoint).host in @loopback_hosts do
+      :ok
+    else
+      raise ArgumentError,
+            "non-live gate: test workflow config points the linear tracker at " <>
+              "#{effective_endpoint} with a usable token; keep tracker endpoints on " <>
+              "loopback or use tracker_kind: \"memory\""
+    end
+  end
+
   defp workflow_content(overrides) do
     config =
       Keyword.merge(
         [
-          tracker_kind: "linear",
-          tracker_endpoint: "https://api.linear.app/graphql",
+          # The default suite runs on the deterministic in-memory tracker
+          # fixture; real Linear contract tests opt into kind "linear"
+          # explicitly with a fake/local client. The dummy token shape stays
+          # for secret-redaction proofs, and the loopback endpoint keeps even
+          # a misconfigured opt-in off the network.
+          tracker_kind: "memory",
+          tracker_endpoint: "http://127.0.0.1:9/graphql",
           tracker_api_token: "token",
           tracker_project_slug: "project",
           tracker_assignee: nil,
@@ -151,6 +301,7 @@ defmodule SymphonyElixir.TestSupport do
     tracker_kind = Keyword.get(config, :tracker_kind)
     tracker_endpoint = Keyword.get(config, :tracker_endpoint)
     tracker_api_token = Keyword.get(config, :tracker_api_token)
+    assert_non_live_tracker!(tracker_kind, tracker_endpoint, tracker_api_token)
     tracker_project_slug = Keyword.get(config, :tracker_project_slug)
     tracker_assignee = Keyword.get(config, :tracker_assignee)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
