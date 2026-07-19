@@ -6,9 +6,9 @@ defmodule SymphonyElixir.ArchitectureSkillContractTest do
   @skill_path Path.join(@skill_dir, "SKILL.md")
   @old_skill_dir Path.join(@repo_root, ".codex/skills/qa-architecture")
   @workflow_path Path.join(@repo_root, "elixir/WORKFLOW.md")
-  @spec_path Path.join(@repo_root, "spec/domains/repository-quality-assurance.md")
-  @handoff_spec_path Path.join(@repo_root, "spec/domains/symphony-handoff-artifacts.md")
-  @index_path Path.join(@repo_root, "spec/index.md")
+  @spec_path Path.join(@repo_root, "docs/specs/domains/repository-quality-assurance.md")
+  @handoff_spec_path Path.join(@repo_root, "docs/specs/domains/symphony-handoff-artifacts.md")
+  @index_path Path.join(@repo_root, "docs/specs/index.md")
   @architecture_skill_files ~w(DEEPENING.md INTERFACE-DESIGN.md LANGUAGE.md SKILL.md)
 
   test "localized architecture skill has a neutral shared name and complete support files" do
@@ -77,9 +77,9 @@ defmodule SymphonyElixir.ArchitectureSkillContractTest do
 
     assert skill =~ "`CONTEXT.md`, when"
     assert skill =~ "is useful domain vocabulary"
-    assert skill =~ "Use `spec/` for branch-local product, workflow, and repository behavior"
-    assert skill =~ "Use `spec/adr/` for accepted architecture decisions"
-    assert skill =~ "Do not use `CONTEXT.md` or `docs/adr/` as canonical sources"
+    assert skill =~ "Use `docs/specs/` for branch-local product, workflow, and repository behavior"
+    assert skill =~ "Use `docs/adr/` for accepted architecture decisions"
+    assert skill =~ "Do not use `CONTEXT.md` as a canonical source"
     assert skill =~ "`CONTEXT.md` is domain vocabulary/context, not durable"
   end
 
@@ -93,7 +93,7 @@ defmodule SymphonyElixir.ArchitectureSkillContractTest do
     assert workflow =~ "EmberAGI/scaling-octo-engine"
     assert workflow =~ "must not copy that\nworkflow contract"
     assert workflow =~ "`CONTEXT.md` as vocabulary/context"
-    assert workflow =~ "`spec/` and `spec/adr/`"
+    assert workflow =~ "`docs/specs/` and\n`docs/adr/`"
 
     refute workflow =~ "qa-architecture"
     refute workflow =~ "Agent QA must open and follow"
@@ -109,8 +109,8 @@ defmodule SymphonyElixir.ArchitectureSkillContractTest do
     assert spec =~ "preserve complete upstream-derived\nsupport files"
     assert spec =~ "`LANGUAGE.md`, `DEEPENING.md`, and `INTERFACE-DESIGN.md`"
     assert spec =~ "`CONTEXT.md` is\ndomain vocabulary/context"
-    assert spec =~ "`spec/` and `spec/adr/` remain\ncanonical durable sources"
-    assert spec =~ "`docs/adr/` is not a canonical durable source"
+    assert spec =~ "`docs/specs/` and `docs/adr/` remain\ncanonical durable sources"
+    assert spec =~ "A top-level directory named `spec` or `specs` is not"
     assert spec =~ "MUST NOT define Octo role workflow\nobligations"
     assert spec =~ "EmberAGI/scaling-octo-engine"
     assert spec =~ "MUST NOT claim that the shared `architecture` skill is automatically\nloaded"
@@ -126,7 +126,7 @@ defmodule SymphonyElixir.ArchitectureSkillContractTest do
     index = File.read!(@index_path)
 
     assert handoff_spec =~ "EmberAGI/scaling-octo-engine"
-    assert handoff_spec =~ "spec/domains/symphony-handoff-artifacts.md"
+    assert handoff_spec =~ "EmberAGI/scaling-octo-engine:spec/domains/symphony-handoff-artifacts.md"
     assert handoff_spec =~ "No Symphony-specific local deltas are defined"
     assert handoff_spec =~ "MUST NOT copy the full Octo contract"
     assert handoff_spec =~ "The full Octo contract is not copied into this repository"

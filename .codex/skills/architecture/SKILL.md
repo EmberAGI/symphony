@@ -17,7 +17,7 @@ invoking workflow.
 
 This skill is informed by the project's domain model. `CONTEXT.md`, when
 present, is useful domain vocabulary for naming modules and concepts.
-Branch-local `spec/` and `spec/adr/` remain the canonical durable sources for
+Branch-local `docs/specs/` and `docs/adr/` remain the canonical durable sources for
 durable Octo/Symphony decisions.
 
 ## Glossary
@@ -80,14 +80,12 @@ reviewed before evaluating the bounded files:
 
 - Use `CONTEXT.md` vocabulary for domain names and concept language when the
   repository has one.
-- Use `spec/` for branch-local product, workflow, and repository behavior.
-- Use `spec/adr/` for accepted architecture decisions.
+- Use `docs/specs/` for branch-local product, workflow, and repository behavior.
+- Use `docs/adr/` for accepted architecture decisions.
 - Use branch-local specs updated in the current issue branch.
 
-Do not use `CONTEXT.md` or `docs/adr/` as canonical sources for Octo work.
+Do not use `CONTEXT.md` as a canonical source for Octo work.
 `CONTEXT.md` is domain vocabulary/context, not durable authority.
-`docs/adr/` may be read only as non-authoritative legacy or historical context
-when explicitly called out as such.
 
 ## Process
 
@@ -133,7 +131,7 @@ vocabulary for the architecture. If `CONTEXT.md` defines "Order," talk about
 "the Order intake module," not a generic handler name and not an invented
 service label.
 
-ADR conflicts: if a candidate contradicts an accepted `spec/adr/` decision, do
+ADR conflicts: if a candidate contradicts an accepted `docs/adr/` decision, do
 not silently choose a side. Cite the ADR, explain the friction, and route the
 conflict according to the invoking workflow. Do not list every theoretical
 refactor an ADR forbids.

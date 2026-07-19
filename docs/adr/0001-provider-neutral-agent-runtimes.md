@@ -91,8 +91,8 @@ artifacts/proof, and failure behavior are validated for each enabled runtime.
 ## References
 
 - EMB-166: https://linear.app/emberai/issue/EMB-166/implement-multi-runtime-symphony-support-for-codex-claude-code-and-pi
-- [Agent Runtime](../domains/agent-runtime.md)
-- [Symphony Service](../domains/symphony-service.md)
+- [Agent Runtime](../specs/domains/agent-runtime.md)
+- [Symphony Service](../specs/domains/symphony-service.md)
 - https://github.com/sumansid/claude-app-server
 - https://github.com/sapsaldog/claude-app-server
 - https://github.com/sapsaldog/symphony

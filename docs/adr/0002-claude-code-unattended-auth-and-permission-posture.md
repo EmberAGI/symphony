@@ -22,8 +22,8 @@ surprising without context:
   with no extra sandbox.
 
 Both were decided by the operator during the EMB-166 re-grill (2026-06-10) and
-are currently recorded as constraint bullets in `spec/domains/agent-runtime.md`
-and the Octo wrapper's `spec/domains/symphony-role-runtime.md`. The decisions
+are currently recorded as constraint bullets in `docs/specs/domains/agent-runtime.md`
+and the Octo wrapper `scaling-octo-engine`'s `spec/domains/symphony-role-runtime.md`. The decisions
 are the result of real trade-offs, shape credential lifecycle and escalation
 behavior, and have consequences (a security posture, an expiring credential on
 a headless host) that outlive the implementation, so they warrant an ADR
@@ -88,7 +88,7 @@ behavior, and security posture together; such a reversal needs a new ADR.
 ## References
 
 - [ADR 0001: Provider-Neutral Agent Runtimes](./0001-provider-neutral-agent-runtimes.md)
-- [Agent Runtime](../domains/agent-runtime.md)
+- [Agent Runtime](../specs/domains/agent-runtime.md)
 - Octo wrapper `scaling-octo-engine` `spec/domains/symphony-role-runtime.md`
   (Claude Code runtime role model configuration)
 - [EMB-166: Integrate Claude Code as an Octo Symphony role runtime](https://linear.app/emberai/issue/EMB-166/integrate-claude-code-as-an-octo-symphony-role-runtime)

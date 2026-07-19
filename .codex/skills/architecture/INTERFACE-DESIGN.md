@@ -24,7 +24,7 @@ Before proposing a new interface, state the problem space for the candidate:
   not a production patch.
 
 For Octo/Symphony work, keep this frame tied to the selected implementation
-files and to durable context from `spec/`, `spec/adr/`, and relevant
+files and to durable context from `docs/specs/`, `docs/adr/`, and relevant
 `CONTEXT.md` vocabulary.
 
 ### 2. Compare Distinct Interface Shapes

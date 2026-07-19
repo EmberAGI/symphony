@@ -645,7 +645,7 @@ until all three test modules pass under `make all`.
 
 ## Constraints
 
-- Keep durable specification and ADR content under `spec/` and `spec/adr/`.
+- Keep durable specification and ADR content under `docs/specs/` and `docs/adr/`.
 - Keep provider protocols native; do not force Pi or Claude Code to become
   Codex internally.
 - Keep runtime adapter implementation separate from tracker workflow policy.
@@ -689,7 +689,7 @@ slices without weakening the skills/tools release gate.
 
 ## Decision log or links to ADRs
 
-- [ADR 0001: Provider-Neutral Agent Runtimes](../adr/0001-provider-neutral-agent-runtimes.md)
+- [ADR 0001: Provider-Neutral Agent Runtimes](../../adr/0001-provider-neutral-agent-runtimes.md)
 - EMB-166 (superseded 2026-06-10): The minimum implementation scope was a
   working multi-runtime system with Codex, Claude Code, and Pi all usable
   before close.
@@ -713,7 +713,7 @@ slices without weakening the skills/tools release gate.
   Claude subscription OAuth; unattended runs use bypass-permissions with no
   sandbox and must stay non-interactive. Recorded in the EMB-166 issue body
   acceptance criteria, the Constraints section above, and
-  [ADR 0002](../adr/0002-claude-code-unattended-auth-and-permission-posture.md),
+  [ADR 0002](../../adr/0002-claude-code-unattended-auth-and-permission-posture.md),
   which owns the auth and permission-posture rationale and reversal policy.
 - EMB-1127 intake: Generalized provider-auth escalation into a
   provider-neutral irrecoverable runtime failure policy. The classifier is the

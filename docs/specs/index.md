@@ -3,8 +3,8 @@
 Canonical specs are organized by durable product or system area. Linear issue
 IDs belong in references and decision logs, not canonical filenames.
 
-Use this index when deciding where durable behavior belongs. `spec/` and
-`spec/adr/` are the source-of-truth layer for agents and reviewers.
+Use this index when deciding where durable behavior belongs. `docs/specs/` and
+`docs/adr/` are the source-of-truth layer for agents and reviewers.
 
 ## Domains
 
@@ -25,11 +25,16 @@ Use this index when deciding where durable behavior belongs. `spec/` and
 - [Symphony Handoff Artifacts](./domains/symphony-handoff-artifacts.md):
   Symphony-local consumer reference for Octo-owned handoff-artifact behavior,
   including source-of-truth provenance, local deltas, and anti-fork guardrails.
+- [Documentation Authority](./domains/documentation-authority.md): Canonical
+  documentation hierarchy, authority failure modes, bounded validation of
+  legacy or nonstandard paths, and the consumer contract for durable specs
+  and ADRs.
 
 ## ADRs
 
-ADRs live under `spec/adr/` and are created lazily when a decision is hard to
+ADRs live under `docs/adr/` and are created lazily when a decision is hard to
 reverse, surprising without context, and the result of a real trade-off.
 
-- [0001: Provider-Neutral Agent Runtimes](./adr/0001-provider-neutral-agent-runtimes.md)
-- [0002: Claude Code Unattended Runtime Authentication and Permission Posture](./adr/0002-claude-code-unattended-auth-and-permission-posture.md)
+- [0001: Provider-Neutral Agent Runtimes](../adr/0001-provider-neutral-agent-runtimes.md)
+- [0002: Claude Code Unattended Runtime Authentication and Permission Posture](../adr/0002-claude-code-unattended-auth-and-permission-posture.md)
+- [0003: Canonical Documentation Authority under docs/specs and docs/adr](../adr/0003-canonical-documentation-authority.md)

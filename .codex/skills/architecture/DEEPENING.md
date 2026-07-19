@@ -68,5 +68,5 @@ external dependency as an injected port; tests provide a mock adapter.
 
 When a deepening request is warranted, include the requested testing strategy
 and the relevant durable context. If the dependency strategy would create or
-change an ADR-worthy decision, cite the relevant `spec/adr/` file or missing
+change an ADR-worthy decision, cite the relevant `docs/adr/` file or missing
 decision and route according to the invoking workflow.
