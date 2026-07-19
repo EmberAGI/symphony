@@ -2036,8 +2036,23 @@ defmodule SymphonyElixir.CoreTest do
       labels: []
     }
 
-    assert_raise RuntimeError, ~r/template_parse_error:.*template="/s, fn ->
-      PromptBuilder.build_prompt(issue)
+    try do
+      built = PromptBuilder.build_prompt(issue)
+
+      # A successful build here means the store served some other workflow
+      # than the invalid template this test just wrote and verified; dump
+      # the effective seam state so a recurrence identifies the writer.
+      flunk("""
+      expected template_parse_error but build_prompt succeeded
+        workflow_file_path=#{inspect(Workflow.workflow_file_path())}
+        file_prompt=#{inspect(File.read!(Workflow.workflow_file_path()) |> String.slice(0, 200))}
+        store_pid=#{inspect(Process.whereis(SymphonyElixir.WorkflowStore))}
+        store_prompt=#{inspect(Workflow.current() |> elem(1) |> Map.get(:prompt_template))}
+        built=#{inspect(String.slice(built, 0, 120))}
+      """)
+    rescue
+      error in RuntimeError ->
+        assert Exception.message(error) =~ ~r/template_parse_error:.*template="/s
     end
   end
 

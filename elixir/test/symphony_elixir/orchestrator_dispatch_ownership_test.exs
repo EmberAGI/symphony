@@ -35,8 +35,11 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
     parent_pid_file = Path.join(test_root, "parent.pid")
     child_pid_file = Path.join(test_root, "child.pid")
 
+    # The child must stay alive through every assertion below even when the
+    # suite runs under heavy load; the on_exit TERMs it, so the long sleep is
+    # only a last-resort self-cleanup, not the test's clock.
     script =
-      "echo $$ > #{parent_pid_file}; sleep 5 >/dev/null 2>&1 & echo $! > #{child_pid_file}; sleep 0.5"
+      "echo $$ > #{parent_pid_file}; sleep 300 >/dev/null 2>&1 & echo $! > #{child_pid_file}; sleep 0.5"
 
     port =
       Port.open({:spawn_executable, System.find_executable("bash")}, [
@@ -131,7 +134,7 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
         SYMPHONY_ROLE_NAME=implementer \
         SYMPHONY_ROLE_HOLDER=#{holder} \
         SYMPHONY_ROLE_WORKSPACE_PATH=#{workspace_path} \
-        sh -c 'echo $$ > #{child_pid_file}; sleep 5' >/dev/null 2>&1 &
+        sh -c 'echo $$ > #{child_pid_file}; sleep 300' >/dev/null 2>&1 &
       sleep 0.2
       """
 
