@@ -51,10 +51,15 @@ Validation is bounded and deterministic:
 - Active references are scanned for stale legacy authority paths. A
   reference to a top-level `spec`-or-`specs` path segment is stale unless
   the referencing line names the upstream `scaling-octo-engine` repository,
-  whose own documentation migration is owned by that repository.
+  whose own documentation migration is owned by that repository. Plural
+  `specs` references are classified using their source context: explicit
+  relative paths resolve from the referencing file, repository paths resolve
+  from the repository root, and only paths resolving under `docs/specs/` are
+  canonical.
 - Relative links inside canonical authority documents must resolve to
-  existing files within the repository; a link that escapes the repository
-  root is rejected even when its target exists.
+  existing files whose physical targets remain within the repository after
+  symlink resolution; a link that escapes the repository root directly or
+  through an in-repository symlink is rejected even when its target exists.
 - Stale-reference scanning covers only active surfaces: inside a Git work
   tree, the tracked source, documentation, and metadata file types
   (Markdown, Elixir sources, TOML, JSON, YAML). Outside a Git work tree it

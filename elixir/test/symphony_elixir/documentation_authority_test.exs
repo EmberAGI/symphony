@@ -102,6 +102,31 @@ defmodule SymphonyElixir.DocumentationAuthorityTest do
     assert Enum.any?(result.errors, &String.contains?(&1, "stale legacy documentation authority path"))
   end
 
+  test "a relative plural legacy path outside the canonical hierarchy is rejected" do
+    root = build_canonical_fixture()
+    legacy_segment = Enum.join(["s", "pecs"], "")
+
+    write_file(root, ["elixir", "README.md"], "Start with [the index](../#{legacy_segment}/index.md).\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "stale legacy documentation authority path"))
+    assert Enum.any?(result.errors, &String.contains?(&1, "elixir/README.md:1"))
+  end
+
+  test "a relative plural path resolving into the canonical hierarchy is accepted" do
+    root = build_canonical_fixture()
+    canonical_segment = Enum.join(["s", "pecs"], "")
+
+    write_file(root, ["docs", "adr", "0002-linking.md"], """
+    See [the specification](../#{canonical_segment}/domains/sample.md).
+    """)
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    refute Enum.any?(result.errors, &String.contains?(&1, "stale legacy documentation authority path"))
+  end
+
   test "a stale-looking reference is allowed when the line names the upstream repository" do
     root = build_canonical_fixture()
     legacy_segment = Enum.join(["s", "pec"], "")
@@ -168,6 +193,22 @@ defmodule SymphonyElixir.DocumentationAuthorityTest do
     assert Enum.any?(result.errors, &String.contains?(&1, "escapes the repository"))
   end
 
+  test "a relative link that escapes through an in-repository symlink is rejected" do
+    root = build_canonical_fixture()
+    outside_dir = create_tmp_dir()
+
+    write_file(outside_dir, ["outside.md"], "# Outside\n")
+    File.ln_s!(outside_dir, Path.join(root, "linked-outside"))
+
+    write_file(root, ["docs", "specs", "domains", "escaping-via-symlink.md"], """
+    See [outside](../../../linked-outside/outside.md) for details.
+    """)
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "escapes the repository"))
+  end
+
   test "a nested spec directory outside the canonical hierarchy produces a warning" do
     root = build_canonical_fixture()
     legacy_segment = Enum.join(["s", "pec"], "")
@@ -222,6 +263,16 @@ defmodule SymphonyElixir.DocumentationAuthorityTest do
     assert result.errors == []
     assert Enum.any?(result.warnings, &String.contains?(&1, "widget.spec.html"))
     assert Enum.any?(result.warnings, &String.contains?(&1, Path.join(["lib", "widgets", "adr"])))
+  end
+
+  test "a visual specification in the canonical ADR hierarchy does not produce a warning" do
+    root = build_canonical_fixture()
+
+    write_file(root, ["docs", "adr", "architecture.spec.html"], "<html></html>\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    refute Enum.any?(result.warnings, &String.contains?(&1, "architecture.spec.html"))
   end
 
   defp build_canonical_fixture do

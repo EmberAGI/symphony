@@ -109,25 +109,42 @@ defmodule SymphonyElixir.DocumentationAuthority do
       |> File.read!()
       |> String.split("\n")
       |> Enum.with_index(1)
-      |> Enum.filter(fn {line, _line_number} -> stale_reference_line?(line) end)
+      |> Enum.filter(fn {line, _line_number} -> stale_reference_line?(line, file, root) end)
       |> Enum.map(fn {_line, line_number} ->
         "#{relative_path(file, root)}:#{line_number} references a stale legacy documentation authority path"
       end)
     end)
   end
 
-  defp stale_reference_line?(line) do
-    legacy_path_reference?(line) and not String.contains?(line, @upstream_marker)
+  defp stale_reference_line?(line, source_file, root) do
+    legacy_path_reference?(line, source_file, root) and
+      not String.contains?(line, @upstream_marker)
   end
 
   # Canonical paths never use a singular spec segment, so one is always a
-  # legacy reference. A plural segment is canonical when reached via docs/ or
-  # a relative hop inside the canonical tree.
+  # legacy reference. Plural segments require source context: repository paths
+  # resolve from the root, while explicit relative paths resolve from the
+  # referencing file.
   @legacy_singular_regex ~r/(?<![\w-])spec\//
-  @legacy_plural_regex ~r/(?<!docs\/)(?<!\.\.\/)(?<!\.\/)(?<![\w-])specs\//
+  @plural_path_regex ~r/(?<![\w-])((?:(?:\.\.?|[\w.-]+)\/)*specs\/)/
 
-  defp legacy_path_reference?(line) do
-    Regex.match?(@legacy_singular_regex, line) or Regex.match?(@legacy_plural_regex, line)
+  defp legacy_path_reference?(line, source_file, root) do
+    Regex.match?(@legacy_singular_regex, line) or
+      Enum.any?(Regex.scan(@plural_path_regex, line, capture: :all_but_first), fn [reference] ->
+        plural_reference_is_legacy?(reference, source_file, root)
+      end)
+  end
+
+  defp plural_reference_is_legacy?(reference, source_file, root) do
+    base =
+      if String.starts_with?(reference, ["./", "../"]) do
+        Path.dirname(source_file)
+      else
+        root
+      end
+
+    resolved = Path.expand(reference, base)
+    not inside_root?(resolved, Path.join([root, "docs", "specs"]))
   end
 
   defp broken_link_errors(root) do
@@ -181,6 +198,9 @@ defmodule SymphonyElixir.DocumentationAuthority do
       not File.exists?(resolved) ->
         ["#{relative_path(source_file, root)} has a broken relative link to #{target}"]
 
+      not physically_inside_root?(resolved, root) ->
+        ["#{relative_path(source_file, root)} has a relative link to #{target} that escapes the repository"]
+
       true ->
         []
     end
@@ -189,6 +209,60 @@ defmodule SymphonyElixir.DocumentationAuthority do
   defp inside_root?(path, root) do
     expanded_root = Path.expand(root)
     path == expanded_root or String.starts_with?(path, expanded_root <> "/")
+  end
+
+  defp physically_inside_root?(path, root) do
+    with {:ok, physical_path} <- resolve_physical_path(path),
+         {:ok, physical_root} <- resolve_physical_path(root) do
+      inside_root?(physical_path, physical_root)
+    else
+      _ -> false
+    end
+  end
+
+  defp resolve_physical_path(path) do
+    path
+    |> Path.expand()
+    |> Path.split()
+    |> Enum.reject(&(&1 == "/"))
+    |> resolve_physical_segments("/", [])
+  end
+
+  defp resolve_physical_segments([], resolved, _seen), do: {:ok, resolved}
+
+  defp resolve_physical_segments([segment | rest], resolved, seen) do
+    candidate = Path.join(resolved, segment)
+
+    case File.lstat(candidate) do
+      {:ok, %File.Stat{type: :symlink}} ->
+        resolve_symlink(candidate, rest, seen)
+
+      {:ok, _stat} ->
+        resolve_physical_segments(rest, candidate, seen)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp resolve_symlink(candidate, rest, seen) do
+    if candidate in seen do
+      {:error, :eloop}
+    else
+      with {:ok, target} <- File.read_link(candidate) do
+        target_segments =
+          target
+          |> Path.expand(Path.dirname(candidate))
+          |> Path.split()
+          |> Enum.reject(&(&1 == "/"))
+
+        resolve_physical_segments(
+          target_segments ++ rest,
+          "/",
+          [candidate | seen]
+        )
+      end
+    end
   end
 
   defp nonstandard_path_warnings(root) do
@@ -222,7 +296,9 @@ defmodule SymphonyElixir.DocumentationAuthority do
     end)
   end
 
-  defp under_any?(path, dirs), do: Enum.any?(dirs, &String.starts_with?(path, &1 <> "/"))
+  defp under_any?(path, dirs) do
+    Enum.any?(dirs, &(path == &1 or String.starts_with?(path, &1 <> "/")))
+  end
 
   defp walk_directories(root) do
     [root | do_walk_directories(root)]
