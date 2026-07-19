@@ -31,17 +31,17 @@ QA-only, and free of external hosted-browser or provider-key dependencies.
 
 Repository QA uses these branch-local durable sources as canonical context:
 
-- `spec/`
-- `spec/adr/`
+- `docs/specs/`
+- `docs/adr/`
 
 `CONTEXT.md` MAY be used as domain vocabulary and contextual naming guidance
-when present. `spec/` and `spec/adr/` remain the durable QA authority.
+when present. `docs/specs/` and `docs/adr/` remain the durable QA authority.
 `CONTEXT.md` and `docs/adr/` MUST NOT be treated as canonical sources for Octo
 QA decisions.
 
 When a QA, review, or handoff instruction requires handoff-artifact spec
 context, agents SHOULD read
-`spec/domains/symphony-handoff-artifacts.md`. That file is a Symphony-local
+`docs/specs/domains/symphony-handoff-artifacts.md`. That file is a Symphony-local
 consumer reference to Octo's source-of-truth handoff-artifacts contract, not a
 forked normative copy. The Octo workflow surface remains responsible for
 successful QA-to-Human-Review packet details.
@@ -84,8 +84,9 @@ fields, one-time suggestion markers, PR metadata, workpad rules, or escalation
 labels.
 
 The shared skill MUST preserve the source distinction that `CONTEXT.md` is
-domain vocabulary/context when present, while `spec/` and `spec/adr/` remain
-canonical durable sources. `docs/adr/` is not a canonical durable source.
+domain vocabulary/context when present, while `docs/specs/` and `docs/adr/` remain
+canonical durable sources. A top-level directory named `spec` or `specs` is not
+a durable authority location.
 
 ## Octo QA Workflow Boundary
 
@@ -231,9 +232,10 @@ source behavior MUST validate that:
   Agent QA state routing, reviewer gates, handoff packet fields, one-time
   suggestion marker rules, PR metadata, workpad rules, or escalation-label
   policy.
-- `CONTEXT.md` can be preserved as useful domain vocabulary, while `spec/` and
-  `spec/adr/` are canonical durable context paths.
-- `docs/adr/` is not treated as a canonical durable source.
+- `CONTEXT.md` can be preserved as useful domain vocabulary, while `docs/specs/` and
+  `docs/adr/` are canonical durable context paths.
+- A top-level directory named `spec` or `specs` is not treated as a canonical
+  durable source.
 - The repository includes a thin Symphony-local handoff-artifacts consumer
   reference that identifies Octo's source-of-truth spec, records local deltas,
   and guards against silently forking the Octo contract.
@@ -409,7 +411,7 @@ explicit width instead of inheriting the ambient terminal's.
 
 ## Constraints
 
-- Keep this domain contract under `spec/` and keep role-specific operational
+- Keep this domain contract under `docs/specs/` and keep role-specific operational
   policy out of runtime adapter internals.
 - Do not add required secrets, hosted browser accounts, hosted browser
   infrastructure, or provider keys to satisfy QA browser validation.
@@ -428,7 +430,7 @@ contract.
 - [Agent Runtime](./agent-runtime.md)
 - [Symphony Service](./symphony-service.md)
 - [Symphony Handoff Artifacts](./symphony-handoff-artifacts.md)
-- [ADR 0001: Provider-Neutral Agent Runtimes](../adr/0001-provider-neutral-agent-runtimes.md)
+- [ADR 0001: Provider-Neutral Agent Runtimes](../../adr/0001-provider-neutral-agent-runtimes.md)
 - [EMB-187: Add no-key Browser Use capability for Agent QA](https://linear.app/emberai/issue/EMB-187/add-no-key-browser-use-capability-for-agent-qa)
 - [EMB-1065: Merge son-of-anton TDD execution contract into the shared tdd skill and restore default-on doctrine](https://linear.app/emberai/issue/EMB-1065/merge-son-of-anton-tdd-execution-contract-into-the-shared-tdd-skill)
 - [EMB-1180: Restore a fully green Symphony make all baseline](https://linear.app/emberai/issue/EMB-1180/restore-a-fully-green-symphony-make-all-baseline)

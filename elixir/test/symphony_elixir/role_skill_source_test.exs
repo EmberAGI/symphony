@@ -195,7 +195,7 @@ defmodule SymphonyElixir.RoleSkillSourceTest do
   end
 
   test "repository quality assurance spec names the role skill acceptance contract" do
-    spec = File.read!(Path.join(repo_root(), "spec/domains/repository-quality-assurance.md"))
+    spec = File.read!(Path.join(repo_root(), "docs/specs/domains/repository-quality-assurance.md"))
 
     assert spec =~ "Shared Symphony role skills"
     assert spec =~ ".codex/role-skills/implementer.json"

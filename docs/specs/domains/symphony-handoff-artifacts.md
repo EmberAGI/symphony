@@ -21,7 +21,7 @@ maintained source of truth for Octo handoff packet behavior.
 ## Provenance
 
 - Upstream owner: `EmberAGI/scaling-octo-engine`
-- Upstream path: `spec/domains/symphony-handoff-artifacts.md`
+- Upstream path: `EmberAGI/scaling-octo-engine:spec/domains/symphony-handoff-artifacts.md`
 - Local reference introduced for EMB-185 on 2026-05-05 after operator
   escalation resolution.
 - Reference basis: Linear EMB-185 operator note dated 2026-05-05T21:05:00Z.
@@ -39,7 +39,7 @@ If a future Symphony change needs local behavior that differs from Octo's
 source contract, that change MUST record the delta in this section and update
 the relevant branch-local specs before relying on it in QA, review, or landing.
 ADR-worthy or ADR-conflicting deltas MUST route to Human Escalation with the
-relevant `spec/adr/` reference or missing ADR decision.
+relevant `docs/adr/` reference or missing ADR decision.
 
 ## Consumer Contract
 
@@ -48,7 +48,7 @@ when a workflow requires handoff-artifact spec context. They SHOULD then follow:
 
 - the current Linear issue body and handoff trail;
 - the repository workflow in `elixir/WORKFLOW.md`;
-- the repository QA contract in `spec/domains/repository-quality-assurance.md`;
+- the repository QA contract in `docs/specs/domains/repository-quality-assurance.md`;
 - Octo's upstream handoff-artifacts contract when detailed artifact packet
   behavior is needed.
 

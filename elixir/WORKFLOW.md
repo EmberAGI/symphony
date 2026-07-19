@@ -232,8 +232,8 @@ workflow contract or claim that the shared skill is automatically loaded by
 Octo QA roles.
 
 The shared skill may use `CONTEXT.md` as vocabulary/context when present.
-Durable behavior and architecture authority remain in `spec/` and `spec/adr/`;
-`CONTEXT.md` and `docs/adr/` are not canonical durable sources.
+Durable behavior and architecture authority remain in `docs/specs/` and
+`docs/adr/`; `CONTEXT.md` is not a canonical durable source.
 
 ## Blocked-access escape hatch (required behavior)
 

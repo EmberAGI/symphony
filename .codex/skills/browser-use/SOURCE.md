@@ -12,7 +12,7 @@ Source artifacts:
   `state`, `click <index>`, `type "text"`, `input <index> "text"`, and
   `screenshot [path]`.
 - Repository workflow and QA contracts in `elixir/WORKFLOW.md` and
-  `spec/domains/repository-quality-assurance.md`.
+  `docs/specs/domains/repository-quality-assurance.md`.
 - Symphony handoff artifact contract at
   `/home/admin/scaling-octo-engine/spec/domains/symphony-handoff-artifacts.md`,
   especially the successful QA-to-`Human Review` packet section requirements.

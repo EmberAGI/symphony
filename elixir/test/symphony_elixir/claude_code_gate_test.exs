@@ -6,7 +6,7 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
   Code runtime (EMB-1029).
 
   These tests prove the four gate dimensions required before Claude Code may be
-  enabled for unattended Octo roles (ADR 0001, `spec/domains/agent-runtime.md`):
+  enabled for unattended Octo roles (ADR 0001, `docs/specs/domains/agent-runtime.md`):
 
   1. Role skill materialization — role workflow/prompt/skill material from
      Symphony remains the source of truth and loads correctly in the Claude Code
@@ -718,7 +718,7 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
   test "agent-runtime spec records the skills/tools gate contract and check locations" do
     # Proves the gate result is durably recorded so EMB-1030 (end-to-end slice)
     # and operator enablement can rely on it.
-    spec = File.read!(Path.join(@repo_root, "spec/domains/agent-runtime.md"))
+    spec = File.read!(Path.join(@repo_root, "docs/specs/domains/agent-runtime.md"))
 
     # Spec must describe the fake binary test convention (already in the original
     # implementation section and the new gate contract section).
