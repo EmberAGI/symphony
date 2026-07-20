@@ -559,11 +559,12 @@ stream-json without a live Claude subscription:
 - `elixir/test/symphony_elixir/claude_code_gate_test.exs` — gate-level checks
   proving all four ADR 0001 gate dimensions:
 
-  1. **Skill materialization**: `.codex/role-skills/implementer.json` and
-     `.codex/role-skills/qa.json` manifests resolve all declared skill
-     directories and SKILL.md files; `elixir/WORKFLOW.md` contains the required
-     Liquid/Solid issue template placeholders; `PromptBuilder` renders the role
-     prompt template with issue variables; manifests carry `octo_authority_boundaries`.
+  1. **Workflow materialization**: `elixir/WORKFLOW.md` contains the required
+     Liquid/Solid issue template placeholders and `PromptBuilder` renders the
+     role prompt template with issue variables. Octo-owned skill discovery,
+     invocation, role exposure, provider projection, and evaluation are
+     accepted in `EmberAGI/scaling-octo-engine`, not from Symphony-local source
+     packages or manifests.
 
   2. **Octo tool bundle** — all five required surfaces proven via the actual
      Claude Code runtime tool path, not the Codex DynamicTool path:
@@ -607,16 +608,16 @@ stream-json without a live Claude subscription:
      produces only `tool_finished` events and `tool_failed: false` on
      `turn_completed`.
 
-All three test modules run under `make all` (via `mix test`) and require no
+The runtime and repository contract test modules run under `make all` (via `mix test`) and require no
 live Claude subscription, Linear API key, or external service. The gate result
 is repeatable in CI. Claude Code MUST NOT be enabled for unattended Octo roles
-until all three test modules pass under `make all`.
+until those test modules pass under `make all`.
 
 ## Edge cases
 
 - Provider executable is missing or not authenticated.
 - Provider starts but cannot bind to the selected workspace.
-- Provider session starts but role skills fail to load or translate.
+- Provider session starts but the Octo-projected role skills fail to load or translate.
 - Required tool bundle is unavailable or partially unavailable.
 - Tool call arguments are invalid.
 - Tool execution returns provider-native failure shape.

@@ -126,9 +126,14 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `commit`: produce clean, logical commits during implementation.
 - `push`: keep remote branch current and publish updates.
 - `pull`: keep branch updated with latest `origin/main` before handoff.
-- `land`: when ticket reaches `Merging`, explicitly open and follow `.codex/skills/land/SKILL.md`, which includes the `land` loop.
-- `architecture`: shared architecture vocabulary and bounded implementation
-  review guidance. Octo role workflows decide when and how to invoke it.
+- `land`: when ticket reaches `Merging`, follow the landing workflow supplied
+  by the invoking Octo role surface.
+- `architecture`: use the architecture guidance supplied by the invoking Octo
+  role surface when that workflow requires it.
+
+Symphony does not provide repository-local role skill packages or exposure
+manifests. `EmberAGI/scaling-octo-engine` owns skill discovery, invocation, role
+exposure, provider projection, and evaluation behavior.
 
 ## Status map
 
@@ -165,7 +170,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
    - `Agent QA` -> run QA validation according to the active Octo QA role
      workflow, then hand off according to the QA result.
    - `Human Review` -> wait and poll for decision/review updates.
-   - `Merging` -> on entry, open and follow `.codex/skills/land/SKILL.md`; do not call `gh pr merge` directly.
+   - `Merging` -> on entry, follow the Octo-provided landing workflow; do not call `gh pr merge` directly.
    - `Rework` -> run rework flow.
    - `Done` -> do nothing and shut down.
 4. Check whether a PR already exists for the current branch and whether it is closed.
@@ -217,24 +222,6 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
 5. Re-run validation after feedback-driven changes and push updates.
 6. Repeat this sweep until there are no outstanding actionable comments.
 
-## Shared Architecture Skill Boundary
-
-The repository-local `.codex/skills/architecture/` directory is shared
-architecture guidance, not an Octo QA workflow definition. It preserves the
-localized module/interface/depth/seam/adapter vocabulary and bounded evaluation
-technique for roles that are explicitly told to use it.
-
-Octo role-specific obligations for Agent QA, reviewer validation, one-time
-architecture suggestion markers, handoff packet fields, role exposure, and
-operator/console loading are owned by the Octo workflow surface in
-`EmberAGI/scaling-octo-engine`. Symphony-local guidance must not copy that
-workflow contract or claim that the shared skill is automatically loaded by
-Octo QA roles.
-
-The shared skill may use `CONTEXT.md` as vocabulary/context when present.
-Durable behavior and architecture authority remain in `docs/specs/` and
-`docs/adr/`; `CONTEXT.md` is not a canonical durable source.
-
 ## Blocked-access escape hatch (required behavior)
 
 Use this only when completion is blocked by missing required tools or missing auth/permissions that cannot be resolved in-session.
@@ -246,65 +233,6 @@ Use this only when completion is blocked by missing required tools or missing au
   - why it blocks required acceptance/validation,
   - exact human action needed to unblock.
 - Keep the brief concise and action-oriented; do not add extra top-level comments outside the required compact handoff.
-
-## Agent QA Browser Use capability (QA role only)
-
-This section applies only when the active role is Agent QA. It does not grant
-Browser Use as a general Symphony role skill to implementer, reviewer, landing,
-or operator roles.
-
-Agent QA may use Browser Use as an optional, issue-appropriate browser-facing
-evidence capability when UI/manual acceptance, browser runtime checks,
-screenshots, page-state inspection, or form-flow verification materially improve
-QA. In this workflow, Browser Use must mean local deterministic browser
-automation or inspection that runs without Browser Use Cloud, hosted browser
-infrastructure, `BROWSER_USE_API_KEY`, OpenAI/Anthropic/Google provider keys, or
-any new operator-provisioned API secret.
-
-The preferred local Browser Use path is the Agent QA-only `browser-use` skill
-from `.codex/role-skills/qa.json`. When local prerequisites are present, Agent
-QA may use Browser Use CLI commands such as `browser-use open`,
-`browser-use state`, `browser-use click <index>`, `browser-use type "text"`,
-`browser-use input <index> "text"`, and `browser-use screenshot` against a
-local browser session. QA should derive numeric element indices from
-`browser-use state`, use `input <index> "text"` for field filling, and reserve
-`type "text"` for an already focused field. Local stdio MCP is an acceptable
-fallback or alternate path when launched with
-`uvx --from 'browser-use[cli]' browser-use --mcp` and used only for local,
-no-key browser inspection.
-
-When a Browser Use agent-mode feature or installed library path requires an LLM
-provider key or hosted browser service, Agent QA must not add or request that
-secret. Use one of these fallbacks instead:
-
-- Browser Use CLI/local stdio MCP only when it runs locally with no key;
-- existing repository Playwright/browser tooling;
-- deterministic local browser CLI automation if a browser is already available;
-- ordinary manual inspection with concise evidence notes;
-- a not-applicable rationale when the issue has no browser-facing acceptance
-  surface or the role environment has no usable browser or Browser Use CLI/MCP;
-- `Human Escalation` when browser-facing acceptance is required and every
-  no-key local path is blocked.
-
-Agent QA must attach useful browser evidence to Linear when browser validation
-is performed. Acceptable evidence includes screenshots, page-state summaries,
-form-flow notes, command output, logs, or short recordings. Do not rely on a
-local file path, GitHub comment, object store, or any other non-Linear location
-as the durable QA artifact store for Linear-backed Octo workflows.
-
-Before a successful QA handoff to `Human Review`, Agent QA must keep the
-`## Symphony Handoff` compact. The successful QA handoff to `Human Review` must
-stay compact, use a tiny `Role note` review summary, put the human-review
-request in `Next action`, and point browser evidence or browser-not-applicable
-rationale to compact handoff `Work done` or approved Linear attachment
-metadata.
-
-Before any QA handoff, Agent QA validation notes must state which browser path
-was used, which pages/states/flows were checked, where Linear artifacts were
-attached, or why browser automation was not applicable. If no local browser is
-available, headless execution is blocked, sandbox policy prevents launch, or a
-desired feature requires a forbidden key, record the fallback chosen and the
-reason.
 
 ## Step 2: Execution phase (Todo -> In Progress -> Human Review)
 
@@ -352,7 +280,7 @@ reason.
 2. Poll for updates as needed, including GitHub PR review comments from humans and bots.
 3. If review feedback requires changes, move the issue to `Rework` and follow the rework flow.
 4. If approved, human moves the issue to `Merging`.
-5. When the issue is in `Merging`, open and follow `.codex/skills/land/SKILL.md`, then run the `land` skill in a loop until the PR is merged. Do not call `gh pr merge` directly.
+5. When the issue is in `Merging`, follow the Octo-provided landing workflow until the PR is merged. Do not call `gh pr merge` directly.
 6. After merge is complete, move the issue to `Done`.
 
 ## Step 4: Rework handling

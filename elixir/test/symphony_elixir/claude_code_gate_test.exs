@@ -8,9 +8,9 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
   These tests prove the four gate dimensions required before Claude Code may be
   enabled for unattended Octo roles (ADR 0001, `docs/specs/domains/agent-runtime.md`):
 
-  1. Role skill materialization — role workflow/prompt/skill material from
-     Symphony remains the source of truth and loads correctly in the Claude Code
-     runtime context.
+  1. Role workflow materialization — the Symphony workflow prompt template
+     loads correctly in the Claude Code runtime context. Octo-owned skills and
+     provider projections are validated in scaling-octo-engine.
   2. Octo tool bundle — all five required tool surfaces execute through
      runtime-native mechanisms: Linear GraphQL access, workpad operations,
      artifact/proof capture, repository status, and PR status are each driven by
@@ -36,55 +36,14 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
 
   @repo_root Path.expand("../../..", __DIR__)
-  @role_skills_dir Path.join(@repo_root, ".codex/role-skills")
-
   # Plaintext sentinel values that must never appear in a built prompt. Used by
   # the secret non-leakage checks below; they are obviously fake tokens that
   # would never appear in a real deployment.
   @fake_tracker_token "fake-linear-token-do-not-leak"
 
   # ---------------------------------------------------------------------------
-  # Gate dimension 1: Role skill materialization
+  # Gate dimension 1: Role workflow materialization
   # ---------------------------------------------------------------------------
-
-  @doc false
-  # The implementer role-skills manifest must be present, reference valid skill
-  # directories, and contain SKILL.md files. This proves Symphony role material
-  # is loaded correctly as the source of truth.
-
-  test "implementer role-skills manifest resolves all declared skill paths" do
-    manifest = read_manifest!("implementer")
-
-    assert manifest["role"] == "implementer"
-    assert is_list(manifest["skills"]) and manifest["skills"] != []
-
-    for skill <- manifest["skills"] do
-      skill_path = Path.expand(skill["path"], @role_skills_dir)
-
-      assert File.dir?(skill_path),
-             "skill #{inspect(skill["name"])} path #{inspect(skill_path)} must be a directory"
-
-      assert File.regular?(Path.join(skill_path, "SKILL.md")),
-             "skill #{inspect(skill["name"])} must have SKILL.md"
-    end
-  end
-
-  test "qa role-skills manifest resolves all declared skill paths" do
-    manifest = read_manifest!("qa")
-
-    assert manifest["role"] == "qa"
-    assert is_list(manifest["skills"]) and manifest["skills"] != []
-
-    for skill <- manifest["skills"] do
-      skill_path = Path.expand(skill["path"], @role_skills_dir)
-
-      assert File.dir?(skill_path),
-             "QA skill #{inspect(skill["name"])} path #{inspect(skill_path)} must be a directory"
-
-      assert File.regular?(Path.join(skill_path, "SKILL.md")),
-             "QA skill #{inspect(skill["name"])} must have SKILL.md"
-    end
-  end
 
   test "role workflow WORKFLOW.md is present and parseable as the role prompt template" do
     workflow_path = Path.join(@repo_root, "elixir/WORKFLOW.md")
@@ -148,20 +107,6 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
     assert prompt =~ "GT-1", "prompt must contain issue identifier"
     assert prompt =~ "Gate skill materialization check", "prompt must contain issue title"
     assert prompt =~ "Verify prompt template renders issue fields correctly.", "prompt must contain issue description"
-  end
-
-  test "role-skills manifests explicitly record Octo workflow authority boundaries" do
-    # Both manifests must carry Octo authority boundaries so skill consumers
-    # know what they may not override.
-    for role <- ["implementer", "qa"] do
-      manifest = read_manifest!(role)
-
-      assert is_list(manifest["octo_authority_boundaries"]),
-             "#{role} manifest must declare octo_authority_boundaries"
-
-      assert manifest["octo_authority_boundaries"] != [],
-             "#{role} manifest octo_authority_boundaries must not be empty"
-    end
   end
 
   # ---------------------------------------------------------------------------
@@ -829,12 +774,5 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
       end
 
     {result, events, trace}
-  end
-
-  defp read_manifest!(role) do
-    [@role_skills_dir, "#{role}.json"]
-    |> Path.join()
-    |> File.read!()
-    |> Jason.decode!()
   end
 end
