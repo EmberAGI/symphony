@@ -71,9 +71,9 @@ Validation is bounded and deterministic:
 
 ## Consumers
 
-- Repository instructions (`README.md`, `elixir/AGENTS.md`,
-  `elixir/WORKFLOW.md`) and shared skills reference the canonical hierarchy
-  directly.
+- Repository instructions (`README.md`, `elixir/AGENTS.md`, and
+  `elixir/WORKFLOW.md`) reference the canonical hierarchy directly. Octo-owned
+  skills consume the hierarchy from `EmberAGI/scaling-octo-engine`.
 - ExUnit contract tests exercise the public documentation-authority
   contract: canonical success, missing hierarchy, legacy-only hierarchy,
   duplicate and alias rejection, stale active references, relative link

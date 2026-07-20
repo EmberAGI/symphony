@@ -18,8 +18,7 @@ Use this index when deciding where durable behavior belongs. `docs/specs/` and
   and Octo mixed-runtime validation.
 - [Repository Quality Assurance](./domains/repository-quality-assurance.md):
   Repo-level minimum acceptance suite for durable behavior changes, including
-  shared role
-  skill source validation, Symphony/Octo workflow-boundary validation, Agent QA
+  Octo role skill source absence and ownership validation, Agent QA
   browser-facing validation, evidence capture, artifact handling, and fallback
   behavior.
 - [Symphony Handoff Artifacts](./domains/symphony-handoff-artifacts.md):
