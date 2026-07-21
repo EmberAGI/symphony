@@ -217,6 +217,14 @@ defmodule SymphonyElixir.AgentRuntime do
       "SYMPHONY_ROLE_NAME" => role,
       "SYMPHONY_ROLE_RUN_ID" => run_id
     })
+    |> put_process_environment("SYMPHONY_ORCHESTRATION_ROOT")
+  end
+
+  defp put_process_environment(environment, key) do
+    case System.get_env(key) do
+      value when is_binary(value) and value != "" -> Map.put(environment, key, value)
+      _ -> environment
+    end
   end
 
   defp required_run_id(opts) do
