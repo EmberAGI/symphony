@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.ImplementerDelegationTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation}
   alias SymphonyElixir.Linear.Issue
@@ -393,6 +393,16 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
   end
 
   test "AgentRuntime routes and composes only Implementer sessions through Herdr" do
+    orchestration_root = "/tmp/production-orchestration-root"
+    previous_root = System.get_env("SYMPHONY_ORCHESTRATION_ROOT")
+    System.put_env("SYMPHONY_ORCHESTRATION_ROOT", orchestration_root)
+
+    on_exit(fn ->
+      if previous_root,
+        do: System.put_env("SYMPHONY_ORCHESTRATION_ROOT", previous_root),
+        else: System.delete_env("SYMPHONY_ORCHESTRATION_ROOT")
+    end)
+
     assert AgentRuntime.session_adapter(:codex, "implementer") == ImplementerDelegation
     assert AgentRuntime.session_adapter(:claude_code, "implementer") == ImplementerDelegation
     assert AgentRuntime.session_adapter(:codex, "reviewer") == SymphonyElixir.Codex.AppServer
@@ -414,13 +424,30 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert_receive {:transport, :start_session, session_spec}
     refute Map.has_key?(session_spec, :worker)
 
-    assert_receive {:transport, :prepare_worker, _, worker_spec}
+    assert_receive {:transport, :prepare_worker, herdr_session, worker_spec}
     assert worker_spec.profile.name == "implementer-worker"
     assert worker_spec.profile.model == "gpt-5.6-luna"
+    assert herdr_session.permission_read_roots == [Path.join(orchestration_root, ".agents/skills")]
+
+    assert Enum.any?(
+             worker_spec.argv,
+             &String.contains?(
+               &1,
+               "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
+             )
+           )
 
     assert_receive {:transport, :start_agent, _, orchestrator_spec}
     assert orchestrator_spec.profile.name == "implementer-orchestrator"
     assert orchestrator_spec.profile.model == "gpt-5.6-sol"
+
+    assert Enum.any?(
+             orchestrator_spec.argv,
+             &String.contains?(
+               &1,
+               "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
+             )
+           )
 
     assert String.starts_with?(
              orchestrator_spec.env["PATH"],
@@ -438,6 +465,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
              "SYMPHONY_ISSUE_STATE" => "In Progress",
              "SYMPHONY_ISSUE_TITLE" => "Exercise the public runtime seam",
              "SYMPHONY_ISSUE_URL" => "https://linear.app/emberai/issue/EMB-1141",
+             "SYMPHONY_ORCHESTRATION_ROOT" => orchestration_root,
              "SYMPHONY_ROLE_NAME" => "implementer",
              "SYMPHONY_ROLE_RUN_ID" => "runtime-seam"
            }
