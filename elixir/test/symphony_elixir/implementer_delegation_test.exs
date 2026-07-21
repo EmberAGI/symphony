@@ -170,6 +170,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
   test "owns one isolated Herdr session and projects Codex agent profiles exactly" do
     contract = contract(:codex)
+    orchestration_root = "/tmp/scaling-octo-engine"
 
     assert {:ok, session} =
              ImplementerDelegation.start_session(
@@ -178,7 +179,10 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
                issue_identifier: "EMB-1141",
                run_id: "run-7",
                transport: RecordingTransport,
-               transport_context: %{owner: self()}
+               transport_context: %{owner: self()},
+               orchestrator_env: %{
+                 "SYMPHONY_ORCHESTRATION_ROOT" => orchestration_root
+               }
              )
 
     assert_receive {:transport, :default_server_snapshot}
@@ -196,6 +200,19 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert worker_spec.argv ==
              codex_argv(contract.worker, "/tmp/selected-workspace", herdr_session)
 
+    assert Enum.any?(
+             worker_spec.argv,
+             &String.contains?(
+               &1,
+               "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
+             )
+           )
+
+    refute Enum.any?(
+             worker_spec.argv,
+             &String.contains?(&1, "#{inspect(orchestration_root)}=\"read\"")
+           )
+
     refute worker_spec.may_spawn_agents
 
     assert_receive {:transport, :start_agent, %{name: "octo-emb-1141-run-7"}, orchestrator_spec}
@@ -205,6 +222,19 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     assert orchestrator_spec.argv ==
              codex_argv(contract.orchestrator, "/tmp/selected-workspace", herdr_session)
+
+    assert Enum.any?(
+             orchestrator_spec.argv,
+             &String.contains?(
+               &1,
+               "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
+             )
+           )
+
+    refute Enum.any?(
+             orchestrator_spec.argv,
+             &String.contains?(&1, "#{inspect(orchestration_root)}=\"read\"")
+           )
 
     assert Enum.any?(orchestrator_spec.argv, fn arg ->
              String.contains?(arg, "\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"}")
@@ -511,6 +541,11 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     runtime_root = herdr_session.runtime_root
     socket = herdr_session.socket
 
+    read_roots =
+      [runtime_root | Map.get(herdr_session, :permission_read_roots, [])]
+      |> Enum.uniq()
+      |> Enum.map_join(",", &"#{inspect(&1)}=\"read\"")
+
     [
       "codex",
       "--model",
@@ -526,7 +561,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       "--config",
       "default_permissions=\"octo_herdr\"",
       "--config",
-      "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"},#{inspect(runtime_root)}=\"read\"}",
+      "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"},#{read_roots}}",
       "--config",
       "permissions.octo_herdr.network={enabled=true,unix_sockets={#{inspect(socket)}=\"allow\"}}",
       "--ask-for-approval",

@@ -28,6 +28,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
     transport = Keyword.fetch!(opts, :transport)
     transport_context = Keyword.get(opts, :transport_context, %{})
     orchestrator_env = Keyword.get(opts, :orchestrator_env, %{})
+    permission_read_roots = codex_permission_read_roots(orchestrator_env)
 
     with :ok <- validate_workspace(workspace),
          :ok <- validate_orchestrator_env(orchestrator_env),
@@ -43,6 +44,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
              },
              transport_context
            ),
+         herdr_session = Map.put(herdr_session, :permission_read_roots, permission_read_roots),
          {:ok, herdr_session} <-
            prepare_worker(
              transport,
@@ -248,6 +250,18 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
   defp validate_orchestrator_env(_env), do: {:error, :invalid_implementer_orchestrator_environment}
 
+  defp codex_permission_read_roots(env) when is_map(env) do
+    case Map.get(env, "SYMPHONY_ORCHESTRATION_ROOT") do
+      root when is_binary(root) and root != "" ->
+        if Path.type(root) == :absolute, do: [Path.join(root, ".agents/skills")], else: []
+
+      _ ->
+        []
+    end
+  end
+
+  defp codex_permission_read_roots(_env), do: []
+
   defp project_orchestrator_herdr_path(env, %{orchestrator_bin: orchestrator_bin})
        when is_binary(orchestrator_bin) and orchestrator_bin != "" do
     inherited_path = Map.get(env, "PATH") || System.get_env("PATH") || ""
@@ -339,7 +353,11 @@ defmodule SymphonyElixir.ImplementerDelegation do
          "codex",
          %{model: model, reasoning_effort: effort, instructions: instructions},
          workspace,
-         %{runtime_root: runtime_root, socket: socket}
+         %{
+           runtime_root: runtime_root,
+           socket: socket,
+           permission_read_roots: permission_read_roots
+         }
        ) do
     [
       "codex",
@@ -356,7 +374,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
       "--config",
       "default_permissions=\"octo_herdr\"",
       "--config",
-      "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"},#{inspect(runtime_root)}=\"read\"}",
+      codex_filesystem_permissions(runtime_root, permission_read_roots),
       "--config",
       "permissions.octo_herdr.network={enabled=true,unix_sockets={#{inspect(socket)}=\"allow\"}}",
       "--ask-for-approval",
@@ -392,6 +410,15 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
   defp launcher_argv(provider, _profile, _workspace, _herdr_session),
     do: raise(ArgumentError, "unsupported Implementer provider #{inspect(provider)}")
+
+  defp codex_filesystem_permissions(runtime_root, permission_read_roots) do
+    read_roots =
+      [runtime_root | permission_read_roots]
+      |> Enum.uniq()
+      |> Enum.map_join(",", &"#{inspect(&1)}=\"read\"")
+
+    "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"},#{read_roots}}"
+  end
 
   defp worker_spec(contract, workspace, herdr_session) do
     %{
