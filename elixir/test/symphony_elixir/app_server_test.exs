@@ -383,6 +383,127 @@ defmodule SymphonyElixir.AppServerTest do
     refute trace =~ "#{inspect(workspace_root)}=\"read\""
   end
 
+  test "AgentRuntime validates exact remote skill resources through the default SSH Adapter" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runtime-remote-skills-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-REMOTE-SKILLS")
+    package_root = Path.join(test_root, "remote skill's package")
+    runtime_input = Path.join(test_root, "uv lock")
+    executable = Path.join(test_root, "uv tool")
+    fake_ssh = Path.join(test_root, "ssh")
+    trace_file = Path.join(test_root, "ssh.trace")
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+    previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+      restore_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_provider)
+      File.rm_rf(test_root)
+    end)
+
+    File.mkdir_p!(workspace)
+    File.mkdir_p!(package_root)
+    File.write!(runtime_input, "locked")
+    File.write!(executable, "#!/bin/sh\nexit 0\n")
+    File.chmod!(executable, 0o755)
+
+    File.write!(fake_ssh, """
+    #!/bin/sh
+    command=""
+    for argument do
+      command="$argument"
+    done
+
+    printf 'SSH:%s\n' "$command" >> "$SYMP_TEST_SSH_TRACE"
+
+    if [ -f "${SYMP_TEST_SSH_TRACE}.unmaterialized" ]; then
+      exit 66
+    fi
+
+    if [ "$command" != "${command#*test -d}" ]; then
+      printf 'VALIDATE\n' >> "$SYMP_TEST_SSH_TRACE"
+      exec /bin/sh -c "$command"
+    fi
+
+    count=0
+    while IFS= read -r line; do
+      count=$((count + 1))
+      case "$count" in
+        1) printf '%s\n' '{"id":1,"result":{}}' ;;
+        2) printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-remote-skills"}}}' ;;
+      esac
+    done
+    """)
+
+    File.chmod!(fake_ssh, 0o755)
+    System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+    System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      codex_command: "fake-remote-codex app-server"
+    )
+
+    issue = %Issue{
+      id: "issue-agent-runtime-remote-skills",
+      identifier: "MT-REMOTE-SKILLS",
+      title: "Validate remote registered skills",
+      state: "In Progress",
+      labels: ["implementation-effort:moderate"]
+    }
+
+    entry = %{
+      skill: "linear",
+      package_root: package_root,
+      runtime_inputs: [runtime_input],
+      tool_executables: [executable]
+    }
+
+    assert {:ok, session} =
+             SymphonyElixir.AgentRuntime.start_session(workspace,
+               issue: issue,
+               role: "reviewer",
+               worker_host: "worker-01:2200",
+               skill_execution_contracts: [entry],
+               orchestration_root: test_root
+             )
+
+    assert :ok = SymphonyElixir.AgentRuntime.stop_session(session)
+
+    trace = File.read!(trace_file)
+    assert trace =~ "VALIDATE\n"
+    assert trace =~ ~s|remote skill'"'"'"'"'"'"'"'"'s package|
+    refute trace =~ "readlink -f"
+    assert trace =~ "fake-remote-codex"
+
+    File.write!(trace_file, "")
+    File.touch!(trace_file <> ".unmaterialized")
+
+    assert {:error, {:invalid_skill_execution_contract, details}} =
+             SymphonyElixir.AgentRuntime.start_session(workspace,
+               issue: issue,
+               role: "reviewer",
+               worker_host: "worker-01:2200",
+               skill_execution_contracts: [entry],
+               orchestration_root: test_root
+             )
+
+    assert details == %{skill: "linear", field: :resources, reason: :remote_unmaterialized}
+    refute inspect(details) =~ runtime_input
+
+    failure_trace = File.read!(trace_file)
+    assert length(Regex.scan(~r/^SSH:/m, failure_trace)) == 1
+    refute failure_trace =~ "fake-remote-codex"
+  end
+
   test "app server marks request-for-input events as a hard failure" do
     test_root =
       Path.join(

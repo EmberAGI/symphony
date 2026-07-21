@@ -393,6 +393,7 @@ defmodule SymphonyElixir.SkillExecutionContract do
 
   defp remote_check(path, kind) do
     escaped = shell_escape(path)
+    escaped_parent = path |> Path.dirname() |> shell_escape()
 
     type_check =
       case kind do
@@ -401,7 +402,8 @@ defmodule SymphonyElixir.SkillExecutionContract do
         :executable -> "test -f #{escaped} && test -x #{escaped}"
       end
 
-    "#{type_check} && test -r #{escaped} && test \"$(readlink -f -- #{escaped})\" = #{escaped}"
+    "#{type_check} && test -r #{escaped} && test ! -L #{escaped} && " <>
+      "test \"$(CDPATH= cd -P #{escaped_parent} && pwd -P)\" = #{escaped_parent}"
   end
 
   defp shell_escape(value) do
