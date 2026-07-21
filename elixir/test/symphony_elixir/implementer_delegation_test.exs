@@ -576,6 +576,92 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert_receive {:transport, :stop_session, _}
   end
 
+  test "AgentRuntime starts the default Herdr Adapter with exact registered resources" do
+    root = Path.join(System.tmp_dir!(), "agent-runtime-default-herdr-#{System.unique_integer([:positive])}")
+    orchestration_root = Path.join(root, "orchestration")
+    workspace = Path.join(root, "selected-product")
+    package_root = Path.join([orchestration_root, ".agents", "skills", "linear"])
+    runtime_input = Path.join(orchestration_root, "uv.lock")
+    executable = Path.join(root, "tooling-uv")
+    herdr_bin = Path.join(root, "fake-herdr")
+    herdr_log = Path.join(root, "herdr.log")
+    runtime_root = Path.join(System.tmp_dir!(), "arh-#{System.unique_integer([:positive])}")
+    previous_root = System.get_env("SYMPHONY_ORCHESTRATION_ROOT")
+    previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    previous_transport = Application.get_env(:symphony_elixir, :delegation_transport_module)
+
+    File.mkdir_p!(package_root)
+    File.mkdir_p!(workspace)
+    File.write!(runtime_input, "locked")
+    File.write!(executable, "#!/bin/sh\nexit 0\n")
+    File.chmod!(executable, 0o755)
+    write_fake_herdr!(herdr_bin)
+    System.put_env("SYMPHONY_ORCHESTRATION_ROOT", orchestration_root)
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
+
+    Application.put_env(
+      :symphony_elixir,
+      :delegation_transport_module,
+      SymphonyElixir.ImplementerDelegation.HerdrTransport
+    )
+
+    on_exit(fn ->
+      if previous_root,
+        do: System.put_env("SYMPHONY_ORCHESTRATION_ROOT", previous_root),
+        else: System.delete_env("SYMPHONY_ORCHESTRATION_ROOT")
+
+      if previous_provider,
+        do: System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_provider),
+        else: System.delete_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+
+      Application.put_env(:symphony_elixir, :delegation_transport_module, previous_transport)
+
+      File.rm_rf(root)
+      File.rm_rf(runtime_root)
+    end)
+
+    entry = %{
+      skill: "linear",
+      package_root: package_root,
+      runtime_inputs: [runtime_input],
+      tool_executables: [executable]
+    }
+
+    assert {:ok, session} =
+             AgentRuntime.start_session(workspace,
+               issue: issue(),
+               role: "implementer",
+               run_id: "default-herdr",
+               skill_execution_contracts: [entry],
+               delegation_transport_context: %{
+                 herdr_bin: herdr_bin,
+                 extra_env: [{"HERDR_FAKE_LOG", herdr_log}],
+                 socket_root: runtime_root,
+                 poll_interval_ms: 5,
+                 ready_stability_ms: 0,
+                 start_timeout_ms: 2_000
+               }
+             )
+
+    assert session.transport == SymphonyElixir.ImplementerDelegation.HerdrTransport
+    assert session.herdr_session.permission_read_roots == [package_root, runtime_input, executable]
+
+    commands = File.read!(herdr_log)
+    assert commands =~ "agent start implementer_orchestrator"
+    assert commands =~ package_root
+    assert commands =~ runtime_input
+    assert commands =~ executable
+    refute commands =~ "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
+
+    worker_launcher = File.read!(session.herdr_session.worker_launcher)
+    assert worker_launcher =~ package_root
+    assert worker_launcher =~ runtime_input
+    assert worker_launcher =~ executable
+    refute worker_launcher =~ "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
+
+    assert :ok = AgentRuntime.stop_session(session)
+  end
+
   test "a stale pre-submit idle state cannot complete a turn" do
     session = %{
       transport: StaleIdleTransport,
@@ -638,6 +724,57 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
                %{identifier: "EMB-1180"},
                turn_timeout_ms: 100
              )
+  end
+
+  defp write_fake_herdr!(path) do
+    File.write!(path, """
+    #!/bin/sh
+    set -eu
+    printf '%s\n' "$*" >> "$HERDR_FAKE_LOG"
+
+    if [ "$#" -eq 2 ] && [ "$1" = "status" ] && [ "$2" = "server" ]; then
+      printf '%s\n' 'status: running' 'version: 0.7.4' 'protocol: 16' 'compatible: yes' 'socket: /tmp/operator-default/herdr.sock'
+      exit 0
+    fi
+
+    session="$2"
+    state_root="$XDG_CONFIG_HOME/herdr/sessions/$session"
+    running="$state_root/running"
+    stopped="$state_root/stopped"
+
+    if [ "$#" -eq 3 ] && [ "$1" = "--session" ] && [ "$3" = "server" ]; then
+      mkdir -p "$state_root"
+      : > "$running"
+      while [ ! -f "$stopped" ]; do sleep 0.01; done
+      rm -f "$running"
+      exit 0
+    fi
+
+    if [ "$#" -eq 4 ] && [ "$1" = "--session" ] && [ "$3" = "status" ] && [ "$4" = "server" ]; then
+      printf '%s\n' 'status: running' 'version: 0.7.4' 'protocol: 16' 'compatible: yes' "socket: $state_root/herdr.sock"
+      exit 0
+    fi
+
+    if [ "$#" -eq 4 ] && [ "$1" = "--session" ] && [ "$3" = "server" ] && [ "$4" = "stop" ]; then
+      : > "$stopped"
+      exit 0
+    fi
+
+    if [ "$1" = "--session" ] && [ "$3" = "agent" ] && [ "$4" = "start" ]; then
+      printf '{"id":"cli:agent:start","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent_status":"idle","revision":1}}}\n' "$5"
+      exit 0
+    fi
+
+    if [ "$#" -eq 5 ] && [ "$1" = "--session" ] && [ "$3" = "agent" ] && [ "$4" = "get" ]; then
+      printf '{"id":"cli:agent:get","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"idle","revision":1}}}\n' "$5"
+      exit 0
+    fi
+
+    printf 'unsupported fake Herdr command: %s\n' "$*" >&2
+    exit 64
+    """)
+
+    File.chmod!(path, 0o755)
   end
 
   defp contract(provider) do

@@ -10,6 +10,8 @@ defmodule SymphonyElixir.SkillExecutionContract do
   import Bitwise
   alias SymphonyElixir.{PathSafety, SSH}
 
+  @forbidden_orchestration_subtrees [".runtime", ".codex", ".claude", "config"]
+
   @enforce_keys [:skill, :package_root]
   defstruct [:skill, :package_root, runtime_inputs: [], tool_executables: []]
 
@@ -79,10 +81,11 @@ defmodule SymphonyElixir.SkillExecutionContract do
          {:ok, package_root} <- required_path(value(entry, :package_root), skill, :package_root),
          {:ok, runtime_inputs} <- path_list(value(entry, :runtime_inputs) || [], skill, :runtime_inputs),
          {:ok, tool_executables} <- path_list(value(entry, :tool_executables) || [], skill, :tool_executables),
+         validation_opts = Keyword.put(opts, :registered_package_root, package_root),
          :ok <- reject_conflicting_access(skill, runtime_inputs, tool_executables),
-         :ok <- validate_package_root(skill, package_root, opts),
-         :ok <- validate_runtime_inputs(skill, runtime_inputs, opts),
-         :ok <- validate_tool_executables(skill, tool_executables, opts) do
+         :ok <- validate_package_root(skill, package_root, validation_opts),
+         :ok <- validate_runtime_inputs(skill, runtime_inputs, validation_opts),
+         :ok <- validate_tool_executables(skill, tool_executables, validation_opts) do
       {:ok,
        %__MODULE__{
          skill: skill,
@@ -232,9 +235,38 @@ defmodule SymphonyElixir.SkillExecutionContract do
   defp maybe_add_broad_roots(roots, _root), do: roots
 
   defp denied?(path, opts) do
+    canonical_path = canonical_path(path)
+
+    within_selected_workspace?(canonical_path, opts) or
+      forbidden_orchestration_resource?(canonical_path, opts)
+  end
+
+  defp within_selected_workspace?(path, opts) do
     case Keyword.get(opts, :selected_workspace) do
-      root when is_binary(root) and root != "" -> within?(canonical_path(path), canonical_path(root))
+      root when is_binary(root) and root != "" -> within?(path, canonical_path(root))
       _ -> false
+    end
+  end
+
+  defp forbidden_orchestration_resource?(path, opts) do
+    case Keyword.get(opts, :orchestration_root) do
+      root when is_binary(root) and root != "" ->
+        root = canonical_path(root)
+        package_root = canonical_option_path(opts, :registered_package_root)
+        skills_root = Path.join([root, ".agents", "skills"])
+
+        Enum.any?(@forbidden_orchestration_subtrees, &within?(path, Path.join(root, &1))) or
+          (within?(path, skills_root) and not within?(path, package_root))
+
+      _ ->
+        false
+    end
+  end
+
+  defp canonical_option_path(opts, key) do
+    case Keyword.get(opts, key) do
+      path when is_binary(path) and path != "" -> canonical_path(path)
+      _ -> "/__symphony_no_registered_package_root__"
     end
   end
 

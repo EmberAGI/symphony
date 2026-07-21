@@ -151,6 +151,25 @@ defmodule SymphonyElixir.SkillExecutionContractTest do
              )
   end
 
+  test "denies forbidden orchestration resources even when they are readable", context do
+    forbidden_paths = [
+      Path.join([context.root, ".runtime", "role-state.json"]),
+      Path.join([context.root, ".claude", "provider-auth.json"]),
+      Path.join([context.root, "config", "production.toml"]),
+      Path.join([context.root, ".agents", "skills", "unregistered", "SKILL.md"])
+    ]
+
+    Enum.each(forbidden_paths, fn path ->
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "must not be projected")
+
+      invalid = %{entry(context) | "runtime_inputs" => [path]}
+
+      assert {:error, {:invalid_skill_execution_contract, %{reason: :denied}}} =
+               SkillExecutionContract.resolve([invalid], orchestration_root: context.root)
+    end)
+  end
+
   test "thin provider and delegation Adapters project only registered resources", context do
     assert {:ok, contracts} =
              SkillExecutionContract.resolve([entry(context)], orchestration_root: context.root)
