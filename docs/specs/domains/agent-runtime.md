@@ -77,6 +77,11 @@ is retryable, recoverable, blocked, or escalated. Provider adapters translate
 provider-native payloads into this shared family vocabulary before retry
 policy is applied.
 
+**Human-required runtime input**: A provider-native request whose next valid
+step requires a human decision that no approved deterministic unattended policy
+can supply. It is distinct from a generic `turn_input_required` event, which may
+still be resolved by continuation or bounded no-progress recovery.
+
 **Process ownership record**: A local runtime metadata file that records the
 Symphony-owned role run, workspace, worker host, app-server PID when available,
 app-server process group when available, observed descendant PIDs,
@@ -124,8 +129,8 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   `provider_authentication_or_revocation`,
   `missing_required_runtime_configuration`, `missing_required_tool_or_cli`,
   `permission_denied`, `invalid_workspace_or_runtime_protocol`,
-  `unsupported_app_server_contract`, `malformed_provider_event_schema`, and
-  `repeated_identical_no_progress_failure`.
+  `unsupported_app_server_contract`, `malformed_provider_event_schema`,
+  `human_input_required`, and `repeated_identical_no_progress_failure`.
 - Deterministic single-shot irrecoverable failures must escalate immediately
   instead of scheduling or consuming an ordinary role retry. The classification
   must be preserved across adapter, workspace hook, runner, orchestrator,
@@ -179,8 +184,25 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   secret-bearing payloads, provider credentials, full issue bodies, or
   unbounded process output; the PR or handoff records only source categories,
   redaction decisions, and fixture coverage.
-- User-input-required events and permission prompts must not leave unattended
-  runs stalled indefinitely.
+- Provider server requests for input must be recognized inside the provider
+  Adapter's active protocol loop; they must not be treated as opaque
+  notifications or left pending until a transport timeout or claim-lease
+  expiry.
+- An unattended Adapter may answer or reject a provider input request only when
+  an approved deterministic non-interactive policy supplies that outcome. If
+  no such policy applies, the Adapter must promptly send the provider-native
+  decline or cancellation response needed to release the pending protocol
+  request and return `human_input_required` as a single-shot irrecoverable
+  failure. The shared lifecycle then clears ordinary retry, records a blocked
+  or escalated claim lease, and uses the existing Human Escalation path.
+- Generic `turn_input_required` and approval-required failures retain bounded
+  no-progress classification. They must not be reclassified as
+  `human_input_required` unless the Adapter has evidence that the unattended
+  runtime cannot proceed without a human decision.
+- Human-required input evidence is bounded and redacted. It may identify the
+  provider, request source, mode, and a short purpose, but must not preserve raw
+  forms, requested schemas, submitted values, credentials, secret fields, full
+  provider payloads, or unbounded message text.
 - Runtime adapters must collect or expose artifacts and proof in a normalized
   way so review, QA, landing, and operator status surfaces do not need to know
   which provider produced the evidence.
@@ -323,14 +345,22 @@ process cleanup/quarantine status.
 Provider-specific requirements:
 
 - Codex uses the existing Codex app-server path and dynamic tools where
-  supported.
+  supported. A `mcpServer/elicitation/request` is a typed app-server request.
+  When `codex.approval_policy.reject.mcp_elicitations` explicitly supplies the
+  unattended outcome, the Adapter responds with `action: decline` and
+  continues. Otherwise it responds with `action: decline`, emits bounded
+  input-required evidence, and returns `human_input_required`. A malformed
+  request returns `malformed_provider_event_schema` rather than waiting.
 - Claude Code uses a first-party adapter or shim with separated transport,
   server/session lifecycle, cancellation, permission handling, tool bridging,
-  and local Claude CLI auth/startup validation.
+  and local Claude CLI auth/startup validation. Claude-native human-required
+  input follows the same shared failure semantics without pretending to
+  implement the Codex request or response shape.
 - Pi uses native JSONL RPC, maps provider commands and streamed events,
   explicitly controls auto-retry and auto-compaction, uses an explicit worker
   extension bundle, and converts unattended UI/input requests into normalized
-  input-required events.
+  input-required events. A Pi request proven to require unavailable human input
+  follows the same shared failure semantics through its own Adapter.
 
 ### Agent Profile Contract
 
@@ -622,6 +652,13 @@ until those test modules pass under `make all`.
 - Tool call arguments are invalid.
 - Tool execution returns provider-native failure shape.
 - Provider requests user input in an unattended role session.
+- Codex emits a form-mode, OpenAI-form-mode, or URL-mode MCP elicitation while
+  an explicit reject policy applies.
+- Codex emits an MCP elicitation without an applicable deterministic policy,
+  including a request whose message or schema contains secret-bearing fields.
+- A server input request has an id but missing, malformed, or unsupported
+  params; the Adapter must reply or fail promptly without accepting fabricated
+  input.
 - Provider cancellation succeeds after the orchestrator already classified the
   turn as failed.
 - Provider reports usage or artifacts only after turn completion.
@@ -673,6 +710,8 @@ until those test modules pass under `make all`.
 - Move Octo orchestration policy into provider adapters.
 - Rebase this fork onto an external Claude Code Symphony fork.
 - Build a general-purpose plugin marketplace or UI for providers.
+- Build an interactive operator-answer channel inside an unattended provider
+  process, or persist provider elicitation forms in Linear.
 - Require every Symphony deployment to support the Octo multi-runtime profile;
   the profile is required only for deployments claiming Octo Codex/Claude
   Code/Pi support.
@@ -721,6 +760,11 @@ slices without weakening the skills/tools release gate.
   shared retry/escalation seam; provider adapters are concrete adapters into
   that seam, and orchestrator/tracker/status code consume the normalized
   family rather than parsing provider-specific raw payloads.
+- EMB-1178 intake: Distinguished deterministically human-required input from
+  generic input-required/no-progress events. Provider Adapters release their
+  native pending request promptly, while the existing irrecoverable-failure,
+  claim-lease, and Human Escalation path owns the shared lifecycle response.
+  This extends ADR 0001's Adapter decision and does not require a new ADR.
 
 ## References to source issues
 
@@ -728,3 +772,4 @@ slices without weakening the skills/tools release gate.
   (re-scoped 2026-06-10 from "Implement multi-runtime Symphony support for
   Codex, Claude Code, and Pi")
 - [EMB-1127: Generalize irrecoverable runtime failure escalation](https://linear.app/emberai/issue/EMB-1127/generalize-irrecoverable-runtime-failure-escalation)
+- [EMB-1178: Handle unattended Codex MCP elicitation without lease stalls](https://linear.app/emberai/issue/EMB-1178/handle-unattended-codex-mcp-elicitation-without-lease-stalls)
