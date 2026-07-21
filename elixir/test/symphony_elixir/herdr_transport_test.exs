@@ -266,14 +266,25 @@ defmodule SymphonyElixir.HerdrTransportTest do
       "permissions.octo_herdr.network={enabled=true,unix_sockets={#{inspect(session.socket)}=\"allow\"}}"
     ]
 
+    contract_json = ~s([{"skill":"linear"}])
+
     assert {:ok, session} =
-             HerdrTransport.prepare_worker(session, %{argv: worker_argv}, adapter_context)
+             HerdrTransport.prepare_worker(
+               session,
+               %{
+                 argv: worker_argv,
+                 env: %{"SYMPHONY_SKILL_EXECUTION_CONTRACTS" => contract_json}
+               },
+               adapter_context
+             )
 
     assert File.exists?(session.worker_launcher)
     assert File.exists?(Path.join(session.orchestrator_bin, "herdr"))
     launcher = File.read!(session.worker_launcher)
     assert launcher =~ "default_permissions=\"octo_herdr\""
     assert launcher =~ session.socket
+    assert launcher =~ "export SYMPHONY_SKILL_EXECUTION_CONTRACTS="
+    assert launcher =~ contract_json
 
     restricted_herdr = Path.join(session.runtime_root, "worker-bin/herdr")
     assert File.exists?(restricted_herdr)

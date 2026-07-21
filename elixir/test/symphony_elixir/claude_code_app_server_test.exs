@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.ClaudeCodeAppServerTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.AgentRuntime
+  alias SymphonyElixir.{AgentRuntime, SkillExecutionContract}
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
 
   import SymphonyElixir.ClaudeShimFixture
@@ -69,6 +69,43 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       refute Map.has_key?(completed, :claude_preferred_model)
       refute Map.has_key?(completed, :claude_preferred_effort)
       refute Map.has_key?(completed, :claude_fallback_reason)
+    after
+      File.rm_rf(ctx.test_root)
+    end
+  end
+
+  test "projects exact registered skill resources through the real Claude launch seam" do
+    ctx = setup_workspace("MT-CC-skill-contract")
+    package_root = Path.join(ctx.test_root, "linear-skill")
+    runtime_input = Path.join(ctx.test_root, "uv.lock")
+    executable = Path.join(ctx.test_root, "uv")
+
+    try do
+      File.mkdir_p!(package_root)
+      File.write!(runtime_input, "locked")
+      File.write!(executable, "#!/bin/sh\nexit 0\n")
+      File.chmod!(executable, 0o755)
+      configure!(ctx, stream_success(), claude_code_model: "sonnet")
+
+      assert {:ok, contracts} =
+               SkillExecutionContract.resolve([
+                 %{
+                   skill: "linear",
+                   package_root: package_root,
+                   runtime_inputs: [runtime_input],
+                   tool_executables: [executable]
+                 }
+               ])
+
+      assert {{:ok, _turn}, _events, trace} =
+               run_shim(ctx, "Run the registered skill", skill_execution_contracts: contracts)
+
+      assert trace =~ "--add-dir #{package_root} --"
+      assert trace =~ "ENV_SYMPHONY_SKILL_EXECUTION_CONTRACTS:"
+      assert trace =~ package_root
+      assert trace =~ runtime_input
+      assert trace =~ executable
+      refute trace =~ "--add-dir #{ctx.test_root} --"
     after
       File.rm_rf(ctx.test_root)
     end

@@ -12,7 +12,7 @@ defmodule SymphonyElixir.AgentRuntime do
 
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
-  alias SymphonyElixir.{Config, ImplementationEffort, ImplementerDelegation, Workspace}
+  alias SymphonyElixir.{Config, ImplementationEffort, ImplementerDelegation, SkillExecutionContract, Workspace}
   alias SymphonyElixir.ImplementerDelegation.HerdrTransport
 
   @type provider :: :codex | :claude_code
@@ -111,6 +111,26 @@ defmodule SymphonyElixir.AgentRuntime do
     ImplementationEffort.runtime_profile_for_issue(provider, worker_provider(), issue, role)
   end
 
+  @doc "Resolve registered skill runtime resources before a provider session starts."
+  @spec resolve_skill_execution_contracts(Path.t(), keyword()) ::
+          {:ok, [SkillExecutionContract.t()]} | {:error, term()}
+  def resolve_skill_execution_contracts(workspace, opts \\ []) when is_binary(workspace) and is_list(opts) do
+    entries =
+      Keyword.get_lazy(opts, :skill_execution_contracts, fn ->
+        Config.settings!().agent_runtime.skill_execution_contracts
+      end)
+
+    resolve_opts =
+      [
+        selected_workspace: workspace,
+        orchestration_root: Keyword.get(opts, :orchestration_root) || System.get_env("SYMPHONY_ORCHESTRATION_ROOT"),
+        worker_host: Keyword.get(opts, :worker_host)
+      ]
+      |> maybe_put_remote_validator(Keyword.get(opts, :remote_validator))
+
+    SkillExecutionContract.resolve(entries, resolve_opts)
+  end
+
   @doc """
   Start a runtime session with the configured adapter.
   """
@@ -119,10 +139,14 @@ defmodule SymphonyElixir.AgentRuntime do
     provider = provider()
     role = Keyword.get(opts, :role, role_name())
 
-    if role == "implementer" do
-      start_implementer_session(workspace, provider, role, opts)
-    else
-      adapter(provider).start_session(workspace, opts)
+    with {:ok, skill_execution_contracts} <- resolve_skill_execution_contracts(workspace, opts) do
+      opts = Keyword.put(opts, :skill_execution_contracts, skill_execution_contracts)
+
+      if role == "implementer" do
+        start_implementer_session(workspace, provider, role, opts)
+      else
+        adapter(provider).start_session(workspace, opts)
+      end
     end
   end
 
@@ -193,6 +217,7 @@ defmodule SymphonyElixir.AgentRuntime do
         issue_identifier: issue_identifier,
         run_id: run_id,
         orchestrator_env: implementer_run_environment(issue, role, run_id),
+        skill_execution_contracts: Keyword.get(opts, :skill_execution_contracts, []),
         transport: transport,
         transport_context: transport_context
       )
@@ -262,6 +287,11 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   defp default_delegation_transport_context(_transport), do: {:ok, %{}}
+
+  defp maybe_put_remote_validator(opts, validator) when is_function(validator, 2),
+    do: Keyword.put(opts, :remote_validator, validator)
+
+  defp maybe_put_remote_validator(opts, _validator), do: opts
 
   @doc """
   Classify a provider/runtime failure before retry policy is applied.
@@ -654,6 +684,20 @@ defmodule SymphonyElixir.AgentRuntime do
 
   defp real_irrecoverable_runtime_reason({:missing_required_tool, tool}) do
     {:missing_required_tool_or_cli, %{tool: safe_detail_fragment(tool), message: "required runtime executable is not installed"}}
+  end
+
+  defp real_irrecoverable_runtime_reason({:invalid_skill_execution_contract, %{reason: reason} = details}) do
+    family =
+      if reason in [:unreadable, :non_executable, :denied, :symlink_escape],
+        do: :permission_denied,
+        else: :missing_required_runtime_configuration
+
+    {family,
+     %{
+       name: "agent_runtime.skill_execution_contracts",
+       subtype: safe_detail_fragment(reason),
+       message: "registered skill runtime resource validation failed for #{safe_detail_fragment(Map.get(details, :skill))}"
+     }}
   end
 
   defp real_irrecoverable_runtime_reason(reason)

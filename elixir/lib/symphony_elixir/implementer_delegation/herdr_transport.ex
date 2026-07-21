@@ -543,7 +543,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp materialize_worker_launcher(_runtime_root, nil, _context), do: {:ok, nil, nil}
 
-  defp materialize_worker_launcher(runtime_root, %{argv: argv}, context) when is_list(argv) and argv != [] do
+  defp materialize_worker_launcher(runtime_root, %{argv: argv} = worker, context)
+       when is_list(argv) and argv != [] do
     path = Path.join(runtime_root, "launch-worker")
     worker_bin = Path.join(runtime_root, "worker-bin")
     orchestrator_bin = Path.join(runtime_root, "orchestrator-bin")
@@ -552,8 +553,12 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     submission_adapter = Path.join(runtime_root, "herdr-pane-run")
     real_herdr = Map.get(context, :herdr_bin) || System.find_executable("herdr") || "herdr"
 
+    worker_env = Map.get(worker, :env, %{})
+
     launcher_body =
-      "#!/bin/sh\nset -eu\nexport PATH=#{shell_escape(worker_bin)}:\"${PATH:-}\"\nexec #{Enum.map_join(argv, " ", &shell_escape/1)}\n"
+      "#!/bin/sh\nset -eu\nexport PATH=#{shell_escape(worker_bin)}:\"${PATH:-}\"\n" <>
+        launcher_env_exports(worker_env) <>
+        "exec #{Enum.map_join(argv, " ", &shell_escape/1)}\n"
 
     submission_adapter_body = """
     #!/bin/sh
@@ -649,6 +654,14 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   defp agent_env_args(_env), do: []
+
+  defp launcher_env_exports(env) when is_map(env) do
+    env
+    |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+    |> Enum.map_join(fn {key, value} -> "export #{key}=#{shell_escape(value)}\n" end)
+  end
+
+  defp launcher_env_exports(_env), do: ""
 
   defp shell_escape(value) do
     "'" <> String.replace(to_string(value), "'", "'\\''") <> "'"

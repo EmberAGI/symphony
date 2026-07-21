@@ -8,6 +8,8 @@ defmodule SymphonyElixir.ImplementerDelegation do
   server. Herdr command mechanics remain behind the transport seam.
   """
 
+  alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
+  alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
   alias SymphonyElixir.ImplementationEffort
 
   @max_session_name_bytes 44
@@ -28,7 +30,8 @@ defmodule SymphonyElixir.ImplementerDelegation do
     transport = Keyword.fetch!(opts, :transport)
     transport_context = Keyword.get(opts, :transport_context, %{})
     orchestrator_env = Keyword.get(opts, :orchestrator_env, %{})
-    permission_read_roots = codex_permission_read_roots(orchestrator_env)
+    skill_execution_contracts = Keyword.get(opts, :skill_execution_contracts, [])
+    permission_read_roots = SymphonyElixir.SkillExecutionContract.read_paths(skill_execution_contracts)
 
     with :ok <- validate_workspace(workspace),
          :ok <- validate_orchestrator_env(orchestrator_env),
@@ -44,7 +47,10 @@ defmodule SymphonyElixir.ImplementerDelegation do
              },
              transport_context
            ),
-         herdr_session = Map.put(herdr_session, :permission_read_roots, permission_read_roots),
+         herdr_session =
+           herdr_session
+           |> Map.put(:permission_read_roots, permission_read_roots)
+           |> Map.put(:skill_execution_contracts, skill_execution_contracts),
          {:ok, herdr_session} <-
            prepare_worker(
              transport,
@@ -69,6 +75,14 @@ defmodule SymphonyElixir.ImplementerDelegation do
   end
 
   def start_session(_workspace, _contract, _opts), do: {:error, :invalid_implementer_delegation_start}
+
+  @doc false
+  @spec skill_execution_projection_for_test(String.t(), list()) :: map()
+  def skill_execution_projection_for_test("codex", contracts),
+    do: CodexAppServer.skill_execution_projection_for_test(contracts)
+
+  def skill_execution_projection_for_test("claude_code", contracts),
+    do: ClaudeAppServer.skill_execution_projection_for_test(contracts)
 
   @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run_turn(
@@ -202,6 +216,10 @@ defmodule SymphonyElixir.ImplementerDelegation do
     orchestrator_env =
       orchestrator_env
       |> Map.put("OCTO_HERDR_WORKER_LAUNCHER", Map.fetch!(herdr_session, :worker_launcher))
+      |> Map.put(
+        "SYMPHONY_SKILL_EXECUTION_CONTRACTS",
+        SymphonyElixir.SkillExecutionContract.encode!(Map.get(herdr_session, :skill_execution_contracts, []))
+      )
       |> project_orchestrator_herdr_path(herdr_session)
 
     spec = %{
@@ -249,18 +267,6 @@ defmodule SymphonyElixir.ImplementerDelegation do
   end
 
   defp validate_orchestrator_env(_env), do: {:error, :invalid_implementer_orchestrator_environment}
-
-  defp codex_permission_read_roots(env) when is_map(env) do
-    case Map.get(env, "SYMPHONY_ORCHESTRATION_ROOT") do
-      root when is_binary(root) and root != "" ->
-        if Path.type(root) == :absolute, do: [Path.join(root, ".agents/skills")], else: []
-
-      _ ->
-        []
-    end
-  end
-
-  defp codex_permission_read_roots(_env), do: []
 
   defp project_orchestrator_herdr_path(env, %{orchestrator_bin: orchestrator_bin})
        when is_binary(orchestrator_bin) and orchestrator_bin != "" do
@@ -392,8 +398,14 @@ defmodule SymphonyElixir.ImplementerDelegation do
          "claude_code",
          %{model: model, reasoning_effort: effort, instructions: instructions},
          _workspace,
-         _herdr_session
+         herdr_session
        ) do
+    skill_args =
+      herdr_session
+      |> Map.get(:skill_execution_contracts, [])
+      |> ClaudeAppServer.skill_execution_projection_for_test()
+      |> Map.fetch!(:args)
+
     [
       "claude",
       "--model",
@@ -401,11 +413,14 @@ defmodule SymphonyElixir.ImplementerDelegation do
       "--effort",
       effort,
       "--append-system-prompt",
-      instructions,
-      "--dangerously-skip-permissions",
-      "--disallowed-tools",
-      "Agent"
-    ]
+      instructions
+    ] ++
+      skill_args ++
+      [
+        "--dangerously-skip-permissions",
+        "--disallowed-tools",
+        "Agent"
+      ]
   end
 
   defp launcher_argv(provider, _profile, _workspace, _herdr_session),
@@ -428,6 +443,9 @@ defmodule SymphonyElixir.ImplementerDelegation do
       profile: contract.worker,
       cwd: workspace,
       argv: launcher_argv(contract_provider(contract, :worker), contract.worker, workspace, herdr_session),
+      env: %{
+        "SYMPHONY_SKILL_EXECUTION_CONTRACTS" => SymphonyElixir.SkillExecutionContract.encode!(Map.get(herdr_session, :skill_execution_contracts, []))
+      },
       may_spawn_agents: false
     }
   end

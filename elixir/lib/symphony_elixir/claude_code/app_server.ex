@@ -44,7 +44,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   require Logger
 
-  alias SymphonyElixir.{Config, ImplementationEffort, Linear.Issue, PathSafety, SSH}
+  alias SymphonyElixir.{Config, ImplementationEffort, Linear.Issue, PathSafety, SkillExecutionContract, SSH}
   alias SymphonyElixir.Runtime.ProcessOwnership
 
   # `claude` exits non-zero when it cannot reach a usable model/auth at all; the
@@ -95,6 +95,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
+    skill_projection = skill_execution_projection(Keyword.get(opts, :skill_execution_contracts, []))
 
     issue = Keyword.get(opts, :issue)
     role = Keyword.get(opts, :role, runtime_role())
@@ -110,7 +111,10 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
          metadata: launch.metadata,
          workspace: expanded_workspace,
          worker_host: worker_host,
-         launch: %{launch | env: launch.env ++ provider_auth_env ++ ownership_env},
+         launch:
+           launch
+           |> Map.put(:env, launch.env ++ Map.to_list(skill_projection.environment) ++ provider_auth_env ++ ownership_env)
+           |> Map.put(:skill_args, skill_projection.args),
          claude_session_id: nil
        }}
     end
@@ -211,6 +215,21 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   @spec launch_command_for_test(Issue.t() | nil, String.t() | nil) :: {:ok, map()} | {:error, term()}
   def launch_command_for_test(issue \\ nil, role \\ nil), do: launch_config(issue, role)
 
+  @doc false
+  @spec skill_execution_projection_for_test([SkillExecutionContract.t()]) :: map()
+  def skill_execution_projection_for_test(contracts), do: skill_execution_projection(contracts)
+
+  defp skill_execution_projection(contracts) do
+    args = Enum.flat_map(contracts, &["--add-dir", &1.package_root])
+
+    %{
+      args: args,
+      environment: %{
+        "SYMPHONY_SKILL_EXECUTION_CONTRACTS" => SkillExecutionContract.encode!(contracts)
+      }
+    }
+  end
+
   # The catalog validates a non-empty model and reasoning effort for every
   # tier cell, so the resolved profile always carries both, and the adapter
   # launches them exactly (agent-runtime spec: Fable unavailability is a
@@ -306,6 +325,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
       model_flag(launch.model),
       effort_flag(launch.effort),
       system_prompt_flag(launch.instructions),
+      skill_args(launch),
       resume_flag(claude_session_id),
       "--",
       shell_escape(prompt)
@@ -322,6 +342,14 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   defp system_prompt_flag(instructions) when is_binary(instructions),
     do: "--append-system-prompt #{shell_escape(instructions)}"
+
+  defp skill_args(%{skill_args: args}) when is_list(args) do
+    args
+    |> Enum.chunk_every(2)
+    |> Enum.map_join(" ", fn [flag, value] -> "#{flag} #{shell_escape(value)}" end)
+  end
+
+  defp skill_args(_launch), do: nil
 
   defp resume_flag(nil), do: nil
   defp resume_flag(session_id) when is_binary(session_id), do: "--resume #{shell_escape(session_id)}"

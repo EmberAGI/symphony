@@ -197,6 +197,9 @@ defmodule SymphonyElixir.AppServerTest do
       workspace = Path.join(workspace_root, "MT-200")
       codex_binary = Path.join(test_root, "fake-codex")
       trace_file = Path.join(test_root, "codex-effort.trace")
+      package_root = Path.join(test_root, "linear-skill")
+      runtime_input = Path.join(test_root, "uv.lock")
+      executable = Path.join(test_root, "uv")
       previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
       previous_role = System.get_env("SYMPHONY_ROLE")
 
@@ -208,11 +211,16 @@ defmodule SymphonyElixir.AppServerTest do
       System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
       System.put_env("SYMPHONY_ROLE", "implementer")
       File.mkdir_p!(workspace)
+      File.mkdir_p!(package_root)
+      File.write!(runtime_input, "locked")
+      File.write!(executable, "#!/bin/sh\nexit 0\n")
+      File.chmod!(executable, 0o755)
 
       File.write!(codex_binary, """
       #!/bin/sh
       trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-effort.trace}"
       printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+      printf 'ENV_SYMPHONY_SKILL_EXECUTION_CONTRACTS:%s\\n' "${SYMPHONY_SKILL_EXECUTION_CONTRACTS}" >> "$trace_file"
       count=0
 
       while IFS= read -r line; do
@@ -256,13 +264,29 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["implementation-effort:minimal"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Validate effort reasoning", issue)
+      assert {:ok, contracts} =
+               SymphonyElixir.SkillExecutionContract.resolve([
+                 %{
+                   skill: "linear",
+                   package_root: package_root,
+                   runtime_inputs: [runtime_input],
+                   tool_executables: [executable]
+                 }
+               ])
+
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Validate effort reasoning", issue, skill_execution_contracts: contracts)
 
       trace = File.read!(trace_file)
 
       assert trace =~ "ARGV:--config model=\"gpt-5.6-sol\" --config model_reasoning_effort=none"
       assert trace =~ "developer_instructions=\"# implementer-orchestrator"
       assert trace =~ "Reusable implementer-orchestrator instructions."
+      assert trace =~ "default_permissions=symphony_skill_runtime"
+      assert trace =~ "#{inspect(package_root)}=\"read\""
+      assert trace =~ "ENV_SYMPHONY_SKILL_EXECUTION_CONTRACTS:"
+      assert trace =~ runtime_input
+      assert trace =~ executable
       assert trace =~ "app-server"
     after
       File.rm_rf(test_root)

@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.ImplementerDelegationTest do
   use ExUnit.Case, async: false
 
-  alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation}
+  alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation, SkillExecutionContract}
   alias SymphonyElixir.Linear.Issue
 
   defmodule RecordingTransport do
@@ -171,6 +171,16 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
   test "owns one isolated Herdr session and projects Codex agent profiles exactly" do
     contract = contract(:codex)
     orchestration_root = "/tmp/scaling-octo-engine"
+    package_root = Path.join([orchestration_root, ".agents", "skills", "linear"])
+    runtime_input = Path.join(orchestration_root, "uv.lock")
+    tool_executable = "/opt/octo/bin/uv"
+
+    skill_contract = %SkillExecutionContract{
+      skill: "linear",
+      package_root: package_root,
+      runtime_inputs: [runtime_input],
+      tool_executables: [tool_executable]
+    }
 
     assert {:ok, session} =
              ImplementerDelegation.start_session(
@@ -180,6 +190,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
                run_id: "run-7",
                transport: RecordingTransport,
                transport_context: %{owner: self()},
+               skill_execution_contracts: [skill_contract],
                orchestrator_env: %{
                  "SYMPHONY_ORCHESTRATION_ROOT" => orchestration_root
                }
@@ -200,18 +211,24 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert worker_spec.argv ==
              codex_argv(contract.worker, "/tmp/selected-workspace", herdr_session)
 
-    assert Enum.any?(
-             worker_spec.argv,
-             &String.contains?(
-               &1,
-               "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
-             )
-           )
+    assert herdr_session.permission_read_roots == [package_root, runtime_input, tool_executable]
+
+    for path <- herdr_session.permission_read_roots do
+      assert Enum.any?(worker_spec.argv, &String.contains?(&1, "#{inspect(path)}=\"read\""))
+    end
 
     refute Enum.any?(
              worker_spec.argv,
              &String.contains?(&1, "#{inspect(orchestration_root)}=\"read\"")
            )
+
+    refute Enum.any?(
+             worker_spec.argv,
+             &String.contains?(&1, "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\"")
+           )
+
+    assert worker_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] ==
+             SkillExecutionContract.encode!([skill_contract])
 
     refute worker_spec.may_spawn_agents
 
@@ -223,17 +240,18 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert orchestrator_spec.argv ==
              codex_argv(contract.orchestrator, "/tmp/selected-workspace", herdr_session)
 
-    assert Enum.any?(
-             orchestrator_spec.argv,
-             &String.contains?(
-               &1,
-               "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
-             )
-           )
+    for path <- herdr_session.permission_read_roots do
+      assert Enum.any?(orchestrator_spec.argv, &String.contains?(&1, "#{inspect(path)}=\"read\""))
+    end
 
     refute Enum.any?(
              orchestrator_spec.argv,
              &String.contains?(&1, "#{inspect(orchestration_root)}=\"read\"")
+           )
+
+    refute Enum.any?(
+             orchestrator_spec.argv,
+             &String.contains?(&1, "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\"")
            )
 
     assert Enum.any?(orchestrator_spec.argv, fn arg ->
@@ -247,6 +265,9 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
              orchestrator_spec.env["PATH"],
              "/tmp/octo-emb-1141-run-7/orchestrator-bin:"
            )
+
+    assert orchestrator_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] ==
+             SkillExecutionContract.encode!([skill_contract])
 
     assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 30_000}
     assert session.orchestrator.name == "implementer_orchestrator"
@@ -427,26 +448,20 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert_receive {:transport, :prepare_worker, herdr_session, worker_spec}
     assert worker_spec.profile.name == "implementer-worker"
     assert worker_spec.profile.model == "gpt-5.6-luna"
-    assert herdr_session.permission_read_roots == [Path.join(orchestration_root, ".agents/skills")]
+    assert herdr_session.permission_read_roots == []
 
-    assert Enum.any?(
+    refute Enum.any?(
              worker_spec.argv,
-             &String.contains?(
-               &1,
-               "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
-             )
+             &String.contains?(&1, "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\"")
            )
 
     assert_receive {:transport, :start_agent, _, orchestrator_spec}
     assert orchestrator_spec.profile.name == "implementer-orchestrator"
     assert orchestrator_spec.profile.model == "gpt-5.6-sol"
 
-    assert Enum.any?(
+    refute Enum.any?(
              orchestrator_spec.argv,
-             &String.contains?(
-               &1,
-               "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
-             )
+             &String.contains?(&1, "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\"")
            )
 
     assert String.starts_with?(
@@ -456,6 +471,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     assert Map.delete(orchestrator_spec.env, "PATH") == %{
              "OCTO_HERDR_WORKER_LAUNCHER" => "/tmp/octo-emb-1141-runtime-seam/launch-worker",
+             "SYMPHONY_SKILL_EXECUTION_CONTRACTS" => "[]",
              "SYMPHONY_EXPECTED_BRANCH" => "agent/emb-1141-exercise-the-public-runtime-seam",
              "SYMPHONY_ISSUE_BRANCH_NAME" => "sebastianvarela/emb-1141-exercise-the-public-runtime-seam",
              "SYMPHONY_ISSUE_ID" => "issue-1141",
