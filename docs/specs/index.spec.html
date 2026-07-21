@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Canonical map of Symphony specifications and architecture decisions.">
+  <title>Symphony — Specification Home</title>
+  <script defer src="./.viz/runtime.js"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #15202b;
+      --muted: #65707d;
+      --paper: #f4f1ea;
+      --surface: rgba(255, 254, 250, .94);
+      --line: #d9d3c7;
+      --blue: #1d5575;
+      --blue-soft: #e2eef4;
+      --orange: #a64b2a;
+      --orange-soft: #f7e6dd;
+      --gold: #866516;
+      --gold-soft: #f5edcf;
+      --shadow: 0 18px 52px rgba(35, 42, 48, .09);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; background: var(--paper); }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 0%, rgba(29, 85, 117, .13), transparent 31rem),
+        radial-gradient(circle at 94% 12%, rgba(166, 75, 42, .10), transparent 27rem),
+        linear-gradient(180deg, #fbfaf6 0%, var(--paper) 100%);
+      font: 16px/1.58 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    a { color: var(--blue); text-underline-offset: 3px; }
+    a:hover { color: var(--orange); }
+    code { padding: .12rem .36rem; border: 1px solid #d8d5ce; border-radius: .38rem; background: #fbfaf7; font-size: .88em; }
+    main { width: min(1120px, calc(100% - 34px)); margin: 0 auto; padding: 34px 0 90px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { max-width: 900px; margin-bottom: 20px; font-size: clamp(3rem, 7vw, 6.25rem); line-height: .91; letter-spacing: -.06em; }
+    h2 { margin-bottom: 10px; font-size: clamp(1.8rem, 3.4vw, 2.75rem); line-height: 1.05; letter-spacing: -.04em; }
+    h3 { margin-bottom: 7px; font-size: 1.02rem; line-height: 1.25; }
+    .topline { display: flex; justify-content: space-between; gap: 18px; margin-bottom: 52px; color: var(--muted); font-size: .78rem; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+    .hero { padding: 24px 0 42px; }
+    .eyebrow { margin-bottom: 16px; color: var(--orange); font-size: .8rem; font-weight: 900; letter-spacing: .13em; text-transform: uppercase; }
+    .lede { max-width: 820px; margin-bottom: 0; color: #465364; font-size: clamp(1.08rem, 2vw, 1.32rem); }
+    .authority-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 30px; }
+    .authority { padding: 16px 18px; border: 1px solid var(--line); border-radius: 15px; background: rgba(255,255,255,.72); }
+    .authority strong { display: block; margin-bottom: 3px; }
+    .authority span { color: var(--muted); font-size: .88rem; }
+    nav { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 42px; }
+    nav a { padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.8); color: #4f5b68; font-size: .82rem; font-weight: 800; text-decoration: none; }
+    .section { scroll-margin-top: 22px; margin-top: 24px; padding: clamp(24px, 4vw, 42px); border: 1px solid var(--line); border-radius: 25px; background: var(--surface); box-shadow: var(--shadow); }
+    .section-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, .62fr); gap: 24px; align-items: end; margin-bottom: 24px; }
+    .section-note { margin: 0; color: var(--muted); }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .card { display: flex; min-height: 100%; flex-direction: column; padding: 18px; border: 1px solid var(--line); border-radius: 16px; background: #fff; }
+    .card p { margin: 0; color: var(--muted); font-size: .9rem; }
+    .card a { font-weight: 850; text-decoration-thickness: 1px; }
+    .tag { align-self: flex-start; margin-bottom: 13px; padding: 5px 8px; border-radius: 999px; color: var(--blue); background: var(--blue-soft); font-size: .68rem; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+    .adr .tag { color: var(--gold); background: var(--gold-soft); }
+    .runtime .tag { color: var(--orange); background: var(--orange-soft); }
+    .long-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+    .long-list li { padding: 15px 17px; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
+    .long-list strong { display: inline-block; min-width: 4.2rem; color: var(--gold); }
+    footer { padding: 28px 4px 0; color: var(--muted); font-size: .85rem; }
+    @media (max-width: 760px) {
+      .grid, .authority-strip, .section-head { grid-template-columns: 1fr; }
+      .section-head { gap: 7px; }
+    }
+    @media (max-width: 560px) {
+      main { width: min(100% - 20px, 1120px); padding-top: 22px; }
+      .topline { margin-bottom: 28px; }
+      .section { padding: 20px; border-radius: 19px; }
+      h1 { font-size: clamp(2.7rem, 16vw, 4.5rem); }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="topline" data-anchor="home-topline">
+      <span>Symphony</span>
+      <span>Canonical documentation map</span>
+    </div>
+
+    <header class="hero" data-anchor="home-hero">
+      <p class="eyebrow" data-anchor="home-eyebrow">Specifications · decisions · runtime</p>
+      <h1 data-anchor="home-title">One map for Symphony’s working theory.</h1>
+      <p class="lede" data-anchor="home-lede">Canonical specs are organized by durable system area. Linear issue IDs belong in references and decision logs, not canonical filenames. Use this map to find the current behavior contract and the architecture decisions behind it.</p>
+      <div class="authority-strip" data-anchor="home-authority-strip">
+        <div class="authority" data-anchor="home-authority-index"><strong>Context map</strong><span><code>docs/specs/index.spec.html</code> is the sole entry point.</span></div>
+        <div class="authority" data-anchor="home-authority-specs"><strong>Behavior</strong><span><code>docs/specs/domains/</code> owns durable semantics and invariants.</span></div>
+        <div class="authority" data-anchor="home-authority-adrs"><strong>Decisions</strong><span><code>docs/adr/</code> records qualifying architecture trade-offs.</span></div>
+      </div>
+    </header>
+
+    <nav data-anchor="home-navigation" aria-label="Specification home sections">
+      <a href="#domains">Domain specs</a>
+      <a href="#adrs">ADRs</a>
+      <a href="#authority">Authority contract</a>
+    </nav>
+
+    <section class="section" id="domains" data-anchor="domain-specifications">
+      <div class="section-head">
+        <div><h2>Domain specifications</h2></div>
+        <p class="section-note">Durable behavior belongs in the owning domain spec. The index is navigational authority, not a synchronized prose twin of those contracts.</p>
+      </div>
+      <div class="grid" data-anchor="domain-specification-grid">
+        <article class="card" data-anchor="domain-symphony-service"><span class="tag">Service</span><h3><a href="./domains/symphony-service.md">Symphony Service</a></h3><p>Workflow loading, configuration, tracker integration, orchestration, workspace management, runtime execution, observability, validation, and worker extensions.</p></article>
+        <article class="card runtime" data-anchor="domain-agent-runtime"><span class="tag">Runtime</span><h3><a href="./domains/agent-runtime.md">Agent Runtime</a></h3><p>Provider-neutral sessions and adapters, registered SkillExecutionContract resources, selected product workspaces, provider-native tools, normalized events, and runtime evidence.</p></article>
+        <article class="card" data-anchor="domain-repository-quality-assurance"><span class="tag">Evidence</span><h3><a href="./domains/repository-quality-assurance.md">Repository Quality Assurance</a></h3><p>Repository-level acceptance suites, skill-source ownership validation, browser-facing QA, evidence capture, artifacts, and fallback behavior.</p></article>
+        <article class="card" data-anchor="domain-symphony-handoff-artifacts"><span class="tag">Handoff</span><h3><a href="./domains/symphony-handoff-artifacts.md">Symphony Handoff Artifacts</a></h3><p>Symphony-local consumer reference for Octo-owned handoff behavior, provenance, local deltas, and anti-fork guardrails.</p></article>
+        <article class="card" data-anchor="domain-documentation-authority"><span class="tag">Authority</span><h3><a href="./domains/documentation-authority.md">Documentation Authority</a></h3><p>The canonical hierarchy, visual review entry point, failure modes, bounded legacy-path validation, and durable consumer contract.</p></article>
+        <article class="card" data-anchor="domain-project-conventions"><span class="tag">Convention</span><h3><a href="./domains/project-conventions.md">Project Conventions</a></h3><p>The repository convention map for runtime and quality-assurance work.</p></article>
+      </div>
+    </section>
+
+    <section class="section" id="adrs" data-anchor="architecture-decision-map">
+      <div class="section-head">
+        <div><h2>Architecture decisions</h2></div>
+        <p class="section-note">ADRs are created lazily when a decision is hard to reverse, surprising without context, and the result of a real trade-off.</p>
+      </div>
+      <ol class="long-list" data-anchor="architecture-decision-list">
+        <li class="adr" data-anchor="adr-0001"><strong>0001</strong> <a href="../adr/0001-provider-neutral-agent-runtimes.md">Provider-Neutral Agent Runtimes</a></li>
+        <li class="adr" data-anchor="adr-0002"><strong>0002</strong> <a href="../adr/0002-claude-code-unattended-auth-and-permission-posture.md">Claude Code Unattended Runtime Authentication and Permission Posture</a></li>
+        <li class="adr" data-anchor="adr-0003"><strong>0003</strong> <a href="../adr/0003-canonical-documentation-authority.md">Canonical Documentation Authority under docs/specs and docs/adr</a></li>
+      </ol>
+    </section>
+
+    <section class="section" id="authority" data-anchor="documentation-authority-contract">
+      <div class="section-head">
+        <div><h2>Authority contract</h2></div>
+        <p class="section-note">The page is an offline, annotatable HTML artifact with stable <code>data-anchor</code> targets and a repository-owned spec-chat runtime. It has no Markdown twin.</p>
+      </div>
+      <div class="grid" data-anchor="authority-contract-grid">
+        <article class="card"><span class="tag">One source</span><h3>One canonical entry point</h3><p>The HTML context map links every canonical domain specification and ADR. A parallel <code>index.md</code>, alias, or symlink is rejected.</p></article>
+        <article class="card"><span class="tag">Fail closed</span><h3>Structural validation</h3><p>Missing runtime assets, broken local links, stale legacy paths, absent stable anchors, and incomplete navigation fail repository validation.</p></article>
+      </div>
+    </section>
+
+    <footer data-anchor="home-footer">At merge, the specification, acceptance evidence, tests, and implementation should express one reconciled theory.</footer>
+  </main>
+</body>
+</html>

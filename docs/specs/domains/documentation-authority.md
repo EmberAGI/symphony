@@ -11,11 +11,15 @@ that exactly one authority hierarchy exists.
 
 The only durable authority locations in this repository are:
 
-- `docs/specs/index.md` — the spec index and entry point.
+- `docs/specs/index.spec.html` — the sole spec context map and entry point.
 - `docs/specs/domains/` — canonical domain specifications.
 - `docs/adr/` — accepted architecture decision records.
 
-Visual specifications, when present, live at `docs/specs/**/*.spec.html` or
+The context map is an offline, annotatable visual HTML artifact. It loads the
+repository-owned spec-chat runtime from `docs/specs/.viz/runtime.js`, exposes
+stable `data-anchor` targets, and links every canonical domain specification
+and ADR. It has no synchronized Markdown twin. Other visual specifications,
+when present, live at `docs/specs/**/*.spec.html` or
 `docs/adr/**/*.spec.html` according to which authority owns them. No other
 location is a durable authority, and no alias, symlink, duplicate tree, or
 read/write fallback to another location is permitted.
@@ -30,7 +34,9 @@ knowledge and no legacy fallback behavior.
 Documentation-authority validation fails visibly — with errors, not silent
 degradation — when any of the following holds:
 
-- `docs/specs/index.md` is missing or is not a regular file.
+- `docs/specs/index.spec.html` is missing or is not a regular file, a parallel
+  `docs/specs/index.md` exists, or the context map omits its review runtime,
+  stable anchors, or any canonical domain specification or ADR.
 - `docs/specs/domains/` is missing, empty, or not a real directory.
 - `docs/adr/` is missing, empty, or not a real directory.
 - A top-level directory named `spec` or `specs` exists in any form,
@@ -58,13 +64,14 @@ Validation is bounded and deterministic:
   relative paths resolve from the referencing file, repository paths resolve
   from the repository root, and only paths resolving under `docs/specs/` are
   canonical.
-- Relative links inside canonical authority documents must resolve to
+- Relative links and asset references inside canonical Markdown and HTML
+  authority documents must resolve to
   existing files whose physical targets remain within the repository after
   symlink resolution; a link that escapes the repository root directly or
   through an in-repository symlink is rejected even when its target exists.
 - Stale-reference scanning covers only active surfaces: inside a Git work
   tree, the tracked source, documentation, and metadata file types
-  (Markdown, Elixir sources, TOML, JSON, YAML). Outside a Git work tree it
+  (Markdown, HTML, Elixir sources, TOML, JSON, YAML). Outside a Git work tree it
   falls back to a bounded directory walk that excludes build, dependency,
   and VCS directories. It does not follow symlinks and does not consult any
   location outside the repository root.
@@ -76,7 +83,8 @@ Validation is bounded and deterministic:
   skills consume the hierarchy from `EmberAGI/scaling-octo-engine`.
 - ExUnit contract tests exercise the public documentation-authority
   contract: canonical success, missing hierarchy, legacy-only hierarchy,
-  duplicate and alias rejection, stale active references, relative link
+  duplicate and alias rejection, complete HTML navigation, review-runtime and
+  stable-anchor presence, stale active references, relative link/asset
   integrity, and nonstandard-path warnings.
 - Octo consumes this repository at a pinned revision; from the migration
   merge until the Octo adoption issue is deployed, no compatibility alias

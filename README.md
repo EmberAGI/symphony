@@ -13,7 +13,7 @@ _In this [demo video](.github/media/symphony-demo.mp4), Symphony monitors a Line
 ## Specifications
 
 Canonical specifications for this fork live under [`docs/specs/`](docs/specs/). Start with
-[`docs/specs/index.md`](docs/specs/index.md).
+[`docs/specs/index.spec.html`](docs/specs/index.spec.html).
 
 ## Running Symphony
 
@@ -27,7 +27,7 @@ moving from managing coding agents to managing work that needs to get done.
 
 Tell your favorite coding agent to build Symphony in a programming language of your choice:
 
-> Implement Symphony according to `docs/specs/index.md` and the canonical specs it links.
+> Implement Symphony according to `docs/specs/index.spec.html` and the canonical specs it links.
 
 ### Option 2. Use our experimental reference implementation
 

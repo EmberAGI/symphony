@@ -10,7 +10,7 @@ artifact behavior without forking Octo's normative handoff-artifacts contract.
 Octo owns the normative handoff-artifacts contract at:
 
 ```text
-EmberAGI/scaling-octo-engine:spec/domains/symphony-handoff-artifacts.md
+EmberAGI/scaling-octo-engine:docs/specs/domains/symphony-handoff-artifacts.md
 ```
 
 Symphony agents use this document only as a local consumer reference so the
@@ -21,7 +21,7 @@ maintained source of truth for Octo handoff packet behavior.
 ## Provenance
 
 - Upstream owner: `EmberAGI/scaling-octo-engine`
-- Upstream path: `EmberAGI/scaling-octo-engine:spec/domains/symphony-handoff-artifacts.md`
+- Upstream path: `EmberAGI/scaling-octo-engine:docs/specs/domains/symphony-handoff-artifacts.md`
 - Local reference introduced for EMB-185 on 2026-05-05 after operator
   escalation resolution.
 - Reference basis: Linear EMB-185 operator note dated 2026-05-05T21:05:00Z.
@@ -81,4 +81,4 @@ explicitly reassigns ownership of the handoff-artifacts contract:
 ## References
 
 - [Repository Quality Assurance](./repository-quality-assurance.md)
-- [Spec Index](../index.md)
+- [Spec Index](../index.spec.html)

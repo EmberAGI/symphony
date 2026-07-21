@@ -2,7 +2,7 @@
 
 This directory contains the current Elixir/OTP implementation of Symphony, based on
 the canonical specs under [`../docs/specs/`](../docs/specs/). Start with
-[`../docs/specs/index.md`](../docs/specs/index.md) and the service spec at
+[`../docs/specs/index.spec.html`](../docs/specs/index.spec.html) and the service spec at
 [`../docs/specs/domains/symphony-service.md`](../docs/specs/domains/symphony-service.md).
 
 > [!WARNING]
