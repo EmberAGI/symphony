@@ -414,14 +414,41 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
   end
 
   test "AgentRuntime routes and composes only Implementer sessions through Herdr" do
-    orchestration_root = "/tmp/production-orchestration-root"
+    orchestration_root =
+      Path.join(
+        System.tmp_dir!(),
+        "implementer-runtime-skills-#{System.unique_integer([:positive])}"
+      )
+
+    package_root = Path.join([orchestration_root, "skill-runtime", "linear"])
+    runtime_input = Path.join(orchestration_root, "uv.lock")
+    executable = Path.join(orchestration_root, "uv")
     previous_root = System.get_env("SYMPHONY_ORCHESTRATION_ROOT")
+    previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    previous_worker_provider = System.get_env("OCTO_RUNTIME_WORKER_PROVIDER")
+
+    File.mkdir_p!(package_root)
+    File.write!(runtime_input, "locked")
+    File.write!(executable, "#!/bin/sh\nexit 0\n")
+    File.chmod!(executable, 0o755)
     System.put_env("SYMPHONY_ORCHESTRATION_ROOT", orchestration_root)
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
+    System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", "codex")
 
     on_exit(fn ->
       if previous_root,
         do: System.put_env("SYMPHONY_ORCHESTRATION_ROOT", previous_root),
         else: System.delete_env("SYMPHONY_ORCHESTRATION_ROOT")
+
+      if previous_provider,
+        do: System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_provider),
+        else: System.delete_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+
+      if previous_worker_provider,
+        do: System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", previous_worker_provider),
+        else: System.delete_env("OCTO_RUNTIME_WORKER_PROVIDER")
+
+      File.rm_rf(orchestration_root)
     end)
 
     assert AgentRuntime.session_adapter(:codex, "implementer") == ImplementerDelegation
@@ -431,12 +458,30 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     issue = issue()
 
+    skill_entry = %{
+      skill: "linear",
+      package_root: package_root,
+      runtime_inputs: [runtime_input],
+      tool_executables: [executable]
+    }
+
+    encoded_contract =
+      Jason.encode!([
+        %{
+          skill: "linear",
+          package_root: package_root,
+          runtime_inputs: [runtime_input],
+          tool_executables: [executable]
+        }
+      ])
+
     assert {:ok, session} =
              AgentRuntime.start_session(
                "/tmp/selected-workspace",
                issue: issue,
                role: "implementer",
                run_id: "runtime-seam",
+               skill_execution_contracts: [skill_entry],
                delegation_transport: RecordingTransport,
                delegation_transport_context: %{owner: self()}
              )
@@ -448,7 +493,9 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert_receive {:transport, :prepare_worker, herdr_session, worker_spec}
     assert worker_spec.profile.name == "implementer-worker"
     assert worker_spec.profile.model == "gpt-5.6-luna"
-    assert herdr_session.permission_read_roots == []
+    assert herdr_session.permission_read_roots == [package_root, runtime_input, executable]
+    assert worker_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] == encoded_contract
+    assert Enum.any?(worker_spec.argv, &String.contains?(&1, "#{inspect(package_root)}=\"read\""))
 
     refute Enum.any?(
              worker_spec.argv,
@@ -458,6 +505,8 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert_receive {:transport, :start_agent, _, orchestrator_spec}
     assert orchestrator_spec.profile.name == "implementer-orchestrator"
     assert orchestrator_spec.profile.model == "gpt-5.6-sol"
+    assert orchestrator_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] == encoded_contract
+    assert Enum.any?(orchestrator_spec.argv, &String.contains?(&1, "#{inspect(package_root)}=\"read\""))
 
     refute Enum.any?(
              orchestrator_spec.argv,
@@ -471,7 +520,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     assert Map.delete(orchestrator_spec.env, "PATH") == %{
              "OCTO_HERDR_WORKER_LAUNCHER" => "/tmp/octo-emb-1141-runtime-seam/launch-worker",
-             "SYMPHONY_SKILL_EXECUTION_CONTRACTS" => "[]",
+             "SYMPHONY_SKILL_EXECUTION_CONTRACTS" => encoded_contract,
              "SYMPHONY_EXPECTED_BRANCH" => "agent/emb-1141-exercise-the-public-runtime-seam",
              "SYMPHONY_ISSUE_BRANCH_NAME" => "sebastianvarela/emb-1141-exercise-the-public-runtime-seam",
              "SYMPHONY_ISSUE_ID" => "issue-1141",
@@ -494,6 +543,37 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert next_session.name == "octo-emb-1141-runtime-seam"
     assert turn.response == "IMPLEMENTER_TURN_COMPLETE"
     assert :ok = AgentRuntime.stop_session(next_session)
+    assert_receive {:transport, :stop_session, _}
+
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "claude_code")
+    System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", "claude_code")
+
+    assert {:ok, claude_session} =
+             AgentRuntime.start_session(
+               "/tmp/selected-workspace",
+               issue: issue,
+               role: "implementer",
+               run_id: "runtime-seam-claude",
+               skill_execution_contracts: [skill_entry],
+               delegation_transport: RecordingTransport,
+               delegation_transport_context: %{owner: self()}
+             )
+
+    assert_receive {:transport, :default_server_snapshot}
+    assert_receive {:transport, :start_session, _}
+    assert_receive {:transport, :prepare_worker, _, claude_worker_spec}
+    assert claude_worker_spec.provider == "claude_code"
+    assert package_root in claude_worker_spec.argv
+    assert claude_worker_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] == encoded_contract
+
+    assert_receive {:transport, :start_agent, _, claude_orchestrator_spec}
+    assert claude_orchestrator_spec.provider == "claude_code"
+    assert package_root in claude_orchestrator_spec.argv
+    assert claude_orchestrator_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] == encoded_contract
+    assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 30_000}
+
+    assert :ok = AgentRuntime.stop_session(claude_session)
+    assert_receive {:transport, :stop_session, _}
   end
 
   test "a stale pre-submit idle state cannot complete a turn" do

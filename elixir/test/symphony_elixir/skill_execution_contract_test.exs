@@ -1,9 +1,9 @@
 defmodule SymphonyElixir.SkillExecutionContractTest do
   use ExUnit.Case, async: true
 
-  alias SymphonyElixir.{AgentRuntime, ImplementerDelegation, SkillExecutionContract}
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
+  alias SymphonyElixir.{ImplementerDelegation, SkillExecutionContract}
 
   setup do
     root = Path.join(System.tmp_dir!(), "skill-contract-#{System.unique_integer([:positive])}")
@@ -115,32 +115,40 @@ defmodule SymphonyElixir.SkillExecutionContractTest do
     refute inspect(error) =~ "token-secret"
   end
 
-  test "AgentRuntime resolves the same contract for every managed role and provider", context do
-    roles = ["implementer", "reviewer", "qa", "landing", "backlog-processor"]
-    providers = [:codex, :claude_code]
+  test "fails closed when the effective caller cannot read or execute a registered resource", context do
+    valid = entry(context)
 
-    for role <- roles, provider <- providers do
-      assert {:ok, [contract]} =
-               AgentRuntime.resolve_skill_execution_contracts(
-                 context.workspace,
-                 skill_execution_contracts: [entry(context)],
-                 role: role,
-                 provider: provider,
-                 orchestration_root: context.root
-               )
+    File.chmod!(context.runtime_input, 0o004)
+    assert_error_reason(valid, :unreadable)
+    File.chmod!(context.runtime_input, 0o644)
 
-      assert contract.skill == "linear"
-      assert contract.package_root == context.package_root
-      assert contract.runtime_inputs == [context.runtime_input]
-      assert contract.tool_executables == [context.executable]
+    File.chmod!(context.executable, 0o401)
+    assert_error_reason(valid, :non_executable)
+  end
 
-      expected_adapter =
-        if role == "implementer",
-          do: ImplementerDelegation,
-          else: AgentRuntime.adapter(provider)
+  test "compares registered resources with canonical physical authority roots", context do
+    orchestration_alias = context.root <> "-orchestration-alias"
+    workspace_alias = context.workspace <> "-alias"
 
-      assert AgentRuntime.session_adapter(provider, role) == expected_adapter
-    end
+    File.ln_s!(context.root, orchestration_alias)
+    File.ln_s!(context.workspace, workspace_alias)
+
+    on_exit(fn ->
+      File.rm(orchestration_alias)
+      File.rm(workspace_alias)
+    end)
+
+    assert {:error, {:invalid_skill_execution_contract, %{reason: :broad_root}}} =
+             SkillExecutionContract.resolve(
+               [%{entry(context) | "package_root" => context.root}],
+               orchestration_root: orchestration_alias
+             )
+
+    assert {:error, {:invalid_skill_execution_contract, %{reason: :denied}}} =
+             SkillExecutionContract.resolve(
+               [%{entry(context) | "package_root" => context.workspace}],
+               selected_workspace: workspace_alias
+             )
   end
 
   test "thin provider and delegation Adapters project only registered resources", context do

@@ -8,7 +8,7 @@ defmodule SymphonyElixir.SkillExecutionContract do
   """
 
   import Bitwise
-  alias SymphonyElixir.SSH
+  alias SymphonyElixir.{PathSafety, SSH}
 
   @enforce_keys [:skill, :package_root]
   defstruct [:skill, :package_root, runtime_inputs: [], tool_executables: []]
@@ -170,7 +170,7 @@ defmodule SymphonyElixir.SkillExecutionContract do
   defp validate_stat(skill, field, path, expected_type, executable?) do
     case File.stat(path) do
       {:ok, %{type: ^expected_type, mode: mode}} ->
-        validate_mode(skill, field, mode, expected_type, executable?)
+        validate_mode(skill, field, path, mode, expected_type, executable?)
 
       {:ok, _stat} ->
         invalid(skill, field, :wrong_type)
@@ -186,24 +186,42 @@ defmodule SymphonyElixir.SkillExecutionContract do
     end
   end
 
-  defp validate_mode(skill, field, mode, expected_type, executable?) do
-    cond do
-      (mode &&& 0o444) == 0 -> invalid(skill, field, :unreadable)
-      expected_type == :directory and (mode &&& 0o111) == 0 -> invalid(skill, field, :unreadable)
-      executable? and (mode &&& 0o111) == 0 -> invalid(skill, field, :non_executable)
-      true -> :ok
+  defp validate_mode(skill, field, path, mode, expected_type, executable?) do
+    with :ok <- require_access(skill, field, path, mode, 0o444, :read, :unreadable),
+         :ok <- require_directory_access(skill, field, path, mode, expected_type) do
+      require_executable_access(skill, field, path, mode, executable?)
     end
+  end
+
+  defp require_directory_access(skill, field, path, mode, :directory) do
+    require_access(skill, field, path, mode, 0o111, :execute, :unreadable)
+  end
+
+  defp require_directory_access(_skill, _field, _path, _mode, _expected_type), do: :ok
+
+  defp require_executable_access(skill, field, path, mode, true) do
+    require_access(skill, field, path, mode, 0o111, :execute, :non_executable)
+  end
+
+  defp require_executable_access(_skill, _field, _path, _mode, false), do: :ok
+
+  defp require_access(skill, field, path, mode, mask, access, reason) do
+    if (mode &&& mask) != 0 and accessible?(path, access),
+      do: :ok,
+      else: invalid(skill, field, reason)
   end
 
   defp broad_root?(path, opts) do
     orchestration_root = Keyword.get(opts, :orchestration_root)
 
+    canonical_path = canonical_path(path)
+
     broad =
       ["/", System.user_home!()]
       |> maybe_add_broad_roots(orchestration_root)
-      |> Enum.map(&Path.expand/1)
+      |> Enum.map(&canonical_path/1)
 
-    path in broad
+    canonical_path in broad
   end
 
   defp maybe_add_broad_roots(roots, root) when is_binary(root) and root != "" do
@@ -215,12 +233,31 @@ defmodule SymphonyElixir.SkillExecutionContract do
 
   defp denied?(path, opts) do
     case Keyword.get(opts, :selected_workspace) do
-      root when is_binary(root) and root != "" -> within?(path, Path.expand(root))
+      root when is_binary(root) and root != "" -> within?(canonical_path(path), canonical_path(root))
       _ -> false
     end
   end
 
   defp within?(path, root), do: path == root or String.starts_with?(path, root <> "/")
+
+  defp canonical_path(path) do
+    case PathSafety.canonicalize(path) do
+      {:ok, canonical_path} -> canonical_path
+      {:error, _reason} -> Path.expand(path)
+    end
+  end
+
+  defp accessible?(path, access) do
+    flag = if access == :read, do: "-r", else: "-x"
+
+    case System.find_executable("test") do
+      nil ->
+        false
+
+      executable ->
+        match?({_output, 0}, System.cmd(executable, [flag, path], stderr_to_stdout: true))
+    end
+  end
 
   defp symlinked?(path) do
     path

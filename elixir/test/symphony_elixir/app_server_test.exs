@@ -293,6 +293,96 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "AgentRuntime projects one registered contract to every non-Implementer Codex role" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runtime-codex-skills-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-201")
+    package_root = Path.join([test_root, "skill-runtime", "linear"])
+    runtime_input = Path.join(test_root, "uv.lock")
+    executable = Path.join(test_root, "uv")
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "codex.trace")
+    previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
+    previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+
+    on_exit(fn ->
+      restore_env("SYMP_TEST_CODEx_TRACE", previous_trace)
+      restore_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_provider)
+      File.rm_rf(test_root)
+    end)
+
+    File.mkdir_p!(workspace)
+    File.mkdir_p!(package_root)
+    File.write!(runtime_input, "locked")
+    File.write!(executable, "#!/bin/sh\nexit 0\n")
+    File.chmod!(executable, 0o755)
+
+    File.write!(codex_binary, """
+    #!/bin/sh
+    printf 'ARGV:%s\n' "$*" >> "${SYMP_TEST_CODEx_TRACE}"
+    printf 'CONTRACT:%s\n' "${SYMPHONY_SKILL_EXECUTION_CONTRACTS}" >> "${SYMP_TEST_CODEx_TRACE}"
+    count=0
+    while IFS= read -r line; do
+      count=$((count + 1))
+      case "$count" in
+        1) printf '%s\n' '{"id":1,"result":{}}' ;;
+        2) printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-skills"}}}' ;;
+      esac
+    done
+    """)
+
+    File.chmod!(codex_binary, 0o755)
+    System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      codex_command: "#{codex_binary} app-server"
+    )
+
+    issue = %Issue{
+      id: "issue-agent-runtime-codex-skills",
+      identifier: "MT-201",
+      title: "Project registered skills",
+      state: "In Progress",
+      labels: ["implementation-effort:moderate"]
+    }
+
+    entry = %{
+      skill: "linear",
+      package_root: package_root,
+      runtime_inputs: [runtime_input],
+      tool_executables: [executable]
+    }
+
+    for role <- ["reviewer", "qa", "landing", "backlog-processor"] do
+      assert {:ok, session} =
+               SymphonyElixir.AgentRuntime.start_session(workspace,
+                 issue: issue,
+                 role: role,
+                 skill_execution_contracts: [entry],
+                 orchestration_root: test_root
+               )
+
+      assert :ok = SymphonyElixir.AgentRuntime.stop_session(session)
+    end
+
+    trace = File.read!(trace_file)
+    assert length(Regex.scan(~r/^ARGV:/m, trace)) == 4
+    assert length(Regex.scan(~r/^CONTRACT:/m, trace)) == 4
+    assert trace =~ "default_permissions=symphony_skill_runtime"
+    assert trace =~ "#{inspect(package_root)}=\"read\""
+    assert trace =~ runtime_input
+    assert trace =~ executable
+    refute trace =~ "#{inspect(test_root)}=\"read\""
+    refute trace =~ "#{inspect(workspace_root)}=\"read\""
+  end
+
   test "app server marks request-for-input events as a hard failure" do
     test_root =
       Path.join(
