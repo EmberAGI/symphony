@@ -22,8 +22,11 @@ alternatives), so it is recorded as an ADR.
 
 ## Decision
 
-- `docs/specs/index.md`, `docs/specs/domains/`, and `docs/adr/` are the only
+- `docs/specs/index.spec.html`, `docs/specs/domains/`, and `docs/adr/` are the only
   durable authority locations in this repository.
+- The index is the sole, offline, annotatable context map. It loads the
+  repository-owned spec-chat runtime, exposes stable anchors, and navigates
+  every canonical domain specification and ADR. It has no Markdown twin.
 - The migration is one atomic repository cutover: the truth-making change
   leaves no top-level directory named `spec` or `specs`, no duplicate tree,
   no symlink alias, and no read or write fallback.
@@ -51,6 +54,8 @@ alternatives), so it is recorded as an ADR.
 
 - Every role and skill uses one standard hierarchy across the repository
   family; no alias or repository-specific discovery survives.
+- Review annotations target stable HTML anchors, while canonical behavior and
+  decisions remain owned by the linked domain specifications and ADRs.
 - Historical Git commits and immutable completed Linear history still
   mention the legacy layout; they are not rewritten. Upstream
   `scaling-octo-engine` references keep their own paths until that

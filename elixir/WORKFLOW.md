@@ -49,6 +49,14 @@ codex:
 # this block is omitted.
 # agent_runtime:
 #   provider: claude_code
+#   # Integration-owned, exact runtime resources for configured skills. These
+#   # paths are validated before provider work and projected read-only; never
+#   # register the orchestration root, `.agents`, or `.agents/skills` itself.
+#   skill_execution_contracts:
+#     - skill: linear
+#       package_root: /opt/octo/.agents/skills/linear
+#       runtime_inputs: [/opt/octo/pyproject.toml, /opt/octo/uv.lock]
+#       tool_executables: [/opt/octo/bin/uv]
 # Claude Code shim configuration (used when agent_runtime.provider is
 # claude_code). Authentication is operator-managed Claude subscription OAuth on
 # the role host; no API key is read or stored here. Unattended runs use

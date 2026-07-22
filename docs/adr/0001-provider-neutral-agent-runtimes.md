@@ -54,6 +54,22 @@ permission policy, tool bundle, artifact policy, and capability information.
 Provider-specific config is still allowed, and the existing `codex` config
 remains the backward-compatible default for Codex.
 
+For configured skills with executable resources, the provider-neutral runtime
+boundary also carries a resolved skill execution contract. The integrating
+workflow registers the exact skill package root, locked runtime inputs, and
+external tool executables; `AgentRuntime` validates and propagates the same
+contract to top-level roles, Implementer orchestrators, and workers. Provider
+adapters translate only those entries into native discovery, read, execute,
+environment, or launch permissions. They do not grant the enclosing
+orchestration checkout, runtime state, provider authentication, production
+configuration, or unregistered sibling resources.
+
+The selected product workspace remains the writable repository and evidence
+authority. Registered skill execution resources are read-only orchestration
+inputs. Symphony owns this runtime propagation seam, while Octo owns its skill
+inventory, registration manifest, activation policy, and provider-native
+evaluation.
+
 Working skills and tools are a release gate. A runtime must not be enabled for
 unattended Octo use until role skills load or translate correctly, required
 tools execute through controlled runtime-native mechanisms, tool failures
@@ -73,6 +89,10 @@ forcing every provider to emulate Codex app-server internally.
 Octo can mix providers across roles only after skills, tools, normalized events,
 artifacts/proof, and failure behavior are validated for each enabled runtime.
 
+Adding executable resources now requires explicit registration and
+provider-native projection tests, but avoids relying on ambient host access or
+granting a whole orchestration checkout to make one skill runnable.
+
 ## Alternatives Considered
 
 - Keep Symphony Codex-only.
@@ -87,10 +107,15 @@ artifacts/proof, and failure behavior are validated for each enabled runtime.
 - Treat tools and skills as follow-up polish.
   This is unsafe for unattended Octo roles because provider runs would appear
   enabled before they can actually perform required workflow operations.
+- Grant the complete orchestration checkout to every provider session.
+  Rejected because a configured skill's executable dependencies are narrower,
+  the product workspace must remain the sole writable evidence authority, and
+  runtime/auth/config paths must not become incidental provider inputs.
 
 ## References
 
 - EMB-166: https://linear.app/emberai/issue/EMB-166/implement-multi-runtime-symphony-support-for-codex-claude-code-and-pi
+- EMB-1199: https://linear.app/emberai/issue/EMB-1199/expose-registered-skill-runtime-paths-to-every-managed-role
 - [Agent Runtime](../specs/domains/agent-runtime.md)
 - [Symphony Service](../specs/domains/symphony-service.md)
 - https://github.com/sumansid/claude-app-server

@@ -2,7 +2,7 @@
 
 This directory contains the current Elixir/OTP implementation of Symphony, based on
 the canonical specs under [`../docs/specs/`](../docs/specs/). Start with
-[`../docs/specs/index.md`](../docs/specs/index.md) and the service spec at
+[`../docs/specs/index.spec.html`](../docs/specs/index.spec.html) and the service spec at
 [`../docs/specs/domains/symphony-service.md`](../docs/specs/domains/symphony-service.md).
 
 > [!WARNING]
@@ -159,6 +159,11 @@ local `claude` CLI behind the same app-server contract. Select the runtime with
 ```yaml
 agent_runtime:
   provider: claude_code
+  skill_execution_contracts:
+    - skill: linear
+      package_root: /opt/octo/.agents/skills/linear
+      runtime_inputs: [/opt/octo/pyproject.toml, /opt/octo/uv.lock]
+      tool_executables: [/opt/octo/bin/uv]
 claude_code:
   command: claude
   model: sonnet
@@ -171,6 +176,13 @@ Notes:
 
 - Omitting `agent_runtime` (or setting `provider: codex`) keeps the existing
   Codex behavior unchanged.
+- `skill_execution_contracts` is supplied by the integrating workflow and is
+  provider-neutral. Each record registers one exact skill package root, its
+  locked runtime inputs, and its executable tools. Symphony validates local or
+  remote materialization before provider work, rejects selected-workspace and
+  broad orchestration roots, then gives Codex and Claude Code only the exact
+  read-only paths. Skill activation and source ownership remain outside
+  Symphony.
 - The shim authenticates via operator-managed Claude subscription OAuth on the
   role host; it never reads, stores, or logs an `ANTHROPIC_API_KEY` or OAuth
   token. An expired or missing credential fails closed with an operator-visible

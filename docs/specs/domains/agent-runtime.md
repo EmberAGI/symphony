@@ -43,6 +43,17 @@ instructions.
 **Skill materialization**: The process of making Symphony role workflow and
 skill material available to the provider in the form it can actually use.
 
+**Skill execution contract**: A provider-neutral, integration-supplied record
+of the exact package root, locked runtime inputs, and external tool
+executables registered for one configured skill. It grants no authority over
+the enclosing orchestration checkout and is distinct from skill discovery or
+body preloading.
+
+**Selected product workspace**: The per-issue repository checkout that owns
+writable product source and repository evidence for a role run. Registered
+skill execution resources remain read-only orchestration inputs and never
+become product-repository evidence.
+
 **Normalized runtime event**: A provider-independent event emitted to the
 orchestrator, status surfaces, and handoff logic. Examples include session
 started, text delta, tool started, tool finished, tool failed, turn completed,
@@ -104,6 +115,27 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   not exposed through prompts or logs.
 - Runtime adapters must expose tools through controlled runtime-native
   mechanisms. Credentials and tracker tokens must not be pasted into prompts.
+- A configured skill with executable resources is not available merely
+  because its metadata or body is discoverable. The integrating workflow must
+  supply its registered skill execution contract, and `AgentRuntime` must
+  validate and carry that same provider-neutral contract to every configured
+  top-level role and to Implementer orchestrators and workers.
+- Skill execution contracts contain only canonical absolute package roots,
+  locked runtime inputs, and required executable paths. Missing, unreadable,
+  non-executable, malformed, duplicated with conflicting access, or denied
+  paths fail closed before provider work starts.
+- A skill execution contract must not grant the complete orchestration
+  checkout, runtime state, provider authentication, production configuration,
+  or another skill's unregistered resources. Provider adapters may add only
+  the native discovery, read, execute, environment, or launch projection
+  required by the validated entries; they must not widen the contract to a
+  convenient parent root.
+- Skill execution resources are read-only inputs. The selected product
+  workspace remains the only writable repository root and the only source of
+  Git `HEAD`, branch diff, changed-file, test, spec, and acceptance evidence.
+- Projection and activation remain separate. Carrying a skill execution
+  contract makes a configured skill genuinely invocable but must not preload
+  its body or trigger it outside the workflow's contextual activation rules.
 - Provider-authentication failures that occur after runtime startup/readiness
   checks, including Claude Code HTTP 401/403 results, normalized
   `{:auth_failed, ...}` adapter errors, and provider-auth-shaped `before_run`
@@ -257,6 +289,43 @@ agent_runtime:
     tool_execution: true
     usage_reporting: true
 ```
+
+The integrating workflow may additionally pass zero or more resolved skill
+execution contracts at session start:
+
+```yaml
+skill_execution_contracts:
+  - skill: linear
+    package_root: /absolute/orchestration/.agents/skills/linear
+    runtime_inputs:
+      - /absolute/orchestration/pyproject.toml
+      - /absolute/orchestration/uv.lock
+    tool_executables:
+      - /absolute/tooling/uv
+```
+
+The field names above are the logical Interface, not a requirement that
+workflow files use YAML. Octo derives these entries from its role-skill
+manifest and passes the resolved records through Symphony's runtime session
+boundary; Symphony does not own or reconstruct Octo's skill inventory.
+
+`AgentRuntime` owns validation, normalization, and propagation of this
+contract. Concrete provider adapters own only native projection:
+
+- Codex receives the exact read/execute roots through its session or launcher
+  permission surface while the product workspace remains writable.
+- Claude Code receives exact skill discovery directories and command/runtime
+  environment through supported native launch arguments. Its host permission
+  posture remains governed by ADR 0002; this contract must not add a broad
+  orchestration directory merely because the host user could otherwise read
+  it.
+- Implementer delegation passes the same validated records to both the
+  orchestrator and every worker launcher. Non-delegating roles receive the
+  same records through their ordinary adapter session.
+
+Provider-native launch evidence must retain enough secret-free detail to prove
+which registered resource identities were projected without logging raw
+environment values or sensitive host paths.
 
 Provider adapters must implement these logical operations:
 
@@ -618,6 +687,14 @@ until those test modules pass under `make all`.
 - Provider executable is missing or not authenticated.
 - Provider starts but cannot bind to the selected workspace.
 - Provider session starts but the Octo-projected role skills fail to load or translate.
+- A configured executable skill is discoverable but has no registered skill
+  execution contract.
+- A registered package, runtime input, or executable is missing, unreadable,
+  denied, non-executable, symlinked outside its approved boundary, or present
+  only on the orchestration host while the selected worker is remote.
+- A contract entry names the orchestration checkout itself, runtime state,
+  provider authentication, production configuration, or an unregistered
+  sibling resource.
 - Required tool bundle is unavailable or partially unavailable.
 - Tool call arguments are invalid.
 - Tool execution returns provider-native failure shape.
@@ -650,6 +727,9 @@ until those test modules pass under `make all`.
 - Keep provider protocols native; do not force Pi or Claude Code to become
   Codex internally.
 - Keep runtime adapter implementation separate from tracker workflow policy.
+- Keep Octo skill inventory and activation policy outside Symphony. Symphony
+  accepts validated execution records through the provider-neutral runtime
+  seam and must not scan or infer a wrapper manifest.
 - Preserve Codex backward compatibility while adding the provider-neutral
   contract.
 - Do not rely on ambient user-local Pi extensions, themes, global skills, or
@@ -681,6 +761,9 @@ until those test modules pass under `make all`.
   provider error ontology beyond the listed irrecoverable runtime failure
   families. Provider-evidence discovery is a bounded implementation evidence
   step, not a new runtime feature.
+- For EMB-1199, copy Octo skill packages into Symphony, make Symphony the
+  editable skill authority, preload every configured skill body, or grant an
+  orchestration checkout as a general-purpose provider workspace.
 
 ## Open questions about system behavior
 
@@ -721,6 +804,13 @@ slices without weakening the skills/tools release gate.
   shared retry/escalation seam; provider adapters are concrete adapters into
   that seam, and orchestrator/tracker/status code consume the normalized
   family rather than parsing provider-specific raw payloads.
+- EMB-1199 intake: A provider-neutral skill execution contract is the runtime
+  seam between Octo-owned manifest registration and provider-native launch
+  permissions. Symphony validates and propagates the resolved contract;
+  Octo continues to own skill source, role exposure, activation, provider
+  evals, and wrapper pin promotion. ADR 0001 is amended rather than adding a
+  new ADR because this is a completion of its existing skills/tools release
+  gate.
 
 ## References to source issues
 
@@ -728,3 +818,4 @@ slices without weakening the skills/tools release gate.
   (re-scoped 2026-06-10 from "Implement multi-runtime Symphony support for
   Codex, Claude Code, and Pi")
 - [EMB-1127: Generalize irrecoverable runtime failure escalation](https://linear.app/emberai/issue/EMB-1127/generalize-irrecoverable-runtime-failure-escalation)
+- [EMB-1199: Expose registered skill runtime paths to every managed role](https://linear.app/emberai/issue/EMB-1199/expose-registered-skill-runtime-paths-to-every-managed-role)

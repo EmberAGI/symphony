@@ -51,11 +51,19 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
       actual_protocol: 17
     }
 
+    missing_skill_contract =
+      {:invalid_skill_execution_contract, %{skill: "linear", field: :package_root, reason: :missing}}
+
+    non_executable_skill_tool =
+      {:invalid_skill_execution_contract, %{skill: "linear", field: :tool_executables, reason: :non_executable}}
+
     cases = [
       {:invalid_workspace_or_runtime_protocol, {:invalid_workspace_cwd, :outside_workspace_root, "/tmp/outside", "/tmp/root"}},
       {:invalid_workspace_or_runtime_protocol, {:invalid_workspace_cwd, :invalid_remote_workspace, "worker-1", "/tmp/work\nspace"}},
       {:missing_required_tool_or_cli, :bash_not_found},
       {:missing_required_tool_or_cli, {:missing_required_tool, "herdr"}},
+      {:missing_required_runtime_configuration, missing_skill_contract},
+      {:permission_denied, non_executable_skill_tool},
       {:missing_required_tool_or_cli, {:port_exit, 127, "claude: command not found token=tool-secret"}},
       {:permission_denied, {:port_exit, 126, "permission denied secret=hidden"}},
       {:missing_required_runtime_configuration, {:unsupported_runtime_provider, "future-provider token=config-secret"}},

@@ -393,12 +393,13 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:provider, :string, default: "codex")
+      field(:skill_execution_contracts, {:array, :map}, default: [])
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:provider], empty_values: [])
+      |> cast(attrs, [:provider, :skill_execution_contracts], empty_values: [])
       |> validate_required([:provider])
       |> validate_inclusion(:provider, @supported_providers, message: "must be one of: #{Enum.join(@supported_providers, ", ")}")
     end
