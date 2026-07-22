@@ -36,7 +36,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
       server_task =
         Task.async(fn ->
-          command(context, ["--session", name, "server"], env)
+          command_in_port(context, ["--session", name, "server"], env, :infinity)
         end)
 
       case await_running(context, name, env, server_task) do
@@ -366,7 +366,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   defp await_running_status(context, name, env, server_task, deadline, interval_ms) do
-    with {:ok, output} <- command(context, ["--session", name, "status", "server"], env),
+    with {:ok, output} <-
+           command_before_deadline(context, ["--session", name, "status", "server"], env, deadline),
          {:ok, %{status: "running"} = status} <- parse_server_status(output) do
       {:ok, status}
     else
@@ -384,16 +385,28 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   defp await_server_stop(server_task, timeout_ms) do
-    case Task.yield(server_task, timeout_ms) || Task.shutdown(server_task, :brutal_kill) do
-      {:ok, {:ok, _output}} -> :ok
-      {:ok, {:error, reason}} -> {:error, reason}
-      nil -> {:error, :timeout}
-      {:exit, reason} -> {:error, reason}
+    case Task.yield(server_task, timeout_ms) do
+      {:ok, {:ok, _output}} ->
+        :ok
+
+      {:ok, {:error, reason}} ->
+        {:error, reason}
+
+      {:exit, reason} ->
+        {:error, reason}
+
+      nil ->
+        shutdown_server_task(server_task)
+        {:error, :timeout}
     end
   end
 
   defp shutdown_server_task(server_task) do
-    _ = Task.shutdown(server_task, :brutal_kill)
+    if Process.alive?(server_task.pid) do
+      send(server_task.pid, :shutdown_command)
+      _ = Task.yield(server_task, 1_000) || Task.shutdown(server_task, :brutal_kill)
+    end
+
     :ok
   end
 
@@ -406,6 +419,109 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     end
   rescue
     error in ErlangError -> {:error, {:command_failed, Exception.message(error)}}
+  end
+
+  defp command_before_deadline(context, args, env, deadline) do
+    if System.monotonic_time(:millisecond) >= deadline,
+      do: {:error, :command_timeout},
+      else: command_in_port(context, args, env, deadline)
+  end
+
+  defp command_in_port(context, args, env, timeout) do
+    binary = Map.get(context, :herdr_bin) || System.find_executable("herdr") || "herdr"
+
+    with executable when is_binary(executable) <- executable_path(binary),
+         port <-
+           Port.open(
+             {:spawn_executable, executable},
+             [:binary, :exit_status, :use_stdio, :stderr_to_stdout, args: args, env: port_env(env)]
+           ) do
+      try do
+        receive_command_output(port, timeout, [])
+      after
+        if Port.info(port) != nil, do: terminate_port_process(port)
+      end
+    else
+      nil -> {:error, {:command_failed, "executable not found: #{binary}"}}
+    end
+  rescue
+    error in [ArgumentError, ErlangError] -> {:error, {:command_failed, Exception.message(error)}}
+  end
+
+  defp executable_path(binary) do
+    if Path.type(binary) == :absolute, do: binary, else: System.find_executable(binary)
+  end
+
+  defp port_env(env) do
+    Enum.map(env, fn {key, value} -> {String.to_charlist(key), String.to_charlist(value)} end)
+  end
+
+  defp receive_command_output(port, :infinity, output) do
+    receive do
+      {^port, {:data, data}} ->
+        receive_command_output(port, :infinity, [data | output])
+
+      {^port, {:exit_status, status}} ->
+        command_result(status, output)
+
+      :shutdown_command ->
+        terminate_port_process(port)
+        {:error, :command_terminated}
+    end
+  end
+
+  defp receive_command_output(port, deadline, output) do
+    remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^port, {:data, data}} ->
+        receive_command_output(port, deadline, [data | output])
+
+      {^port, {:exit_status, 0}} ->
+        command_result_before_deadline(0, output, deadline)
+
+      {^port, {:exit_status, status}} ->
+        command_result_before_deadline(status, output, deadline)
+    after
+      remaining_ms ->
+        terminate_port_process(port)
+        {:error, :command_timeout}
+    end
+  end
+
+  defp command_result_before_deadline(status, output, deadline) do
+    if System.monotonic_time(:millisecond) >= deadline,
+      do: {:error, :command_timeout},
+      else: command_result(status, output)
+  end
+
+  defp command_result(status, output) do
+    output = output |> Enum.reverse() |> IO.iodata_to_binary()
+
+    if status == 0,
+      do: {:ok, output},
+      else: normalize_command_error(status, String.trim(output))
+  end
+
+  defp terminate_port_process(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, os_pid} ->
+        _ = System.cmd("kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
+        await_port_exit(port)
+
+      nil ->
+        :ok
+    end
+  end
+
+  defp await_port_exit(port) do
+    receive do
+      {^port, {:exit_status, _status}} -> :ok
+    after
+      100 ->
+        if Port.info(port) != nil, do: Port.close(port)
+        :ok
+    end
   end
 
   defp normalize_command_error(status, output) do

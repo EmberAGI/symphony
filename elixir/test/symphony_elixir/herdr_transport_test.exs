@@ -43,6 +43,9 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
     if [ "$#" -eq 1 ] && [ "$1" = "server" ]; then
       mkdir -p "$state_root"
+      if [ -n "${HERDR_FAKE_SERVER_PID_FILE:-}" ]; then
+        printf '%s\n' "$$" > "$HERDR_FAKE_SERVER_PID_FILE"
+      fi
       : > "$running"
       while [ ! -f "$stopped" ]; do sleep 0.02; done
       rm -f "$running"
@@ -50,6 +53,11 @@ defmodule SymphonyElixir.HerdrTransportTest do
     fi
 
     if [ "$#" -eq 2 ] && [ "$1" = "status" ] && [ "$2" = "server" ]; then
+      if [ "${HERDR_FAKE_STATUS_STALL:-}" = "1" ]; then
+        printf '%s\n' "$$" > "$HERDR_FAKE_STATUS_PID_FILE"
+        sleep "${HERDR_FAKE_STATUS_STALL_SECONDS:-2}"
+        exit 1
+      fi
       if [ -f "$running" ]; then
         printf '%s\n' \
           'status: running' \
@@ -456,6 +464,41 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert commands =~ "--session octo-emb-1141-incompatible status server"
   end
 
+  test "bounds a stalled readiness probe and cleans the isolated runtime", context do
+    status_pid_file = Path.join(Path.dirname(context.bin), "stalled-status.pid")
+    server_pid_file = Path.join(Path.dirname(context.bin), "stalled-server.pid")
+    runtime_root = Path.join(System.tmp_dir!(), "octo-herdr-stall-#{System.unique_integer([:positive])}")
+
+    adapter_context = %{
+      herdr_bin: context.bin,
+      socket_root: runtime_root,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_FAKE_STATUS_STALL", "1"},
+        {"HERDR_FAKE_STATUS_STALL_SECONDS", "2"},
+        {"HERDR_FAKE_STATUS_PID_FILE", status_pid_file},
+        {"HERDR_FAKE_SERVER_PID_FILE", server_pid_file}
+      ],
+      start_timeout_ms: 100,
+      poll_interval_ms: 5
+    }
+
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, :herdr_server_start_timeout} =
+             HerdrTransport.start_session(
+               %{name: "octo-emb-1201-stalled-status", isolated: true, workspace: "/tmp/selected-workspace"},
+               adapter_context
+             )
+
+    elapsed_ms = System.monotonic_time(:millisecond) - started_at
+
+    assert elapsed_ms < 750
+    refute File.exists?(runtime_root)
+    refute process_alive?(File.read!(status_pid_file))
+    refute process_alive?(File.read!(server_pid_file))
+  end
+
   test "normalizes the native protocol mismatch before session startup", context do
     adapter_context = %{
       herdr_bin: context.bin,
@@ -772,5 +815,12 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert ownership_ref.cleanup_context.socket_root == runtime_root
     assert :ok = HerdrTransport.cleanup_owned_session(ownership_ref)
     refute File.exists?(runtime_root)
+  end
+
+  defp process_alive?(pid) do
+    case System.cmd("kill", ["-0", String.trim(pid)], stderr_to_stdout: true) do
+      {_output, 0} -> true
+      {_output, _status} -> false
+    end
   end
 end
