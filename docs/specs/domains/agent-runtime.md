@@ -458,9 +458,9 @@ matrix. Invalid or ambiguous Codex labels fail closed. Claude keeps its
 documented invalid-label fallback, now to the universally moderate default.
 
 For Implementer, Symphony resolves one exact orchestrator/worker contract and
-starts a new isolated named Herdr session containing the selected provider's
-orchestrator and workers. Runtime-owned launchers outside the selected
-repository apply exact model, effort, and reusable profile instructions. Codex
+starts a new isolated named Herdr 0.7.5/protocol 17 session containing the
+selected provider's orchestrator and workers. Runtime-owned launchers outside
+the selected repository apply exact model, effort, and reusable profile instructions. Codex
 receives the Markdown body as `developer_instructions`; Claude receives it with
 `--append-system-prompt`. The role `WORKFLOW.md` continues to own issue
 lifecycle. Each orchestrator-authored worker assignment contains only its
@@ -476,49 +476,58 @@ The Codex permission profile keeps the workspace root writable and explicitly
 reopens that root's `.git` metadata for issue-branch and commit operations; the
 isolated Herdr runtime root remains read-only except for its allowed socket.
 
+After readiness validation, the Adapter creates one workspace rooted at the
+selected product checkout and resolves its returned root pane rather than
+predicting topology identifiers. It starts each participant through strict
+`agent start <name> --kind <kind> --pane <id> --timeout <ms> -- <native args>`;
+Herdr validates the live name, provider kind, target pane, and interactive
+readiness before returning. There is no secondary readiness poll.
+
 The orchestrator receives the worker launcher path through
 `OCTO_HERDR_WORKER_LAUNCHER`. Missing or incompatible Herdr, unsafe socket
 paths, rejected launchers, and adapter-side model/effort substitution fail
-closed. Every mutating Herdr command is scoped to the run-owned named session
-and private configuration root; cleanup verifies that the operator's default
-server snapshot is unchanged.
+closed. The launcher accepts exactly the worker's strict live name and a pane
+ID returned by Herdr, then invokes run-owned `agent start` with the
+Adapter-selected provider kind, fixed native profile arguments, and bounded
+startup timeout; it never directly execs the provider or accepts caller-supplied
+model, effort, provider, or command arguments. The matching provider projection
+places the restricted worker Herdr proxy and worker environment in the launched
+process while the orchestrator retains its full run-owned Herdr projection.
+Every mutating Herdr command is scoped to the run-owned named session and
+private configuration root; cleanup verifies that the operator's default server
+snapshot is unchanged.
 
-Herdr owns terminal input and provider keyboard-protocol semantics behind its
-atomic `pane run` Interface. Symphony submits every orchestrator assignment,
-worker result, and consultation response through that Interface. Symphony
-transport Adapters and runtime launchers must not branch on the target provider
-to decompose a turn into `send-text`, synthesized key sequences, or other PTY
-writes.
+Herdr owns terminal input, bracketed-paste handling, provider keyboard protocol,
+prompt acknowledgement, and lifecycle waiting behind its native live-agent
+Interface. Symphony submits initial turns, worker results, and consultation
+responses through one atomic `agent prompt` operation. A bounded initial prompt
+wait accepts `working`, `idle`, or `done`, so a started turn and a turn that
+finishes before observation are both represented without revision heuristics or
+double submission. Subsequent bounded lifecycle observation uses server-owned
+`agent wait`, never client-side sleep/poll loops.
 
-Initial turn submission uses a provider-neutral acknowledgement state machine.
-The Adapter records the ready agent revision, submits the prompt with `pane
-run`, and observes status plus revision. `working` proves an active turn; an
-idle/done state with an advanced revision proves a fast completed turn. If the
-agent remains idle with the original revision after the bounded settlement
-window, the Adapter sends exactly one empty `pane run` to confirm the prompt
-already present at the harness input, then resumes bounded observation. An
-unchanged stale idle state never completes the turn, and confirmation is never
-repeated.
+Completed terminal output is consumed from native `agent read` text; Symphony
+does not expect a JSON response envelope from that command.
 
-Inter-agent message submission uses the same public Herdr Interface through one
-runtime-owned CLI Adapter shared by the worker-restricted and orchestrator
-projections. The projections may inspect Herdr's target identity, status, and
-revision; they must not inspect or synthesize terminal protocol. With the
-pinned Herdr 0.7.4 contract, healthy working-target single-line steering passes
-through unchanged. A Claude-target multiline paste receives exactly one empty
-`pane run` confirmation so the paste becomes a queued message. A Claude target
-that remains idle, done, or blocked at its original revision after the bounded
-settlement also receives exactly one confirmation. Advanced revisions,
-started turns, and non-Claude targets are not confirmed again. This is a thin
-provider compatibility Adapter over Herdr's public Interface, not a second
-terminal-input implementation.
+Native `agent_prompt_stalled` is a typed prompt-stall failure. A prompt or wait
+whose named live agent has closed is a typed closed-agent failure. Native
+timeouts remain bounded status-timeout results and protocol mismatch remains a
+machine-readable incompatible-runtime failure. Symphony does not retain the
+0.7.4 `pane run`, manual confirmation, revision acknowledgement, top-level
+wait, provider-specific multiline handling, translation, dual-version, or
+compatibility machinery.
+
+Inter-agent messaging uses the same `agent prompt` command for Codex and Claude.
+The runtime-owned orchestrator projection forwards the native Herdr Interface
+unchanged. The restricted worker projection permits only agent list/get/read,
+prompt, and wait operations; it denies agent start, raw pane input, logical key
+injection, topology mutation, server control, and descendant delegation.
 
 The Codex launcher uses unattended workspace-write/no-approval mode, disables
 `multi_agent`, disables alternate-screen rendering, and supplies the selected
 workspace through the whole `projects={...}` trust map. The Claude launcher
 uses unattended bypass-permissions mode and disables the provider-native
-`Agent` tool. The orchestrator is not ready for its first prompt until Herdr
-observes its identity in an idle/done state. A restricted worker Herdr proxy is
+`Agent` tool. A restricted worker Herdr proxy is
 defense in depth rather than a complete process sandbox; one-generation
 delegation remains a profile invariant backed by evals.
 
@@ -527,14 +536,12 @@ top-level runtime events. Runtime contract tests prove that resolved profiles
 become exact orchestrator and worker launcher arguments, reusable system
 instructions reach each provider, the isolated session is cleaned up without
 replacing or stopping the default server, and incompatible or substituted
-profiles fail closed. The same contract tests prove every allowed direction of
-delegation preserves `pane run`, never reconstructs provider terminal input
-inside Symphony, and permits at most one empty confirmation after an unchanged
-idle revision. Generated-wrapper tests additionally execute both role
-projections against the same message-submission Adapter and prove multiline,
-unchanged-idle, healthy working-steering, advanced-revision, non-Claude, and
-command-failure cases without raw input commands. Bounded live evaluation—not narration—provides
-session/start/message/result/integration/cleanup evidence for Codex and Claude.
+profiles fail closed. The same contract tests prove strict named/kind startup,
+atomic prompt, bounded server-owned wait, typed prompt-stall and closed-agent
+failures, least-privilege worker control, and the absence of raw pane input or
+manual confirmation across both provider projections. Bounded live
+evaluation—not narration—provides session/start/message/result/integration/
+cleanup evidence for Codex and Claude.
 
 Octo mixed-runtime validation (a real workflow assigning roles to different
 runtimes in one run, for example implementer on Pi, reviewer on Claude Code,

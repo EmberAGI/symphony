@@ -26,7 +26,7 @@ defmodule SymphonyElixir.TestSupport.NonLiveDelegationTransport do
   def start_agent(_session, _agent_spec, _context), do: sealed(:start_agent)
 
   @impl true
-  def submit(_session, _agent, _prompt, _context), do: sealed(:submit)
+  def begin_turn(_session, _agent, _prompt, _timeout_ms, _context), do: sealed(:begin_turn)
 
   @impl true
   def await_agent(_session, _agent, _statuses, _timeout_ms, _context), do: sealed(:await_agent)

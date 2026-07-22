@@ -7,7 +7,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
   defmodule RecordingTransport do
     def default_server_snapshot(%{owner: owner}) do
       send(owner, {:transport, :default_server_snapshot})
-      {:ok, %{status: "running", version: "0.7.4", protocol: 16, socket: "/tmp/operator-default/herdr.sock"}}
+      {:ok, %{status: "running", version: "0.7.5", protocol: 17, socket: "/tmp/operator-default/herdr.sock"}}
     end
 
     def start_session(spec, %{owner: owner}) do
@@ -54,11 +54,6 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       :ok
     end
 
-    def submit(session, agent, prompt, %{owner: owner}) do
-      send(owner, {:transport, :submit, session, agent, prompt})
-      :ok
-    end
-
     def begin_turn(session, agent, prompt, timeout_ms, %{owner: owner}) do
       send(owner, {:transport, :begin_turn, session, agent, prompt, timeout_ms})
 
@@ -93,39 +88,25 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     end
   end
 
-  defmodule StaleIdleTransport do
-    def submit(_session, _agent, _prompt, %{owner: owner}) do
-      send(owner, {:early_completion, :submit})
-      :ok
-    end
-
-    def await_agent(_session, agent, statuses, _timeout_ms, %{owner: owner}) do
-      send(owner, {:stale_idle, :await_agent, statuses, agent})
-
-      if statuses == ["working"] do
-        {:error, :timeout_waiting_for_working}
-      else
-        {:ok,
-         %{
-           name: agent.name,
-           pane_id: agent.pane_id,
-           agent_status: "done",
-           agent_session: %{value: "stale-session-1"}
-         }}
-      end
+  defmodule PromptStallTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, %{owner: owner}) do
+      send(owner, {:prompt_stall, :begin_turn, agent})
+      {:error, {:herdr_agent_prompt_stalled, agent.name}}
     end
 
     def read_agent(_session, _agent, _opts, %{owner: owner}) do
-      send(owner, {:stale_idle, :read_agent})
-      {:ok, %{text: "STALE_IDLE_MUST_NOT_COMPLETE"}}
+      send(owner, {:prompt_stall, :read_agent})
+      {:ok, %{text: "PROMPT_STALL_MUST_NOT_COMPLETE"}}
     end
   end
 
   defmodule HeartbeatTransport do
-    def submit(_session, _agent, _prompt, _context), do: :ok
-
-    def await_agent(_session, agent, ["working"], _timeout_ms, _context) do
-      {:ok, %{name: agent.name, agent_status: "working", agent_session: nil}}
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok,
+       %{
+         phase: :working,
+         agent: %{name: agent.name, agent_status: "working", agent_session: nil}
+       }}
     end
 
     def await_agent(_session, agent, ["idle", "done"], _timeout_ms, _context) do
@@ -269,7 +250,6 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert orchestrator_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] ==
              SkillExecutionContract.encode!([skill_contract])
 
-    assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 30_000}
     assert session.orchestrator.name == "implementer_orchestrator"
     assert session.contract == contract
     assert session.default_server_before.socket == "/tmp/operator-default/herdr.sock"
@@ -291,7 +271,6 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     assert_receive {:transport, :begin_turn, %{name: "octo-emb-1141-run-7"}, %{name: "implementer_orchestrator"}, "Implement the bounded tracer task.", 30_000}
 
-    refute_receive {:transport, :submit, _, _, _}
     assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 30_000}
     assert_receive {:transport, :read_agent, _, _, %{lines: 240, source: :recent_unwrapped}}
 
@@ -535,8 +514,6 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
              "SYMPHONY_ROLE_RUN_ID" => "runtime-seam"
            }
 
-    assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 30_000}
-
     assert {:ok, {next_session, turn}} =
              AgentRuntime.run_turn(session, "Complete the public tracer turn.", issue, [])
 
@@ -570,8 +547,6 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert claude_orchestrator_spec.provider == "claude_code"
     assert package_root in claude_orchestrator_spec.argv
     assert claude_orchestrator_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] == encoded_contract
-    assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 30_000}
-
     assert :ok = AgentRuntime.stop_session(claude_session)
     assert_receive {:transport, :stop_session, _}
   end
@@ -638,7 +613,6 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
                  extra_env: [{"HERDR_FAKE_LOG", herdr_log}],
                  socket_root: runtime_root,
                  poll_interval_ms: 5,
-                 ready_stability_ms: 0,
                  start_timeout_ms: 2_000
                }
              )
@@ -659,18 +633,122 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert worker_launcher =~ executable
     refute worker_launcher =~ "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
 
-    assert :ok = AgentRuntime.stop_session(session)
+    assert {:ok, {next_session, turn}} =
+             AgentRuntime.run_turn(session, "Complete the public native turn.", issue(), [])
+
+    assert turn.response == "IMPLEMENTER_TURN_COMPLETE"
+    assert :ok = AgentRuntime.stop_session(next_session)
   end
 
-  test "a stale pre-submit idle state cannot complete a turn" do
+  test "default Herdr Adapter starts both worker providers through the native live-agent Interface" do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "agent-runtime-native-workers-#{System.unique_integer([:positive])}"
+      )
+
+    workspace = Path.join(root, "selected-product")
+    fake_provider_bin = Path.join(root, "provider-bin")
+    previous_orchestrator_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    previous_worker_provider = System.get_env("OCTO_RUNTIME_WORKER_PROVIDER")
+    previous_path = System.get_env("PATH") || ""
+    previous_transport = Application.get_env(:symphony_elixir, :delegation_transport_module)
+
+    File.mkdir_p!(workspace)
+    File.mkdir_p!(fake_provider_bin)
+
+    for provider <- ["codex", "claude"] do
+      path = Path.join(fake_provider_bin, provider)
+
+      File.write!(path, """
+      #!/bin/sh
+      set -eu
+      printf 'NATIVE_PROVIDER_EXEC agent=%s pane=%s path=%s args=%s\n' "$HERDR_FAKE_AGENT_NAME" "$HERDR_PANE_ID" "$PATH" "$*" >> "$HERDR_FAKE_LOG"
+      if [ "$HERDR_FAKE_AGENT_NAME" = "implementer_orchestrator" ]; then
+        pane_json=$(herdr pane split --current --direction right --no-focus)
+        pane_id=$(printf '%s\n' "$pane_json" | sed -n 's/.*"pane_id":"\\([^"]*\\)".*/\\1/p')
+        [ -n "$pane_id" ]
+        "$OCTO_HERDR_WORKER_LAUNCHER" implementer_worker "$pane_id"
+      fi
+      """)
+
+      File.chmod!(path, 0o755)
+    end
+
+    Application.put_env(
+      :symphony_elixir,
+      :delegation_transport_module,
+      SymphonyElixir.ImplementerDelegation.HerdrTransport
+    )
+
+    on_exit(fn ->
+      if previous_orchestrator_provider,
+        do: System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_orchestrator_provider),
+        else: System.delete_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+
+      if previous_worker_provider,
+        do: System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", previous_worker_provider),
+        else: System.delete_env("OCTO_RUNTIME_WORKER_PROVIDER")
+
+      System.put_env("PATH", previous_path)
+      Application.put_env(:symphony_elixir, :delegation_transport_module, previous_transport)
+      File.rm_rf(root)
+    end)
+
+    for {provider, kind} <- [{"codex", "codex"}, {"claude_code", "claude"}] do
+      System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", provider)
+      System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", provider)
+      System.put_env("PATH", fake_provider_bin <> ":" <> previous_path)
+
+      herdr_bin = Path.join(root, "fake-herdr-#{kind}")
+      herdr_log = Path.join(root, "herdr-#{kind}.log")
+
+      runtime_root =
+        Path.join(
+          System.tmp_dir!(),
+          "anw-#{kind}-#{System.unique_integer([:positive])}"
+        )
+
+      write_fake_herdr!(herdr_bin)
+
+      assert {:ok, session} =
+               AgentRuntime.start_session(workspace,
+                 issue: issue(),
+                 role: "implementer",
+                 run_id: "native-worker-#{kind}",
+                 delegation_transport_context: %{
+                   herdr_bin: herdr_bin,
+                   extra_env: [
+                     {"HERDR_FAKE_EXEC_PROVIDER", "1"},
+                     {"HERDR_FAKE_LOG", herdr_log}
+                   ],
+                   socket_root: runtime_root,
+                   poll_interval_ms: 5,
+                   start_timeout_ms: 2_000
+                 }
+               )
+
+      commands = File.read!(herdr_log)
+
+      assert commands =~
+               "--session #{session.name} agent start implementer_worker --kind #{kind} --pane w7:p42 --timeout 30000 --"
+
+      assert commands =~ "NATIVE_PROVIDER_EXEC agent=implementer_worker pane=w7:p42"
+      assert commands =~ "path=#{runtime_root}/worker-bin:#{fake_provider_bin}:"
+      assert :ok = AgentRuntime.stop_session(session)
+      File.rm_rf(runtime_root)
+    end
+  end
+
+  test "a native prompt stall cannot complete a turn" do
     session = %{
-      transport: StaleIdleTransport,
+      transport: PromptStallTransport,
       transport_context: %{owner: self()},
       herdr_session: %{name: "octo-emb-1141-fast"},
       orchestrator: %{name: "implementer_orchestrator", pane_id: "w1:p1"}
     }
 
-    assert {:error, :timeout_waiting_for_working} =
+    assert {:error, {:herdr_agent_prompt_stalled, "implementer_orchestrator"}} =
              ImplementerDelegation.run_turn(
                session,
                "Complete immediately.",
@@ -678,8 +756,8 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
                start_timeout_ms: 25
              )
 
-    assert_receive {:stale_idle, :await_agent, ["working"], _agent}
-    refute_receive {:stale_idle, :read_agent}
+    assert_receive {:prompt_stall, :begin_turn, _agent}
+    refute_receive {:prompt_stall, :read_agent}
   end
 
   test "long working turns emit bounded heartbeats while awaiting semantic completion" do
@@ -733,16 +811,20 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     printf '%s\n' "$*" >> "$HERDR_FAKE_LOG"
 
     if [ "$#" -eq 2 ] && [ "$1" = "status" ] && [ "$2" = "server" ]; then
-      printf '%s\n' 'status: running' 'version: 0.7.4' 'protocol: 16' 'compatible: yes' 'socket: /tmp/operator-default/herdr.sock'
+      printf '%s\n' 'status: running' 'version: 0.7.5' 'protocol: 17' 'compatible: yes' 'socket: /tmp/operator-default/herdr.sock'
       exit 0
     fi
 
-    session="$2"
+    session="${2:-default}"
     state_root="$XDG_CONFIG_HOME/herdr/sessions/$session"
     running="$state_root/running"
     stopped="$state_root/stopped"
 
-    if [ "$#" -eq 3 ] && [ "$1" = "--session" ] && [ "$3" = "server" ]; then
+    if [ "${1:-}" = "--session" ]; then
+      shift 2
+    fi
+
+    if [ "$#" -eq 1 ] && [ "$1" = "server" ]; then
       mkdir -p "$state_root"
       : > "$running"
       while [ ! -f "$stopped" ]; do sleep 0.01; done
@@ -750,23 +832,58 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       exit 0
     fi
 
-    if [ "$#" -eq 4 ] && [ "$1" = "--session" ] && [ "$3" = "status" ] && [ "$4" = "server" ]; then
-      printf '%s\n' 'status: running' 'version: 0.7.4' 'protocol: 16' 'compatible: yes' "socket: $state_root/herdr.sock"
+    if [ "$#" -eq 2 ] && [ "$1" = "status" ] && [ "$2" = "server" ]; then
+      printf '%s\n' 'status: running' 'version: 0.7.5' 'protocol: 17' 'compatible: yes' "socket: $state_root/herdr.sock"
       exit 0
     fi
 
-    if [ "$#" -eq 4 ] && [ "$1" = "--session" ] && [ "$3" = "server" ] && [ "$4" = "stop" ]; then
+    if [ "$#" -eq 2 ] && [ "$1" = "server" ] && [ "$2" = "stop" ]; then
       : > "$stopped"
       exit 0
     fi
 
-    if [ "$1" = "--session" ] && [ "$3" = "agent" ] && [ "$4" = "start" ]; then
-      printf '{"id":"cli:agent:start","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent_status":"idle","revision":1}}}\n' "$5"
+    if [ "$#" -eq 5 ] && [ "$1" = "workspace" ] && [ "$2" = "create" ] && [ "$3" = "--cwd" ] && [ "$5" = "--no-focus" ]; then
+      printf '{"id":"cli:workspace:create","result":{"workspace":{"workspace_id":"w1"},"root_pane":{"pane_id":"w1:p1"}}}\n'
       exit 0
     fi
 
-    if [ "$#" -eq 5 ] && [ "$1" = "--session" ] && [ "$3" = "agent" ] && [ "$4" = "get" ]; then
-      printf '{"id":"cli:agent:get","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"idle","revision":1}}}\n' "$5"
+    if [ "$#" -eq 6 ] && [ "$1" = "pane" ] && [ "$2" = "split" ] && [ "$3" = "--current" ] && [ "$4" = "--direction" ] && [ "$5" = "right" ] && [ "$6" = "--no-focus" ]; then
+      printf '{"id":"cli:pane:split","result":{"pane":{"pane_id":"w7:p42"}}}\n'
+      exit 0
+    fi
+
+    if [ "$1" = "agent" ] && [ "$2" = "start" ]; then
+      name="$3"
+      kind="$5"
+      pane="$7"
+
+      if [ "${HERDR_FAKE_EXEC_PROVIDER:-}" = "1" ]; then
+        while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+        shift
+
+        if ! HERDR_FAKE_AGENT_NAME="$name" HERDR_PANE_ID="$pane" "$kind" "$@" >/dev/null; then
+          printf 'fake provider failed for %s on %s\n' "$name" "$pane" >&2
+          tail -n 20 "$HERDR_FAKE_LOG" >&2
+          exit 1
+        fi
+      fi
+
+      printf '{"id":"cli:agent:start","result":{"agent":{"name":"%s","pane_id":"%s","agent":"%s","agent_status":"idle","interactive_ready":true,"revision":1}}}\n' "$name" "$pane" "$kind"
+      exit 0
+    fi
+
+    if [ "$1" = "agent" ] && [ "$2" = "prompt" ]; then
+      printf '{"id":"cli:agent:prompt","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"working","revision":2}}}\n' "$3"
+      exit 0
+    fi
+
+    if [ "$1" = "agent" ] && [ "$2" = "wait" ]; then
+      printf '{"id":"cli:agent:wait","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"idle","revision":3}}}\n' "$3"
+      exit 0
+    fi
+
+    if [ "$1" = "agent" ] && [ "$2" = "read" ]; then
+      printf 'IMPLEMENTER_TURN_COMPLETE'
       exit 0
     fi
 

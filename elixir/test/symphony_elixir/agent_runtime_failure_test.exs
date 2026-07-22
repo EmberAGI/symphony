@@ -54,8 +54,8 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
 
   test "classifies real adapter and runtime error shapes without pre-normalized families" do
     incompatible_runtime = %{
-      expected_version: "0.7.4",
-      expected_protocol: 16,
+      expected_version: "0.7.5",
+      expected_protocol: 17,
       actual_version: "0.8.0",
       actual_protocol: 17
     }

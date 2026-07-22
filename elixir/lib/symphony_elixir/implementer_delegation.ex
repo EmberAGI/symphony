@@ -35,6 +35,12 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
     with :ok <- validate_workspace(workspace),
          :ok <- validate_orchestrator_env(orchestrator_env),
+         session_env =
+           Map.put(
+             orchestrator_env,
+             "SYMPHONY_SKILL_EXECUTION_CONTRACTS",
+             SymphonyElixir.SkillExecutionContract.encode!(skill_execution_contracts)
+           ),
          {:ok, contract} <- ImplementationEffort.validate_runtime_contract(contract),
          {:ok, name} <- session_name(opts),
          {:ok, default_server_before} <- transport.default_server_snapshot(transport_context),
@@ -43,7 +49,8 @@ defmodule SymphonyElixir.ImplementerDelegation do
              %{
                name: name,
                isolated: true,
-               workspace: workspace
+               workspace: workspace,
+               env: session_env
              },
              transport_context
            ),
@@ -172,15 +179,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
   def run_turn(_session, _prompt, _issue, _opts), do: {:error, :invalid_implementer_delegation_turn}
 
   defp begin_turn(transport, context, session, orchestrator, prompt, timeout_ms) do
-    if function_exported?(transport, :begin_turn, 5) do
-      transport.begin_turn(session, orchestrator, prompt, timeout_ms, context)
-    else
-      with :ok <- transport.submit(session, orchestrator, prompt, context),
-           {:ok, observed} <-
-             transport.await_agent(session, orchestrator, ["working"], timeout_ms, context) do
-        {:ok, %{phase: :working, agent: observed}}
-      end
-    end
+    transport.begin_turn(session, orchestrator, prompt, timeout_ms, context)
   end
 
   @spec stop_session(session()) :: :ok | {:error, term()}
@@ -234,25 +233,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
     case transport.start_agent(herdr_session, spec, transport_context) do
       {:ok, orchestrator} ->
-        ready_timeout_ms =
-          if is_map(transport_context),
-            do: Map.get(transport_context, :orchestrator_ready_timeout_ms, 30_000),
-            else: 30_000
-
-        case transport.await_agent(
-               herdr_session,
-               orchestrator,
-               ["idle", "done"],
-               ready_timeout_ms,
-               transport_context
-             ) do
-          {:ok, ready_orchestrator} ->
-            {:ok, ready_orchestrator}
-
-          {:error, reason} ->
-            _ = transport.stop_session(herdr_session, transport_context)
-            {:error, {:implementer_orchestrator_ready_failed, reason}}
-        end
+        {:ok, orchestrator}
 
       {:error, reason} ->
         _ = transport.stop_session(herdr_session, transport_context)

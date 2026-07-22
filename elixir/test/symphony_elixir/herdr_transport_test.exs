@@ -19,34 +19,50 @@ defmodule SymphonyElixir.HerdrTransportTest do
     printf '%s\n' "$*" >> "$HERDR_FAKE_LOG"
 
     if [ "$#" -eq 2 ] && [ "$1" = "status" ] && [ "$2" = "server" ]; then
+      if [ "${HERDR_FAKE_PROTOCOL_MISMATCH:-}" = "1" ]; then
+        printf '{"id":"cli:status:server","error":{"code":"protocol_mismatch","message":"client protocol 17 is newer than server protocol 16"}}\n' >&2
+        exit 1
+      fi
       printf '%s\n' \
         'status: running' \
-        'version: 0.7.4' \
-        'protocol: 16' \
+        'version: 0.7.5' \
+        'protocol: 17' \
         'compatible: yes' \
         'socket: /tmp/operator-default/herdr.sock'
       exit 0
     fi
 
-    session="$2"
+    session="${2:-default}"
     state_root="$XDG_CONFIG_HOME/herdr/sessions/$session"
     running="$state_root/running"
     stopped="$state_root/stopped"
 
-    if [ "$#" -eq 3 ] && [ "$1" = "--session" ] && [ "$3" = "server" ]; then
+    if [ "${1:-}" = "--session" ]; then
+      shift 2
+    fi
+
+    if [ "$#" -eq 1 ] && [ "$1" = "server" ]; then
       mkdir -p "$state_root"
+      if [ -n "${HERDR_FAKE_SERVER_PID_FILE:-}" ]; then
+        printf '%s\n' "$$" > "$HERDR_FAKE_SERVER_PID_FILE"
+      fi
       : > "$running"
       while [ ! -f "$stopped" ]; do sleep 0.02; done
       rm -f "$running"
       exit 0
     fi
 
-    if [ "$#" -eq 4 ] && [ "$1" = "--session" ] && [ "$3" = "status" ] && [ "$4" = "server" ]; then
+    if [ "$#" -eq 2 ] && [ "$1" = "status" ] && [ "$2" = "server" ]; then
+      if [ "${HERDR_FAKE_STATUS_STALL:-}" = "1" ]; then
+        printf '%s\n' "$$" > "$HERDR_FAKE_STATUS_PID_FILE"
+        sleep "${HERDR_FAKE_STATUS_STALL_SECONDS:-2}"
+        exit 1
+      fi
       if [ -f "$running" ]; then
         printf '%s\n' \
           'status: running' \
-          "version: ${HERDR_FAKE_VERSION:-0.7.4}" \
-          "protocol: ${HERDR_FAKE_PROTOCOL:-16}" \
+          "version: ${HERDR_FAKE_VERSION:-0.7.5}" \
+          "protocol: ${HERDR_FAKE_PROTOCOL:-17}" \
           'compatible: yes' \
           "socket: $state_root/herdr.sock"
       else
@@ -55,56 +71,63 @@ defmodule SymphonyElixir.HerdrTransportTest do
       exit 0
     fi
 
-    if [ "$#" -eq 4 ] && [ "$1" = "--session" ] && [ "$3" = "server" ] && [ "$4" = "stop" ]; then
+    if [ "$#" -eq 2 ] && [ "$1" = "server" ] && [ "$2" = "stop" ]; then
       : > "$stopped"
       exit 0
     fi
 
-    if [ "$1" = "--session" ] && [ "$3" = "agent" ] && [ "$4" = "start" ]; then
-      name="$5"
-      printf '{"id":"cli:agent:start","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent_status":"idle"}}}\n' "$name"
+    if [ "$#" -eq 5 ] && [ "$1" = "workspace" ] && [ "$2" = "create" ] && [ "$3" = "--cwd" ] && [ "$5" = "--no-focus" ]; then
+      printf '{"id":"cli:workspace:create","result":{"workspace":{"workspace_id":"w1"},"root_pane":{"pane_id":"w1:p1"}}}\n'
       exit 0
     fi
 
-    if [ "$#" -eq 5 ] && [ "$1" = "--session" ] && [ "$3" = "agent" ] && [ "$4" = "get" ]; then
-      status=idle
-      revision=1
-      if [ "${HERDR_FAKE_CONFIRM_REQUIRED:-}" = "1" ] && [ -f "$state_root/submission-confirmed" ]; then
-        status=working
-        revision=2
+    if [ "$1" = "agent" ] && [ "$2" = "start" ]; then
+      name="$3"
+      kind="$5"
+      pane="$7"
+
+      if [ "${HERDR_FAKE_EXEC_PROVIDER:-}" = "1" ]; then
+        while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+        shift
+        HERDR_PANE_ID="$pane" "$kind" "$@" > "$HERDR_FAKE_PROVIDER_OUTPUT"
       fi
-      if [ "${HERDR_FAKE_FAST_COMPLETION:-}" = "1" ] && [ -f "$state_root/submission-completed" ]; then
-        status=idle
-        revision=2
-      fi
-      printf '{"id":"cli:agent:get","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"%s","revision":%s}}}\n' "$5" "$status" "$revision"
+
+      printf '{"id":"cli:agent:start","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"%s","agent_status":"idle","interactive_ready":true,"revision":1}}}\n' "$name" "$kind"
       exit 0
     fi
 
-    if [ "$1" = "--session" ] && [ "$3" = "pane" ] && { [ "$4" = "run" ] || [ "$4" = "send-text" ]; }; then
-      if [ "${HERDR_FAKE_CONFIRM_REQUIRED:-}" = "1" ] && [ "$4" = "run" ] && [ -z "${6:-}" ]; then
-        : > "$state_root/submission-confirmed"
+    if [ "$1" = "agent" ] && [ "$2" = "prompt" ]; then
+      if [ -n "${HERDR_FAKE_PROMPT_ERROR:-}" ]; then
+        printf '{"id":"cli:agent:prompt","error":{"code":"%s","message":"fake prompt failure"}}\n' "$HERDR_FAKE_PROMPT_ERROR" >&2
+        exit 1
       fi
-      if [ "${HERDR_FAKE_FAST_COMPLETION:-}" = "1" ] && [ "$4" = "run" ] && [ -n "${6:-}" ]; then
-        : > "$state_root/submission-completed"
-      fi
+      status="${HERDR_FAKE_PROMPT_STATUS:-working}"
+      printf '{"id":"cli:agent:prompt","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"%s","revision":2}}}\n' "$3" "$status"
       exit 0
     fi
 
-    if [ "$#" -eq 3 ] && [ "$1" = "agent" ] && [ "$2" = "get" ]; then
-      agent="${HERDR_FAKE_WRAPPER_AGENT:-codex}"
-      status="${HERDR_FAKE_WRAPPER_STATUS:-idle}"
-      revision="${HERDR_FAKE_WRAPPER_REVISION:-1}"
-      if [ "${HERDR_FAKE_WRAPPER_ADVANCE:-}" = "1" ]; then
-        counter="$XDG_CONFIG_HOME/wrapper-agent-get-count"
-        if [ -f "$counter" ]; then revision=2; else : > "$counter"; fi
+    if [ "$1" = "agent" ] && [ "$2" = "wait" ]; then
+      if [ -n "${HERDR_FAKE_WAIT_ERROR:-}" ]; then
+        printf '{"id":"cli:agent:wait","error":{"code":"%s","message":"fake wait failure"}}\n' "$HERDR_FAKE_WAIT_ERROR" >&2
+        exit 1
       fi
-      printf '{"id":"cli:agent:get","result":{"agent":{"name":"target","pane_id":"%s","agent":"%s","agent_status":"%s","revision":%s}}}\n' "$3" "$agent" "$status" "$revision"
+      status="${HERDR_FAKE_WAIT_STATUS:-idle}"
+      printf '{"id":"cli:agent:wait","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"%s","revision":3}}}\n' "$3" "$status"
       exit 0
     fi
 
-    if [ "$1" = "pane" ] && { [ "$2" = "run" ] || [ "$2" = "send-text" ]; }; then
-      if [ "${HERDR_FAKE_WRAPPER_RUN_FAIL:-}" = "1" ] && [ -n "${4:-}" ]; then exit 44; fi
+    if [ "$1" = "agent" ] && [ "$2" = "get" ]; then
+      printf '{"id":"cli:agent:get","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"idle","revision":1}}}\n' "$3"
+      exit 0
+    fi
+
+    if [ "$1" = "agent" ] && [ "$2" = "list" ]; then
+      printf '{"id":"cli:agent:list","result":{"agents":[]}}\n'
+      exit 0
+    fi
+
+    if [ "$1" = "agent" ] && [ "$2" = "read" ]; then
+      printf 'IMPLEMENTER_TURN_COMPLETE'
       exit 0
     fi
 
@@ -118,8 +141,18 @@ defmodule SymphonyElixir.HerdrTransportTest do
     %{bin: bin, log: log, runtime_root: deliberately_long_runtime_root}
   end
 
-  test "generated role adapters durably acknowledge only Claude submissions that require it", context do
-    session_name = "octo-emb-1175-message-ack-#{System.unique_integer([:positive])}"
+  test "generated role projections expose only the native live-agent controls", context do
+    session_name = "octo-emb-1201-native-projection-#{System.unique_integer([:positive])}"
+    provider_bin = Path.join(Path.dirname(context.bin), "provider-bin")
+    fake_claude = Path.join(provider_bin, "claude")
+    File.mkdir_p!(provider_bin)
+
+    File.write!(fake_claude, """
+    #!/bin/sh
+    printf 'PATH=%s\nSKILLS=%s\n' "$PATH" "${SYMPHONY_SKILL_EXECUTION_CONTRACTS:-}"
+    """)
+
+    File.chmod!(fake_claude, 0o755)
 
     adapter_context = %{
       herdr_bin: context.bin,
@@ -130,7 +163,12 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
     assert {:ok, session} =
              HerdrTransport.start_session(
-               %{name: session_name, isolated: true, workspace: "/tmp/selected-workspace"},
+               %{
+                 name: session_name,
+                 isolated: true,
+                 workspace: "/tmp/selected-workspace",
+                 env: %{"PATH" => provider_bin <> ":" <> (System.get_env("PATH") || "")}
+               },
                adapter_context
              )
 
@@ -139,88 +177,101 @@ defmodule SymphonyElixir.HerdrTransportTest do
     end)
 
     assert {:ok, session} =
-             HerdrTransport.prepare_worker(session, %{argv: ["claude", "--model", "claude-sonnet-5"]}, adapter_context)
+             HerdrTransport.prepare_worker(
+               session,
+               %{
+                 provider: "claude_code",
+                 argv: ["claude", "--model", "claude-sonnet-5"],
+                 env: %{"SYMPHONY_SKILL_EXECUTION_CONTRACTS" => "worker-contract"}
+               },
+               adapter_context
+             )
 
     worker_herdr = Path.join(session.runtime_root, "worker-bin/herdr")
     orchestrator_herdr = Path.join(session.orchestrator_bin, "herdr")
+    claude_projection = Path.join(session.orchestrator_bin, "claude")
     base_env = [{"HERDR_FAKE_LOG", context.log}, {"XDG_CONFIG_HOME", session.runtime_root}]
+
+    assert {orchestrator_projection, 0} =
+             System.cmd(claude_projection, ["--model", "claude-sonnet-5"],
+               env: [
+                 {"HERDR_PANE_ID", "w1:p1"},
+                 {"SYMPHONY_SKILL_EXECUTION_CONTRACTS", ""}
+               ],
+               stderr_to_stdout: true
+             )
+
+    assert orchestrator_projection =~ "PATH=#{session.orchestrator_bin}:#{provider_bin}:"
+    assert orchestrator_projection =~ "SKILLS="
+
+    provider_output = Path.join(Path.dirname(context.bin), "worker-provider.out")
+    commands_before_substitution = File.read!(context.log)
+
+    assert {substitution_error, 64} =
+             System.cmd(session.worker_launcher, ["replacement_worker", "w1:p2"],
+               env: base_env,
+               stderr_to_stdout: true
+             )
+
+    assert substitution_error =~ "worker name must be implementer_worker"
+    assert File.read!(context.log) == commands_before_substitution
+
+    assert {_native_response, 0} =
+             System.cmd(session.worker_launcher, ["implementer_worker", "w1:p2"],
+               env: [
+                 {"HERDR_FAKE_EXEC_PROVIDER", "1"},
+                 {"HERDR_FAKE_LOG", context.log},
+                 {"HERDR_FAKE_PROVIDER_OUTPUT", provider_output},
+                 {"PATH", session.orchestrator_bin <> ":" <> provider_bin <> ":" <> (System.get_env("PATH") || "")},
+                 {"SYMPHONY_SKILL_EXECUTION_CONTRACTS", ""},
+                 {"XDG_CONFIG_HOME", session.runtime_root}
+               ],
+               stderr_to_stdout: true
+             )
+
+    worker_projection = File.read!(provider_output)
+    assert worker_projection =~ "PATH=#{session.runtime_root}/worker-bin:#{provider_bin}:"
+    assert worker_projection =~ "SKILLS=worker-contract"
 
     for role_herdr <- [worker_herdr, orchestrator_herdr] do
       File.write!(context.log, "")
 
-      assert {"", 0} =
-               System.cmd(role_herdr, ["pane", "run", "w1:p2", "line one\nline two"], env: base_env ++ [{"HERDR_FAKE_WRAPPER_AGENT", "claude"}, {"HERDR_FAKE_WRAPPER_STATUS", "working"}])
+      assert {_native_response, 0} =
+               System.cmd(
+                 role_herdr,
+                 ["agent", "prompt", "implementer_orchestrator", "line one\nline two"],
+                 env: base_env
+               )
 
       commands = File.read!(context.log)
-      assert length(:binary.matches(commands, "pane run w1:p2")) == 2
+      assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
+      refute commands =~ "pane run"
       refute commands =~ "pane send-text"
       refute commands =~ "pane send-keys"
+    end
 
-      File.write!(context.log, "")
+    for args <- [
+          ["agent", "list"],
+          ["agent", "get", "implementer_orchestrator"],
+          ["agent", "read", "implementer_orchestrator"],
+          ["agent", "prompt", "implementer_orchestrator", "worker result"],
+          ["agent", "wait", "implementer_orchestrator", "--until", "idle", "--timeout", "100"]
+        ] do
+      assert {_native_response, 0} = System.cmd(worker_herdr, args, env: base_env, stderr_to_stdout: true)
+    end
 
-      assert {"", 0} =
-               System.cmd(role_herdr, ["pane", "run", "w1:p2", "single-line steering"], env: base_env ++ [{"HERDR_FAKE_WRAPPER_AGENT", "claude"}, {"HERDR_FAKE_WRAPPER_STATUS", "working"}])
-
-      assert length(:binary.matches(File.read!(context.log), "pane run w1:p2")) == 1
-
-      File.write!(context.log, "")
-
-      assert {"", 0} =
-               System.cmd(role_herdr, ["pane", "run", "w1:p2", "idle follow-up"],
-                 env:
-                   base_env ++
-                     [
-                       {"HERDR_FAKE_WRAPPER_AGENT", "claude"},
-                       {"HERDR_FAKE_WRAPPER_STATUS", "idle"},
-                       {"OCTO_HERDR_SUBMISSION_SETTLE_SECONDS", "0"}
-                     ]
-               )
-
-      commands = File.read!(context.log)
-
-      assert length(:binary.matches(commands, "agent get w1:p2")) == 2, commands
-
-      assert length(:binary.matches(commands, "pane run w1:p2")) == 2
-
-      File.write!(context.log, "")
-      File.rm(Path.join(session.runtime_root, "wrapper-agent-get-count"))
-
-      assert {"", 0} =
-               System.cmd(role_herdr, ["pane", "run", "w1:p2", "fast completion"],
-                 env:
-                   base_env ++
-                     [
-                       {"HERDR_FAKE_WRAPPER_AGENT", "claude"},
-                       {"HERDR_FAKE_WRAPPER_STATUS", "idle"},
-                       {"HERDR_FAKE_WRAPPER_ADVANCE", "1"},
-                       {"OCTO_HERDR_SUBMISSION_SETTLE_SECONDS", "0"}
-                     ]
-               )
-
-      assert length(:binary.matches(File.read!(context.log), "pane run w1:p2")) == 1
-
-      File.write!(context.log, "")
-
-      assert {"", 0} =
-               System.cmd(role_herdr, ["pane", "run", "w1:p2", "line one\nline two"], env: base_env ++ [{"HERDR_FAKE_WRAPPER_AGENT", "codex"}, {"HERDR_FAKE_WRAPPER_STATUS", "idle"}])
-
-      assert length(:binary.matches(File.read!(context.log), "pane run w1:p2")) == 1
-
-      File.write!(context.log, "")
-
-      assert {_output, 44} =
-               System.cmd(role_herdr, ["pane", "run", "w1:p2", "must fail"],
-                 env:
-                   base_env ++
-                     [
-                       {"HERDR_FAKE_WRAPPER_AGENT", "claude"},
-                       {"HERDR_FAKE_WRAPPER_STATUS", "idle"},
-                       {"HERDR_FAKE_WRAPPER_RUN_FAIL", "1"}
-                     ],
-                 stderr_to_stdout: true
-               )
-
-      assert length(:binary.matches(File.read!(context.log), "pane run w1:p2")) == 1
+    for args <- [
+          ["agent", "start", "descendant"],
+          ["agent", "send-keys", "implementer_orchestrator", "enter"],
+          ["pane", "run", "w1:p2", "legacy"],
+          ["pane", "send-text", "w1:p2", "raw"],
+          ["pane", "send-keys", "w1:p2", "enter"],
+          ["pane", "split", "w1:p2", "--direction", "right"],
+          ["workspace", "create"],
+          ["server", "stop"]
+        ] do
+      assert {denied, 64} = System.cmd(worker_herdr, args, env: base_env, stderr_to_stdout: true)
+      assert denied =~ "worker Herdr authority denies"
     end
 
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
@@ -256,6 +307,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert String.starts_with?(session.runtime_root, "/tmp/octo-herdr-")
     assert String.length(session.socket) <= 103
     assert session.socket == Path.join(session.runtime_root, "herdr/sessions/octo-emb-1141-run-7/herdr.sock")
+    assert session.pane_id == "w1:p1"
     refute Map.has_key?(session, :worker_launcher)
 
     worker_argv = [
@@ -272,6 +324,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
              HerdrTransport.prepare_worker(
                session,
                %{
+                 provider: "codex",
                  argv: worker_argv,
                  env: %{"SYMPHONY_SKILL_EXECUTION_CONTRACTS" => contract_json}
                },
@@ -281,42 +334,43 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert File.exists?(session.worker_launcher)
     assert File.exists?(Path.join(session.orchestrator_bin, "herdr"))
     launcher = File.read!(session.worker_launcher)
+    provider_wrapper = File.read!(Path.join(session.orchestrator_bin, "codex"))
+
+    assert launcher =~ "agent start \"$1\" --kind 'codex' --pane \"$2\""
     assert launcher =~ "default_permissions=\"octo_herdr\""
     assert launcher =~ session.socket
-    assert launcher =~ "export SYMPHONY_SKILL_EXECUTION_CONTRACTS="
-    assert launcher =~ contract_json
+    refute launcher =~ "exec 'codex'"
+    assert provider_wrapper =~ "export SYMPHONY_SKILL_EXECUTION_CONTRACTS="
+    assert provider_wrapper =~ contract_json
+    assert provider_wrapper =~ "export PATH='#{session.runtime_root}/worker-bin':"
 
     restricted_herdr = Path.join(session.runtime_root, "worker-bin/herdr")
     assert File.exists?(restricted_herdr)
     assert {output, 64} = System.cmd(restricted_herdr, ["agent", "start", "descendant"], stderr_to_stdout: true)
     assert output =~ "worker Herdr authority denies"
 
-    assert {"", 0} =
+    assert {_native_response, 0} =
              System.cmd(
                restricted_herdr,
-               ["pane", "run", "w1:p2", "worker result"],
+               ["agent", "prompt", "implementer_orchestrator", "worker result"],
                env: [{"HERDR_FAKE_LOG", context.log}, {"XDG_CONFIG_HOME", session.runtime_root}]
              )
 
     orchestrator_herdr = Path.join(session.orchestrator_bin, "herdr")
 
-    assert {"", 0} =
+    assert {_native_response, 0} =
              System.cmd(
                orchestrator_herdr,
-               ["pane", "run", "w1:p2", "orchestrator advice"],
+               ["agent", "prompt", "implementer_worker", "orchestrator advice"],
                env: [{"HERDR_FAKE_LOG", context.log}, {"XDG_CONFIG_HOME", session.runtime_root}]
              )
 
-    assert {wait_output, 64} =
+    assert {_native_response, 0} =
              System.cmd(
                restricted_herdr,
-               ["wait", "agent-status", "w1:p1", "--status", "working", "--timeout", "100"],
-               env: [{"HERDR_FAKE_LOG", context.log}, {"XDG_CONFIG_HOME", session.runtime_root}],
-               stderr_to_stdout: true
+               ["agent", "wait", "implementer_orchestrator", "--until", "idle", "--timeout", "100"],
+               env: [{"HERDR_FAKE_LOG", context.log}, {"XDG_CONFIG_HOME", session.runtime_root}]
              )
-
-    refute wait_output =~ "worker Herdr authority denies"
-    assert wait_output =~ "unsupported fake Herdr command"
 
     orchestrator_spec = %{
       name: "implementer_orchestrator",
@@ -330,33 +384,31 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert orchestrator.pane_id == "w1:p1"
     assert orchestrator.provider == "codex"
 
-    assert :ok = HerdrTransport.submit(session, orchestrator, "Codex assignment", adapter_context)
+    assert {:ok, %{phase: :working, agent: started_turn}} =
+             HerdrTransport.begin_turn(
+               session,
+               orchestrator,
+               "Codex assignment",
+               3_000,
+               adapter_context
+             )
 
-    claude_spec = %{
-      name: "claude_orchestrator",
-      provider: "claude_code",
-      cwd: "/tmp/selected-workspace",
-      argv: ["claude", "--model", "claude-fable-5", "--effort", "medium"]
-    }
-
-    assert {:ok, claude} = HerdrTransport.start_agent(session, claude_spec, adapter_context)
-    assert claude.provider == "claude_code"
-
-    assert {:ok, ready_claude} =
-             HerdrTransport.await_agent(session, claude, ["idle", "done"], 3_000, adapter_context)
-
-    assert ready_claude.provider == "claude_code"
-    assert :ok = HerdrTransport.submit(session, ready_claude, "Claude assignment", adapter_context)
-
-    ready_started_at = System.monotonic_time(:millisecond)
+    assert started_turn.provider == "codex"
 
     assert {:ok, ready_orchestrator} =
              HerdrTransport.await_agent(session, orchestrator, ["idle", "done"], 3_000, adapter_context)
 
-    assert System.monotonic_time(:millisecond) - ready_started_at >= 1_900
     assert ready_orchestrator.agent == "codex"
     assert ready_orchestrator.agent_status == "idle"
     assert ready_orchestrator.agent_session == nil
+
+    assert {:ok, %{text: "IMPLEMENTER_TURN_COMPLETE"}} =
+             HerdrTransport.read_agent(
+               session,
+               ready_orchestrator,
+               %{source: :recent_unwrapped, lines: 240},
+               adapter_context
+             )
 
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
     refute File.exists?(session.runtime_root)
@@ -365,12 +417,20 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
     commands = File.read!(context.log)
     assert commands =~ "--session octo-emb-1141-run-7 server\n"
-    assert commands =~ "--session octo-emb-1141-run-7 agent start implementer_orchestrator"
-    assert commands =~ "-- codex --model gpt-5.6-sol --config model_reasoning_effort=medium"
-    assert commands =~ "--session octo-emb-1141-run-7 pane run w1:p1 Codex assignment\n"
-    assert commands =~ "--session octo-emb-1141-run-7 pane run w1:p1 Claude assignment\n"
-    assert commands =~ "pane run w1:p2 worker result\n"
-    assert commands =~ "pane run w1:p2 orchestrator advice\n"
+    assert commands =~ "--session octo-emb-1141-run-7 workspace create --cwd /tmp/selected-workspace --no-focus"
+
+    assert commands =~
+             "--session octo-emb-1141-run-7 agent start implementer_orchestrator --kind codex --pane w1:p1 --timeout 30000 -- --model gpt-5.6-sol --config model_reasoning_effort=medium"
+
+    assert commands =~
+             "--session octo-emb-1141-run-7 agent prompt implementer_orchestrator Codex assignment --wait --until working --until idle --until done --timeout 3000"
+
+    assert commands =~
+             "--session octo-emb-1141-run-7 agent wait implementer_orchestrator --until idle --until done --timeout 3000"
+
+    assert commands =~ "agent prompt implementer_orchestrator worker result"
+    assert commands =~ "agent prompt implementer_worker orchestrator advice"
+    refute commands =~ "pane run"
     refute commands =~ "pane send-text"
     assert commands =~ "--session octo-emb-1141-run-7 server stop\n"
   end
@@ -388,8 +448,8 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     incompatible_runtime = %{
-      expected_version: "0.7.4",
-      expected_protocol: 16,
+      expected_version: "0.7.5",
+      expected_protocol: 17,
       actual_version: "0.8.0",
       actual_protocol: 17
     }
@@ -404,15 +464,66 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert commands =~ "--session octo-emb-1141-incompatible status server"
   end
 
-  test "begins a turn by confirming an unchanged idle submission through pane run", context do
+  test "bounds a stalled readiness probe and cleans the isolated runtime", context do
+    status_pid_file = Path.join(Path.dirname(context.bin), "stalled-status.pid")
+    server_pid_file = Path.join(Path.dirname(context.bin), "stalled-server.pid")
+    runtime_root = Path.join(System.tmp_dir!(), "octo-herdr-stall-#{System.unique_integer([:positive])}")
+
+    adapter_context = %{
+      herdr_bin: context.bin,
+      socket_root: runtime_root,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_FAKE_STATUS_STALL", "1"},
+        {"HERDR_FAKE_STATUS_STALL_SECONDS", "2"},
+        {"HERDR_FAKE_STATUS_PID_FILE", status_pid_file},
+        {"HERDR_FAKE_SERVER_PID_FILE", server_pid_file}
+      ],
+      start_timeout_ms: 100,
+      poll_interval_ms: 5
+    }
+
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, :herdr_server_start_timeout} =
+             HerdrTransport.start_session(
+               %{name: "octo-emb-1201-stalled-status", isolated: true, workspace: "/tmp/selected-workspace"},
+               adapter_context
+             )
+
+    elapsed_ms = System.monotonic_time(:millisecond) - started_at
+
+    assert elapsed_ms < 750
+    refute File.exists?(runtime_root)
+    refute process_alive?(File.read!(status_pid_file))
+    refute process_alive?(File.read!(server_pid_file))
+  end
+
+  test "normalizes the native protocol mismatch before session startup", context do
     adapter_context = %{
       herdr_bin: context.bin,
       extra_env: [
         {"HERDR_FAKE_LOG", context.log},
-        {"HERDR_FAKE_CONFIRM_REQUIRED", "1"}
-      ],
+        {"HERDR_FAKE_PROTOCOL_MISMATCH", "1"}
+      ]
+    }
+
+    assert {:error,
+            {:incompatible_herdr_runtime,
+             %{
+               expected_version: "0.7.5",
+               expected_protocol: 17,
+               actual_version: nil,
+               actual_protocol: nil,
+               error_code: "protocol_mismatch"
+             }}} = HerdrTransport.default_server_snapshot(adapter_context)
+  end
+
+  test "begins a turn through one atomic native prompt", context do
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [{"HERDR_FAKE_LOG", context.log}],
       start_timeout_ms: 2_000,
-      submission_settle_ms: 10,
       poll_interval_ms: 5
     }
 
@@ -449,21 +560,21 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert observed.provider == "claude_code"
 
     commands = File.read!(context.log)
-    assert length(:binary.matches(commands, "pane run w1:p1")) == 2
+    assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
+    refute commands =~ "pane run"
     refute commands =~ "pane send-text"
     refute commands =~ "pane send-keys"
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
-  test "recognizes an advanced idle revision as fast turn completion without confirmation", context do
+  test "recognizes a prompt that completes before the caller observes working", context do
     adapter_context = %{
       herdr_bin: context.bin,
       extra_env: [
         {"HERDR_FAKE_LOG", context.log},
-        {"HERDR_FAKE_FAST_COMPLETION", "1"}
+        {"HERDR_FAKE_PROMPT_STATUS", "idle"}
       ],
       start_timeout_ms: 2_000,
-      submission_settle_ms: 10,
       poll_interval_ms: 5
     }
 
@@ -499,8 +610,150 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert observed.revision == 2
 
     commands = File.read!(context.log)
-    assert length(:binary.matches(commands, "pane run w1:p1")) == 1
+    assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
+  end
+
+  test "starts Claude through the strict native kind and strips the executable from native args", context do
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [{"HERDR_FAKE_LOG", context.log}],
+      start_timeout_ms: 2_000,
+      agent_start_timeout_ms: 45_000,
+      poll_interval_ms: 5
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{
+                 name: "octo-emb-1201-claude-kind",
+                 isolated: true,
+                 workspace: "/tmp/selected-workspace"
+               },
+               adapter_context
+             )
+
+    assert {:ok, agent} =
+             HerdrTransport.start_agent(
+               session,
+               %{
+                 name: "implementer_orchestrator",
+                 provider: "claude_code",
+                 cwd: "/tmp/selected-workspace",
+                 argv: ["claude", "--model", "claude-fable-5", "--effort", "high"]
+               },
+               adapter_context
+             )
+
+    assert agent.provider == "claude_code"
+
+    commands = File.read!(context.log)
+
+    assert commands =~
+             "agent start implementer_orchestrator --kind claude --pane w1:p1 --timeout 45000 -- --model claude-fable-5 --effort high"
+
+    refute commands =~ "-- -- claude"
+    assert :ok = HerdrTransport.stop_session(session, adapter_context)
+  end
+
+  test "returns typed prompt-stall and closed-agent failures", context do
+    for {code, expected} <- [
+          {"agent_prompt_stalled", :herdr_agent_prompt_stalled},
+          {"agent_not_running", :herdr_agent_closed}
+        ] do
+      adapter_context = %{
+        herdr_bin: context.bin,
+        extra_env: [
+          {"HERDR_FAKE_LOG", context.log},
+          {"HERDR_FAKE_PROMPT_ERROR", code}
+        ],
+        start_timeout_ms: 2_000,
+        poll_interval_ms: 5
+      }
+
+      assert {:ok, session} =
+               HerdrTransport.start_session(
+                 %{
+                   name: "octo-emb-1201-#{String.replace(code, "_", "-")}",
+                   isolated: true,
+                   workspace: "/tmp/selected-workspace"
+                 },
+                 adapter_context
+               )
+
+      assert {:ok, agent} =
+               HerdrTransport.start_agent(
+                 session,
+                 %{
+                   name: "implementer_orchestrator",
+                   provider: "codex",
+                   cwd: "/tmp/selected-workspace",
+                   argv: ["codex", "--model", "gpt-5.6-sol"]
+                 },
+                 adapter_context
+               )
+
+      assert {:error, {^expected, "implementer_orchestrator"}} =
+               HerdrTransport.begin_turn(
+                 session,
+                 agent,
+                 "Complete the assignment.",
+                 6_000,
+                 adapter_context
+               )
+
+      assert :ok = HerdrTransport.stop_session(session, adapter_context)
+    end
+  end
+
+  test "maps bounded native wait timeout and closed-agent errors", context do
+    for {code, expected} <- [
+          {"timeout", {:herdr_agent_status_timeout, "implementer_orchestrator", ["idle", "done"]}},
+          {"agent_not_running", {:herdr_agent_closed, "implementer_orchestrator"}}
+        ] do
+      adapter_context = %{
+        herdr_bin: context.bin,
+        extra_env: [
+          {"HERDR_FAKE_LOG", context.log},
+          {"HERDR_FAKE_WAIT_ERROR", code}
+        ],
+        start_timeout_ms: 2_000,
+        poll_interval_ms: 5
+      }
+
+      assert {:ok, session} =
+               HerdrTransport.start_session(
+                 %{
+                   name: "octo-emb-1201-wait-#{String.replace(code, "_", "-")}",
+                   isolated: true,
+                   workspace: "/tmp/selected-workspace"
+                 },
+                 adapter_context
+               )
+
+      assert {:ok, agent} =
+               HerdrTransport.start_agent(
+                 session,
+                 %{
+                   name: "implementer_orchestrator",
+                   provider: "codex",
+                   cwd: "/tmp/selected-workspace",
+                   argv: ["codex", "--model", "gpt-5.6-sol"]
+                 },
+                 adapter_context
+               )
+
+      assert {:error, ^expected} =
+               HerdrTransport.await_agent(
+                 session,
+                 agent,
+                 ["idle", "done"],
+                 1_000,
+                 adapter_context
+               )
+
+      assert :ok = HerdrTransport.stop_session(session, adapter_context)
+    end
   end
 
   test "an ownership reference stops an abandoned run idempotently", context do
@@ -533,5 +786,41 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
     commands = File.read!(context.log)
     assert commands =~ "--session octo-emb-1141-abandoned server stop"
+  end
+
+  test "an ownership reference recovers an explicitly owned custom socket root", context do
+    runtime_root =
+      Path.join(System.tmp_dir!(), "octo-herdr-custom-#{System.unique_integer([:positive])}")
+
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [{"HERDR_FAKE_LOG", context.log}],
+      socket_root: runtime_root,
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 10
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{name: "octo-emb-1201-custom-owned", isolated: true, workspace: "/tmp/selected-workspace"},
+               adapter_context
+             )
+
+    on_exit(fn ->
+      if File.exists?(runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
+    end)
+
+    ownership_ref = HerdrTransport.owned_session_ref(session, adapter_context)
+
+    assert ownership_ref.cleanup_context.socket_root == runtime_root
+    assert :ok = HerdrTransport.cleanup_owned_session(ownership_ref)
+    refute File.exists?(runtime_root)
+  end
+
+  defp process_alive?(pid) do
+    case System.cmd("kill", ["-0", String.trim(pid)], stderr_to_stdout: true) do
+      {_output, 0} -> true
+      {_output, _status} -> false
+    end
   end
 end

@@ -35,42 +35,6 @@ defmodule SymphonyElixir.ImplementerDelegationSessionLifecycleTest do
     end
   end
 
-  defmodule OrchestratorReadyFailsTransport do
-    def default_server_snapshot(%{owner: owner}) do
-      send(owner, :default_server_snapshot)
-      {:ok, %{status: "running", version: "v", protocol: 1, socket: "/tmp/default.sock"}}
-    end
-
-    def start_session(spec, %{owner: owner}) do
-      send(owner, {:start_session, spec.name})
-      {:ok, %{name: spec.name, socket: "/tmp/#{spec.name}/sock", runtime_root: "/tmp/#{spec.name}"}}
-    end
-
-    def prepare_worker(session, _spec, %{owner: owner}) do
-      send(owner, :prepare_worker)
-
-      {:ok,
-       session
-       |> Map.put(:worker_launcher, "/tmp/#{session.name}/launch-worker")
-       |> Map.put(:orchestrator_bin, "/tmp/#{session.name}/bin")}
-    end
-
-    def start_agent(_session, spec, %{owner: owner}) do
-      send(owner, :start_agent)
-      {:ok, %{name: spec.name, pane_id: "w1:p1", profile: spec.profile}}
-    end
-
-    def await_agent(_session, _agent, _statuses, _timeout_ms, %{owner: owner}) do
-      send(owner, :await_agent)
-      {:error, :not_ready}
-    end
-
-    def stop_session(session, %{owner: owner}) do
-      send(owner, {:stop_session, session.name})
-      :ok
-    end
-  end
-
   defmodule PrepareWorkerFailsTransport do
     def default_server_snapshot(%{owner: owner}) do
       send(owner, :default_server_snapshot)
@@ -182,20 +146,6 @@ defmodule SymphonyElixir.ImplementerDelegationSessionLifecycleTest do
     assert_received {:stop_session, _name}
   end
 
-  test "a failed orchestrator readiness check stops the isolated session and surfaces the reason" do
-    assert {:error, {:implementer_orchestrator_ready_failed, :not_ready}} =
-             ImplementerDelegation.start_session(
-               "/tmp/ws",
-               valid_contract(),
-               issue_identifier: "EMB-4",
-               run_id: "r4",
-               transport: OrchestratorReadyFailsTransport,
-               transport_context: %{owner: self()}
-             )
-
-    assert_received {:stop_session, _name}
-  end
-
   test "a failed worker preparation stops the isolated session and surfaces the reason" do
     assert {:error, {:implementer_worker_prepare_failed, :worker_boom}} =
              ImplementerDelegation.start_session(
@@ -226,7 +176,7 @@ defmodule SymphonyElixir.ImplementerDelegationSessionLifecycleTest do
     assert spec.env["OCTO_HERDR_WORKER_LAUNCHER"] == "/tmp/octo-emb-6-r6/launch-worker"
   end
 
-  test "a non-map transport_context does not crash the orchestrator readiness timeout lookup" do
+  test "a non-map transport_context is passed through without Adapter policy leakage" do
     assert {:ok, _session} =
              ImplementerDelegation.start_session(
                "/tmp/ws",
@@ -236,8 +186,6 @@ defmodule SymphonyElixir.ImplementerDelegationSessionLifecycleTest do
                transport: ContextAgnosticTransport,
                transport_context: :not_a_map
              )
-
-    assert_received {:await_agent, ["idle", "done"], 30_000}
   end
 
   test "launcher_argv raises for a contract provider that is neither codex nor claude_code" do
