@@ -90,7 +90,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @impl true
   def prepare_worker(%{runtime_root: runtime_root} = session, worker, context)
       when is_binary(runtime_root) and is_map(context) do
-    case materialize_worker_launcher(runtime_root, worker, context) do
+    case materialize_worker_launcher(session, worker, context) do
       {:ok, worker_launcher, orchestrator_bin} ->
         {:ok, session |> Map.put(:worker_launcher, worker_launcher) |> Map.put(:orchestrator_bin, orchestrator_bin)}
 
@@ -503,62 +503,117 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     end
   end
 
-  defp materialize_worker_launcher(_runtime_root, nil, _context), do: {:ok, nil, nil}
+  defp materialize_worker_launcher(_session, nil, _context), do: {:ok, nil, nil}
 
-  defp materialize_worker_launcher(runtime_root, %{argv: argv} = worker, context)
-       when is_list(argv) and argv != [] do
+  defp materialize_worker_launcher(
+         %{name: session_name, runtime_root: runtime_root, env: session_env},
+         %{argv: argv} = worker,
+         context
+       )
+       when is_binary(session_name) and is_list(session_env) and is_list(argv) and argv != [] do
     path = Path.join(runtime_root, "launch-worker")
     worker_bin = Path.join(runtime_root, "worker-bin")
+    worker_panes = Path.join(runtime_root, "worker-panes")
     orchestrator_bin = Path.join(runtime_root, "orchestrator-bin")
     restricted_herdr = Path.join(worker_bin, "herdr")
     orchestrator_herdr = Path.join(orchestrator_bin, "herdr")
     real_herdr = Map.get(context, :herdr_bin) || System.find_executable("herdr") || "herdr"
-
     worker_env = Map.get(worker, :env, %{})
 
-    launcher_body =
-      "#!/bin/sh\nset -eu\nexport PATH=#{shell_escape(worker_bin)}:\"${PATH:-}\"\n" <>
-        launcher_env_exports(worker_env) <>
-        "exec #{Enum.map_join(argv, " ", &shell_escape/1)}\n"
+    with {:ok, kind, native_args} <- native_agent_launch(worker, argv) do
+      provider_command = hd(argv)
+      provider_wrapper = Path.join(orchestrator_bin, provider_command)
+      inherited_path = inherited_provider_path(session_env, orchestrator_bin)
+      timeout_ms = Map.get(context, :agent_start_timeout_ms, @default_agent_start_timeout_ms)
 
-    restricted_body = """
-    #!/bin/sh
-    set -eu
-    case "${1:-}:${2:-}" in
-      agent:get|agent:list|agent:read|agent:prompt|agent:wait)
-        exec #{shell_escape(real_herdr)} "$@"
-        ;;
-      *)
-        printf '%s\n' "worker Herdr authority denies: $*" >&2
+      launcher_body = """
+      #!/bin/sh
+      set -eu
+      if [ "$#" -ne 2 ]; then
+        printf '%s\n' 'usage: launch-worker <name> <pane-id>' >&2
         exit 64
-        ;;
-    esac
-    """
+      fi
+      marker=$(mktemp #{shell_escape(Path.join(worker_panes, "pending.XXXXXX"))})
+      printf '%s\n' "$2" > "$marker"
+      trap 'rm -f "$marker"' EXIT HUP INT TERM
+      #{shell_escape(orchestrator_herdr)} --session #{shell_escape(session_name)} agent start "$1" --kind #{shell_escape(kind)} --pane "$2" --timeout #{timeout_ms} -- #{Enum.map_join(native_args, " ", &shell_escape/1)}
+      """
 
-    orchestrator_body = """
-    #!/bin/sh
-    set -eu
-    exec #{shell_escape(real_herdr)} "$@"
-    """
+      restricted_body = """
+      #!/bin/sh
+      set -eu
+      case "${1:-}:${2:-}" in
+        agent:get|agent:list|agent:read|agent:prompt|agent:wait)
+          exec #{shell_escape(real_herdr)} "$@"
+          ;;
+        *)
+          printf '%s\n' "worker Herdr authority denies: $*" >&2
+          exit 64
+          ;;
+      esac
+      """
 
-    with :ok <- File.mkdir_p(worker_bin),
-         :ok <- File.mkdir_p(orchestrator_bin),
-         :ok <- File.write(restricted_herdr, restricted_body),
-         :ok <- File.chmod(restricted_herdr, 0o500),
-         :ok <- File.write(orchestrator_herdr, orchestrator_body),
-         :ok <- File.chmod(orchestrator_herdr, 0o500),
-         :ok <- File.write(path, launcher_body),
-         :ok <- File.chmod(path, 0o500) do
-      {:ok, path, orchestrator_bin}
-    else
-      {:error, reason} ->
-        File.rm_rf(runtime_root)
-        {:error, {:worker_launcher_materialization_failed, reason}}
+      orchestrator_body = """
+      #!/bin/sh
+      set -eu
+      exec #{shell_escape(real_herdr)} "$@"
+      """
+
+      provider_body = """
+      #!/bin/sh
+      set -eu
+      provider_executable=$(PATH=#{shell_escape(inherited_path)} command -v #{shell_escape(provider_command)}) || {
+        printf '%s\n' 'required worker provider executable is unavailable' >&2
+        exit 127
+      }
+      worker_projection=false
+      for marker in #{shell_escape(worker_panes)}/pending.*; do
+        [ -f "$marker" ] || continue
+        IFS= read -r expected_pane < "$marker" || continue
+        [ "$expected_pane" = "${HERDR_PANE_ID:-}" ] || continue
+        claimed_marker="${marker}.claimed.$$"
+        if mv "$marker" "$claimed_marker" 2>/dev/null; then
+          rm -f "$claimed_marker"
+          worker_projection=true
+          break
+        fi
+      done
+      if [ "$worker_projection" = true ]; then
+        export PATH=#{shell_escape(worker_bin)}:#{shell_escape(inherited_path)}
+        #{launcher_env_exports(worker_env)}
+      else
+        export PATH=#{shell_escape(orchestrator_bin)}:#{shell_escape(inherited_path)}
+      fi
+      exec "$provider_executable" "$@"
+      """
+
+      with :ok <- File.mkdir_p(worker_bin),
+           :ok <- File.mkdir_p(worker_panes),
+           :ok <- File.mkdir_p(orchestrator_bin),
+           :ok <- File.write(restricted_herdr, restricted_body),
+           :ok <- File.chmod(restricted_herdr, 0o500),
+           :ok <- File.write(orchestrator_herdr, orchestrator_body),
+           :ok <- File.chmod(orchestrator_herdr, 0o500),
+           :ok <- File.write(provider_wrapper, provider_body),
+           :ok <- File.chmod(provider_wrapper, 0o500),
+           :ok <- File.write(path, launcher_body),
+           :ok <- File.chmod(path, 0o500) do
+        {:ok, path, orchestrator_bin}
+      else
+        {:error, reason} ->
+          File.rm_rf(runtime_root)
+          {:error, {:worker_launcher_materialization_failed, reason}}
+      end
     end
   end
 
-  defp materialize_worker_launcher(_runtime_root, _worker, _context),
+  defp materialize_worker_launcher(_session, _worker, _context),
     do: {:error, :invalid_worker_launcher_spec}
+
+  defp inherited_provider_path(session_env, orchestrator_bin) do
+    path = session_env |> Map.new() |> Map.get("PATH", System.get_env("PATH") || "")
+    String.replace_prefix(path, orchestrator_bin <> ":", "")
+  end
 
   defp launcher_env_exports(env) when is_map(env) do
     env

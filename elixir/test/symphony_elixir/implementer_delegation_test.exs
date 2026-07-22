@@ -640,6 +640,101 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert :ok = AgentRuntime.stop_session(next_session)
   end
 
+  test "default Herdr Adapter starts both worker providers through the native live-agent Interface" do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "agent-runtime-native-workers-#{System.unique_integer([:positive])}"
+      )
+
+    workspace = Path.join(root, "selected-product")
+    fake_provider_bin = Path.join(root, "provider-bin")
+    previous_orchestrator_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    previous_worker_provider = System.get_env("OCTO_RUNTIME_WORKER_PROVIDER")
+    previous_transport = Application.get_env(:symphony_elixir, :delegation_transport_module)
+
+    File.mkdir_p!(workspace)
+    File.mkdir_p!(fake_provider_bin)
+
+    for provider <- ["codex", "claude"] do
+      path = Path.join(fake_provider_bin, provider)
+      File.write!(path, "#!/bin/sh\nprintf 'DIRECT_PROVIDER_EXEC %s\\n' \"$*\" >> \"$HERDR_FAKE_LOG\"\n")
+      File.chmod!(path, 0o755)
+    end
+
+    Application.put_env(
+      :symphony_elixir,
+      :delegation_transport_module,
+      SymphonyElixir.ImplementerDelegation.HerdrTransport
+    )
+
+    on_exit(fn ->
+      if previous_orchestrator_provider,
+        do: System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_orchestrator_provider),
+        else: System.delete_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+
+      if previous_worker_provider,
+        do: System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", previous_worker_provider),
+        else: System.delete_env("OCTO_RUNTIME_WORKER_PROVIDER")
+
+      Application.put_env(:symphony_elixir, :delegation_transport_module, previous_transport)
+      File.rm_rf(root)
+    end)
+
+    for {provider, kind} <- [{"codex", "codex"}, {"claude_code", "claude"}] do
+      System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", provider)
+      System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", provider)
+
+      herdr_bin = Path.join(root, "fake-herdr-#{kind}")
+      herdr_log = Path.join(root, "herdr-#{kind}.log")
+
+      runtime_root =
+        Path.join(
+          System.tmp_dir!(),
+          "anw-#{kind}-#{System.unique_integer([:positive])}"
+        )
+
+      write_fake_herdr!(herdr_bin)
+
+      assert {:ok, session} =
+               AgentRuntime.start_session(workspace,
+                 issue: issue(),
+                 role: "implementer",
+                 run_id: "native-worker-#{kind}",
+                 delegation_transport_context: %{
+                   herdr_bin: herdr_bin,
+                   extra_env: [{"HERDR_FAKE_LOG", herdr_log}],
+                   socket_root: runtime_root,
+                   poll_interval_ms: 5,
+                   start_timeout_ms: 2_000
+                 }
+               )
+
+      launcher_env = [
+        {"HERDR_FAKE_LOG", herdr_log},
+        {"PATH", fake_provider_bin <> ":" <> (System.get_env("PATH") || "")},
+        {"XDG_CONFIG_HOME", runtime_root}
+      ]
+
+      assert {_output, 0} =
+               System.cmd(
+                 session.herdr_session.worker_launcher,
+                 ["implementer_worker", "w1:p2"],
+                 env: launcher_env,
+                 stderr_to_stdout: true
+               )
+
+      commands = File.read!(herdr_log)
+
+      assert commands =~
+               "--session #{session.name} agent start implementer_worker --kind #{kind} --pane w1:p2 --timeout 30000 --"
+
+      refute commands =~ "DIRECT_PROVIDER_EXEC"
+      assert :ok = AgentRuntime.stop_session(session)
+      File.rm_rf(runtime_root)
+    end
+  end
+
   test "a native prompt stall cannot complete a turn" do
     session = %{
       transport: PromptStallTransport,

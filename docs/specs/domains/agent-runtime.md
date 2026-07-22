@@ -486,9 +486,16 @@ readiness before returning. There is no secondary readiness poll.
 The orchestrator receives the worker launcher path through
 `OCTO_HERDR_WORKER_LAUNCHER`. Missing or incompatible Herdr, unsafe socket
 paths, rejected launchers, and adapter-side model/effort substitution fail
-closed. Every mutating Herdr command is scoped to the run-owned named session
-and private configuration root; cleanup verifies that the operator's default
-server snapshot is unchanged.
+closed. The launcher accepts exactly the worker's strict live name and a pane
+ID returned by Herdr, then invokes run-owned `agent start` with the
+Adapter-selected provider kind, fixed native profile arguments, and bounded
+startup timeout; it never directly execs the provider or accepts caller-supplied
+model, effort, provider, or command arguments. The matching provider projection
+places the restricted worker Herdr proxy and worker environment in the launched
+process while the orchestrator retains its full run-owned Herdr projection.
+Every mutating Herdr command is scoped to the run-owned named session and
+private configuration root; cleanup verifies that the operator's default server
+snapshot is unchanged.
 
 Herdr owns terminal input, bracketed-paste handling, provider keyboard protocol,
 prompt acknowledgement, and lifecycle waiting behind its native live-agent

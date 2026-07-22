@@ -76,6 +76,14 @@ defmodule SymphonyElixir.HerdrTransportTest do
     if [ "$1" = "agent" ] && [ "$2" = "start" ]; then
       name="$3"
       kind="$5"
+      pane="$7"
+
+      if [ "${HERDR_FAKE_EXEC_PROVIDER:-}" = "1" ]; then
+        while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+        shift
+        HERDR_PANE_ID="$pane" "$kind" "$@" > "$HERDR_FAKE_PROVIDER_OUTPUT"
+      fi
+
       printf '{"id":"cli:agent:start","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"%s","agent_status":"idle","interactive_ready":true,"revision":1}}}\n' "$name" "$kind"
       exit 0
     fi
@@ -105,6 +113,11 @@ defmodule SymphonyElixir.HerdrTransportTest do
       exit 0
     fi
 
+    if [ "$1" = "agent" ] && [ "$2" = "list" ]; then
+      printf '{"id":"cli:agent:list","result":{"agents":[]}}\n'
+      exit 0
+    fi
+
     if [ "$1" = "agent" ] && [ "$2" = "read" ]; then
       printf 'IMPLEMENTER_TURN_COMPLETE'
       exit 0
@@ -122,6 +135,16 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
   test "generated role projections expose only the native live-agent controls", context do
     session_name = "octo-emb-1201-native-projection-#{System.unique_integer([:positive])}"
+    provider_bin = Path.join(Path.dirname(context.bin), "provider-bin")
+    fake_claude = Path.join(provider_bin, "claude")
+    File.mkdir_p!(provider_bin)
+
+    File.write!(fake_claude, """
+    #!/bin/sh
+    printf 'PATH=%s\nSKILLS=%s\n' "$PATH" "${SYMPHONY_SKILL_EXECUTION_CONTRACTS:-}"
+    """)
+
+    File.chmod!(fake_claude, 0o755)
 
     adapter_context = %{
       herdr_bin: context.bin,
@@ -132,7 +155,12 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
     assert {:ok, session} =
              HerdrTransport.start_session(
-               %{name: session_name, isolated: true, workspace: "/tmp/selected-workspace"},
+               %{
+                 name: session_name,
+                 isolated: true,
+                 workspace: "/tmp/selected-workspace",
+                 env: %{"PATH" => provider_bin <> ":" <> (System.get_env("PATH") || "")}
+               },
                adapter_context
              )
 
@@ -141,11 +169,51 @@ defmodule SymphonyElixir.HerdrTransportTest do
     end)
 
     assert {:ok, session} =
-             HerdrTransport.prepare_worker(session, %{argv: ["claude", "--model", "claude-sonnet-5"]}, adapter_context)
+             HerdrTransport.prepare_worker(
+               session,
+               %{
+                 provider: "claude_code",
+                 argv: ["claude", "--model", "claude-sonnet-5"],
+                 env: %{"SYMPHONY_SKILL_EXECUTION_CONTRACTS" => "worker-contract"}
+               },
+               adapter_context
+             )
 
     worker_herdr = Path.join(session.runtime_root, "worker-bin/herdr")
     orchestrator_herdr = Path.join(session.orchestrator_bin, "herdr")
+    claude_projection = Path.join(session.orchestrator_bin, "claude")
     base_env = [{"HERDR_FAKE_LOG", context.log}, {"XDG_CONFIG_HOME", session.runtime_root}]
+
+    assert {orchestrator_projection, 0} =
+             System.cmd(claude_projection, ["--model", "claude-sonnet-5"],
+               env: [
+                 {"HERDR_PANE_ID", "w1:p1"},
+                 {"SYMPHONY_SKILL_EXECUTION_CONTRACTS", ""}
+               ],
+               stderr_to_stdout: true
+             )
+
+    assert orchestrator_projection =~ "PATH=#{session.orchestrator_bin}:#{provider_bin}:"
+    assert orchestrator_projection =~ "SKILLS="
+
+    provider_output = Path.join(Path.dirname(context.bin), "worker-provider.out")
+
+    assert {_native_response, 0} =
+             System.cmd(session.worker_launcher, ["implementer_worker", "w1:p2"],
+               env: [
+                 {"HERDR_FAKE_EXEC_PROVIDER", "1"},
+                 {"HERDR_FAKE_LOG", context.log},
+                 {"HERDR_FAKE_PROVIDER_OUTPUT", provider_output},
+                 {"PATH", session.orchestrator_bin <> ":" <> provider_bin <> ":" <> (System.get_env("PATH") || "")},
+                 {"SYMPHONY_SKILL_EXECUTION_CONTRACTS", ""},
+                 {"XDG_CONFIG_HOME", session.runtime_root}
+               ],
+               stderr_to_stdout: true
+             )
+
+    worker_projection = File.read!(provider_output)
+    assert worker_projection =~ "PATH=#{session.runtime_root}/worker-bin:#{provider_bin}:"
+    assert worker_projection =~ "SKILLS=worker-contract"
 
     for role_herdr <- [worker_herdr, orchestrator_herdr] do
       File.write!(context.log, "")
@@ -164,21 +232,29 @@ defmodule SymphonyElixir.HerdrTransportTest do
       refute commands =~ "pane send-keys"
     end
 
-    assert {denied, 64} =
-             System.cmd(worker_herdr, ["agent", "start", "descendant"],
-               env: base_env,
-               stderr_to_stdout: true
-             )
+    for args <- [
+          ["agent", "list"],
+          ["agent", "get", "implementer_orchestrator"],
+          ["agent", "read", "implementer_orchestrator"],
+          ["agent", "prompt", "implementer_orchestrator", "worker result"],
+          ["agent", "wait", "implementer_orchestrator", "--until", "idle", "--timeout", "100"]
+        ] do
+      assert {_native_response, 0} = System.cmd(worker_herdr, args, env: base_env, stderr_to_stdout: true)
+    end
 
-    assert denied =~ "worker Herdr authority denies"
-
-    assert {denied, 64} =
-             System.cmd(worker_herdr, ["pane", "run", "w1:p2", "legacy"],
-               env: base_env,
-               stderr_to_stdout: true
-             )
-
-    assert denied =~ "worker Herdr authority denies"
+    for args <- [
+          ["agent", "start", "descendant"],
+          ["agent", "send-keys", "implementer_orchestrator", "enter"],
+          ["pane", "run", "w1:p2", "legacy"],
+          ["pane", "send-text", "w1:p2", "raw"],
+          ["pane", "send-keys", "w1:p2", "enter"],
+          ["pane", "split", "w1:p2", "--direction", "right"],
+          ["workspace", "create"],
+          ["server", "stop"]
+        ] do
+      assert {denied, 64} = System.cmd(worker_herdr, args, env: base_env, stderr_to_stdout: true)
+      assert denied =~ "worker Herdr authority denies"
+    end
 
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
@@ -230,6 +306,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
              HerdrTransport.prepare_worker(
                session,
                %{
+                 provider: "codex",
                  argv: worker_argv,
                  env: %{"SYMPHONY_SKILL_EXECUTION_CONTRACTS" => contract_json}
                },
@@ -239,10 +316,15 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert File.exists?(session.worker_launcher)
     assert File.exists?(Path.join(session.orchestrator_bin, "herdr"))
     launcher = File.read!(session.worker_launcher)
+    provider_wrapper = File.read!(Path.join(session.orchestrator_bin, "codex"))
+
+    assert launcher =~ "agent start \"$1\" --kind 'codex' --pane \"$2\""
     assert launcher =~ "default_permissions=\"octo_herdr\""
     assert launcher =~ session.socket
-    assert launcher =~ "export SYMPHONY_SKILL_EXECUTION_CONTRACTS="
-    assert launcher =~ contract_json
+    refute launcher =~ "exec 'codex'"
+    assert provider_wrapper =~ "export SYMPHONY_SKILL_EXECUTION_CONTRACTS="
+    assert provider_wrapper =~ contract_json
+    assert provider_wrapper =~ "export PATH='#{session.runtime_root}/worker-bin':"
 
     restricted_herdr = Path.join(session.runtime_root, "worker-bin/herdr")
     assert File.exists?(restricted_herdr)
