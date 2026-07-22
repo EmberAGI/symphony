@@ -706,6 +706,16 @@ defmodule SymphonyElixir.AppServerTest do
           5)
             case "$line" in
               *'"id":122'*'"action":"decline"'*)
+                printf '%s\\n' '{"id":123,"method":"mcpServer/elicitation/request","params":{"serverName":"linear","threadId":"thread-1178","turnId":"turn-1178","mode":"url","elicitationId":"safe-local-eval","message":"Open the safe local URL","url":"https://example.invalid/emb-1178"}}'
+                ;;
+              *)
+                exit 9
+                ;;
+            esac
+            ;;
+          6)
+            case "$line" in
+              *'"id":123'*'"action":"decline"'*)
                 printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"continued"}}'
                 printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"id":"turn-1178"}}}'
                 ;;
@@ -780,7 +790,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1178"}}}'
             ;;
           4)
-            printf '%s\\n' '{"id":121,"method":"mcpServer/elicitation/request","params":{"serverName":"linear","threadId":"thread-1178","message":"Enter raw-secret-token","requestedSchema":{"type":"object","properties":{"token":{"type":"string"}}}}}'
+            printf '%s\\n' '{"id":121,"method":"mcpServer/elicitation/request","params":{"serverName":"linear","threadId":"thread-1178","mode":"form","message":"Enter raw-secret-token"}}'
             ;;
           5)
             exit 0

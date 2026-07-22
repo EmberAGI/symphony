@@ -1301,24 +1301,49 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp tool_request_user_input_unavailable_answers(_params), do: :error
 
-  defp mcp_elicitation_details(%{"serverName" => server_name, "mode" => mode})
-       when is_binary(server_name) and mode in ["form", "openai/form", "url"] do
-    case bounded_elicitation_source(server_name) do
-      nil ->
-        :error
+  defp mcp_elicitation_details(%{
+         "serverName" => server_name,
+         "threadId" => thread_id,
+         "mode" => mode,
+         "message" => message,
+         "requestedSchema" => requested_schema
+       })
+       when mode in ["form", "openai/form"] and is_map(requested_schema) do
+    bounded_mcp_elicitation_details(server_name, thread_id, message, mode)
+  end
 
-      source ->
-        {:ok,
-         %{
-           provider: :codex,
-           source: source,
-           mode: mode,
-           purpose: "MCP server requested human input"
-         }}
+  defp mcp_elicitation_details(%{
+         "serverName" => server_name,
+         "threadId" => thread_id,
+         "mode" => "url",
+         "elicitationId" => elicitation_id,
+         "message" => message,
+         "url" => url
+       }) do
+    if non_empty_text?(elicitation_id) and non_empty_text?(url) do
+      bounded_mcp_elicitation_details(server_name, thread_id, message, "url")
+    else
+      :error
     end
   end
 
   defp mcp_elicitation_details(_params), do: :error
+
+  defp bounded_mcp_elicitation_details(server_name, thread_id, message, mode) do
+    with true <- non_empty_text?(thread_id),
+         true <- non_empty_text?(message),
+         source when is_binary(source) <- bounded_elicitation_source(server_name) do
+      {:ok,
+       %{
+         provider: :codex,
+         source: source,
+         mode: mode,
+         purpose: "MCP server requested human input"
+       }}
+    else
+      _ -> :error
+    end
+  end
 
   defp reject_mcp_elicitations?(%{"reject" => %{"mcp_elicitations" => true}}), do: true
   defp reject_mcp_elicitations?(%{reject: %{mcp_elicitations: true}}), do: true
@@ -1342,6 +1367,8 @@ defmodule SymphonyElixir.Codex.AppServer do
       value -> value
     end
   end
+
+  defp bounded_elicitation_source(_source), do: nil
 
   defp tool_request_user_input_question_id(%{"id" => question_id}) when is_binary(question_id),
     do: {:ok, question_id}
