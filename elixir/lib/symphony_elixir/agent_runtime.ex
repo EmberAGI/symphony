@@ -24,6 +24,7 @@ defmodule SymphonyElixir.AgentRuntime do
           | :invalid_workspace_or_runtime_protocol
           | :unsupported_app_server_contract
           | :malformed_provider_event_schema
+          | :human_input_required
           | :repeated_identical_no_progress_failure
 
   @type failure_decision :: %{
@@ -51,6 +52,7 @@ defmodule SymphonyElixir.AgentRuntime do
     :invalid_workspace_or_runtime_protocol,
     :unsupported_app_server_contract,
     :malformed_provider_event_schema,
+    :human_input_required,
     :repeated_identical_no_progress_failure
   ]
 
@@ -934,6 +936,19 @@ defmodule SymphonyElixir.AgentRuntime do
     |> Map.new()
   end
 
+  defp irrecoverable_summary(:human_input_required, details, provider, _subtype) do
+    [
+      "human_input_required",
+      provider && to_string(provider),
+      named_failure_detail("source", details, [:source, "source"]),
+      named_failure_detail("mode", details, [:mode, "mode"]),
+      named_failure_detail("purpose", details, [:purpose, "purpose"])
+    ]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join(" ")
+    |> redact_runtime_text()
+  end
+
   defp irrecoverable_summary(family, details, provider, subtype) do
     [
       Atom.to_string(family),
@@ -944,6 +959,14 @@ defmodule SymphonyElixir.AgentRuntime do
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join(" ")
     |> redact_runtime_text()
+  end
+
+  defp named_failure_detail(name, details, keys) when is_map(details) and is_list(keys) do
+    case details |> value_for_any(keys) |> safe_detail_fragment() do
+      nil -> nil
+      "" -> nil
+      value -> "#{name}=#{value}"
+    end
   end
 
   defp detail_summary(details) when is_map(details) do

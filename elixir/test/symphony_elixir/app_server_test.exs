@@ -583,6 +583,269 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server declines MCP elicitation and returns bounded human-required input" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-mcp-elicitation-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1178")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1178"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1178"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":120,"method":"mcpServer/elicitation/request","params":{"serverName":"linear","threadId":"thread-1178","turnId":"turn-1178","mode":"form","message":"Enter Bearer raw-secret-token","requestedSchema":{"type":"object","properties":{"token":{"type":"string"}},"required":["token"]}}}'
+            ;;
+          5)
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_approval_policy: "on-request"
+      )
+
+      issue = %Issue{
+        id: "issue-mcp-elicitation",
+        identifier: "MT-1178",
+        title: "MCP elicitation",
+        description: "Release unattended human input requests",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-1178",
+        labels: ["backend"]
+      }
+
+      test_pid = self()
+      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+
+      expected_details = %{
+        provider: :codex,
+        source: "linear",
+        mode: "form",
+        purpose: "MCP server requested human input"
+      }
+
+      assert {:error, {:human_input_required, ^expected_details}} =
+               AppServer.run(workspace, "Handle elicitation", issue, on_message: on_message)
+
+      assert_received {:app_server_message,
+                       %{
+                         event: :human_input_required,
+                         details: ^expected_details
+                       } = event}
+
+      refute Map.has_key?(event, :payload)
+      refute Map.has_key?(event, :raw)
+      refute inspect(event) =~ "raw-secret-token"
+      refute inspect(event) =~ "requestedSchema"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server applies deterministic MCP elicitation rejection and continues" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-rejected-mcp-elicitation-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1178")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1178"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1178"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":122,"method":"mcpServer/elicitation/request","params":{"serverName":"linear","threadId":"thread-1178","turnId":"turn-1178","mode":"openai/form","message":"Choose a safe value","requestedSchema":{"type":"object","properties":{"choice":{"type":"string"}}}}}'
+            ;;
+          5)
+            case "$line" in
+              *'"id":122'*'"action":"decline"'*)
+                printf '%s\\n' '{"id":123,"method":"mcpServer/elicitation/request","params":{"serverName":"linear","threadId":"thread-1178","turnId":"turn-1178","mode":"url","elicitationId":"safe-local-eval","message":"Open the safe local URL","url":"https://example.invalid/emb-1178"}}'
+                ;;
+              *)
+                exit 9
+                ;;
+            esac
+            ;;
+          6)
+            case "$line" in
+              *'"id":123'*'"action":"decline"'*)
+                printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"continued"}}'
+                printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"id":"turn-1178"}}}'
+                ;;
+              *)
+                exit 9
+                ;;
+            esac
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-rejected-mcp-elicitation",
+        identifier: "MT-1178",
+        title: "Rejected MCP elicitation",
+        description: "Apply deterministic unattended policy",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-1178",
+        labels: ["backend"]
+      }
+
+      test_pid = self()
+      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+
+      assert {:ok, %{result: :turn_completed}} =
+               AppServer.run(workspace, "Reject elicitation and continue", issue, on_message: on_message)
+
+      refute_received {:app_server_message, %{event: :human_input_required}}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server declines malformed MCP elicitation without exposing its payload" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-malformed-mcp-elicitation-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1178")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1178"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1178"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":121,"method":"mcpServer/elicitation/request","params":{"serverName":"linear","threadId":"thread-1178","mode":"form","message":"Enter raw-secret-token"}}'
+            ;;
+          5)
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-malformed-mcp-elicitation",
+        identifier: "MT-1178",
+        title: "Malformed MCP elicitation",
+        description: "Release malformed unattended human input requests",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-1178",
+        labels: ["backend"]
+      }
+
+      test_pid = self()
+      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+
+      expected_details = %{
+        provider: :codex,
+        event: "mcpServer/elicitation/request",
+        message: "invalid MCP elicitation request"
+      }
+
+      assert {:error, {:malformed_provider_event_schema, ^expected_details}} =
+               AppServer.run(workspace, "Handle malformed elicitation", issue, on_message: on_message)
+
+      assert_received {:app_server_message,
+                       %{
+                         event: :malformed,
+                         details: ^expected_details
+                       } = event}
+
+      refute Map.has_key?(event, :payload)
+      refute Map.has_key?(event, :raw)
+      refute inspect(event) =~ "raw-secret-token"
+      refute inspect(event) =~ "requestedSchema"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server rejects turn completion without agent message output" do
     test_root =
       Path.join(

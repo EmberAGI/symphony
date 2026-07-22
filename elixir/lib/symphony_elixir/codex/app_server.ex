@@ -123,7 +123,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests, approval_policy) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -456,7 +456,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests, approval_policy) do
     receive_loop(
       port,
       on_message,
@@ -464,7 +464,10 @@ defmodule SymphonyElixir.Codex.AppServer do
       "",
       tool_executor,
       auto_approve_requests,
-      %{agent_message_seen?: false}
+      %{
+        agent_message_seen?: false,
+        reject_mcp_elicitations?: reject_mcp_elicitations?(approval_policy)
+      }
     )
   end
 
@@ -657,6 +660,11 @@ defmodule SymphonyElixir.Codex.AppServer do
     metadata = metadata_from_message(port, payload)
     turn_observations = update_turn_observations(turn_observations, method, payload)
 
+    request_policy = %{
+      auto_approve_requests?: auto_approve_requests,
+      reject_mcp_elicitations?: Map.get(turn_observations, :reject_mcp_elicitations?, false)
+    }
+
     case maybe_handle_approval_request(
            port,
            method,
@@ -665,8 +673,28 @@ defmodule SymphonyElixir.Codex.AppServer do
            on_message,
            metadata,
            tool_executor,
-           auto_approve_requests
+           request_policy
          ) do
+      {:human_input_required, details} ->
+        emit_message(
+          on_message,
+          :human_input_required,
+          %{details: details},
+          metadata
+        )
+
+        {:error, {:human_input_required, details}}
+
+      {:malformed_provider_event_schema, details} ->
+        emit_message(
+          on_message,
+          :malformed,
+          %{details: details},
+          metadata
+        )
+
+        {:error, {:malformed_provider_event_schema, details}}
+
       :input_required ->
         emit_message(
           on_message,
@@ -885,7 +913,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests
+         request_policy
        ) do
     approve_or_require(
       port,
@@ -895,8 +923,47 @@ defmodule SymphonyElixir.Codex.AppServer do
       payload_string,
       on_message,
       metadata,
-      auto_approve_requests
+      request_policy.auto_approve_requests?
     )
+  end
+
+  defp maybe_handle_approval_request(
+         port,
+         "mcpServer/elicitation/request",
+         %{"id" => id, "params" => params},
+         _payload_string,
+         _on_message,
+         _metadata,
+         _tool_executor,
+         request_policy
+       ) do
+    case mcp_elicitation_details(params) do
+      {:ok, details} ->
+        send_message(port, %{"id" => id, "result" => %{"action" => "decline"}})
+
+        if request_policy.reject_mcp_elicitations? do
+          :approved
+        else
+          {:human_input_required, details}
+        end
+
+      :error ->
+        send_message(port, %{"id" => id, "result" => %{"action" => "decline"}})
+        {:malformed_provider_event_schema, malformed_mcp_elicitation_details()}
+    end
+  end
+
+  defp maybe_handle_approval_request(
+         _port,
+         "mcpServer/elicitation/request",
+         _payload,
+         _payload_string,
+         _on_message,
+         _metadata,
+         _tool_executor,
+         _auto_approve_requests
+       ) do
+    {:malformed_provider_event_schema, malformed_mcp_elicitation_details()}
   end
 
   defp maybe_handle_approval_request(
@@ -942,7 +1009,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests
+         request_policy
        ) do
     approve_or_require(
       port,
@@ -952,7 +1019,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       payload_string,
       on_message,
       metadata,
-      auto_approve_requests
+      request_policy.auto_approve_requests?
     )
   end
 
@@ -964,7 +1031,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests
+         request_policy
        ) do
     approve_or_require(
       port,
@@ -974,7 +1041,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       payload_string,
       on_message,
       metadata,
-      auto_approve_requests
+      request_policy.auto_approve_requests?
     )
   end
 
@@ -986,7 +1053,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests
+         request_policy
        ) do
     approve_or_require(
       port,
@@ -996,7 +1063,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       payload_string,
       on_message,
       metadata,
-      auto_approve_requests
+      request_policy.auto_approve_requests?
     )
   end
 
@@ -1008,7 +1075,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          metadata,
          _tool_executor,
-         auto_approve_requests
+         request_policy
        ) do
     maybe_auto_answer_tool_request_user_input(
       port,
@@ -1018,7 +1085,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       payload_string,
       on_message,
       metadata,
-      auto_approve_requests
+      request_policy.auto_approve_requests?
     )
   end
 
@@ -1233,6 +1300,75 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp tool_request_user_input_unavailable_answers(_params), do: :error
+
+  defp mcp_elicitation_details(%{
+         "serverName" => server_name,
+         "threadId" => thread_id,
+         "mode" => mode,
+         "message" => message,
+         "requestedSchema" => requested_schema
+       })
+       when mode in ["form", "openai/form"] and is_map(requested_schema) do
+    bounded_mcp_elicitation_details(server_name, thread_id, message, mode)
+  end
+
+  defp mcp_elicitation_details(%{
+         "serverName" => server_name,
+         "threadId" => thread_id,
+         "mode" => "url",
+         "elicitationId" => elicitation_id,
+         "message" => message,
+         "url" => url
+       }) do
+    if non_empty_text?(elicitation_id) and non_empty_text?(url) do
+      bounded_mcp_elicitation_details(server_name, thread_id, message, "url")
+    else
+      :error
+    end
+  end
+
+  defp mcp_elicitation_details(_params), do: :error
+
+  defp bounded_mcp_elicitation_details(server_name, thread_id, message, mode) do
+    with true <- non_empty_text?(thread_id),
+         true <- non_empty_text?(message),
+         source when is_binary(source) <- bounded_elicitation_source(server_name) do
+      {:ok,
+       %{
+         provider: :codex,
+         source: source,
+         mode: mode,
+         purpose: "MCP server requested human input"
+       }}
+    else
+      _ -> :error
+    end
+  end
+
+  defp reject_mcp_elicitations?(%{"reject" => %{"mcp_elicitations" => true}}), do: true
+  defp reject_mcp_elicitations?(%{reject: %{mcp_elicitations: true}}), do: true
+  defp reject_mcp_elicitations?(_approval_policy), do: false
+
+  defp malformed_mcp_elicitation_details do
+    %{
+      provider: :codex,
+      event: "mcpServer/elicitation/request",
+      message: "invalid MCP elicitation request"
+    }
+  end
+
+  defp bounded_elicitation_source(source) when is_binary(source) do
+    source
+    |> String.trim()
+    |> String.replace(~r/[^a-zA-Z0-9_.:-]/, "_")
+    |> String.slice(0, 80)
+    |> case do
+      "" -> nil
+      value -> value
+    end
+  end
+
+  defp bounded_elicitation_source(_source), do: nil
 
   defp tool_request_user_input_question_id(%{"id" => question_id}) when is_binary(question_id),
     do: {:ok, question_id}
