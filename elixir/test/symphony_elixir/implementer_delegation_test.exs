@@ -651,6 +651,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     fake_provider_bin = Path.join(root, "provider-bin")
     previous_orchestrator_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
     previous_worker_provider = System.get_env("OCTO_RUNTIME_WORKER_PROVIDER")
+    previous_path = System.get_env("PATH") || ""
     previous_transport = Application.get_env(:symphony_elixir, :delegation_transport_module)
 
     File.mkdir_p!(workspace)
@@ -658,7 +659,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     for provider <- ["codex", "claude"] do
       path = Path.join(fake_provider_bin, provider)
-      File.write!(path, "#!/bin/sh\nprintf 'DIRECT_PROVIDER_EXEC %s\\n' \"$*\" >> \"$HERDR_FAKE_LOG\"\n")
+      File.write!(path, "#!/bin/sh\nprintf 'NATIVE_PROVIDER_EXEC pane=%s path=%s args=%s\\n' \"$HERDR_PANE_ID\" \"$PATH\" \"$*\" >> \"$HERDR_FAKE_LOG\"\n")
       File.chmod!(path, 0o755)
     end
 
@@ -677,6 +678,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
         do: System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", previous_worker_provider),
         else: System.delete_env("OCTO_RUNTIME_WORKER_PROVIDER")
 
+      System.put_env("PATH", previous_path)
       Application.put_env(:symphony_elixir, :delegation_transport_module, previous_transport)
       File.rm_rf(root)
     end)
@@ -684,6 +686,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     for {provider, kind} <- [{"codex", "codex"}, {"claude_code", "claude"}] do
       System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", provider)
       System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", provider)
+      System.put_env("PATH", fake_provider_bin <> ":" <> previous_path)
 
       herdr_bin = Path.join(root, "fake-herdr-#{kind}")
       herdr_log = Path.join(root, "herdr-#{kind}.log")
@@ -711,8 +714,13 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
                )
 
       launcher_env = [
+        {"HERDR_FAKE_EXEC_PROVIDER", "1"},
         {"HERDR_FAKE_LOG", herdr_log},
-        {"PATH", fake_provider_bin <> ":" <> (System.get_env("PATH") || "")},
+        {
+          "PATH",
+          session.herdr_session.orchestrator_bin <>
+            ":" <> (System.get_env("PATH") || "")
+        },
         {"XDG_CONFIG_HOME", runtime_root}
       ]
 
@@ -729,7 +737,8 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       assert commands =~
                "--session #{session.name} agent start implementer_worker --kind #{kind} --pane w1:p2 --timeout 30000 --"
 
-      refute commands =~ "DIRECT_PROVIDER_EXEC"
+      assert commands =~ "NATIVE_PROVIDER_EXEC pane=w1:p2"
+      assert commands =~ "path=#{runtime_root}/worker-bin:#{fake_provider_bin}:"
       assert :ok = AgentRuntime.stop_session(session)
       File.rm_rf(runtime_root)
     end
@@ -843,7 +852,17 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     fi
 
     if [ "$1" = "agent" ] && [ "$2" = "start" ]; then
-      printf '{"id":"cli:agent:start","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"%s","agent_status":"idle","interactive_ready":true,"revision":1}}}\n' "$3" "$5"
+      name="$3"
+      kind="$5"
+      pane="$7"
+
+      if [ "${HERDR_FAKE_EXEC_PROVIDER:-}" = "1" ]; then
+        while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+        shift
+        HERDR_PANE_ID="$pane" "$kind" "$@"
+      fi
+
+      printf '{"id":"cli:agent:start","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"%s","agent_status":"idle","interactive_ready":true,"revision":1}}}\n' "$name" "$kind"
       exit 0
     fi
 
