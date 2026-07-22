@@ -26,6 +26,26 @@ defmodule SymphonyElixir.AgentProfileCatalogFieldValidationTest do
              AgentProfileCatalog.load(root)
   end
 
+  test "load/1 accepts the Codex max reasoning_effort", %{root: root} do
+    path = write_profile!(root, "implementer-worker", "worker", "implementer", "gpt-5.6-luna", "claude-sonnet-5")
+
+    body =
+      File.read!(path)
+      |> String.replace(
+        ~s(extreme = { model = "gpt-5.6-luna", reasoning_effort = "xhigh" }),
+        ~s(extreme = { model = "gpt-5.6-luna", reasoning_effort = "max" })
+      )
+
+    File.write!(path, body)
+
+    assert {:ok, catalog} = AgentProfileCatalog.load(root)
+
+    assert {:ok, profile} =
+             AgentProfileCatalog.resolve(catalog, "implementer-worker", "codex", "extreme", "default")
+
+    assert profile.reasoning_effort == "max"
+  end
+
   test "load/1 accepts the Claude Code max reasoning_effort for a supported model", %{root: root} do
     path = write_profile!(root, "implementer-worker", "worker", "implementer", "gpt-5.6-luna", "claude-sonnet-5")
 

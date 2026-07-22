@@ -16,7 +16,7 @@ defmodule SymphonyElixir.AgentProfileCatalog do
   @tiers ~w(extreme high moderate low minimal)
   @cell_keys ~w(model reasoning_effort)
   @kinds ~w(orchestrator worker)
-  @codex_efforts ~w(none low medium high xhigh)
+  @codex_efforts ~w(none low medium high xhigh max)
   @claude_efforts ~w(low medium high xhigh max)
   @claude_xhigh_models ~w(claude-fable-5 claude-mythos-5 claude-opus-4-8 claude-opus-4-7 claude-sonnet-5)
   @claude_max_models ~w(claude-fable-5 claude-mythos-5 claude-opus-4-8 claude-opus-4-7 claude-opus-4-6 claude-sonnet-5 claude-sonnet-4-6)
