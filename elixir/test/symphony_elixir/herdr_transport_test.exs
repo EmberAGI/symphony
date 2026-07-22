@@ -197,6 +197,16 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert orchestrator_projection =~ "SKILLS="
 
     provider_output = Path.join(Path.dirname(context.bin), "worker-provider.out")
+    commands_before_substitution = File.read!(context.log)
+
+    assert {substitution_error, 64} =
+             System.cmd(session.worker_launcher, ["replacement_worker", "w1:p2"],
+               env: base_env,
+               stderr_to_stdout: true
+             )
+
+    assert substitution_error =~ "worker name must be implementer_worker"
+    assert File.read!(context.log) == commands_before_substitution
 
     assert {_native_response, 0} =
              System.cmd(session.worker_launcher, ["implementer_worker", "w1:p2"],

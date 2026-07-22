@@ -533,6 +533,10 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         printf '%s\n' 'usage: launch-worker <name> <pane-id>' >&2
         exit 64
       fi
+      if [ "$1" != "implementer_worker" ]; then
+        printf '%s\n' 'worker name must be implementer_worker' >&2
+        exit 64
+      fi
       marker=$(mktemp #{shell_escape(Path.join(worker_panes, "pending.XXXXXX"))})
       printf '%s\n' "$2" > "$marker"
       trap 'rm -f "$marker"' EXIT HUP INT TERM

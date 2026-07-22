@@ -659,7 +659,19 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     for provider <- ["codex", "claude"] do
       path = Path.join(fake_provider_bin, provider)
-      File.write!(path, "#!/bin/sh\nprintf 'NATIVE_PROVIDER_EXEC pane=%s path=%s args=%s\\n' \"$HERDR_PANE_ID\" \"$PATH\" \"$*\" >> \"$HERDR_FAKE_LOG\"\n")
+
+      File.write!(path, """
+      #!/bin/sh
+      set -eu
+      printf 'NATIVE_PROVIDER_EXEC agent=%s pane=%s path=%s args=%s\n' "$HERDR_FAKE_AGENT_NAME" "$HERDR_PANE_ID" "$PATH" "$*" >> "$HERDR_FAKE_LOG"
+      if [ "$HERDR_FAKE_AGENT_NAME" = "implementer_orchestrator" ]; then
+        pane_json=$(herdr pane split --current --direction right --no-focus)
+        pane_id=$(printf '%s\n' "$pane_json" | sed -n 's/.*"pane_id":"\\([^"]*\\)".*/\\1/p')
+        [ -n "$pane_id" ]
+        "$OCTO_HERDR_WORKER_LAUNCHER" implementer_worker "$pane_id"
+      fi
+      """)
+
       File.chmod!(path, 0o755)
     end
 
@@ -706,38 +718,22 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
                  run_id: "native-worker-#{kind}",
                  delegation_transport_context: %{
                    herdr_bin: herdr_bin,
-                   extra_env: [{"HERDR_FAKE_LOG", herdr_log}],
+                   extra_env: [
+                     {"HERDR_FAKE_EXEC_PROVIDER", "1"},
+                     {"HERDR_FAKE_LOG", herdr_log}
+                   ],
                    socket_root: runtime_root,
                    poll_interval_ms: 5,
                    start_timeout_ms: 2_000
                  }
                )
 
-      launcher_env = [
-        {"HERDR_FAKE_EXEC_PROVIDER", "1"},
-        {"HERDR_FAKE_LOG", herdr_log},
-        {
-          "PATH",
-          session.herdr_session.orchestrator_bin <>
-            ":" <> (System.get_env("PATH") || "")
-        },
-        {"XDG_CONFIG_HOME", runtime_root}
-      ]
-
-      assert {_output, 0} =
-               System.cmd(
-                 session.herdr_session.worker_launcher,
-                 ["implementer_worker", "w1:p2"],
-                 env: launcher_env,
-                 stderr_to_stdout: true
-               )
-
       commands = File.read!(herdr_log)
 
       assert commands =~
-               "--session #{session.name} agent start implementer_worker --kind #{kind} --pane w1:p2 --timeout 30000 --"
+               "--session #{session.name} agent start implementer_worker --kind #{kind} --pane w7:p42 --timeout 30000 --"
 
-      assert commands =~ "NATIVE_PROVIDER_EXEC pane=w1:p2"
+      assert commands =~ "NATIVE_PROVIDER_EXEC agent=implementer_worker pane=w7:p42"
       assert commands =~ "path=#{runtime_root}/worker-bin:#{fake_provider_bin}:"
       assert :ok = AgentRuntime.stop_session(session)
       File.rm_rf(runtime_root)
@@ -851,6 +847,11 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       exit 0
     fi
 
+    if [ "$#" -eq 6 ] && [ "$1" = "pane" ] && [ "$2" = "split" ] && [ "$3" = "--current" ] && [ "$4" = "--direction" ] && [ "$5" = "right" ] && [ "$6" = "--no-focus" ]; then
+      printf '{"id":"cli:pane:split","result":{"pane":{"pane_id":"w7:p42"}}}\n'
+      exit 0
+    fi
+
     if [ "$1" = "agent" ] && [ "$2" = "start" ]; then
       name="$3"
       kind="$5"
@@ -859,10 +860,15 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       if [ "${HERDR_FAKE_EXEC_PROVIDER:-}" = "1" ]; then
         while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
         shift
-        HERDR_PANE_ID="$pane" "$kind" "$@"
+
+        if ! HERDR_FAKE_AGENT_NAME="$name" HERDR_PANE_ID="$pane" "$kind" "$@" >/dev/null; then
+          printf 'fake provider failed for %s on %s\n' "$name" "$pane" >&2
+          tail -n 20 "$HERDR_FAKE_LOG" >&2
+          exit 1
+        fi
       fi
 
-      printf '{"id":"cli:agent:start","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"%s","agent_status":"idle","interactive_ready":true,"revision":1}}}\n' "$name" "$kind"
+      printf '{"id":"cli:agent:start","result":{"agent":{"name":"%s","pane_id":"%s","agent":"%s","agent_status":"idle","interactive_ready":true,"revision":1}}}\n' "$name" "$pane" "$kind"
       exit 0
     fi
 
