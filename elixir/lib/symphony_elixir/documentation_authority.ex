@@ -9,10 +9,11 @@ defmodule SymphonyElixir.DocumentationAuthority do
 
   @type inspection :: %{errors: [String.t()], warnings: [String.t()]}
 
-  @scanned_extensions ~w(.md .ex .exs .toml .json .yml .yaml)
+  @scanned_extensions ~w(.md .html .ex .exs .toml .json .yml .yaml)
   @excluded_dirs ~w(_build deps .git .symphony node_modules)
   @legacy_top_level ~w(spec specs)
   @upstream_marker "scaling-octo-engine"
+  @context_map "docs/specs/index.spec.html"
 
   @spec inspect_repository(Path.t()) :: inspection()
   def inspect_repository(root) do
@@ -38,14 +39,89 @@ defmodule SymphonyElixir.DocumentationAuthority do
   end
 
   defp hierarchy_errors(root) do
-    index_path = Path.join([root, "docs", "specs", "index.md"])
+    index_path = Path.join(root, @context_map)
+    markdown_index_path = Path.join([root, "docs", "specs", "index.md"])
     domains_dir = Path.join([root, "docs", "specs", "domains"])
     adr_dir = Path.join([root, "docs", "adr"])
 
     []
-    |> check_regular_file(index_path, "docs/specs/index.md")
+    |> check_regular_file(index_path, @context_map)
+    |> reject_duplicate_markdown_index(markdown_index_path)
     |> check_nonempty_directory(domains_dir, "docs/specs/domains")
     |> check_nonempty_directory(adr_dir, "docs/adr")
+    |> check_context_map_runtime(index_path)
+    |> check_context_map_anchor(index_path)
+    |> check_context_map_domains(index_path, domains_dir, root)
+    |> check_context_map_adrs(index_path, adr_dir, root)
+  end
+
+  @runtime_script_regex ~r/<script\b[^>]*\bsrc\s*=\s*["']\.\/\.viz\/runtime\.js["'][^>]*>/i
+
+  defp check_context_map_runtime(errors, path) do
+    if File.regular?(path) and Regex.match?(@runtime_script_regex, File.read!(path)) do
+      errors
+    else
+      ["#{@context_map} must load ./.viz/runtime.js" | errors]
+    end
+  end
+
+  @stable_anchor_regex ~r/data-anchor\s*=\s*["'][^"']+["']/i
+
+  defp check_context_map_anchor(errors, path) do
+    if File.regular?(path) and Regex.match?(@stable_anchor_regex, File.read!(path)) do
+      errors
+    else
+      ["#{@context_map} must expose at least one stable data-anchor" | errors]
+    end
+  end
+
+  defp check_context_map_domains(errors, index_path, domains_dir, root) do
+    linked_paths = context_map_linked_paths(index_path)
+
+    domains_dir
+    |> Path.join("**/*.{md,html}")
+    |> Path.wildcard()
+    |> Enum.reject(&(Path.expand(&1) in linked_paths))
+    |> Enum.reduce(errors, fn path, acc ->
+      ["#{@context_map} does not link canonical domain #{relative_path(path, root)}" | acc]
+    end)
+  end
+
+  defp check_context_map_adrs(errors, index_path, adr_dir, root) do
+    linked_paths = context_map_linked_paths(index_path)
+
+    adr_dir
+    |> Path.join("**/*.{md,html}")
+    |> Path.wildcard()
+    |> Enum.reject(&(Path.expand(&1) in linked_paths))
+    |> Enum.reduce(errors, fn path, acc ->
+      ["#{@context_map} does not link canonical ADR #{relative_path(path, root)}" | acc]
+    end)
+  end
+
+  @spec context_map_linked_paths(Path.t()) :: [Path.t()]
+  defp context_map_linked_paths(path) do
+    if File.regular?(path) do
+      path
+      |> File.read!()
+      |> extract_link_targets(path)
+      |> Enum.map(fn target ->
+        target
+        |> String.split("#", parts: 2)
+        |> List.first()
+        |> then(&Path.expand(&1, Path.dirname(path)))
+      end)
+    else
+      []
+    end
+  end
+
+  defp reject_duplicate_markdown_index(errors, path) do
+    if File.exists?(path) do
+      ["docs/specs/index.md is duplicate authority beside #{@context_map}" | errors]
+    else
+      errors
+    end
   end
 
   defp check_regular_file(errors, path, label) do
@@ -193,20 +269,25 @@ defmodule SymphonyElixir.DocumentationAuthority do
     canonical_doc_dirs = [Path.join([root, "docs", "specs"]), Path.join([root, "docs", "adr"])]
 
     canonical_doc_dirs
-    |> Enum.flat_map(&Path.wildcard(Path.join(&1, "**/*.md")))
+    |> Enum.flat_map(fn dir ->
+      Path.wildcard(Path.join(dir, "**/*.{md,html}"))
+    end)
     |> Enum.flat_map(fn file ->
       file
       |> File.read!()
-      |> extract_link_targets()
+      |> extract_link_targets(file)
       |> Enum.reject(&skip_link_target?/1)
       |> Enum.flat_map(fn target -> link_target_errors(target, file, root) end)
     end)
   end
 
   @link_regex ~r/\]\(([^)]+)\)/
+  @html_link_regex ~r/(?:href|src)\s*=\s*["']([^"']+)["']/i
 
-  defp extract_link_targets(content) do
-    @link_regex
+  defp extract_link_targets(content, file) do
+    regex = if Path.extname(file) == ".html", do: @html_link_regex, else: @link_regex
+
+    regex
     |> Regex.scan(content)
     |> Enum.map(fn [_, target] -> target end)
   end

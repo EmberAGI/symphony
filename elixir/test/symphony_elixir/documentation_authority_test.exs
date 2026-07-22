@@ -10,6 +10,81 @@ defmodule SymphonyElixir.DocumentationAuthorityTest do
     assert DocumentationAuthority.validate!(root) == {:ok, []}
   end
 
+  test "the canonical context map is the reviewable HTML index, not a Markdown twin" do
+    root = build_canonical_fixture()
+
+    assert DocumentationAuthority.inspect_repository(root) == %{errors: [], warnings: []}
+  end
+
+  test "a Markdown index beside the canonical HTML context map is rejected as duplicate authority" do
+    root = build_canonical_fixture()
+    write_file(root, ["docs", "specs", "index.md"], "# Duplicate Spec Index\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/index.md is duplicate authority"))
+  end
+
+  test "the canonical HTML context map loads the repository review runtime" do
+    root = build_canonical_fixture()
+
+    write_file(root, ["docs", "specs", "index.spec.html"], "<!doctype html><main data-anchor=\"specs\"></main>\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "./.viz/runtime.js"))
+  end
+
+  test "a navigation link to the review runtime does not count as loading it" do
+    root = build_canonical_fixture()
+
+    write_file(root, ["docs", "specs", "index.spec.html"], """
+    <!doctype html>
+    <main data-anchor="specs">
+      <a href="./domains/sample.md">Sample domain</a>
+      <a href="../adr/0001-sample.md">Sample ADR</a>
+      <a href="./.viz/runtime.js">Review runtime</a>
+    </main>
+    """)
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "must load ./.viz/runtime.js"))
+  end
+
+  test "the canonical HTML context map exposes stable review anchors" do
+    root = build_canonical_fixture()
+
+    write_file(root, ["docs", "specs", "index.spec.html"], """
+    <!doctype html>
+    <a href="./domains/sample.md">Sample domain</a>
+    <a href="../adr/0001-sample.md">Sample ADR</a>
+    <script defer src="./.viz/runtime.js"></script>
+    """)
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "data-anchor"))
+  end
+
+  test "the canonical HTML context map links every canonical domain specification" do
+    root = build_canonical_fixture()
+    write_file(root, ["docs", "specs", "domains", "unlinked.md"], "# Unlinked domain\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/domains/unlinked.md"))
+  end
+
+  test "the canonical HTML context map links every canonical architecture decision" do
+    root = build_canonical_fixture()
+    write_file(root, ["docs", "adr", "0002-unlinked.md"], "# Unlinked ADR\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "docs/adr/0002-unlinked.md"))
+  end
+
   test "the real repository root passes validation" do
     root = repo_root()
 
@@ -21,7 +96,7 @@ defmodule SymphonyElixir.DocumentationAuthorityTest do
 
     result = DocumentationAuthority.inspect_repository(root)
 
-    assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/index.md"))
+    assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/index.spec.html"))
     assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/domains"))
     assert Enum.any?(result.errors, &String.contains?(&1, "docs/adr"))
 
@@ -39,7 +114,7 @@ defmodule SymphonyElixir.DocumentationAuthorityTest do
     result = DocumentationAuthority.inspect_repository(root)
 
     assert Enum.any?(result.errors, &String.contains?(&1, "legacy documentation authority hierarchy"))
-    assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/index.md"))
+    assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/index.spec.html"))
   end
 
   test "a legacy hierarchy alongside the canonical one is rejected as a duplicate authority" do
@@ -69,14 +144,14 @@ defmodule SymphonyElixir.DocumentationAuthorityTest do
   test "a symlinked canonical file is rejected as an alias" do
     root = build_canonical_fixture()
 
-    real_index = Path.join([root, "docs", "specs", "index.md"])
-    alias_target = Path.join([root, "docs", "specs", "index-alias.md"])
+    real_index = Path.join([root, "docs", "specs", "index.spec.html"])
+    alias_target = Path.join([root, "docs", "specs", "index-alias.spec.html"])
     File.rename!(real_index, alias_target)
     File.ln_s!(alias_target, real_index)
 
     result = DocumentationAuthority.inspect_repository(root)
 
-    assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/index.md is a symlink"))
+    assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/index.spec.html is a symlink"))
   end
 
   test "an alternate symlink pointing into the canonical hierarchy is rejected" do
@@ -225,6 +300,17 @@ defmodule SymphonyElixir.DocumentationAuthorityTest do
     assert Enum.any?(result.errors, &String.contains?(&1, "metadata.json:1"))
   end
 
+  test "stale references in the canonical HTML context map are rejected" do
+    root = build_canonical_fixture()
+    legacy_segment = Enum.join(["s", "pec"], "")
+
+    write_file(root, ["docs", "specs", "index.spec.html"], "<p>See #{legacy_segment}/domains/thing.md.</p>\n")
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "docs/specs/index.spec.html:1"))
+  end
+
   test "a relative link that escapes the repository root is rejected even when the target exists" do
     root = build_canonical_fixture()
 
@@ -280,6 +366,21 @@ defmodule SymphonyElixir.DocumentationAuthorityTest do
     assert Enum.any?(result.errors, &String.contains?(&1, "nowhere.md"))
   end
 
+  test "a broken href or src in the canonical HTML context map is rejected" do
+    root = build_canonical_fixture()
+
+    write_file(root, ["docs", "specs", "index.spec.html"], """
+    <!doctype html>
+    <a href="./domains/missing.md">Missing domain</a>
+    <script src="./.viz/missing.js"></script>
+    """)
+
+    result = DocumentationAuthority.inspect_repository(root)
+
+    assert Enum.any?(result.errors, &String.contains?(&1, "./domains/missing.md"))
+    assert Enum.any?(result.errors, &String.contains?(&1, "./.viz/missing.js"))
+  end
+
   test "relative links that resolve, plus http/mailto/anchor/absolute links, are accepted" do
     root = build_canonical_fixture()
 
@@ -294,6 +395,18 @@ defmodule SymphonyElixir.DocumentationAuthorityTest do
     - [anchor](#section)
     - [absolute](/etc/hosts)
     """)
+
+    index = File.read!(Path.join([root, "docs", "specs", "index.spec.html"]))
+
+    write_file(
+      root,
+      ["docs", "specs", "index.spec.html"],
+      index <>
+        """
+        <a href="./domains/other.md">Other</a>
+        <a href="./domains/linking.md">Linking</a>
+        """
+    )
 
     result = DocumentationAuthority.inspect_repository(root)
 
@@ -326,7 +439,16 @@ defmodule SymphonyElixir.DocumentationAuthorityTest do
   defp build_canonical_fixture do
     root = create_tmp_dir()
 
-    write_file(root, ["docs", "specs", "index.md"], "# Spec Index\n")
+    write_file(root, ["docs", "specs", "index.spec.html"], """
+    <!doctype html>
+    <main data-anchor="specs">
+      <a href="./domains/sample.md">Sample domain</a>
+      <a href="../adr/0001-sample.md">Sample ADR</a>
+    </main>
+    <script defer src="./.viz/runtime.js"></script>
+    """)
+
+    write_file(root, ["docs", "specs", ".viz", "runtime.js"], "// review runtime\n")
     write_file(root, ["docs", "specs", "domains", "sample.md"], "# Sample\n")
     write_file(root, ["docs", "adr", "0001-sample.md"], "# ADR\n")
 

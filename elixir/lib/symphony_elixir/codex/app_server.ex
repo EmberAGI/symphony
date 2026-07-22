@@ -4,7 +4,17 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, ImplementationEffort, Linear.Issue, PathSafety, SSH}
+
+  alias SymphonyElixir.{
+    Codex.DynamicTool,
+    Config,
+    ImplementationEffort,
+    Linear.Issue,
+    PathSafety,
+    SkillExecutionContract,
+    SSH
+  }
+
   alias SymphonyElixir.Runtime.ProcessOwnership
 
   @initialize_id 1
@@ -40,14 +50,17 @@ defmodule SymphonyElixir.Codex.AppServer do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
+    skill_projection = skill_execution_projection(Keyword.get(opts, :skill_execution_contracts, []))
 
     issue = Keyword.get(opts, :issue)
     role = Keyword.get(opts, :role, runtime_role())
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, launch} <- launch_config(issue, role),
+         {:ok, command} <- project_skill_permissions(launch.command, skill_projection),
          ownership_env = ownership_env(issue, role, expanded_workspace, opts),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, launch.command, ownership_env) do
+         projection_env = Map.to_list(skill_projection.environment),
+         {:ok, port} <- start_port(expanded_workspace, worker_host, command, projection_env ++ ownership_env) do
       metadata = port_metadata(port, worker_host) |> Map.merge(launch.metadata)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
@@ -197,6 +210,64 @@ defmodule SymphonyElixir.Codex.AppServer do
   def launch_command_for_test(%Issue{} = issue, role) do
     Config.settings!().codex.command
     |> ImplementationEffort.command_for_issue(issue, role)
+  end
+
+  @doc false
+  @spec launch_command_for_test(Issue.t(), String.t() | nil, [SkillExecutionContract.t()]) ::
+          {:ok, {String.t(), map()}} | {:error, term()}
+  def launch_command_for_test(%Issue{} = issue, role, contracts) do
+    with {:ok, {command, metadata}} <- launch_command_for_test(issue, role),
+         {:ok, command} <- project_skill_permissions(command, skill_execution_projection(contracts)) do
+      {:ok, {command, metadata}}
+    end
+  end
+
+  @doc false
+  @spec skill_execution_projection_for_test([SkillExecutionContract.t()]) :: map()
+  def skill_execution_projection_for_test(contracts), do: skill_execution_projection(contracts)
+
+  @doc false
+  @spec project_skill_permissions_for_test(String.t(), [SkillExecutionContract.t()]) ::
+          {:ok, String.t()} | {:error, term()}
+  def project_skill_permissions_for_test(command, contracts) do
+    project_skill_permissions(command, skill_execution_projection(contracts))
+  end
+
+  defp skill_execution_projection(contracts) do
+    read_paths = SkillExecutionContract.read_paths(contracts)
+    exact_reads = Enum.map_join(read_paths, ",", &"#{inspect(&1)}=\"read\"")
+
+    %{
+      read_paths: read_paths,
+      permission_config: "permissions.symphony_skill_runtime.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"},#{exact_reads}}",
+      environment: %{
+        "SYMPHONY_SKILL_EXECUTION_CONTRACTS" => SkillExecutionContract.encode!(contracts)
+      }
+    }
+  end
+
+  defp project_skill_permissions(command, %{read_paths: []}), do: {:ok, command}
+
+  defp project_skill_permissions(command, projection) when is_binary(command) do
+    suffix = "app-server"
+
+    if String.ends_with?(String.trim(command), suffix) do
+      prefix = command |> String.trim() |> String.replace_suffix(suffix, "") |> String.trim_trailing()
+
+      {:ok,
+       Enum.join(
+         [
+           prefix,
+           "--config default_permissions=\"symphony_skill_runtime\"",
+           "--config #{shell_escape(projection.permission_config)}",
+           "--config #{shell_escape("permissions.symphony_skill_runtime.network={enabled=true}")}",
+           suffix
+         ],
+         " "
+       )}
+    else
+      {:error, {:invalid_codex_skill_projection_command, :missing_app_server_suffix}}
+    end
   end
 
   defp start_port(workspace, nil, command, env) do

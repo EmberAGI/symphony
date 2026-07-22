@@ -74,6 +74,65 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     end
   end
 
+  test "AgentRuntime projects one registered contract to every non-Implementer Claude role" do
+    ctx = setup_workspace("MT-CC-skill-contract")
+    package_root = Path.join(ctx.test_root, "linear-skill")
+    runtime_input = Path.join(ctx.test_root, "uv.lock")
+    executable = Path.join(ctx.test_root, "uv")
+
+    try do
+      File.mkdir_p!(package_root)
+      File.write!(runtime_input, "locked")
+      File.write!(executable, "#!/bin/sh\nexit 0\n")
+      File.chmod!(executable, 0o755)
+      configure!(ctx, stream_success(), claude_code_model: "sonnet")
+
+      issue = %SymphonyElixir.Linear.Issue{
+        id: "issue-agent-runtime-claude-skills",
+        identifier: "MT-CC-skill-contract",
+        title: "Project registered skills",
+        state: "In Progress",
+        labels: ["implementation-effort:moderate"]
+      }
+
+      entry = %{
+        skill: "linear",
+        package_root: package_root,
+        runtime_inputs: [runtime_input],
+        tool_executables: [executable]
+      }
+
+      for role <- ["reviewer", "qa", "landing", "backlog-processor"] do
+        assert {:ok, session} =
+                 AgentRuntime.start_session(ctx.workspace,
+                   issue: issue,
+                   role: role,
+                   skill_execution_contracts: [entry],
+                   orchestration_root: ctx.test_root
+                 )
+
+        assert {:ok, {next_session, turn}} =
+                 AgentRuntime.run_turn(session, "Run the registered skill", issue, [])
+
+        assert turn.session_id == "sess-success"
+        assert :ok = AgentRuntime.stop_session(next_session)
+      end
+
+      trace = File.read!(ctx.trace_file)
+
+      assert length(Regex.scan(~r/^ARGV:/m, trace)) == 4
+      assert length(Regex.scan(~r/^ENV_SYMPHONY_SKILL_EXECUTION_CONTRACTS:/m, trace)) == 4
+      assert trace =~ "--add-dir #{package_root} --"
+      assert trace =~ "ENV_SYMPHONY_SKILL_EXECUTION_CONTRACTS:"
+      assert trace =~ package_root
+      assert trace =~ runtime_input
+      assert trace =~ executable
+      refute trace =~ "--add-dir #{ctx.test_root} --"
+    after
+      File.rm_rf(ctx.test_root)
+    end
+  end
+
   test "does not classify already-normalized synthetic families as provider auth at the adapter boundary" do
     ctx = setup_workspace("MT-CC-synthetic-family")
 

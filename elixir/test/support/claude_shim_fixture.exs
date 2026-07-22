@@ -82,6 +82,7 @@ defmodule SymphonyElixir.ClaudeShimFixture do
     printf 'ENV_SYMPHONY_ROLE_ISSUE_IDENTIFIER:%s\\n' "${SYMPHONY_ROLE_ISSUE_IDENTIFIER}" >> "$trace_file"
     printf 'ENV_SYMPHONY_ROLE_NAME:%s\\n' "${SYMPHONY_ROLE_NAME}" >> "$trace_file"
     printf 'ENV_SYMPHONY_ROLE_WORKSPACE_PATH:%s\\n' "${SYMPHONY_ROLE_WORKSPACE_PATH}" >> "$trace_file"
+    printf 'ENV_SYMPHONY_SKILL_EXECUTION_CONTRACTS:%s\\n' "${SYMPHONY_SKILL_EXECUTION_CONTRACTS}" >> "$trace_file"
     printf 'ENV_CLAUDE_CODE_OAUTH_TOKEN_PRESENT:%s\\n' "${CLAUDE_CODE_OAUTH_TOKEN:+present}" >> "$trace_file"
     #{body}
     exit 0
@@ -128,7 +129,8 @@ defmodule SymphonyElixir.ClaudeShimFixture do
       ClaudeAppServer.run(ctx.workspace, prompt, issue,
         on_message: on_message,
         role: Keyword.get(overrides, :role),
-        run_id: Keyword.get(overrides, :run_id)
+        run_id: Keyword.get(overrides, :run_id),
+        skill_execution_contracts: Keyword.get(overrides, :skill_execution_contracts, [])
       )
 
     events = agent |> Agent.get(& &1) |> Enum.reverse()

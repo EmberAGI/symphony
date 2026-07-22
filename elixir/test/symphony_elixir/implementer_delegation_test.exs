@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.ImplementerDelegationTest do
   use ExUnit.Case, async: false
 
-  alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation}
+  alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation, SkillExecutionContract}
   alias SymphonyElixir.Linear.Issue
 
   defmodule RecordingTransport do
@@ -171,6 +171,16 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
   test "owns one isolated Herdr session and projects Codex agent profiles exactly" do
     contract = contract(:codex)
     orchestration_root = "/tmp/scaling-octo-engine"
+    package_root = Path.join([orchestration_root, ".agents", "skills", "linear"])
+    runtime_input = Path.join(orchestration_root, "uv.lock")
+    tool_executable = "/opt/octo/bin/uv"
+
+    skill_contract = %SkillExecutionContract{
+      skill: "linear",
+      package_root: package_root,
+      runtime_inputs: [runtime_input],
+      tool_executables: [tool_executable]
+    }
 
     assert {:ok, session} =
              ImplementerDelegation.start_session(
@@ -180,6 +190,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
                run_id: "run-7",
                transport: RecordingTransport,
                transport_context: %{owner: self()},
+               skill_execution_contracts: [skill_contract],
                orchestrator_env: %{
                  "SYMPHONY_ORCHESTRATION_ROOT" => orchestration_root
                }
@@ -200,18 +211,24 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert worker_spec.argv ==
              codex_argv(contract.worker, "/tmp/selected-workspace", herdr_session)
 
-    assert Enum.any?(
-             worker_spec.argv,
-             &String.contains?(
-               &1,
-               "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
-             )
-           )
+    assert herdr_session.permission_read_roots == [package_root, runtime_input, tool_executable]
+
+    for path <- herdr_session.permission_read_roots do
+      assert Enum.any?(worker_spec.argv, &String.contains?(&1, "#{inspect(path)}=\"read\""))
+    end
 
     refute Enum.any?(
              worker_spec.argv,
              &String.contains?(&1, "#{inspect(orchestration_root)}=\"read\"")
            )
+
+    refute Enum.any?(
+             worker_spec.argv,
+             &String.contains?(&1, "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\"")
+           )
+
+    assert worker_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] ==
+             SkillExecutionContract.encode!([skill_contract])
 
     refute worker_spec.may_spawn_agents
 
@@ -223,17 +240,18 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert orchestrator_spec.argv ==
              codex_argv(contract.orchestrator, "/tmp/selected-workspace", herdr_session)
 
-    assert Enum.any?(
-             orchestrator_spec.argv,
-             &String.contains?(
-               &1,
-               "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
-             )
-           )
+    for path <- herdr_session.permission_read_roots do
+      assert Enum.any?(orchestrator_spec.argv, &String.contains?(&1, "#{inspect(path)}=\"read\""))
+    end
 
     refute Enum.any?(
              orchestrator_spec.argv,
              &String.contains?(&1, "#{inspect(orchestration_root)}=\"read\"")
+           )
+
+    refute Enum.any?(
+             orchestrator_spec.argv,
+             &String.contains?(&1, "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\"")
            )
 
     assert Enum.any?(orchestrator_spec.argv, fn arg ->
@@ -247,6 +265,9 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
              orchestrator_spec.env["PATH"],
              "/tmp/octo-emb-1141-run-7/orchestrator-bin:"
            )
+
+    assert orchestrator_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] ==
+             SkillExecutionContract.encode!([skill_contract])
 
     assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 30_000}
     assert session.orchestrator.name == "implementer_orchestrator"
@@ -393,14 +414,41 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
   end
 
   test "AgentRuntime routes and composes only Implementer sessions through Herdr" do
-    orchestration_root = "/tmp/production-orchestration-root"
+    orchestration_root =
+      Path.join(
+        System.tmp_dir!(),
+        "implementer-runtime-skills-#{System.unique_integer([:positive])}"
+      )
+
+    package_root = Path.join([orchestration_root, "skill-runtime", "linear"])
+    runtime_input = Path.join(orchestration_root, "uv.lock")
+    executable = Path.join(orchestration_root, "uv")
     previous_root = System.get_env("SYMPHONY_ORCHESTRATION_ROOT")
+    previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    previous_worker_provider = System.get_env("OCTO_RUNTIME_WORKER_PROVIDER")
+
+    File.mkdir_p!(package_root)
+    File.write!(runtime_input, "locked")
+    File.write!(executable, "#!/bin/sh\nexit 0\n")
+    File.chmod!(executable, 0o755)
     System.put_env("SYMPHONY_ORCHESTRATION_ROOT", orchestration_root)
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
+    System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", "codex")
 
     on_exit(fn ->
       if previous_root,
         do: System.put_env("SYMPHONY_ORCHESTRATION_ROOT", previous_root),
         else: System.delete_env("SYMPHONY_ORCHESTRATION_ROOT")
+
+      if previous_provider,
+        do: System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_provider),
+        else: System.delete_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+
+      if previous_worker_provider,
+        do: System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", previous_worker_provider),
+        else: System.delete_env("OCTO_RUNTIME_WORKER_PROVIDER")
+
+      File.rm_rf(orchestration_root)
     end)
 
     assert AgentRuntime.session_adapter(:codex, "implementer") == ImplementerDelegation
@@ -410,12 +458,30 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     issue = issue()
 
+    skill_entry = %{
+      skill: "linear",
+      package_root: package_root,
+      runtime_inputs: [runtime_input],
+      tool_executables: [executable]
+    }
+
+    encoded_contract =
+      Jason.encode!([
+        %{
+          skill: "linear",
+          package_root: package_root,
+          runtime_inputs: [runtime_input],
+          tool_executables: [executable]
+        }
+      ])
+
     assert {:ok, session} =
              AgentRuntime.start_session(
                "/tmp/selected-workspace",
                issue: issue,
                role: "implementer",
                run_id: "runtime-seam",
+               skill_execution_contracts: [skill_entry],
                delegation_transport: RecordingTransport,
                delegation_transport_context: %{owner: self()}
              )
@@ -427,26 +493,24 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert_receive {:transport, :prepare_worker, herdr_session, worker_spec}
     assert worker_spec.profile.name == "implementer-worker"
     assert worker_spec.profile.model == "gpt-5.6-luna"
-    assert herdr_session.permission_read_roots == [Path.join(orchestration_root, ".agents/skills")]
+    assert herdr_session.permission_read_roots == [package_root, runtime_input, executable]
+    assert worker_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] == encoded_contract
+    assert Enum.any?(worker_spec.argv, &String.contains?(&1, "#{inspect(package_root)}=\"read\""))
 
-    assert Enum.any?(
+    refute Enum.any?(
              worker_spec.argv,
-             &String.contains?(
-               &1,
-               "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
-             )
+             &String.contains?(&1, "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\"")
            )
 
     assert_receive {:transport, :start_agent, _, orchestrator_spec}
     assert orchestrator_spec.profile.name == "implementer-orchestrator"
     assert orchestrator_spec.profile.model == "gpt-5.6-sol"
+    assert orchestrator_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] == encoded_contract
+    assert Enum.any?(orchestrator_spec.argv, &String.contains?(&1, "#{inspect(package_root)}=\"read\""))
 
-    assert Enum.any?(
+    refute Enum.any?(
              orchestrator_spec.argv,
-             &String.contains?(
-               &1,
-               "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
-             )
+             &String.contains?(&1, "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\"")
            )
 
     assert String.starts_with?(
@@ -456,6 +520,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     assert Map.delete(orchestrator_spec.env, "PATH") == %{
              "OCTO_HERDR_WORKER_LAUNCHER" => "/tmp/octo-emb-1141-runtime-seam/launch-worker",
+             "SYMPHONY_SKILL_EXECUTION_CONTRACTS" => encoded_contract,
              "SYMPHONY_EXPECTED_BRANCH" => "agent/emb-1141-exercise-the-public-runtime-seam",
              "SYMPHONY_ISSUE_BRANCH_NAME" => "sebastianvarela/emb-1141-exercise-the-public-runtime-seam",
              "SYMPHONY_ISSUE_ID" => "issue-1141",
@@ -478,6 +543,123 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert next_session.name == "octo-emb-1141-runtime-seam"
     assert turn.response == "IMPLEMENTER_TURN_COMPLETE"
     assert :ok = AgentRuntime.stop_session(next_session)
+    assert_receive {:transport, :stop_session, _}
+
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "claude_code")
+    System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", "claude_code")
+
+    assert {:ok, claude_session} =
+             AgentRuntime.start_session(
+               "/tmp/selected-workspace",
+               issue: issue,
+               role: "implementer",
+               run_id: "runtime-seam-claude",
+               skill_execution_contracts: [skill_entry],
+               delegation_transport: RecordingTransport,
+               delegation_transport_context: %{owner: self()}
+             )
+
+    assert_receive {:transport, :default_server_snapshot}
+    assert_receive {:transport, :start_session, _}
+    assert_receive {:transport, :prepare_worker, _, claude_worker_spec}
+    assert claude_worker_spec.provider == "claude_code"
+    assert package_root in claude_worker_spec.argv
+    assert claude_worker_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] == encoded_contract
+
+    assert_receive {:transport, :start_agent, _, claude_orchestrator_spec}
+    assert claude_orchestrator_spec.provider == "claude_code"
+    assert package_root in claude_orchestrator_spec.argv
+    assert claude_orchestrator_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] == encoded_contract
+    assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 30_000}
+
+    assert :ok = AgentRuntime.stop_session(claude_session)
+    assert_receive {:transport, :stop_session, _}
+  end
+
+  test "AgentRuntime starts the default Herdr Adapter with exact registered resources" do
+    root = Path.join(System.tmp_dir!(), "agent-runtime-default-herdr-#{System.unique_integer([:positive])}")
+    orchestration_root = Path.join(root, "orchestration")
+    workspace = Path.join(root, "selected-product")
+    package_root = Path.join([orchestration_root, ".agents", "skills", "linear"])
+    runtime_input = Path.join(orchestration_root, "uv.lock")
+    executable = Path.join(root, "tooling-uv")
+    herdr_bin = Path.join(root, "fake-herdr")
+    herdr_log = Path.join(root, "herdr.log")
+    runtime_root = Path.join(System.tmp_dir!(), "arh-#{System.unique_integer([:positive])}")
+    previous_root = System.get_env("SYMPHONY_ORCHESTRATION_ROOT")
+    previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    previous_transport = Application.get_env(:symphony_elixir, :delegation_transport_module)
+
+    File.mkdir_p!(package_root)
+    File.mkdir_p!(workspace)
+    File.write!(runtime_input, "locked")
+    File.write!(executable, "#!/bin/sh\nexit 0\n")
+    File.chmod!(executable, 0o755)
+    write_fake_herdr!(herdr_bin)
+    System.put_env("SYMPHONY_ORCHESTRATION_ROOT", orchestration_root)
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
+
+    Application.put_env(
+      :symphony_elixir,
+      :delegation_transport_module,
+      SymphonyElixir.ImplementerDelegation.HerdrTransport
+    )
+
+    on_exit(fn ->
+      if previous_root,
+        do: System.put_env("SYMPHONY_ORCHESTRATION_ROOT", previous_root),
+        else: System.delete_env("SYMPHONY_ORCHESTRATION_ROOT")
+
+      if previous_provider,
+        do: System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_provider),
+        else: System.delete_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+
+      Application.put_env(:symphony_elixir, :delegation_transport_module, previous_transport)
+
+      File.rm_rf(root)
+      File.rm_rf(runtime_root)
+    end)
+
+    entry = %{
+      skill: "linear",
+      package_root: package_root,
+      runtime_inputs: [runtime_input],
+      tool_executables: [executable]
+    }
+
+    assert {:ok, session} =
+             AgentRuntime.start_session(workspace,
+               issue: issue(),
+               role: "implementer",
+               run_id: "default-herdr",
+               skill_execution_contracts: [entry],
+               delegation_transport_context: %{
+                 herdr_bin: herdr_bin,
+                 extra_env: [{"HERDR_FAKE_LOG", herdr_log}],
+                 socket_root: runtime_root,
+                 poll_interval_ms: 5,
+                 ready_stability_ms: 0,
+                 start_timeout_ms: 2_000
+               }
+             )
+
+    assert session.transport == SymphonyElixir.ImplementerDelegation.HerdrTransport
+    assert session.herdr_session.permission_read_roots == [package_root, runtime_input, executable]
+
+    commands = File.read!(herdr_log)
+    assert commands =~ "agent start implementer_orchestrator"
+    assert commands =~ package_root
+    assert commands =~ runtime_input
+    assert commands =~ executable
+    refute commands =~ "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
+
+    worker_launcher = File.read!(session.herdr_session.worker_launcher)
+    assert worker_launcher =~ package_root
+    assert worker_launcher =~ runtime_input
+    assert worker_launcher =~ executable
+    refute worker_launcher =~ "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
+
+    assert :ok = AgentRuntime.stop_session(session)
   end
 
   test "a stale pre-submit idle state cannot complete a turn" do
@@ -542,6 +724,57 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
                %{identifier: "EMB-1180"},
                turn_timeout_ms: 100
              )
+  end
+
+  defp write_fake_herdr!(path) do
+    File.write!(path, """
+    #!/bin/sh
+    set -eu
+    printf '%s\n' "$*" >> "$HERDR_FAKE_LOG"
+
+    if [ "$#" -eq 2 ] && [ "$1" = "status" ] && [ "$2" = "server" ]; then
+      printf '%s\n' 'status: running' 'version: 0.7.4' 'protocol: 16' 'compatible: yes' 'socket: /tmp/operator-default/herdr.sock'
+      exit 0
+    fi
+
+    session="$2"
+    state_root="$XDG_CONFIG_HOME/herdr/sessions/$session"
+    running="$state_root/running"
+    stopped="$state_root/stopped"
+
+    if [ "$#" -eq 3 ] && [ "$1" = "--session" ] && [ "$3" = "server" ]; then
+      mkdir -p "$state_root"
+      : > "$running"
+      while [ ! -f "$stopped" ]; do sleep 0.01; done
+      rm -f "$running"
+      exit 0
+    fi
+
+    if [ "$#" -eq 4 ] && [ "$1" = "--session" ] && [ "$3" = "status" ] && [ "$4" = "server" ]; then
+      printf '%s\n' 'status: running' 'version: 0.7.4' 'protocol: 16' 'compatible: yes' "socket: $state_root/herdr.sock"
+      exit 0
+    fi
+
+    if [ "$#" -eq 4 ] && [ "$1" = "--session" ] && [ "$3" = "server" ] && [ "$4" = "stop" ]; then
+      : > "$stopped"
+      exit 0
+    fi
+
+    if [ "$1" = "--session" ] && [ "$3" = "agent" ] && [ "$4" = "start" ]; then
+      printf '{"id":"cli:agent:start","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent_status":"idle","revision":1}}}\n' "$5"
+      exit 0
+    fi
+
+    if [ "$#" -eq 5 ] && [ "$1" = "--session" ] && [ "$3" = "agent" ] && [ "$4" = "get" ]; then
+      printf '{"id":"cli:agent:get","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"idle","revision":1}}}\n' "$5"
+      exit 0
+    fi
+
+    printf 'unsupported fake Herdr command: %s\n' "$*" >&2
+    exit 64
+    """)
+
+    File.chmod!(path, 0o755)
   end
 
   defp contract(provider) do
