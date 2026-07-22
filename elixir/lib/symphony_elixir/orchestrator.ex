@@ -1558,6 +1558,10 @@ defmodule SymphonyElixir.Orchestrator do
     "refresh or re-authenticate the unattended provider credential, then move the issue back to the appropriate role state."
   end
 
+  defp operator_repair_action(%{family: :human_input_required}) do
+    "respond to the provider input request or approve a deterministic unattended policy, then move the issue back to the appropriate role state."
+  end
+
   defp operator_repair_action(%{family: family}) do
     "repair the #{family} runtime condition, then move the issue back to the appropriate role state."
   end

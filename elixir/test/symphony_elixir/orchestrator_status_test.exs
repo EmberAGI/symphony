@@ -554,6 +554,96 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute event["failure"]["reason"] =~ "token="
   end
 
+  test "human-required runtime input blocks once with bounded operator evidence" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-human-input-blocked"
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "EMB-1178",
+      title: "Handle unattended elicitation",
+      state: "In Progress",
+      labels: [],
+      url: "https://linear.app/example/EMB-1178"
+    }
+
+    claim_lease =
+      ClaimLease.new(%{
+        comment_id: "lease-comment-human-input",
+        issue_id: issue_id,
+        issue_identifier: issue.identifier,
+        role: "reviewer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-human-input",
+        attempt: 0,
+        state: "active",
+        started_at: DateTime.utc_now()
+      })
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: %{issue | claim_lease: claim_lease},
+          claim_lease: claim_lease,
+          run_id: claim_lease.run_id,
+          workspace_path: "/tmp/symphony/EMB-1178",
+          started_at: DateTime.utc_now(),
+          retry_attempt: 2
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{issue_id => %{attempt: 2, error: "ordinary retry must be cleared"}},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    reason =
+      {:human_input_required,
+       %{
+         provider: :codex,
+         source: "linear",
+         mode: "form",
+         purpose: "MCP server requested human input",
+         raw: ~s({"requestedSchema":{"token":"raw-secret-token"}})
+       }}
+
+    log =
+      capture_log(fn ->
+        assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), reason}, state)
+        assert state.running == %{}
+        assert state.retry_attempts == %{}
+        assert state.blocked_failures[issue_id].family == :human_input_required
+      end)
+
+    blocked_lease = receive_claim_lease_state!(issue_id, "blocked")
+    assert blocked_lease.recovery_reason == "human-input-required-repair-required"
+    assert blocked_lease.retry_reason =~ "source=linear"
+    assert blocked_lease.retry_reason =~ "mode=form"
+
+    assert_receive {:memory_tracker_comment, ^issue_id, note}
+    assert note =~ "human_input_required"
+    assert note =~ "source=linear"
+    assert note =~ "mode=form"
+    assert note =~ "respond to the provider input request"
+    refute note =~ "raw-secret-token"
+    refute note =~ "requestedSchema"
+
+    assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "retrying"}}, 100
+    refute_receive {:memory_tracker_comment, ^issue_id, _duplicate_note}, 100
+
+    assert log =~ "human_input_required"
+    refute log =~ "raw-secret-token"
+    refute log =~ "requestedSchema"
+  end
+
   test "real invalid workspace adapter failure escalates without ordinary retry" do
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 

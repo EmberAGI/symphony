@@ -26,6 +26,15 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
       {:invalid_workspace_or_runtime_protocol, {:invalid_workspace_or_runtime_protocol, %{message: "workspace escaped configured root"}}},
       {:unsupported_app_server_contract, {:unsupported_app_server_contract, %{method: "turn/start", message: "unsupported schema"}}},
       {:malformed_provider_event_schema, {:malformed_provider_event_schema, %{event: "result", message: "missing required session_id"}}},
+      {:human_input_required,
+       {:human_input_required,
+        %{
+          provider: :codex,
+          source: "linear",
+          mode: "form",
+          purpose: "MCP server requested human input",
+          raw: "Bearer provider-token"
+        }}},
       {:repeated_identical_no_progress_failure, {:repeated_identical_no_progress_failure, %{subtype: "empty_turn_completed", summary: "same turn emitted no progress"}}}
     ]
 
