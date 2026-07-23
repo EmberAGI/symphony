@@ -553,6 +553,19 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
   test "AgentRuntime starts the default Herdr Adapter with exact registered resources" do
     root = Path.join(System.tmp_dir!(), "agent-runtime-default-herdr-#{System.unique_integer([:positive])}")
+
+    resolvable_provider_bin = Path.join(root, "resolvable-provider-bin")
+    File.mkdir_p!(resolvable_provider_bin)
+
+    for provider <- ["codex", "claude"] do
+      fake = Path.join(resolvable_provider_bin, provider)
+      File.write!(fake, "#!/bin/sh\nexit 0\n")
+      File.chmod!(fake, 0o755)
+    end
+
+    previous_path = System.get_env("PATH") || ""
+    System.put_env("PATH", resolvable_provider_bin <> ":" <> previous_path)
+    on_exit(fn -> System.put_env("PATH", previous_path) end)
     orchestration_root = Path.join(root, "orchestration")
     workspace = Path.join(root, "selected-product")
     package_root = Path.join([orchestration_root, ".agents", "skills", "linear"])
