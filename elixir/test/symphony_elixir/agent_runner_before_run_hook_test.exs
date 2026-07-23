@@ -36,6 +36,29 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
     end
   end
 
+  defmodule BrutalStartTransport do
+    def planned_owned_session_ref(name, %{owner: owner}) do
+      %{
+        kind: "herdr",
+        session_name: name,
+        runtime_root: "/tmp/#{name}",
+        cleanup_module: __MODULE__,
+        cleanup_context: %{owner: owner}
+      }
+    end
+
+    def default_server_snapshot(%{owner: owner}) do
+      send(owner, :brutal_start_transport_entered)
+      {:ok, %{status: "running", version: "v", protocol: 17, socket: "/tmp/default.sock"}}
+    end
+
+    def start_session(_spec, _context) do
+      receive do
+        :never -> {:error, :unexpected}
+      end
+    end
+  end
+
   setup do
     previous_role = System.get_env("SYMPHONY_ROLE")
     System.put_env("SYMPHONY_ROLE", "implementer")
@@ -276,6 +299,54 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
                         session_name: "octo-emb-1217-run-startup-cleanup"
                       }},
                      500
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner publishes the owned session capability before Herdr startup can be brutally killed" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-brutal-start-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-brutal-start",
+        identifier: "EMB-1217",
+        title: "Retain cleanup authority during startup",
+        state: "In Progress",
+        labels: []
+      }
+
+      owner = self()
+
+      task =
+        Task.async(fn ->
+          AgentRunner.run(
+            issue,
+            owner,
+            run_id: "run-brutal-start",
+            delegation_transport: BrutalStartTransport,
+            delegation_transport_context: %{owner: owner}
+          )
+        end)
+
+      assert_receive {:owned_session_runtime_info, "issue-brutal-start", "run-brutal-start",
+                      %{
+                        kind: "herdr",
+                        session_name: "octo-emb-1217-run-brutal-start",
+                        runtime_root: "/tmp/octo-emb-1217-run-brutal-start"
+                      }},
+                     500
+
+      assert_receive :brutal_start_transport_entered, 500
+      assert Task.shutdown(task, :brutal_kill) == nil
     after
       File.rm_rf(test_root)
     end

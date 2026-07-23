@@ -726,6 +726,57 @@ defmodule SymphonyElixir.CoreTest do
     assert ProcessOwnership.status_for_issue(live_issue).state == "active"
   end
 
+  test "startup recovery quarantines cleanup success while the owned process tree is live" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-owned-session-recovery-live-process-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-RECOVER-LIVE-PROCESS-symphony")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-owned-session-recovery-live-process",
+      identifier: "MT-RECOVER-LIVE-PROCESS",
+      repository: "EmberAGI/symphony"
+    }
+
+    sleep = System.find_executable("sleep") || raise "sleep executable unavailable"
+    port = Port.open({:spawn_executable, sleep}, [:binary, :exit_status, args: [~c"5"]])
+    {:os_pid, app_server_pid} = :erlang.port_info(port, :os_pid)
+
+    on_exit(fn ->
+      if Port.info(port), do: Port.close(port)
+      File.rm_rf(test_root)
+    end)
+
+    assert :ok =
+             ProcessOwnership.record_active(issue, %{
+               role: "implementer",
+               holder: "#{ProcessOwnership.current_host()}:999999:implementer",
+               run_id: "run-owned-session-recovery-live-process",
+               workspace_path: workspace,
+               app_server_pid: app_server_pid,
+               owned_session_ref: %{
+                 kind: "herdr",
+                 session_name: "octo-mt-recover-live-process"
+               }
+             })
+
+    assert {:ok, 0} =
+             ProcessOwnership.recover_stale_owned_sessions(
+               fn _ownership_ref -> {:ok, :absent} end,
+               fn _ownership_ref -> :live end
+             )
+
+    status = ProcessOwnership.status_for_issue(issue)
+    assert status.state == "quarantined"
+    assert status.cleanup_status == "quarantined"
+    assert status.quarantine_reason =~ "owned process tree remains live"
+  end
+
   test "startup recovery quarantines a stale session when cleanup cannot prove absence" do
     test_root =
       Path.join(
@@ -944,6 +995,52 @@ defmodule SymphonyElixir.CoreTest do
     assert ProcessOwnership.blocking_record(issue) == nil
   end
 
+  test "a quarantined ownership marker fails closed when process inspection is unavailable" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-process-inspection-unavailable-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-PROCESS-UNKNOWN-symphony")
+    fake_bin = Path.join(test_root, "bin")
+    fake_ps = Path.join(fake_bin, "ps")
+    previous_path = System.get_env("PATH")
+
+    File.mkdir_p!(fake_bin)
+    File.write!(fake_ps, "#!/bin/sh\nexit 1\n")
+    File.chmod!(fake_ps, 0o755)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-process-inspection-unavailable",
+      identifier: "MT-PROCESS-UNKNOWN",
+      repository: "EmberAGI/symphony"
+    }
+
+    assert :ok =
+             ProcessOwnership.record_quarantined(
+               issue,
+               %{
+                 role: "implementer",
+                 holder: "host:999999:implementer",
+                 run_id: "run-process-inspection-unavailable",
+                 workspace_path: workspace
+               },
+               "owned process cleanup requires verification"
+             )
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      File.rm_rf(test_root)
+    end)
+
+    System.put_env("PATH", fake_bin)
+
+    assert %{"state" => "quarantined"} = ProcessOwnership.blocking_record(issue)
+  end
+
   test "normal worker exit schedules active-state continuation retry" do
     previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
     previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
@@ -998,7 +1095,7 @@ defmodule SymphonyElixir.CoreTest do
     assert retry_lease.issue_identifier == "MT-558"
   end
 
-  test "settled owned-session completion releases the claim without retry scheduling" do
+  test "verified owned-session completion preserves the active-state continuation check" do
     issue_id = "issue-settled-owned-session"
     issue_identifier = "MT-SETTLED"
     ref = make_ref()
@@ -1062,12 +1159,14 @@ defmodule SymphonyElixir.CoreTest do
 
     assert_receive {:owned_session_cleanup, "octo-mt-settled-session", false}
     assert_receive {:owned_session_liveness, :absent}
-    refute Map.has_key?(state.retry_attempts, issue_id)
-    refute MapSet.member?(state.claimed, issue_id)
+    assert %{attempt: 1} = state.retry_attempts[issue_id]
+    assert MapSet.member?(state.claimed, issue_id)
     assert MapSet.member?(state.completed, issue_id)
 
-    assert_receive {:memory_tracker_claim_lease, ^issue_id, released_lease}
-    assert released_lease.state == "released"
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, retrying_lease}
+    assert retrying_lease.state == "retrying"
+    assert retrying_lease.retry_reason == "active-state-continuation-check"
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "released"}}
   end
 
   test "ownership record write failure quarantines before claim release" do

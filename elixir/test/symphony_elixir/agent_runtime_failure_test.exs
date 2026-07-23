@@ -75,6 +75,68 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     assert exhausted.retryable? == false
   end
 
+  test "durable retry progress preserves a transient hook budget across process restart" do
+    reason = %HookResult{
+      hook: "before_run",
+      classification: :transient,
+      family: :transient_workspace_hook_failure,
+      summary: "provider readiness temporarily unavailable",
+      retry_limit: 3
+    }
+
+    restarted_context =
+      @context
+      |> Map.put(:retry_epoch, "lease-comment-restart")
+      |> Map.put(:durable_retry_attempt, 2)
+
+    assert {observation, {:irrecoverable, exhausted}} =
+             AgentRuntime.record_failure_observation(nil, reason, restarted_context)
+
+    assert observation.count == 3
+    assert exhausted.family == :workspace_hook_retry_budget_exhausted
+  end
+
+  test "transient hook budget ignores changing diagnostic summaries in one retry epoch" do
+    transient = fn summary ->
+      %HookResult{
+        hook: "before_run",
+        classification: :transient,
+        family: :transient_workspace_hook_failure,
+        summary: summary,
+        retry_limit: 3
+      }
+    end
+
+    context = Map.put(@context, :retry_epoch, "lease-comment-changing-summary")
+
+    {observation, {:retryable, first}} =
+      AgentRuntime.record_failure_observation(
+        nil,
+        transient.("provider unavailable request=req-1"),
+        context
+      )
+
+    assert first.subtype == "before_run_hook"
+
+    {observation, {:retryable, _second}} =
+      AgentRuntime.record_failure_observation(
+        observation,
+        transient.("provider unavailable request=req-2"),
+        context
+      )
+
+    assert observation.count == 2
+
+    assert {_observation, {:irrecoverable, exhausted}} =
+             AgentRuntime.record_failure_observation(
+               observation,
+               transient.("provider unavailable request=req-3"),
+               context
+             )
+
+    assert exhausted.family == :workspace_hook_retry_budget_exhausted
+  end
+
   test "typed hook schema rejects a deterministic family disguised as transient" do
     payload =
       Jason.encode!(%{
@@ -114,6 +176,26 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
               classification: :deterministic,
               family: :malformed_provider_event_schema
             }} = HookResult.parse_failure("before_run", 1, output)
+  end
+
+  test "typed hook summaries redact quoted credential fields at the schema boundary" do
+    payload =
+      Jason.encode!(%{
+        "kind" => "symphony_workspace_hook_result",
+        "version" => 1,
+        "hook" => "before_run",
+        "classification" => "deterministic",
+        "family" => "permission_denied",
+        "summary" => ~s(provider denied {"api_key":"raw-api-key","refresh_token":"raw-refresh"} bearer raw-bearer)
+      })
+
+    assert {:ok, %HookResult{summary: summary}} =
+             HookResult.parse_failure("before_run", 1, payload)
+
+    assert summary =~ "[REDACTED]"
+    refute summary =~ "raw-api-key"
+    refute summary =~ "raw-refresh"
+    refute summary =~ "raw-bearer"
   end
 
   test "classifies deterministic irrecoverable runtime failure families with redacted summaries" do

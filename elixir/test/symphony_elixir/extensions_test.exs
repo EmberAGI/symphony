@@ -41,6 +41,90 @@ defmodule SymphonyElixir.ExtensionsTest do
     end
   end
 
+  defmodule StatefulEscalationLinearClient do
+    use Agent
+
+    def start_link(issue, fail_once \\ []) do
+      Agent.start_link(
+        fn ->
+          %{
+            issue: issue,
+            fail_once: MapSet.new(fail_once),
+            mutations: %{comment: 0, label: 0, state: 0}
+          }
+        end,
+        name: __MODULE__
+      )
+    end
+
+    def snapshot, do: Agent.get(__MODULE__, & &1)
+
+    def fetch_issue_states_by_ids([issue_id]) do
+      Agent.get(__MODULE__, fn %{issue: issue} ->
+        if issue.id == issue_id, do: {:ok, [issue]}, else: {:ok, []}
+      end)
+    end
+
+    def graphql(query, variables) do
+      cond do
+        String.contains?(query, "commentCreate") ->
+          mutate(:comment, fn issue ->
+            comment = %{id: "comment-escalation", body: variables.body}
+            {%{issue | comments: issue.comments ++ [comment]}, ok("commentCreate")}
+          end)
+
+        String.contains?(query, "SymphonyResolveIssueLabelId") ->
+          {:ok,
+           %{
+             "data" => %{
+               "issue" => %{
+                 "team" => %{
+                   "labels" => %{
+                     "nodes" => [%{"id" => "label-human", "name" => "Human Escalation"}]
+                   }
+                 },
+                 "labels" => %{"nodes" => []}
+               }
+             }
+           }}
+
+        Map.has_key?(variables, :labelId) ->
+          mutate(:label, fn issue ->
+            {%{issue | labels: Enum.uniq(["Human Escalation" | issue.labels])}, ok("issueUpdate")}
+          end)
+
+        String.contains?(query, "SymphonyResolveStateId") ->
+          {:ok,
+           %{
+             "data" => %{
+               "issue" => %{
+                 "team" => %{"states" => %{"nodes" => [%{"id" => "state-human"}]}}
+               }
+             }
+           }}
+
+        Map.has_key?(variables, :stateId) ->
+          mutate(:state, fn issue ->
+            {%{issue | state: "Human Escalation"}, ok("issueUpdate")}
+          end)
+      end
+    end
+
+    defp mutate(kind, mutation) do
+      Agent.get_and_update(__MODULE__, fn state ->
+        if MapSet.member?(state.fail_once, kind) do
+          {{:error, {kind, :temporarily_unavailable}}, %{state | fail_once: MapSet.delete(state.fail_once, kind)}}
+        else
+          {issue, response} = mutation.(state.issue)
+          mutations = Map.update!(state.mutations, kind, &(&1 + 1))
+          {response, %{state | issue: issue, mutations: mutations}}
+        end
+      end)
+    end
+
+    defp ok(field), do: {:ok, %{"data" => %{field => %{"success" => true}}}}
+  end
+
   defmodule SlowOrchestrator do
     use GenServer
 
@@ -433,6 +517,75 @@ defmodule SymphonyElixir.ExtensionsTest do
              )
 
     refute_receive {:graphql_called, _query, _variables}, 50
+  end
+
+  test "linear escalation reconciliation is concurrency-safe for one failure episode" do
+    Application.put_env(:symphony_elixir, :linear_client_module, StatefulEscalationLinearClient)
+
+    issue_id = "issue-linear-escalation-concurrent"
+    issue = %Issue{id: issue_id, identifier: "MT-ESC-C", state: "In Progress", labels: [], comments: []}
+    {:ok, _pid} = StatefulEscalationLinearClient.start_link(issue)
+
+    on_exit(fn ->
+      if Process.whereis(StatefulEscalationLinearClient),
+        do: Agent.stop(StatefulEscalationLinearClient)
+    end)
+
+    attrs = %{
+      failure_fingerprint: "fingerprint-linear-concurrent",
+      retry_epoch: "epoch-linear-concurrent",
+      run_id: "run-linear-concurrent",
+      operator_note: "## Operator Note\n\nredacted concurrent failure"
+    }
+
+    results =
+      1..8
+      |> Task.async_stream(
+        fn _ -> Adapter.ensure_irrecoverable_escalation(issue_id, attrs) end,
+        max_concurrency: 8,
+        timeout: 5_000
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.all?(results, &match?({:ok, _}, &1))
+    snapshot = StatefulEscalationLinearClient.snapshot()
+    assert snapshot.mutations == %{comment: 1, label: 1, state: 1}
+    assert Enum.count(snapshot.issue.comments, &String.contains?(&1.body, "symphony-irrecoverable-escalation:v1")) == 1
+  end
+
+  test "linear escalation reconciliation resumes only a missing partial mutation" do
+    Application.put_env(:symphony_elixir, :linear_client_module, StatefulEscalationLinearClient)
+
+    issue_id = "issue-linear-escalation-partial"
+    issue = %Issue{id: issue_id, identifier: "MT-ESC-P", state: "In Progress", labels: [], comments: []}
+    {:ok, _pid} = StatefulEscalationLinearClient.start_link(issue, [:label])
+
+    on_exit(fn ->
+      if Process.whereis(StatefulEscalationLinearClient),
+        do: Agent.stop(StatefulEscalationLinearClient)
+    end)
+
+    attrs = %{
+      failure_fingerprint: "fingerprint-linear-partial",
+      retry_epoch: "epoch-linear-partial",
+      run_id: "run-linear-partial",
+      operator_note: "## Operator Note\n\nredacted partial failure"
+    }
+
+    assert {:error, first} = Adapter.ensure_irrecoverable_escalation(issue_id, attrs)
+    assert first.progress.comment == :created
+    assert first.progress.label == {:error, {:label, :temporarily_unavailable}}
+    assert first.progress.state == :applied
+
+    assert {:ok, resumed} = Adapter.ensure_irrecoverable_escalation(issue_id, attrs)
+    assert resumed.comment == :already_present
+    assert resumed.label == :applied
+    assert resumed.state == :already_present
+
+    snapshot = StatefulEscalationLinearClient.snapshot()
+    assert snapshot.mutations == %{comment: 1, label: 1, state: 1}
+    assert snapshot.issue.labels == ["Human Escalation"]
+    assert snapshot.issue.state == "Human Escalation"
   end
 
   test "linear adapter updates and verifies an existing claim lease comment before dispatch" do

@@ -453,10 +453,7 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp redact_runtime_text(value) when is_binary(value) do
-    value
-    |> String.replace(~r/(?i)\b(authorization)\s*[:=]\s*bearer\s+[^\s,\]}]+/, "\\1=[REDACTED]")
-    |> String.replace(~r/(?i)\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,\]}]+/, "credential=[REDACTED]")
-    |> String.replace(~r/(?i)\bbearer\s+[A-Za-z0-9._~+\/-]+=*/, "[REDACTED]")
+    AgentRuntime.sanitize_runtime_text(value)
   end
 
   defp validate_workspace_path(workspace, nil) when is_binary(workspace) do

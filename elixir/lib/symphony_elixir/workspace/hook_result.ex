@@ -22,6 +22,8 @@ defmodule SymphonyElixir.Workspace.HookResult do
     :human_input_required
   ]
 
+  alias SymphonyElixir.RuntimeEvidence
+
   @enforce_keys [:hook, :classification, :family, :summary, :retry_limit]
   defstruct @enforce_keys
 
@@ -144,9 +146,6 @@ defmodule SymphonyElixir.Workspace.HookResult do
   defp truncate_output(output), do: binary_part(output, 0, 4_096)
 
   defp redact(value) do
-    value
-    |> String.replace(~r/(?i)\b(authorization)\s*[:=]\s*bearer\s+[^\s,\]}]+/, "\\1=[REDACTED]")
-    |> String.replace(~r/(?i)\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,\]}]+/, "credential=[REDACTED]")
-    |> String.replace(~r/(?i)\bbearer\s+[A-Za-z0-9._~+\/-]+=*/, "[REDACTED]")
+    RuntimeEvidence.sanitize_text(value)
   end
 end

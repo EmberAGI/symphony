@@ -26,6 +26,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.Tracker.ClaimLease
 
   @continuation_retry_delay_ms 1_000
+  @missing_retry_epoch "missing-claim-lease-epoch"
   @failure_retry_base_ms 10_000
   @claim_lease_min_ttl_ms 60_000
   @claim_lease_refresh_interval_ms 30_000
@@ -1000,7 +1001,13 @@ defmodule SymphonyElixir.Orchestrator do
     owned_session_teardown_lifecycle_verdict(running_entry, :failed)
   end
 
-  defp teardown_owned_session_lifecycle_verdict(_running_entry), do: nil
+  defp teardown_owned_session_lifecycle_verdict(running_entry) do
+    LifecycleVerdict.evaluate(
+      session: :absent,
+      lease: running_entry_lease_liveness(running_entry),
+      provider_turn: :failed
+    )
+  end
 
   defp owned_session_teardown_lifecycle_verdict(
          %{owned_session_ref: ownership_ref} = running_entry,
@@ -1980,29 +1987,6 @@ defmodule SymphonyElixir.Orchestrator do
          running_entry,
          _reason,
          session_id,
-         %LifecycleVerdict{claim_release: :allow, retry: :refuse},
-         _process_status
-       ) do
-    Logger.info("Agent task settled for issue_id=#{issue_id} session_id=#{session_id}; releasing claim without retry")
-    RoleTurnRecovery.clear_turn(issue_id)
-
-    state
-    |> clear_failure_observation(issue_id)
-    |> complete_issue(issue_id)
-    |> release_issue_claim(
-      issue_id,
-      Map.get(running_entry, :issue),
-      Map.get(running_entry, :run_id)
-    )
-  end
-
-  defp apply_task_exit_classification(
-         :normal,
-         state,
-         issue_id,
-         running_entry,
-         _reason,
-         session_id,
          _lifecycle_verdict,
          process_status
        ) do
@@ -2103,7 +2087,13 @@ defmodule SymphonyElixir.Orchestrator do
     owned_session_teardown_lifecycle_verdict(running_entry, provider_turn_for_task_exit(reason))
   end
 
-  defp task_exit_lifecycle_verdict(_running_entry, _reason), do: nil
+  defp task_exit_lifecycle_verdict(running_entry, reason) do
+    LifecycleVerdict.evaluate(
+      session: :absent,
+      lease: running_entry_lease_liveness(running_entry),
+      provider_turn: provider_turn_for_task_exit(reason)
+    )
+  end
 
   defp lifecycle_task_exit_failure(
          %LifecycleVerdict{
@@ -2196,7 +2186,6 @@ defmodule SymphonyElixir.Orchestrator do
   defp provider_turn_for_task_exit(_reason), do: :failed
 
   defp lifecycle_session_for_log(%LifecycleVerdict{session: session}), do: session
-  defp lifecycle_session_for_log(nil), do: :not_recorded
 
   defp classify_task_exit(:normal, _running_entry, _issue_id, _state), do: :normal
 
@@ -2226,6 +2215,7 @@ defmodule SymphonyElixir.Orchestrator do
       run_id: Map.get(running_entry, :run_id),
       claim_lease_run_id: claim_lease_scope_id(claim_lease),
       retry_epoch: retry_epoch_for(running_entry),
+      durable_retry_attempt: if(match?(%ClaimLease{}, claim_lease), do: Map.get(claim_lease, :attempt), else: 0),
       input_fingerprint: runtime_input_fingerprint(issue, workspace_path),
       operator_repair_id: Map.get(running_entry, :operator_repair_id)
     }
@@ -2241,7 +2231,7 @@ defmodule SymphonyElixir.Orchestrator do
     claim_lease = Map.get(running_entry, :claim_lease)
 
     Map.get(running_entry, :retry_epoch) || claim_lease_scope_id(claim_lease) ||
-      Map.get(running_entry, :run_id)
+      @missing_retry_epoch
   end
 
   defp runtime_input_fingerprint(%Issue{} = issue, workspace_path) do
@@ -2355,8 +2345,8 @@ defmodule SymphonyElixir.Orchestrator do
 
     retry_epoch =
       escalation_identity(
-        Map.get(running_entry, :retry_epoch) || claim_lease_scope_id(claim_lease),
-        run_id
+        retry_epoch_for(running_entry),
+        @missing_retry_epoch
       )
 
     attrs = %{
@@ -3115,9 +3105,6 @@ defmodule SymphonyElixir.Orchestrator do
     do: record_process_completion(running_entry, reason)
 
   defp record_process_completion(running_entry, reason, %LifecycleVerdict{}),
-    do: record_process_completion(running_entry, reason)
-
-  defp record_process_completion(running_entry, reason, nil),
     do: record_process_completion(running_entry, reason)
 
   defp process_ownership_record_status(:ok, success_status), do: success_status

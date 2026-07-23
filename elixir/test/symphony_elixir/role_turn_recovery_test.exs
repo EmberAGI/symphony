@@ -3,6 +3,7 @@ defmodule SymphonyElixir.RoleTurnRecoveryTest do
 
   alias SymphonyElixir.RoleTurnRecovery
   alias SymphonyElixir.Runtime.ProcessOwnership
+  alias SymphonyElixir.Tracker.ClaimLease
 
   defmodule OwnedSessionLivenessAdapter do
     def owned_session_liveness(ownership_ref) do
@@ -68,7 +69,7 @@ defmodule SymphonyElixir.RoleTurnRecoveryTest do
              RoleTurnRecovery.recovery_plan_for_test(issue, marker, @active_states, @terminal_states)
   end
 
-  test "live pending markers are skipped until the role turn becomes orphaned" do
+  test "pending markers without native evidence remain untouched after the active list drops" do
     recovery_dir =
       Path.join(System.tmp_dir!(), "symphony-role-turn-recovery-live-#{System.unique_integer([:positive])}")
 
@@ -114,10 +115,9 @@ defmodule SymphonyElixir.RoleTurnRecoveryTest do
 
     assert :ok = RoleTurnRecovery.recover_pending_turns(@active_states, @terminal_states, [])
 
-    assert_receive {:memory_tracker_comment, "live-issue", body}
-    assert body =~ "symphony:aborted-role-turn-recovery"
-    assert_receive {:memory_tracker_state_update, "live-issue", "Agent Fixes"}
-    refute File.exists?(marker_path)
+    refute_receive {:memory_tracker_comment, "live-issue", _body}, 50
+    refute_receive {:memory_tracker_state_update, "live-issue", _state}, 50
+    assert File.exists?(marker_path)
   end
 
   test "startup recovery leaves Linear untouched while the native session remains live" do
@@ -257,6 +257,68 @@ defmodule SymphonyElixir.RoleTurnRecoveryTest do
     refute_receive {:memory_tracker_comment, "live-process-only-issue", _body}, 100
     refute_receive {:memory_tracker_state_update, "live-process-only-issue", _state}, 100
     assert File.exists?(Path.join(recovery_dir, "live-process-only-issue.json"))
+  end
+
+  test "startup recovery fails closed when an expired lease has no native session record" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-role-turn-recovery-missing-session-record-#{System.unique_integer([:positive])}"
+      )
+
+    recovery_dir = Path.join(test_root, "recovery")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace_path = Path.join(workspace_root, "EMB-MISSING-SESSION-symphony")
+
+    previous_recovery_dir = Application.get_env(:symphony_elixir, :role_turn_recovery_dir)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    Application.put_env(:symphony_elixir, :role_turn_recovery_dir, recovery_dir)
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    on_exit(fn ->
+      restore_app_env(:role_turn_recovery_dir, previous_recovery_dir)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      File.rm_rf(test_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      tracker_active_states: ["In Progress", "Agent Fixes"],
+      tracker_terminal_states: ["Done"]
+    )
+
+    issue = %Issue{
+      id: "missing-session-record-issue",
+      identifier: "EMB-MISSING-SESSION",
+      title: "Lease survives missing native identity",
+      state: "In Progress",
+      branch_name: "agent/missing-session-record",
+      repository: "EmberAGI/symphony",
+      claim_lease:
+        ClaimLease.new(%{
+          issue_id: "missing-session-record-issue",
+          issue_identifier: "EMB-MISSING-SESSION",
+          role: "implementer",
+          holder: "orphaned-holder",
+          run_id: "run-missing-session-record",
+          workspace_path: workspace_path,
+          state: "active",
+          refreshed_at: DateTime.utc_now(),
+          expires_at: DateTime.add(DateTime.utc_now(), -1, :second)
+        })
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    assert :ok = RoleTurnRecovery.record_turn_start(issue)
+    assert :ok = RoleTurnRecovery.recover_pending_turns(@active_states, @terminal_states, [])
+
+    refute_receive {:memory_tracker_comment, "missing-session-record-issue", _body}, 100
+    refute_receive {:memory_tracker_state_update, "missing-session-record-issue", _state}, 100
+    assert File.exists?(Path.join(recovery_dir, "missing-session-record-issue.json"))
   end
 
   test "role states recover visibly without routing implementation-started work back to Todo" do

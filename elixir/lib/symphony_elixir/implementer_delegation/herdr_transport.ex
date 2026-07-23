@@ -352,6 +352,15 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   def stop_session(_session, _context), do: {:error, :invalid_herdr_session_ref}
 
   @impl true
+  @doc "Return the cleanup capability before the first run-owned Herdr mutation."
+  @spec planned_owned_session_ref(String.t(), map()) :: map()
+  def planned_owned_session_ref(name, context)
+      when is_binary(name) and name != "" and is_map(context) do
+    runtime_root = Map.get(context, :socket_root, short_socket_root(name))
+    owned_session_ref(%{name: name, runtime_root: runtime_root}, context)
+  end
+
+  @impl true
   @doc "Return the narrow capability needed to clean up this run-owned server outside its owner task."
   @spec owned_session_ref(map(), map()) :: map()
   def owned_session_ref(%{name: name, runtime_root: runtime_root}, context)
@@ -416,6 +425,31 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     timeout_ms = Map.get(context, :liveness_timeout_ms, @default_liveness_timeout_ms)
     deadline = System.monotonic_time(:millisecond) + timeout_ms
 
+    case command_in_port(context, ["--session", name, "status", "server"], env, deadline) do
+      {:ok, output} -> owned_session_liveness_from_server(output, context, name, agent_name, env, deadline)
+      {:error, {:incompatible_herdr_runtime, _details}} -> {:ok, :unknown}
+      {:error, _reason} -> {:ok, :unreachable}
+    end
+  end
+
+  defp owned_session_liveness_from_server(output, context, name, agent_name, env, deadline) do
+    case parse_server_status(output) do
+      {:ok, %{status: "running"} = status} ->
+        with :ok <- validate_runtime(status) do
+          read_owned_agent_liveness(context, name, agent_name, env, deadline)
+        else
+          {:error, {:incompatible_herdr_runtime, _details}} -> {:ok, :unknown}
+        end
+
+      {:ok, _status} ->
+        {:ok, :absent}
+
+      {:error, _reason} ->
+        {:ok, :unknown}
+    end
+  end
+
+  defp read_owned_agent_liveness(context, name, agent_name, env, deadline) do
     case command_in_port(context, ["--session", name, "agent", "get", agent_name], env, deadline) do
       {:ok, output} -> normalize_owned_agent_response(output)
       {:error, {:incompatible_herdr_runtime, _details}} -> {:ok, :unknown}

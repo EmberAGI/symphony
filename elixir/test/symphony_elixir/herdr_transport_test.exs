@@ -58,7 +58,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
         sleep "${HERDR_FAKE_STATUS_STALL_SECONDS:-2}"
         exit 1
       fi
-      if [ -f "$running" ]; then
+      if [ -f "$running" ] || [ "${HERDR_FAKE_STATUS_FORCE_RUNNING:-}" = "1" ]; then
         printf '%s\n' \
           'status: running' \
           "version: ${HERDR_FAKE_VERSION:-0.7.5}" \
@@ -735,6 +735,9 @@ defmodule SymphonyElixir.HerdrTransportTest do
   end
 
   test "shares the 120-second cold-start budget across orchestrator and worker startup", context do
+    session_name =
+      "octo-emb-1227-shared-cold-start-budget-#{System.unique_integer([:positive])}"
+
     adapter_context = %{
       herdr_bin: context.bin,
       extra_env: [{"HERDR_FAKE_LOG", context.log}],
@@ -745,7 +748,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert {:ok, session} =
              HerdrTransport.start_session(
                %{
-                 name: "octo-emb-1227-shared-cold-start-budget",
+                 name: session_name,
                  isolated: true,
                  workspace: "/tmp/selected-workspace"
                },
@@ -977,12 +980,26 @@ defmodule SymphonyElixir.HerdrTransportTest do
           [:cleanup_context, :extra_env],
           [
             {"HERDR_FAKE_LOG", context.log},
+            {"HERDR_FAKE_STATUS_FORCE_RUNNING", "1"},
             {"HERDR_FAKE_AGENT_GET_MODE", mode}
           ]
         )
 
       assert {:ok, ^expected} = HerdrTransport.owned_session_liveness(ownership_ref)
     end
+
+    incompatible_ref =
+      put_in(
+        base_ref,
+        [:cleanup_context, :extra_env],
+        [
+          {"HERDR_FAKE_LOG", context.log},
+          {"HERDR_FAKE_STATUS_FORCE_RUNNING", "1"},
+          {"HERDR_FAKE_VERSION", "0.7.4"}
+        ]
+      )
+
+    assert {:ok, :unknown} = HerdrTransport.owned_session_liveness(incompatible_ref)
   end
 
   test "native agent liveness bounds a stalled Herdr query", context do
@@ -995,6 +1012,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
         herdr_bin: context.bin,
         extra_env: [
           {"HERDR_FAKE_LOG", context.log},
+          {"HERDR_FAKE_STATUS_FORCE_RUNNING", "1"},
           {"HERDR_FAKE_AGENT_GET_MODE", "stalled"}
         ],
         socket_root: context.runtime_root,

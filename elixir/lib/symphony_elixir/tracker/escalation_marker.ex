@@ -15,6 +15,8 @@ defmodule SymphonyElixir.Tracker.EscalationMarker do
   @max_fingerprint_bytes 2_048
   @token_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._:\/-]*\z/
 
+  alias SymphonyElixir.RuntimeEvidence
+
   defstruct [:key, :failure_fingerprint, :retry_epoch, :run_id, :operator_note]
 
   @type t :: %__MODULE__{
@@ -158,7 +160,7 @@ defmodule SymphonyElixir.Tracker.EscalationMarker do
   defp normalize_token(_value, field), do: {:error, {:missing_escalation_field, field}}
 
   defp normalize_note(value) when is_binary(value) do
-    value = String.trim(value)
+    value = value |> RuntimeEvidence.sanitize_text() |> String.trim()
 
     cond do
       value == "" -> {:error, :missing_operator_note}

@@ -123,6 +123,13 @@ defmodule SymphonyElixir.AgentRunner do
       |> put_optional(:delegation_transport, Keyword.get(opts, :delegation_transport))
       |> put_optional(:delegation_transport_context, Keyword.get(opts, :delegation_transport_context))
 
+    send_owned_session_ref(
+      codex_update_recipient,
+      issue,
+      Keyword.get(opts, :run_id),
+      AgentRuntime.planned_owned_session_ref(session_opts)
+    )
+
     case AgentRuntime.start_session(workspace, session_opts) do
       {:ok, session} ->
         send_owned_session_runtime_info(

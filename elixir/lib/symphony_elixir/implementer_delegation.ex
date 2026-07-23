@@ -83,6 +83,25 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
   def start_session(_workspace, _contract, _opts), do: {:error, :invalid_implementer_delegation_start}
 
+  @doc "Return the run-owned cleanup capability before session startup mutates Herdr."
+  @spec planned_owned_session_ref(keyword()) :: map() | nil
+  def planned_owned_session_ref(opts) when is_list(opts) do
+    transport = Keyword.get(opts, :transport)
+    transport_context = Keyword.get(opts, :transport_context, %{})
+
+    with true <- is_atom(transport),
+         true <- function_exported?(transport, :planned_owned_session_ref, 2),
+         {:ok, name} <- session_name(opts),
+         ownership_ref when is_map(ownership_ref) <-
+           transport.planned_owned_session_ref(name, transport_context) do
+      Map.put(ownership_ref, :agent_name, "implementer_orchestrator")
+    else
+      _ -> nil
+    end
+  end
+
+  def planned_owned_session_ref(_opts), do: nil
+
   @doc false
   @spec skill_execution_projection_for_test(String.t(), list()) :: map()
   def skill_execution_projection_for_test("codex", contracts),

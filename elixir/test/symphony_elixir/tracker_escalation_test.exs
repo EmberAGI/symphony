@@ -2,7 +2,7 @@ defmodule SymphonyElixir.TrackerEscalationTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Linear.Issue
-  alias SymphonyElixir.Tracker.Memory
+  alias SymphonyElixir.Tracker.{EscalationMarker, Memory}
 
   setup do
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
@@ -44,12 +44,25 @@ defmodule SymphonyElixir.TrackerEscalationTest do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [%Issue{id: issue_id, state: "In Progress"}])
 
     assert {:ok, first} = Memory.ensure_irrecoverable_escalation(issue_id, escalation_attrs())
+    assert {:ok, [durable_issue]} = Memory.fetch_issue_states_by_ids([issue_id])
+
+    restarted_recipient =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [durable_issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, restarted_recipient)
 
     assert {:ok, restarted} =
              Memory.ensure_irrecoverable_escalation(
                issue_id,
                Map.put(escalation_attrs(), :run_id, "run-after-process-restart")
              )
+
+    send(restarted_recipient, :stop)
 
     assert first.comment == :created
     assert restarted.comment == :already_present
@@ -116,6 +129,23 @@ defmodule SymphonyElixir.TrackerEscalationTest do
     assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}
     assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}
     refute_receive {:memory_tracker_comment, ^issue_id, _body}, 100
+  end
+
+  test "escalation markers redact credential fields before tracker persistence" do
+    attrs =
+      escalation_attrs()
+      |> Map.put(
+        :operator_note,
+        ~s(## Operator Note\n\n{"api_key":"raw-api-key","refresh_token":"raw-refresh"} bearer raw-bearer)
+      )
+
+    assert {:ok, marker} = EscalationMarker.new(attrs)
+    rendered = EscalationMarker.render(marker)
+
+    assert rendered =~ "[REDACTED]"
+    refute rendered =~ "raw-api-key"
+    refute rendered =~ "raw-refresh"
+    refute rendered =~ "raw-bearer"
   end
 
   defp escalation_attrs do

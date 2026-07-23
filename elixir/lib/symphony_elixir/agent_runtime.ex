@@ -14,7 +14,7 @@ defmodule SymphonyElixir.AgentRuntime do
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
   alias SymphonyElixir.{Config, ImplementationEffort, ImplementerDelegation, SkillExecutionContract, Workspace}
   alias SymphonyElixir.ImplementerDelegation.HerdrTransport
-  alias SymphonyElixir.Workspace.HookResult
+  alias SymphonyElixir.{RuntimeEvidence, Workspace.HookResult}
 
   @type provider :: :codex | :claude_code
   @type session_liveness :: :live | :absent | :unknown | :unreachable
@@ -157,6 +157,31 @@ defmodule SymphonyElixir.AgentRuntime do
       end
     end
   end
+
+  @doc "Return the Implementer session cleanup capability before startup mutates Herdr."
+  @spec planned_owned_session_ref(keyword()) :: map() | nil
+  def planned_owned_session_ref(opts) when is_list(opts) do
+    role = Keyword.get(opts, :role, role_name())
+    issue = Keyword.get(opts, :issue)
+    transport = Keyword.get(opts, :delegation_transport, default_delegation_transport())
+
+    if role == "implementer" do
+      with {:ok, run_id} <- required_run_id(opts),
+           {:ok, issue_identifier} <- required_issue_identifier(issue),
+           {:ok, transport_context} <- delegation_transport_context(opts, transport) do
+        ImplementerDelegation.planned_owned_session_ref(
+          issue_identifier: issue_identifier,
+          run_id: run_id,
+          transport: transport,
+          transport_context: transport_context
+        )
+      else
+        _ -> nil
+      end
+    end
+  end
+
+  def planned_owned_session_ref(_opts), do: nil
 
   @doc """
   Run a turn with the configured adapter, threading any provider session id
@@ -907,7 +932,7 @@ defmodule SymphonyElixir.AgentRuntime do
   defp record_retryable_failure_observation(previous_observation, reason, failure, context) do
     cond do
       match?(%HookResult{classification: :transient}, reason) ->
-        count = next_observation_count(previous_observation, failure, context)
+        count = next_hook_observation_count(previous_observation, failure, context)
         observation = observation_for(failure, context, count)
 
         if HookResult.retry_exhausted?(reason, count) do
@@ -951,15 +976,45 @@ defmodule SymphonyElixir.AgentRuntime do
   defp next_observation_count(previous_observation, failure, context) when is_map(previous_observation) do
     reset_marker = reset_marker(context)
 
-    if Map.get(previous_observation, :fingerprint) == failure.fingerprint and
-         Map.get(previous_observation, :reset_marker) == reset_marker do
-      Map.get(previous_observation, :count, 0) + 1
-    else
-      1
-    end
+    previous_count =
+      if Map.get(previous_observation, :fingerprint) == failure.fingerprint and
+           Map.get(previous_observation, :reset_marker) == reset_marker do
+        Map.get(previous_observation, :count, 0)
+      else
+        0
+      end
+
+    max(previous_count, durable_retry_count(context)) + 1
   end
 
-  defp next_observation_count(_previous_observation, _failure, _context), do: 1
+  defp next_observation_count(_previous_observation, _failure, context),
+    do: durable_retry_count(context) + 1
+
+  defp next_hook_observation_count(previous_observation, failure, context)
+       when is_map(previous_observation) do
+    previous_fingerprint = Map.get(previous_observation, :fingerprint, %{})
+
+    previous_count =
+      if Map.get(previous_fingerprint, :family) == failure.family and
+           Map.get(previous_fingerprint, :subtype) == Map.get(failure, :subtype) and
+           Map.get(previous_observation, :reset_marker) == reset_marker(context) do
+        Map.get(previous_observation, :count, 0)
+      else
+        0
+      end
+
+    max(previous_count, durable_retry_count(context)) + 1
+  end
+
+  defp next_hook_observation_count(_previous_observation, _failure, context),
+    do: durable_retry_count(context) + 1
+
+  defp durable_retry_count(context) do
+    case Map.get(context, :durable_retry_attempt) do
+      attempt when is_integer(attempt) and attempt >= 0 -> attempt
+      _ -> 0
+    end
+  end
 
   defp observation_for(failure, context, count) when is_map(failure) do
     %{
@@ -1204,6 +1259,9 @@ defmodule SymphonyElixir.AgentRuntime do
 
   defp provider_from_details(_details), do: nil
 
+  defp subtype_from_details(%HookResult{hook: hook}) when is_binary(hook),
+    do: "#{hook}_hook"
+
   defp subtype_from_details(details) when is_map(details) do
     details
     |> value_for_any([:subtype, "subtype", :reason, "reason", :code, "code"])
@@ -1234,19 +1292,7 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   defp redact_runtime_text(value) when is_binary(value) do
-    value
-    |> String.replace(~r/(?i)\b(authorization)\s*[:=]\s*bearer\s+[^\s,\]}]+/, "\\1=[REDACTED]")
-    |> String.replace(
-      ~r/(?i)(["']?)(api[_-]?key|refresh[_-]?token|access[_-]?token|oauth[_-]?token|token|secret|password)\1\s*[:=]\s*(["'])[^"']*\3/,
-      "credential=[REDACTED]"
-    )
-    |> String.replace(~r/(?i)\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,\]}]+/, "credential=[REDACTED]")
-    |> String.replace(
-      ~r/(?i)\b(api[\s_-]?key|refresh[\s_-]?token|access[\s_-]?token|oauth[\s_-]?token)\s+["']?[^\s,\]}]+["']?/,
-      "credential=[REDACTED]"
-    )
-    |> String.replace(~r/(?i)\bbearer\s+[A-Za-z0-9._~+\/-]+=*/, "[REDACTED]")
-    |> String.replace(~r/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/, "[REDACTED_EMAIL]")
+    RuntimeEvidence.sanitize_text(value)
   end
 
   defp redact_runtime_text(value), do: value

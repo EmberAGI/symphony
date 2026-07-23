@@ -221,19 +221,21 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       ownership_ref = owned_session_ref_value(record)
       cleanup_result = safe_cleanup(cleanup_fun, ownership_ref)
       liveness = safe_owned_session_liveness(liveness_fun, ownership_ref)
+      process_tree_live? = local_process_live?(record)
 
-      case {cleanup_result, liveness} do
-        {:ok, :absent} ->
+      case {cleanup_result, liveness, process_tree_live?} do
+        {:ok, :absent, false} ->
           mark_record_cleaned(path, record)
           count + 1
 
-        {{:ok, :absent}, _status} ->
+        {{:ok, :absent}, _status, false} ->
           mark_record_cleaned(path, record)
           count + 1
 
-        {result, status} ->
+        {result, status, process_tree_live?} ->
           reason =
-            "startup cleanup=#{inspect(result)}; native session liveness=#{status}"
+            "startup cleanup=#{inspect(result)}; native session liveness=#{status}; " <>
+              "owned process tree remains live=#{process_tree_live?}"
 
           quarantined_record = mark_record_quarantined(path, record, reason)
 
@@ -755,17 +757,41 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     end
   end
 
-  defp ownership_env_process_live?(attrs_or_record), do: ownership_env_pids(attrs_or_record) != []
+  defp ownership_env_process_live?(attrs_or_record) do
+    criteria = ownership_env_criteria(attrs_or_record)
+    ownership_env_process_live?(criteria, ownership_env_criteria_scoped?(criteria))
+  end
+
+  defp ownership_env_process_live?(_criteria, false), do: false
+
+  defp ownership_env_process_live?(criteria, true) do
+    case process_table_result() do
+      {:ok, processes} ->
+        Enum.any?(processes, fn {pid, _ppid, _pgid} ->
+          process_env_matches?(pid, criteria)
+        end)
+
+      {:error, _reason} ->
+        true
+    end
+  end
 
   defp ownership_env_pids(attrs_or_record) when is_map(attrs_or_record) do
     criteria = ownership_env_criteria(attrs_or_record)
+    ownership_env_pids(criteria, ownership_env_criteria_scoped?(criteria))
+  end
 
-    if ownership_env_criteria_scoped?(criteria) do
-      process_table()
-      |> Enum.map(fn {pid, _ppid, _pgid} -> pid end)
-      |> Enum.filter(&process_env_matches?(&1, criteria))
-    else
-      []
+  defp ownership_env_pids(_criteria, false), do: []
+
+  defp ownership_env_pids(criteria, true) do
+    case process_table_result() do
+      {:ok, processes} ->
+        processes
+        |> Enum.map(fn {pid, _ppid, _pgid} -> pid end)
+        |> Enum.filter(&process_env_matches?(&1, criteria))
+
+      {:error, _reason} ->
+        []
     end
   end
 
@@ -857,17 +883,25 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp issue_identifier(_issue, attrs), do: attrs.issue_identifier
 
   defp process_table do
+    case process_table_result() do
+      {:ok, processes} -> processes
+      {:error, _reason} -> []
+    end
+  end
+
+  defp process_table_result do
     case System.cmd("ps", ["-eo", "pid=,ppid=,pgid="], stderr_to_stdout: true) do
       {output, 0} ->
-        output
-        |> String.split("\n", trim: true)
-        |> Enum.flat_map(&parse_process_table_line/1)
+        {:ok,
+         output
+         |> String.split("\n", trim: true)
+         |> Enum.flat_map(&parse_process_table_line/1)}
 
-      _ ->
-        []
+      {_output, status} ->
+        {:error, {:process_table_exit, status}}
     end
   rescue
-    _ -> []
+    error -> {:error, {:process_table_unavailable, error}}
   end
 
   defp parse_process_table_line(line) when is_binary(line) do
