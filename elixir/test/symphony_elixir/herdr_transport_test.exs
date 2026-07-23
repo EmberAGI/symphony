@@ -98,6 +98,19 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
     if [ "$1" = "agent" ] && [ "$2" = "prompt" ]; then
       if [ -n "${HERDR_FAKE_PROMPT_STALL_COUNT:-}" ]; then
+        prompt_timeout=0
+        previous_arg=
+        for arg in "$@"; do
+          if [ "$previous_arg" = "--timeout" ]; then
+            prompt_timeout=$arg
+            break
+          fi
+          previous_arg=$arg
+        done
+        if [ "$prompt_timeout" -le 5000 ]; then
+          printf '{"id":"cli:agent:prompt","error":{"code":"timeout","message":"timed out before prompt effect could be classified"}}\n' >&2
+          exit 1
+        fi
         mkdir -p "$state_root"
         prompt_attempt_file="$state_root/prompt-attempts"
         prompt_attempts=0
@@ -289,6 +302,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       assert length(prompt_commands) == 2
       assert Enum.any?(prompt_commands, &String.contains?(&1, "worker result --wait"))
       assert Enum.any?(prompt_commands, &String.contains?(&1, "agent prompt implementer_orchestrator   --wait"))
+      assert Enum.all?(prompt_commands, &String.contains?(&1, "--timeout 6000"))
 
       File.write!(context.log, "")
       File.rm(Path.join([session.runtime_root, "herdr", "sessions", "prompt", "prompt-attempts"]))

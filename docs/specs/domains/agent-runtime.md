@@ -509,9 +509,11 @@ Interface. Symphony submits initial turns, worker results, and consultation
 responses through the same verified `agent prompt` operation. Each submission
 waits for Herdr to observe an agent state change and accepts `working`, `idle`,
 or `done`, so a started turn and a turn that finishes before observation are
-both represented without revision heuristics. If Herdr returns the typed
-`agent_prompt_stalled` result because `state_change_seq` remained unchanged,
-the transport re-drives submission with a follow-up submit input at most twice.
+both represented without revision heuristics. The submission wait must exceed
+Herdr 0.7.5's 5000 ms prompt-effect window so an unchanged
+`state_change_seq` is classified as the typed `agent_prompt_stalled` result
+rather than an ordinary timeout. On that result, the transport re-drives
+submission with a follow-up submit input at most twice.
 Only an observed state change succeeds; exhausting the recovery bound preserves
 the typed prompt-stall failure. This provider-neutral recovery applies to
 orchestrator turns and both generated inter-agent prompt projections for Codex

@@ -13,6 +13,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @default_poll_interval_ms 50
   @default_stop_timeout_ms 5_000
   @default_agent_start_timeout_ms 120_000
+  @generated_prompt_timeout_ms 6_000
   @prompt_recovery_attempts 2
   @required_version "0.7.5"
   @required_protocol 17
@@ -817,9 +818,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       recovery_attempt=0
       while :; do
         if [ "$recovery_attempt" -eq 0 ]; then
-          set -- "$@" --wait --until working --until idle --until done --timeout 5000
+          set -- "$@" --wait --until working --until idle --until done --timeout #{@generated_prompt_timeout_ms}
         else
-          set -- agent prompt "$agent_name" ' ' --wait --until working --until idle --until done --timeout 5000
+          set -- agent prompt "$agent_name" ' ' --wait --until working --until idle --until done --timeout #{@generated_prompt_timeout_ms}
         fi
 
         set +e
