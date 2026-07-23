@@ -11,6 +11,7 @@ defmodule SymphonyElixir.AgentRuntime do
   """
 
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
+  alias SymphonyElixir.ClaudeCode.ProviderAuth
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
   alias SymphonyElixir.{Config, ImplementationEffort, ImplementerDelegation, SkillExecutionContract, Workspace}
   alias SymphonyElixir.ImplementerDelegation.HerdrTransport
@@ -218,7 +219,7 @@ defmodule SymphonyElixir.AgentRuntime do
         contract,
         issue_identifier: issue_identifier,
         run_id: run_id,
-        orchestrator_env: implementer_run_environment(issue, role, run_id),
+        orchestrator_env: implementer_run_environment(issue, role, run_id, contract),
         skill_execution_contracts: Keyword.get(opts, :skill_execution_contracts, []),
         transport: transport,
         transport_context: transport_context
@@ -237,7 +238,7 @@ defmodule SymphonyElixir.AgentRuntime do
   defp validate_local_herdr_worker(nil), do: :ok
   defp validate_local_herdr_worker(worker_host), do: {:error, {:herdr_remote_worker_not_implemented, worker_host}}
 
-  defp implementer_run_environment(issue, role, run_id) do
+  defp implementer_run_environment(issue, role, run_id, contract) do
     issue
     |> Workspace.issue_environment()
     |> Map.merge(%{
@@ -245,7 +246,13 @@ defmodule SymphonyElixir.AgentRuntime do
       "SYMPHONY_ROLE_RUN_ID" => run_id
     })
     |> put_process_environment("SYMPHONY_ORCHESTRATION_ROOT")
+    |> put_local_provider_auth_environment(Map.get(contract, :orchestrator_provider))
   end
+
+  defp put_local_provider_auth_environment(environment, "claude_code"),
+    do: Map.merge(environment, ProviderAuth.local_env())
+
+  defp put_local_provider_auth_environment(environment, _provider), do: environment
 
   defp put_process_environment(environment, key) do
     case System.get_env(key) do

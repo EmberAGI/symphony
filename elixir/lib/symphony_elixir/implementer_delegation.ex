@@ -56,6 +56,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
            ),
          herdr_session =
            herdr_session
+           |> Map.put(:session_env, session_env)
            |> Map.put(:permission_read_roots, permission_read_roots)
            |> Map.put(:skill_execution_contracts, skill_execution_contracts),
          {:ok, herdr_session} <-
@@ -424,9 +425,13 @@ defmodule SymphonyElixir.ImplementerDelegation do
       profile: contract.worker,
       cwd: workspace,
       argv: launcher_argv(contract_provider(contract, :worker), contract.worker, workspace, herdr_session),
-      env: %{
-        "SYMPHONY_SKILL_EXECUTION_CONTRACTS" => SymphonyElixir.SkillExecutionContract.encode!(Map.get(herdr_session, :skill_execution_contracts, []))
-      },
+      env:
+        herdr_session
+        |> Map.get(:session_env, %{})
+        |> Map.put(
+          "SYMPHONY_SKILL_EXECUTION_CONTRACTS",
+          SymphonyElixir.SkillExecutionContract.encode!(Map.get(herdr_session, :skill_execution_contracts, []))
+        ),
       may_spawn_agents: false
     }
   end

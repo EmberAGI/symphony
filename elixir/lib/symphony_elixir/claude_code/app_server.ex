@@ -44,6 +44,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   require Logger
 
+  alias SymphonyElixir.ClaudeCode.ProviderAuth
   alias SymphonyElixir.{Config, ImplementationEffort, Linear.Issue, PathSafety, SkillExecutionContract, SSH}
   alias SymphonyElixir.Runtime.ProcessOwnership
 
@@ -54,7 +55,6 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   @no_thinking_env "MAX_THINKING_TOKENS"
 
-  @local_provider_auth_env_names ~w(CLAUDE_CODE_OAUTH_TOKEN)
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
 
@@ -294,22 +294,12 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   defp maybe_put_no_thinking_env(env, false), do: env
 
   defp local_provider_auth_env(nil) do
-    Enum.flat_map(@local_provider_auth_env_names, &local_provider_auth_env_value/1)
+    Map.to_list(ProviderAuth.local_env())
   end
 
   # Remote worker launches render env values into an SSH command line, so local
   # provider auth must be materialized on the worker host instead.
   defp local_provider_auth_env(_worker_host), do: []
-
-  defp local_provider_auth_env_value(name) do
-    case System.get_env(name) do
-      value when is_binary(value) -> local_provider_auth_env_pair(name, String.trim(value), value)
-      _ -> []
-    end
-  end
-
-  defp local_provider_auth_env_pair(_name, "", _value), do: []
-  defp local_provider_auth_env_pair(name, _trimmed, value), do: [{name, value}]
 
   # Build the full `claude` invocation for a turn. The prompt is passed as the
   # last positional argument (`claude -p <prompt>`) so the process needs no

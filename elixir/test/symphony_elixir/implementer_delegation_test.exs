@@ -640,6 +640,92 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert :ok = AgentRuntime.stop_session(next_session)
   end
 
+  test "AgentRuntime forwards local Claude auth only to Claude delegation participants without argv leakage" do
+    previous_orchestrator_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    previous_worker_provider = System.get_env("OCTO_RUNTIME_WORKER_PROVIDER")
+    previous_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
+    token = "delegation-oauth-secret-value"
+
+    on_exit(fn ->
+      restore_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_orchestrator_provider)
+      restore_env("OCTO_RUNTIME_WORKER_PROVIDER", previous_worker_provider)
+      restore_env("CLAUDE_CODE_OAUTH_TOKEN", previous_token)
+    end)
+
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "claude_code")
+    System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", "claude_code")
+    System.put_env("CLAUDE_CODE_OAUTH_TOKEN", token)
+
+    assert {:ok, session} =
+             AgentRuntime.start_session(
+               "/tmp/selected-workspace",
+               issue: issue(),
+               role: "implementer",
+               run_id: "claude-auth-env",
+               delegation_transport: RecordingTransport,
+               delegation_transport_context: %{owner: self()}
+             )
+
+    assert_receive {:transport, :default_server_snapshot}
+    assert_receive {:transport, :start_session, session_spec}
+    assert session_spec.env["CLAUDE_CODE_OAUTH_TOKEN"] == token
+
+    assert_receive {:transport, :prepare_worker, _, worker_spec}
+    assert worker_spec.env["CLAUDE_CODE_OAUTH_TOKEN"] == token
+    refute inspect(worker_spec.argv) =~ token
+
+    assert_receive {:transport, :start_agent, _, orchestrator_spec}
+    assert orchestrator_spec.env["CLAUDE_CODE_OAUTH_TOKEN"] == token
+    refute inspect(orchestrator_spec.argv) =~ token
+    refute inspect(session.orchestrator) =~ token
+
+    assert :ok = AgentRuntime.stop_session(session)
+    assert_receive {:transport, :stop_session, _}
+  end
+
+  test "AgentRuntime does not forward local Claude auth to Codex delegation participants" do
+    previous_orchestrator_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    previous_worker_provider = System.get_env("OCTO_RUNTIME_WORKER_PROVIDER")
+    previous_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
+    token = "codex-must-not-receive-this-secret"
+
+    on_exit(fn ->
+      restore_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_orchestrator_provider)
+      restore_env("OCTO_RUNTIME_WORKER_PROVIDER", previous_worker_provider)
+      restore_env("CLAUDE_CODE_OAUTH_TOKEN", previous_token)
+    end)
+
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
+    System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", "codex")
+    System.put_env("CLAUDE_CODE_OAUTH_TOKEN", token)
+
+    assert {:ok, session} =
+             AgentRuntime.start_session(
+               "/tmp/selected-workspace",
+               issue: issue(),
+               role: "implementer",
+               run_id: "codex-no-claude-auth-env",
+               delegation_transport: RecordingTransport,
+               delegation_transport_context: %{owner: self()}
+             )
+
+    assert_receive {:transport, :default_server_snapshot}
+    assert_receive {:transport, :start_session, session_spec}
+    refute Map.has_key?(session_spec.env, "CLAUDE_CODE_OAUTH_TOKEN")
+    refute inspect(session_spec) =~ token
+
+    assert_receive {:transport, :prepare_worker, _, worker_spec}
+    refute Map.has_key?(worker_spec.env, "CLAUDE_CODE_OAUTH_TOKEN")
+    refute inspect(worker_spec) =~ token
+
+    assert_receive {:transport, :start_agent, _, orchestrator_spec}
+    refute Map.has_key?(orchestrator_spec.env, "CLAUDE_CODE_OAUTH_TOKEN")
+    refute inspect(orchestrator_spec) =~ token
+
+    assert :ok = AgentRuntime.stop_session(session)
+    assert_receive {:transport, :stop_session, _}
+  end
+
   test "default Herdr Adapter starts both worker providers through the native live-agent Interface" do
     root =
       Path.join(
@@ -652,6 +738,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     previous_orchestrator_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
     previous_worker_provider = System.get_env("OCTO_RUNTIME_WORKER_PROVIDER")
     previous_path = System.get_env("PATH") || ""
+    previous_token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
     previous_transport = Application.get_env(:symphony_elixir, :delegation_transport_module)
 
     File.mkdir_p!(workspace)
@@ -663,7 +750,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       File.write!(path, """
       #!/bin/sh
       set -eu
-      printf 'NATIVE_PROVIDER_EXEC agent=%s pane=%s path=%s args=%s\n' "$HERDR_FAKE_AGENT_NAME" "$HERDR_PANE_ID" "$PATH" "$*" >> "$HERDR_FAKE_LOG"
+      printf 'NATIVE_PROVIDER_EXEC agent=%s pane=%s path=%s args=%s claude_auth=%s\n' "$HERDR_FAKE_AGENT_NAME" "$HERDR_PANE_ID" "$PATH" "$*" "${CLAUDE_CODE_OAUTH_TOKEN:+present}" >> "$HERDR_FAKE_LOG"
       if [ "$HERDR_FAKE_AGENT_NAME" = "implementer_orchestrator" ]; then
         pane_json=$(herdr pane split --current --direction right --no-focus)
         pane_id=$(printf '%s\n' "$pane_json" | sed -n 's/.*"pane_id":"\\([^"]*\\)".*/\\1/p')
@@ -691,6 +778,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
         else: System.delete_env("OCTO_RUNTIME_WORKER_PROVIDER")
 
       System.put_env("PATH", previous_path)
+      restore_env("CLAUDE_CODE_OAUTH_TOKEN", previous_token)
       Application.put_env(:symphony_elixir, :delegation_transport_module, previous_transport)
       File.rm_rf(root)
     end)
@@ -699,6 +787,10 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", provider)
       System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", provider)
       System.put_env("PATH", fake_provider_bin <> ":" <> previous_path)
+
+      if provider == "claude_code",
+        do: System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "native-delegation-secret"),
+        else: System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
 
       herdr_bin = Path.join(root, "fake-herdr-#{kind}")
       herdr_log = Path.join(root, "herdr-#{kind}.log")
@@ -735,6 +827,16 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
       assert commands =~ "NATIVE_PROVIDER_EXEC agent=implementer_worker pane=w7:p42"
       assert commands =~ "path=#{runtime_root}/worker-bin:#{fake_provider_bin}:"
+
+      if provider == "claude_code" do
+        assert commands =~ "claude_auth=present"
+      else
+        assert commands =~ "claude_auth="
+        refute commands =~ "claude_auth=present"
+      end
+
+      refute commands =~ "native-delegation-secret"
+      refute inspect(session.orchestrator) =~ "native-delegation-secret"
       assert :ok = AgentRuntime.stop_session(session)
       File.rm_rf(runtime_root)
     end
@@ -914,6 +1016,9 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       labels: ["implementation-effort:moderate"]
     }
   end
+
+  defp restore_env(name, nil), do: System.delete_env(name)
+  defp restore_env(name, value), do: System.put_env(name, value)
 
   defp codex_argv(profile, workspace, herdr_session) do
     runtime_root = herdr_session.runtime_root
