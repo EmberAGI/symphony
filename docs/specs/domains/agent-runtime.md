@@ -506,28 +506,43 @@ snapshot is unchanged.
 Herdr owns terminal input, bracketed-paste handling, provider keyboard protocol,
 prompt acknowledgement, and lifecycle waiting behind its native live-agent
 Interface. Symphony submits initial turns, worker results, and consultation
-responses through one atomic `agent prompt` operation. A bounded initial prompt
-wait accepts `working`, `idle`, or `done`, so a started turn and a turn that
-finishes before observation are both represented without revision heuristics or
-double submission. Subsequent bounded lifecycle observation uses server-owned
-`agent wait`, never client-side sleep/poll loops.
+responses through the same verified `agent prompt` operation. Each submission
+waits for Herdr to observe an agent state change and accepts `working`, `idle`,
+or `done`, so a started turn and a turn that finishes before observation are
+both represented without revision heuristics. The submission wait must exceed
+Herdr 0.7.5's 5000 ms prompt-effect window so an unchanged
+`state_change_seq` is classified as the typed `agent_prompt_stalled` result
+rather than an ordinary timeout. On that result, the transport re-drives
+submission with a follow-up submit input at most twice.
+Only an observed state change succeeds; exhausting the recovery bound preserves
+the typed prompt-stall failure. This provider-neutral recovery applies to
+orchestrator turns and both generated inter-agent prompt projections for Codex
+and Claude. Subsequent bounded lifecycle observation uses server-owned `agent
+wait`, never client-side sleep/poll loops.
 
 Completed terminal output is consumed from native `agent read` text; Symphony
 does not expect a JSON response envelope from that command.
 
-Native `agent_prompt_stalled` is a typed prompt-stall failure. A prompt or wait
-whose named live agent has closed is a typed closed-agent failure. Native
-timeouts remain bounded status-timeout results and protocol mismatch remains a
-machine-readable incompatible-runtime failure. Symphony does not retain the
-0.7.4 `pane run`, manual confirmation, revision acknowledgement, top-level
-wait, provider-specific multiline handling, translation, dual-version, or
-compatibility machinery.
+Native `agent_prompt_stalled` remains a typed prompt-stall failure after bounded
+recovery is exhausted. A prompt or wait whose named live agent has closed is a
+typed closed-agent failure. Native timeouts remain bounded status-timeout
+results and protocol mismatch remains a machine-readable incompatible-runtime
+failure. Symphony does not retain the 0.7.4 `pane run`, manual confirmation,
+revision acknowledgement, top-level wait, provider-specific multiline
+handling, translation, dual-version, or compatibility machinery.
 
 Inter-agent messaging uses the same `agent prompt` command for Codex and Claude.
-The runtime-owned orchestrator projection forwards the native Herdr Interface
-unchanged. The restricted worker projection permits only agent list/get/read,
-prompt, and wait operations; it denies agent start, raw pane input, logical key
-injection, topology mutation, server control, and descendant delegation.
+The runtime-owned orchestrator and restricted worker projections add the same
+verified-submission wait and bounded prompt-stall recovery before forwarding to
+the native Herdr Interface. The restricted worker projection permits only agent
+list/get/read, prompt, and wait operations; it denies agent start, raw pane
+input, logical key injection, topology mutation, server control, and descendant
+delegation.
+
+Managed isolated sessions write private Herdr update configuration with both
+version and remote manifest background checks disabled. This prevents a
+30-minute update check from changing or perturbing the pinned 0.7.5/protocol-17
+runtime contract during a role session.
 
 The Codex launcher uses unattended workspace-write/no-approval mode, disables
 `multi_agent`, disables alternate-screen rendering, and supplies the selected

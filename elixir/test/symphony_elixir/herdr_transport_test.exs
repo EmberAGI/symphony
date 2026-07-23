@@ -97,6 +97,33 @@ defmodule SymphonyElixir.HerdrTransportTest do
     fi
 
     if [ "$1" = "agent" ] && [ "$2" = "prompt" ]; then
+      if [ -n "${HERDR_FAKE_PROMPT_STALL_COUNT:-}" ]; then
+        prompt_timeout=0
+        previous_arg=
+        for arg in "$@"; do
+          if [ "$previous_arg" = "--timeout" ]; then
+            prompt_timeout=$arg
+            break
+          fi
+          previous_arg=$arg
+        done
+        if [ "$prompt_timeout" -le 5000 ]; then
+          printf '{"id":"cli:agent:prompt","error":{"code":"timeout","message":"timed out before prompt effect could be classified"}}\n' >&2
+          exit 1
+        fi
+        mkdir -p "$state_root"
+        prompt_attempt_file="$state_root/prompt-attempts"
+        prompt_attempts=0
+        if [ -f "$prompt_attempt_file" ]; then
+          IFS= read -r prompt_attempts < "$prompt_attempt_file"
+        fi
+        prompt_attempts=$((prompt_attempts + 1))
+        printf '%s\n' "$prompt_attempts" > "$prompt_attempt_file"
+        if [ "$prompt_attempts" -le "$HERDR_FAKE_PROMPT_STALL_COUNT" ]; then
+          printf '{"id":"cli:agent:prompt","error":{"code":"agent_prompt_stalled","message":"agent state_change_seq did not change","details":{"before_state_change_seq":1,"after_state_change_seq":1}}}\n' >&2
+          exit 1
+        fi
+      fi
       if [ -n "${HERDR_FAKE_PROMPT_ERROR:-}" ]; then
         printf '{"id":"cli:agent:prompt","error":{"code":"%s","message":"fake prompt failure"}}\n' "$HERDR_FAKE_PROMPT_ERROR" >&2
         exit 1
@@ -250,6 +277,56 @@ defmodule SymphonyElixir.HerdrTransportTest do
       refute commands =~ "pane send-keys"
     end
 
+    for role_herdr <- [worker_herdr, orchestrator_herdr] do
+      File.write!(context.log, "")
+      File.rm(Path.join([session.runtime_root, "herdr", "sessions", "prompt", "prompt-attempts"]))
+
+      assert {_native_response, 0} =
+               System.cmd(
+                 role_herdr,
+                 ["agent", "prompt", "implementer_orchestrator", "worker result"],
+                 env:
+                   base_env ++
+                     [
+                       {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"}
+                     ],
+                 stderr_to_stdout: true
+               )
+
+      prompt_commands =
+        context.log
+        |> File.read!()
+        |> String.split("\n")
+        |> Enum.filter(&String.contains?(&1, "agent prompt implementer_orchestrator"))
+
+      assert length(prompt_commands) == 2
+      assert Enum.any?(prompt_commands, &String.contains?(&1, "worker result --wait"))
+      assert Enum.any?(prompt_commands, &String.contains?(&1, "agent prompt implementer_orchestrator   --wait"))
+      assert Enum.all?(prompt_commands, &String.contains?(&1, "--timeout 6000"))
+
+      File.write!(context.log, "")
+      File.rm(Path.join([session.runtime_root, "herdr", "sessions", "prompt", "prompt-attempts"]))
+
+      assert {failure, 1} =
+               System.cmd(
+                 role_herdr,
+                 ["agent", "prompt", "implementer_orchestrator", "worker result"],
+                 env:
+                   base_env ++
+                     [
+                       {"HERDR_FAKE_PROMPT_STALL_COUNT", "3"}
+                     ],
+                 stderr_to_stdout: true
+               )
+
+      assert failure =~ ~s("code":"agent_prompt_stalled")
+
+      assert context.log
+             |> File.read!()
+             |> :binary.matches("agent prompt implementer_orchestrator")
+             |> length() == 3
+    end
+
     for args <- [
           ["agent", "list"],
           ["agent", "get", "implementer_orchestrator"],
@@ -309,6 +386,13 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert session.socket == Path.join(session.runtime_root, "herdr/sessions/octo-emb-1141-run-7/herdr.sock")
     assert session.pane_id == "w1:p1"
     refute Map.has_key?(session, :worker_launcher)
+
+    assert File.read!(Path.join(session.runtime_root, "herdr/config.toml")) =~
+             """
+             [update]
+             version_check = false
+             manifest_check = false
+             """
 
     worker_argv = [
       "codex",
@@ -565,6 +649,127 @@ defmodule SymphonyElixir.HerdrTransportTest do
     refute commands =~ "pane send-text"
     refute commands =~ "pane send-keys"
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
+  end
+
+  test "re-drives a stalled prompt until Herdr observes an agent state change", context do
+    for provider <- ["codex", "claude_code"] do
+      adapter_context = %{
+        herdr_bin: context.bin,
+        extra_env: [
+          {"HERDR_FAKE_LOG", context.log},
+          {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"}
+        ],
+        start_timeout_ms: 2_000,
+        poll_interval_ms: 5
+      }
+
+      assert {:ok, session} =
+               HerdrTransport.start_session(
+                 %{
+                   name: "octo-emb-1231-recover-#{provider}",
+                   isolated: true,
+                   workspace: "/tmp/selected-workspace"
+                 },
+                 adapter_context
+               )
+
+      on_exit(fn ->
+        if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
+      end)
+
+      executable = if provider == "codex", do: "codex", else: "claude"
+
+      assert {:ok, agent} =
+               HerdrTransport.start_agent(
+                 session,
+                 %{
+                   name: "implementer_orchestrator",
+                   provider: provider,
+                   cwd: "/tmp/selected-workspace",
+                   argv: [executable, "--model", "test-model"]
+                 },
+                 adapter_context
+               )
+
+      assert {:ok, %{phase: :working, agent: observed}} =
+               HerdrTransport.begin_turn(
+                 session,
+                 agent,
+                 "Complete the assignment.",
+                 6_000,
+                 adapter_context
+               )
+
+      assert observed.agent_status == "working"
+
+      prompt_commands =
+        context.log
+        |> File.read!()
+        |> String.split("\n")
+        |> Enum.filter(&String.contains?(&1, "agent prompt implementer_orchestrator"))
+
+      assert Enum.any?(prompt_commands, &String.contains?(&1, "Complete the assignment."))
+      assert Enum.any?(prompt_commands, &String.contains?(&1, "agent prompt implementer_orchestrator   --wait"))
+      assert :ok = HerdrTransport.stop_session(session, adapter_context)
+      File.write!(context.log, "")
+    end
+  end
+
+  test "returns a typed prompt-stall failure after bounded recovery retries are exhausted", context do
+    for provider <- ["codex", "claude_code"] do
+      adapter_context = %{
+        herdr_bin: context.bin,
+        extra_env: [
+          {"HERDR_FAKE_LOG", context.log},
+          {"HERDR_FAKE_PROMPT_STALL_COUNT", "3"}
+        ],
+        start_timeout_ms: 2_000,
+        poll_interval_ms: 5
+      }
+
+      assert {:ok, session} =
+               HerdrTransport.start_session(
+                 %{
+                   name: "octo-emb-1231-exhausted-#{provider}",
+                   isolated: true,
+                   workspace: "/tmp/selected-workspace"
+                 },
+                 adapter_context
+               )
+
+      executable = if provider == "codex", do: "codex", else: "claude"
+
+      assert {:ok, agent} =
+               HerdrTransport.start_agent(
+                 session,
+                 %{
+                   name: "implementer_orchestrator",
+                   provider: provider,
+                   cwd: "/tmp/selected-workspace",
+                   argv: [executable, "--model", "test-model"]
+                 },
+                 adapter_context
+               )
+
+      assert {:error, {:herdr_agent_prompt_stalled, "implementer_orchestrator"}} =
+               HerdrTransport.begin_turn(
+                 session,
+                 agent,
+                 "Complete the assignment.",
+                 6_000,
+                 adapter_context
+               )
+
+      prompt_count =
+        context.log
+        |> File.read!()
+        |> :binary.matches("agent prompt implementer_orchestrator")
+        |> length()
+
+      assert prompt_count == 3
+      assert :ok = HerdrTransport.stop_session(session, adapter_context)
+      File.write!(context.log, "")
+    end
   end
 
   test "recognizes a prompt that completes before the caller observes working", context do
