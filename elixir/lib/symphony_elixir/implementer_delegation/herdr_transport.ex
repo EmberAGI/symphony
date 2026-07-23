@@ -435,9 +435,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   defp owned_session_liveness_from_server(output, context, name, agent_name, env, deadline) do
     case parse_server_status(output) do
       {:ok, %{status: "running"} = status} ->
-        with :ok <- validate_runtime(status) do
-          read_owned_agent_liveness(context, name, agent_name, env, deadline)
-        else
+        case validate_runtime(status) do
+          :ok -> read_owned_agent_liveness(context, name, agent_name, env, deadline)
           {:error, {:incompatible_herdr_runtime, _details}} -> {:ok, :unknown}
         end
 
