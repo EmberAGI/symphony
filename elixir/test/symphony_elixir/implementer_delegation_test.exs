@@ -269,7 +269,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
                on_message: fn message -> send(self(), {:runtime_message, message}) end
              )
 
-    assert_receive {:transport, :begin_turn, %{name: "octo-emb-1141-run-7"}, %{name: "implementer_orchestrator"}, "Implement the bounded tracer task.", 30_000}
+    assert_receive {:transport, :begin_turn, %{name: "octo-emb-1141-run-7"}, %{name: "implementer_orchestrator"}, "Implement the bounded tracer task.", 120_000}
 
     assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 30_000}
     assert_receive {:transport, :read_agent, _, _, %{lines: 240, source: :recent_unwrapped}}
@@ -731,7 +731,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       commands = File.read!(herdr_log)
 
       assert commands =~
-               "--session #{session.name} agent start implementer_worker --kind #{kind} --pane w7:p42 --timeout 30000 --"
+               "--session #{session.name} agent start implementer_worker --kind #{kind} --pane w7:p42 --timeout 120000 --"
 
       assert commands =~ "NATIVE_PROVIDER_EXEC agent=implementer_worker pane=w7:p42"
       assert commands =~ "path=#{runtime_root}/worker-bin:#{fake_provider_bin}:"
