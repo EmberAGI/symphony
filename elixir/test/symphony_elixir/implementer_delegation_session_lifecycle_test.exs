@@ -57,6 +57,38 @@ defmodule SymphonyElixir.ImplementerDelegationSessionLifecycleTest do
     end
   end
 
+  defmodule PrepareAndCleanupFailTransport do
+    def default_server_snapshot(%{owner: owner}) do
+      send(owner, :default_server_snapshot)
+      {:ok, %{status: "running", version: "v", protocol: 1, socket: "/tmp/default.sock"}}
+    end
+
+    def start_session(spec, %{owner: owner}) do
+      send(owner, {:start_session, spec.name})
+      {:ok, %{name: spec.name, socket: "/tmp/#{spec.name}/sock", runtime_root: "/tmp/#{spec.name}"}}
+    end
+
+    def prepare_worker(_session, _spec, %{owner: owner}) do
+      send(owner, :prepare_worker)
+      {:error, :worker_boom}
+    end
+
+    def stop_session(session, %{owner: owner}) do
+      send(owner, {:stop_session, session.name})
+      {:error, :stop_boom}
+    end
+
+    def owned_session_ref(session, _context) do
+      %{
+        kind: "herdr",
+        session_name: session.name,
+        runtime_root: session.runtime_root,
+        cleanup_module: __MODULE__,
+        cleanup_context: %{}
+      }
+    end
+  end
+
   defmodule NoOrchestratorBinTransport do
     def default_server_snapshot(%{owner: owner}) do
       send(owner, :default_server_snapshot)
@@ -158,6 +190,33 @@ defmodule SymphonyElixir.ImplementerDelegationSessionLifecycleTest do
              )
 
     assert_received {:stop_session, _name}
+  end
+
+  test "a failed worker preparation quarantines the owned session when cleanup cannot be verified" do
+    assert {:error,
+            {:owned_session_cleanup_unverified,
+             %{
+               subtype: "implementer_worker_prepare",
+               startup_failure: :worker_boom,
+               cleanup_failure: :stop_boom,
+               owned_session_ref: %{
+                 kind: "herdr",
+                 session_name: session_name,
+                 runtime_root: runtime_root
+               }
+             }}} =
+             ImplementerDelegation.start_session(
+               "/tmp/ws",
+               valid_contract(),
+               issue_identifier: "EMB-5",
+               run_id: "r5-cleanup",
+               transport: PrepareAndCleanupFailTransport,
+               transport_context: %{owner: self()}
+             )
+
+    assert session_name == "octo-emb-5-r5-cleanup"
+    assert runtime_root == "/tmp/#{session_name}"
+    assert_received {:stop_session, ^session_name}
   end
 
   test "a worker launcher without an orchestrator_bin leaves the orchestrator PATH untouched" do

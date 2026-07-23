@@ -2,6 +2,7 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Runtime.ProcessOwnership
+  alias SymphonyElixir.Tracker.{ClaimLease, Memory}
 
   defmodule OwnedSessionLivenessAdapter do
     def owned_session_liveness(ownership_ref) do
@@ -267,6 +268,60 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
     end)
 
     assert_final_refetch_after_claim(issue.id)
+  end
+
+  test "final dispatch refusal releases only the claim created by that run" do
+    issue_id = "issue-dispatch-final-refusal"
+    run_id = "run-dispatch-final-refusal"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-DISPATCH-REFUSAL",
+      title: "Reconcile refused dispatch",
+      state: "In Progress",
+      repository: "EmberAGI/symphony",
+      labels: []
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+    end)
+
+    assert {:ok, claim_lease} =
+             Memory.upsert_claim_lease(issue_id, %{
+               comment_id: "comment-dispatch-final-refusal",
+               issue_identifier: issue.identifier,
+               role: "implementer",
+               holder: ClaimLease.holder_id(),
+               run_id: run_id,
+               refreshed_at: DateTime.utc_now(),
+               expires_at: DateTime.add(DateTime.utc_now(), 60, :second),
+               state: "active"
+             })
+
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "active"}}, 500
+
+    claimed_issue = %{issue | claim_lease: claim_lease, claim_leases: [claim_lease]}
+    terminal_issue = %{claimed_issue | state: "Done"}
+    fetcher = fn [^issue_id] -> {:ok, [terminal_issue]} end
+
+    state = %Orchestrator.State{claimed: MapSet.new()}
+
+    assert {^state, {:error, :issue_or_claim_changed}} =
+             Orchestrator.reconcile_final_dispatch_fence_for_test(
+               state,
+               claimed_issue,
+               run_id,
+               fetcher
+             )
+
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, released_lease}, 500
+    assert released_lease.comment_id == claim_lease.comment_id
+    assert released_lease.run_id == run_id
+    assert released_lease.state == "released"
   end
 
   # Late-detached detection is Linux-hosted runtime behavior: it needs /proc

@@ -58,7 +58,13 @@ defmodule SymphonyElixir.AgentRunner do
 
     case Workspace.create_for_issue(issue, worker_host) do
       {:ok, workspace} ->
-        send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
+        send_worker_runtime_info(
+          codex_update_recipient,
+          issue,
+          Keyword.get(opts, :run_id),
+          worker_host,
+          workspace
+        )
 
         try do
           with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
@@ -87,11 +93,11 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_codex_update(_recipient, _issue, _message), do: :ok
 
-  defp send_worker_runtime_info(recipient, %Issue{id: issue_id}, worker_host, workspace)
+  defp send_worker_runtime_info(recipient, %Issue{id: issue_id}, run_id, worker_host, workspace)
        when is_binary(issue_id) and is_pid(recipient) and is_binary(workspace) do
     send(
       recipient,
-      {:worker_runtime_info, issue_id,
+      {:worker_runtime_info, issue_id, run_id,
        %{
          worker_host: worker_host,
          workspace_path: workspace
@@ -101,7 +107,7 @@ defmodule SymphonyElixir.AgentRunner do
     :ok
   end
 
-  defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
+  defp send_worker_runtime_info(_recipient, _issue, _run_id, _worker_host, _workspace), do: :ok
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
@@ -117,23 +123,51 @@ defmodule SymphonyElixir.AgentRunner do
       |> put_optional(:delegation_transport, Keyword.get(opts, :delegation_transport))
       |> put_optional(:delegation_transport_context, Keyword.get(opts, :delegation_transport_context))
 
-    with {:ok, session} <-
-           AgentRuntime.start_session(workspace, session_opts) do
-      send_owned_session_runtime_info(codex_update_recipient, issue, session)
+    case AgentRuntime.start_session(workspace, session_opts) do
+      {:ok, session} ->
+        send_owned_session_runtime_info(
+          codex_update_recipient,
+          issue,
+          Keyword.get(opts, :run_id),
+          session
+        )
 
-      try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
-      after
-        AgentRuntime.stop_session(session)
-      end
+        try do
+          do_run_codex_turns(
+            session,
+            workspace,
+            issue,
+            codex_update_recipient,
+            opts,
+            issue_state_fetcher,
+            1,
+            max_turns
+          )
+        after
+          AgentRuntime.stop_session(session)
+        end
+
+      {:error, {:owned_session_cleanup_unverified, details} = reason}
+      when is_map(details) ->
+        send_owned_session_ref(
+          codex_update_recipient,
+          issue,
+          Keyword.get(opts, :run_id),
+          Map.get(details, :owned_session_ref)
+        )
+
+        {:error, reason}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  defp send_owned_session_runtime_info(recipient, %Issue{id: issue_id}, session)
+  defp send_owned_session_runtime_info(recipient, %Issue{id: issue_id}, run_id, session)
        when is_binary(issue_id) and is_pid(recipient) do
     case AgentRuntime.owned_session_ref(session) do
       ownership_ref when is_map(ownership_ref) ->
-        send(recipient, {:owned_session_runtime_info, issue_id, ownership_ref})
+        send(recipient, {:owned_session_runtime_info, issue_id, run_id, ownership_ref})
         :ok
 
       _ ->
@@ -141,7 +175,15 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp send_owned_session_runtime_info(_recipient, _issue, _session), do: :ok
+  defp send_owned_session_runtime_info(_recipient, _issue, _run_id, _session), do: :ok
+
+  defp send_owned_session_ref(recipient, %Issue{id: issue_id}, run_id, ownership_ref)
+       when is_binary(issue_id) and is_pid(recipient) and is_map(ownership_ref) do
+    send(recipient, {:owned_session_runtime_info, issue_id, run_id, ownership_ref})
+    :ok
+  end
+
+  defp send_owned_session_ref(_recipient, _issue, _run_id, _ownership_ref), do: :ok
 
   defp put_optional(opts, _key, nil), do: opts
   defp put_optional(opts, key, value), do: Keyword.put(opts, key, value)

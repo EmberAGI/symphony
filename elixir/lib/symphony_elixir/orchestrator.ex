@@ -177,21 +177,15 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:worker_runtime_info, issue_id, runtime_info}, %{running: running} = state)
       when is_binary(issue_id) and is_map(runtime_info) do
-    case Map.get(running, issue_id) do
-      nil ->
-        {:noreply, state}
+    handle_worker_runtime_info(state, running, issue_id, nil, runtime_info)
+  end
 
-      running_entry ->
-        updated_running_entry =
-          running_entry
-          |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
-          |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
-          |> record_process_ownership(issue_id)
-          |> maybe_refresh_claim_lease(issue_id, true)
-
-        notify_dashboard()
-        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
-    end
+  def handle_info(
+        {:worker_runtime_info, issue_id, run_id, runtime_info},
+        %{running: running} = state
+      )
+      when is_binary(issue_id) and is_map(runtime_info) do
+    handle_worker_runtime_info(state, running, issue_id, run_id, runtime_info)
   end
 
   def handle_info(
@@ -199,21 +193,20 @@ defmodule SymphonyElixir.Orchestrator do
         %{running: running} = state
       )
       when is_binary(issue_id) and is_map(ownership_ref) do
-    case Map.get(running, issue_id) do
-      nil ->
-        # The issue can leave the active state between session startup and this
-        # message. Clean the now-unclaimed capability immediately.
-        _ = AgentRuntime.cleanup_owned_session(ownership_ref)
-        {:noreply, state}
+    handle_owned_session_runtime_info(state, running, issue_id, nil, ownership_ref)
+  end
 
-      running_entry ->
-        updated_running_entry =
-          running_entry
-          |> Map.put(:owned_session_ref, ownership_ref)
-          |> record_process_ownership(issue_id)
+  def handle_info(
+        {:owned_session_runtime_info, issue_id, run_id, ownership_ref},
+        %{running: running} = state
+      )
+      when is_binary(issue_id) and is_map(ownership_ref) do
+    handle_owned_session_runtime_info(state, running, issue_id, run_id, ownership_ref)
+  end
 
-        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
-    end
+  def handle_info({:startup_owned_session_quarantine, evidence}, %State{} = state)
+      when is_map(evidence) do
+    {:noreply, reconcile_startup_owned_session_quarantine(state, evidence)}
   end
 
   def handle_info(
@@ -419,6 +412,23 @@ defmodule SymphonyElixir.Orchestrator do
     reconcile_orphaned_claims(state)
   end
 
+  @spec reconcile_final_dispatch_fence_for_test(
+          term(),
+          Issue.t(),
+          String.t(),
+          ([String.t()] -> term())
+        ) ::
+          {term(), {:ok, Issue.t(), ClaimLease.t()} | {:error, term()}}
+  def reconcile_final_dispatch_fence_for_test(
+        %State{} = state,
+        %Issue{} = issue,
+        run_id,
+        issue_fetcher
+      )
+      when is_binary(run_id) and is_function(issue_fetcher, 1) do
+    reconcile_final_dispatch_fence(state, issue, run_id, issue_fetcher)
+  end
+
   defp reconcile_running_issue_states([], state, _active_states, _terminal_states), do: state
 
   defp reconcile_running_issue_states([issue | rest], state, active_states, terminal_states) do
@@ -576,14 +586,19 @@ defmodule SymphonyElixir.Orchestrator do
     state = record_session_completion_totals(state, running_entry)
     lifecycle_verdict = teardown_owned_session_lifecycle_verdict(running_entry)
     terminate_running_entry_process(running_entry)
+    process_status = record_process_completion(running_entry, :terminated, lifecycle_verdict)
 
-    case lifecycle_task_exit_failure(lifecycle_verdict, issue_id, running_entry) do
+    case teardown_task_exit_failure(
+           lifecycle_verdict,
+           process_status,
+           issue_id,
+           running_entry
+         ) do
       {:irrecoverable, failure, failure_observation} ->
         quarantine_terminated_entry(
           state,
           issue_id,
           running_entry,
-          lifecycle_verdict,
           failure,
           failure_observation
         )
@@ -593,7 +608,6 @@ defmodule SymphonyElixir.Orchestrator do
           state,
           issue_id,
           running_entry,
-          lifecycle_verdict,
           cleanup_workspace,
           release_issue
         )
@@ -616,12 +630,9 @@ defmodule SymphonyElixir.Orchestrator do
          state,
          issue_id,
          running_entry,
-         lifecycle_verdict,
          failure,
          failure_observation
        ) do
-    record_process_completion(running_entry, :terminated, lifecycle_verdict)
-
     blocked_state =
       state
       |> put_failure_observation(issue_id, failure_observation)
@@ -634,21 +645,29 @@ defmodule SymphonyElixir.Orchestrator do
          state,
          issue_id,
          running_entry,
-         lifecycle_verdict,
          cleanup_workspace,
          release_issue
        ) do
     maybe_cleanup_terminated_workspace(running_entry, cleanup_workspace)
-    record_process_completion(running_entry, :terminated, lifecycle_verdict)
-    maybe_release_claim_lease(release_issue || Map.get(running_entry, :issue))
-    RoleTurnRecovery.clear_turn(issue_id)
+    release_issue = release_issue || Map.get(running_entry, :issue)
 
-    released_state = %{
+    state = %{
       state
       | running: Map.delete(state.running, issue_id),
-        claimed: MapSet.delete(state.claimed, issue_id),
         retry_attempts: Map.delete(state.retry_attempts, issue_id)
     }
+
+    released_state =
+      release_issue_claim(
+        state,
+        issue_id,
+        release_issue,
+        Map.get(running_entry, :run_id)
+      )
+
+    unless MapSet.member?(released_state.claimed, issue_id) do
+      RoleTurnRecovery.clear_turn(issue_id)
+    end
 
     {released_state, :released}
   end
@@ -753,7 +772,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp recover_stale_owned_sessions do
     case ProcessOwnership.recover_stale_owned_sessions(
            &AgentRuntime.cleanup_owned_session/1,
-           &AgentRuntime.owned_session_liveness/1
+           &AgentRuntime.owned_session_liveness/1,
+           fn evidence -> send(self(), {:startup_owned_session_quarantine, evidence}) end
          ) do
       {:ok, 0} ->
         :ok
@@ -763,6 +783,217 @@ defmodule SymphonyElixir.Orchestrator do
         :ok
     end
   end
+
+  defp reconcile_startup_owned_session_quarantine(
+         %State{} = state,
+         %{record: record} = evidence
+       )
+       when is_map(record) do
+    issue_id = startup_record_value(record, :issue_id)
+    issue = detached_owned_session_issue(issue_id)
+    running_entry = startup_owned_session_entry(issue, record)
+
+    verdict =
+      LifecycleVerdict.evaluate(
+        session: startup_quarantine_liveness(evidence),
+        lease: running_entry_lease_liveness(running_entry),
+        provider_turn: :failed
+      )
+
+    case lifecycle_task_exit_failure(verdict, issue_id, running_entry) do
+      {:irrecoverable, failure, failure_observation} ->
+        block_task_exit_failure(
+          state,
+          issue_id,
+          running_entry,
+          failure,
+          failure_observation
+        )
+
+      :continue ->
+        state
+    end
+  end
+
+  defp reconcile_startup_owned_session_quarantine(%State{} = state, evidence) do
+    Logger.warning("Ignoring malformed startup ownership quarantine evidence: #{inspect(evidence)}")
+    state
+  end
+
+  defp startup_owned_session_entry(%Issue{} = issue, record) do
+    claim_lease = issue.claim_lease
+
+    %{
+      issue: issue,
+      identifier: issue.identifier || startup_record_value(record, :issue_identifier) || issue.id,
+      owned_session_ref: startup_record_value(record, :owned_session_ref),
+      run_id: startup_record_value(record, :run_id) || claim_lease_value(claim_lease, :run_id),
+      retry_epoch: claim_lease_value(claim_lease, :comment_id),
+      workspace_path:
+        startup_record_value(record, :workspace_path) ||
+          claim_lease_value(claim_lease, :workspace_path),
+      claim_lease: claim_lease,
+      started_at: claim_lease_value(claim_lease, :started_at) || DateTime.utc_now()
+    }
+  end
+
+  defp startup_quarantine_liveness(%{
+         cleanup_result: :ok,
+         session_liveness: status
+       })
+       when status in [:live, :absent, :unknown, :unreachable],
+       do: status
+
+  defp startup_quarantine_liveness(%{session_liveness: :live}), do: :live
+  defp startup_quarantine_liveness(_evidence), do: :unknown
+
+  defp startup_record_value(record, key) when is_map(record) and is_atom(key) do
+    Map.get(record, key) || Map.get(record, Atom.to_string(key))
+  end
+
+  defp handle_owned_session_runtime_info(state, running, issue_id, run_id, ownership_ref) do
+    case Map.get(running, issue_id) do
+      nil ->
+        ownership_ref = maybe_put_owned_session_run_id(ownership_ref, run_id)
+        {:noreply, reconcile_detached_owned_session(state, issue_id, ownership_ref)}
+
+      %{run_id: current_run_id} = running_entry
+      when is_binary(run_id) and run_id == current_run_id ->
+        updated_running_entry =
+          running_entry
+          |> Map.put(:owned_session_ref, ownership_ref)
+          |> record_process_ownership(issue_id)
+
+        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+
+      %{run_id: nil} = running_entry when is_nil(run_id) ->
+        updated_running_entry =
+          running_entry
+          |> Map.put(:owned_session_ref, ownership_ref)
+          |> record_process_ownership(issue_id)
+
+        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+
+      running_entry ->
+        Logger.warning(
+          "Refusing stale owned-session metadata for issue_id=#{issue_id} " <>
+            "message_run_id=#{inspect(run_id)} current_run_id=#{inspect(Map.get(running_entry, :run_id))}"
+        )
+
+        ownership_ref = maybe_put_owned_session_run_id(ownership_ref, run_id)
+        issue = Map.get(running_entry, :issue)
+
+        {:noreply,
+         reconcile_detached_owned_session(
+           state,
+           issue_id,
+           ownership_ref,
+           issue
+         )}
+    end
+  end
+
+  defp maybe_put_owned_session_run_id(ownership_ref, run_id) when is_binary(run_id),
+    do: Map.put_new(ownership_ref, :run_id, run_id)
+
+  defp maybe_put_owned_session_run_id(ownership_ref, _run_id), do: ownership_ref
+
+  defp handle_worker_runtime_info(state, running, issue_id, run_id, runtime_info) do
+    case Map.get(running, issue_id) do
+      nil ->
+        {:noreply, state}
+
+      %{run_id: current_run_id} when not is_nil(run_id) and run_id != current_run_id ->
+        Logger.warning(
+          "Refusing stale worker runtime metadata for issue_id=#{issue_id} " <>
+            "message_run_id=#{inspect(run_id)} current_run_id=#{inspect(current_run_id)}"
+        )
+
+        {:noreply, state}
+
+      %{run_id: current_run_id} when is_nil(run_id) and not is_nil(current_run_id) ->
+        Logger.warning(
+          "Refusing unfenced worker runtime metadata for issue_id=#{issue_id} " <>
+            "current_run_id=#{inspect(current_run_id)}"
+        )
+
+        {:noreply, state}
+
+      running_entry ->
+        updated_running_entry =
+          running_entry
+          |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
+          |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
+          |> record_process_ownership(issue_id)
+          |> maybe_refresh_claim_lease(issue_id, true)
+
+        notify_dashboard()
+        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+    end
+  end
+
+  defp reconcile_detached_owned_session(
+         %State{} = state,
+         issue_id,
+         ownership_ref,
+         issue \\ nil
+       ) do
+    issue = if match?(%Issue{}, issue), do: issue, else: detached_owned_session_issue(issue_id)
+    running_entry = detached_owned_session_entry(issue, ownership_ref)
+    lifecycle_verdict = owned_session_teardown_lifecycle_verdict(running_entry, :failed)
+    process_status = record_process_completion(running_entry, :detached, lifecycle_verdict)
+
+    case teardown_task_exit_failure(
+           lifecycle_verdict,
+           process_status,
+           issue_id,
+           running_entry
+         ) do
+      {:irrecoverable, failure, failure_observation} ->
+        block_task_exit_failure(
+          state,
+          issue_id,
+          running_entry,
+          failure,
+          failure_observation
+        )
+
+      :continue ->
+        state
+    end
+  end
+
+  defp detached_owned_session_issue(issue_id) do
+    case Tracker.fetch_issue_states_by_ids([issue_id]) do
+      {:ok, [%Issue{} = issue | _]} ->
+        issue
+
+      result ->
+        Logger.warning("Detached owned-session cleanup could not refetch issue_id=#{issue_id}: #{inspect(result)}")
+
+        %Issue{id: issue_id, identifier: issue_id}
+    end
+  end
+
+  defp detached_owned_session_entry(%Issue{} = issue, ownership_ref) do
+    claim_lease = issue.claim_lease
+
+    %{
+      issue: issue,
+      identifier: issue.identifier || issue.id,
+      owned_session_ref: ownership_ref,
+      run_id: Map.get(ownership_ref, :run_id) || claim_lease_value(claim_lease, :run_id),
+      retry_epoch: claim_lease_value(claim_lease, :comment_id),
+      workspace_path:
+        Map.get(ownership_ref, :workspace_path) ||
+          claim_lease_value(claim_lease, :workspace_path),
+      claim_lease: claim_lease,
+      started_at: claim_lease_value(claim_lease, :started_at) || DateTime.utc_now()
+    }
+  end
+
+  defp claim_lease_value(%ClaimLease{} = claim_lease, key), do: Map.get(claim_lease, key)
+  defp claim_lease_value(_claim_lease, _key), do: nil
 
   defp teardown_owned_session_lifecycle_verdict(%{owned_session_ref: ownership_ref} = running_entry)
        when is_map(ownership_ref) do
@@ -777,11 +1008,17 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when is_map(ownership_ref) and provider_turn in [:working, :completed, :failed] do
     cleanup_result = cleanup_owned_session_for_verdict(ownership_ref)
-    observed_liveness = AgentRuntime.owned_session_liveness(ownership_ref)
+
+    observed_liveness =
+      case cleanup_result do
+        {:ok, :absent} -> :absent
+        _ -> AgentRuntime.owned_session_liveness(ownership_ref)
+      end
 
     session_liveness =
       case {cleanup_result, observed_liveness} do
         {:ok, status} -> status
+        {{:ok, :absent}, _status} -> :absent
         {{:error, _reason}, :live} -> :live
         {{:error, _reason}, _status} -> :unknown
       end
@@ -797,6 +1034,9 @@ defmodule SymphonyElixir.Orchestrator do
     case AgentRuntime.cleanup_owned_session(ownership_ref) do
       :ok ->
         :ok
+
+      {:ok, :absent} = verified ->
+        verified
 
       {:error, reason} = error ->
         Logger.warning("Failed to clean up run-owned runtime before lifecycle verdict: #{inspect(reason)}")
@@ -1176,8 +1416,13 @@ defmodule SymphonyElixir.Orchestrator do
          _claim_lease,
          run_id
        ) do
-    case refetch_dispatch_fence(issue, run_id) do
-      {:ok, %Issue{} = refreshed_issue, %ClaimLease{} = refreshed_claim_lease} ->
+    case reconcile_final_dispatch_fence(
+           state,
+           issue,
+           run_id,
+           &Tracker.fetch_issue_states_by_ids/1
+         ) do
+      {state, {:ok, %Issue{} = refreshed_issue, %ClaimLease{} = refreshed_claim_lease}} ->
         spawn_issue_on_worker_host_with_result(
           state,
           refreshed_issue,
@@ -1187,15 +1432,31 @@ defmodule SymphonyElixir.Orchestrator do
           refreshed_claim_lease
         )
 
-      {:error, reason} ->
+      {state, {:error, reason}} ->
         Logger.warning("Skipping dispatch; final ownership fence refused #{issue_context(issue)}: #{inspect(reason)}")
         {state, {:failed, "dispatch_fence_refused"}}
     end
   end
 
-  defp refetch_dispatch_fence(%Issue{id: issue_id}, run_id)
-       when is_binary(issue_id) and is_binary(run_id) do
-    case Tracker.fetch_issue_states_by_ids([issue_id]) do
+  defp reconcile_final_dispatch_fence(state, issue, run_id, issue_fetcher) do
+    case refetch_dispatch_fence(issue, run_id, issue_fetcher) do
+      {:ok, %Issue{} = refreshed_issue, %ClaimLease{} = refreshed_claim_lease} ->
+        {state, {:ok, refreshed_issue, refreshed_claim_lease}}
+
+      {:error, reason, %Issue{} = refreshed_issue} ->
+        case release_refused_dispatch_claim(refreshed_issue, run_id) do
+          :ok -> {state, {:error, reason}}
+          {:error, release_reason} -> {state, {:error, {reason, {:claim_release_failed, release_reason}}}}
+        end
+
+      {:error, reason, nil} ->
+        {state, {:error, reason}}
+    end
+  end
+
+  defp refetch_dispatch_fence(%Issue{id: issue_id}, run_id, issue_fetcher)
+       when is_binary(issue_id) and is_binary(run_id) and is_function(issue_fetcher, 1) do
+    case issue_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
         with true <- dispatch_issue_still_eligible?(refreshed_issue),
              %ClaimLease{} = refreshed_claim_lease <-
@@ -1204,17 +1465,32 @@ defmodule SymphonyElixir.Orchestrator do
              false <- conflicting_dispatch_claim?(refreshed_issue, refreshed_claim_lease) do
           {:ok, refreshed_issue, refreshed_claim_lease}
         else
-          false -> {:error, :issue_or_claim_changed}
-          nil -> {:error, :claim_missing_after_refetch}
-          {:error, reason} -> {:error, reason}
-          true -> {:error, :conflicting_claim_after_refetch}
+          false -> {:error, :issue_or_claim_changed, refreshed_issue}
+          nil -> {:error, :claim_missing_after_refetch, refreshed_issue}
+          {:error, reason} -> {:error, reason, refreshed_issue}
+          true -> {:error, :conflicting_claim_after_refetch, refreshed_issue}
         end
 
       {:ok, []} ->
-        {:error, :issue_missing_after_claim_upsert}
+        {:error, :issue_missing_after_claim_upsert, nil}
 
       {:error, reason} ->
-        {:error, {:claim_refetch_failed, reason}}
+        {:error, {:claim_refetch_failed, reason}, nil}
+    end
+  end
+
+  defp release_refused_dispatch_claim(%Issue{} = issue, run_id) when is_binary(run_id) do
+    issue
+    |> issue_claim_leases()
+    |> Enum.find(fn %ClaimLease{} = claim_lease ->
+      claim_lease.run_id == run_id and
+        ClaimLease.owned_by_current_holder?(claim_lease) and
+        claim_lease_role_matches?(claim_lease) and
+        claim_lease_workspace_matches?(issue, claim_lease)
+    end)
+    |> case do
+      %ClaimLease{} = claim_lease -> release_claim_lease(issue, claim_lease)
+      nil -> :ok
     end
   end
 
@@ -1464,6 +1740,10 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.warning("Dropping retry timer for issue_id=#{issue_id}; issue is already running")
         state
 
+      Map.has_key?(state.blocked_failures, issue_id) ->
+        Logger.warning("Retry chain missing for quarantined issue_id=#{issue_id}; preserving blocked claim")
+        state
+
       MapSet.member?(state.claimed, issue_id) ->
         Logger.warning("Retry chain missing for claimed issue_id=#{issue_id}; releasing leaked claim")
         release_issue_claim(state, issue_id)
@@ -1502,6 +1782,9 @@ defmodule SymphonyElixir.Orchestrator do
     terminal_states = terminal_state_set()
 
     cond do
+      process_ownership_blocks_dispatch?(issue) ->
+        handle_process_blocked_retry(state, issue, attempt, metadata)
+
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
@@ -1510,9 +1793,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       retry_candidate_issue?(issue, terminal_states) ->
         handle_active_retry(state, issue, attempt, metadata)
-
-      retry_blocked_by_process_ownership?(issue, terminal_states) ->
-        handle_process_blocked_retry(state, issue, attempt, metadata)
 
       true ->
         Logger.debug("Issue left active states, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
@@ -1541,19 +1821,22 @@ defmodule SymphonyElixir.Orchestrator do
   defp run_terminal_workspace_cleanup do
     case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
       {:ok, issues} ->
-        issues
-        |> Enum.each(fn
-          %Issue{} = issue ->
-            cleanup_issue_workspace(issue)
-
-          _ ->
-            :ok
-        end)
+        Enum.each(issues, &cleanup_terminal_issue_workspace/1)
 
       {:error, reason} ->
         Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
     end
   end
+
+  defp cleanup_terminal_issue_workspace(%Issue{} = issue) do
+    if process_ownership_blocks_dispatch?(issue) do
+      Logger.warning("Skipping startup terminal workspace cleanup; live ownership still blocks #{issue_context(issue)}")
+    else
+      cleanup_issue_workspace(issue)
+    end
+  end
+
+  defp cleanup_terminal_issue_workspace(_issue), do: :ok
 
   defp notify_dashboard do
     StatusDashboard.notify_update()
@@ -1655,11 +1938,16 @@ defmodule SymphonyElixir.Orchestrator do
          lifecycle_verdict,
          process_status
        ) do
-    case lifecycle_task_exit_failure(lifecycle_verdict, issue_id, running_entry) do
+    case teardown_task_exit_failure(
+           lifecycle_verdict,
+           process_status,
+           issue_id,
+           running_entry
+         ) do
       {:irrecoverable, failure, failure_observation} ->
         Logger.error(
           "Lifecycle verdict refused task exit mutation for issue_id=#{issue_id} " <>
-            "session_id=#{session_id} session_liveness=#{lifecycle_verdict.session}"
+            "session_id=#{session_id} session_liveness=#{lifecycle_session_for_log(lifecycle_verdict)}"
         )
 
         block_task_exit_failure(
@@ -1679,6 +1967,7 @@ defmodule SymphonyElixir.Orchestrator do
           running_entry,
           reason,
           session_id,
+          lifecycle_verdict,
           process_status
         )
     end
@@ -1691,6 +1980,30 @@ defmodule SymphonyElixir.Orchestrator do
          running_entry,
          _reason,
          session_id,
+         %LifecycleVerdict{claim_release: :allow, retry: :refuse},
+         _process_status
+       ) do
+    Logger.info("Agent task settled for issue_id=#{issue_id} session_id=#{session_id}; releasing claim without retry")
+    RoleTurnRecovery.clear_turn(issue_id)
+
+    state
+    |> clear_failure_observation(issue_id)
+    |> complete_issue(issue_id)
+    |> release_issue_claim(
+      issue_id,
+      Map.get(running_entry, :issue),
+      Map.get(running_entry, :run_id)
+    )
+  end
+
+  defp apply_task_exit_classification(
+         :normal,
+         state,
+         issue_id,
+         running_entry,
+         _reason,
+         session_id,
+         _lifecycle_verdict,
          process_status
        ) do
     Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
@@ -1713,6 +2026,7 @@ defmodule SymphonyElixir.Orchestrator do
          running_entry,
          _reason,
          _session_id,
+         _lifecycle_verdict,
          _process_status
        ) do
     RoleTurnRecovery.clear_turn(issue_id)
@@ -1726,6 +2040,7 @@ defmodule SymphonyElixir.Orchestrator do
          running_entry,
          reason,
          session_id,
+         _lifecycle_verdict,
          process_status
        ) do
     exit_reason = retryable_task_exit_reason(reason, failure)
@@ -1817,6 +2132,60 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp lifecycle_task_exit_failure(_verdict, _issue_id, _running_entry), do: :continue
 
+  defp teardown_task_exit_failure(
+         lifecycle_verdict,
+         process_status,
+         issue_id,
+         running_entry
+       ) do
+    case lifecycle_task_exit_failure(lifecycle_verdict, issue_id, running_entry) do
+      :continue ->
+        process_ownership_task_exit_failure(process_status, issue_id, running_entry)
+
+      failure ->
+        failure
+    end
+  end
+
+  defp process_ownership_task_exit_failure(:quarantined, issue_id, running_entry) do
+    context = runtime_failure_context(issue_id, running_entry)
+
+    reason =
+      {:owned_session_cleanup_unverified,
+       %{
+         subtype: "owned_process_tree",
+         message: "owned process tree remained live after session cleanup"
+       }}
+
+    {failure_observation, {:irrecoverable, failure}} =
+      AgentRuntime.record_failure_observation(nil, reason, context)
+
+    {:irrecoverable, failure, failure_observation}
+  end
+
+  defp process_ownership_task_exit_failure(
+         :ownership_record_failed,
+         issue_id,
+         running_entry
+       ) do
+    context = runtime_failure_context(issue_id, running_entry)
+
+    reason =
+      {:owned_session_cleanup_unverified,
+       %{
+         subtype: "process_ownership_registry",
+         message: "owned process cleanup could not be persisted in the ownership registry"
+       }}
+
+    {failure_observation, {:irrecoverable, failure}} =
+      AgentRuntime.record_failure_observation(nil, reason, context)
+
+    {:irrecoverable, failure, failure_observation}
+  end
+
+  defp process_ownership_task_exit_failure(_process_status, _issue_id, _running_entry),
+    do: :continue
+
   defp running_entry_lease_liveness(%{claim_lease: %ClaimLease{} = claim_lease}) do
     if ClaimLease.expired?(claim_lease, DateTime.utc_now()), do: :expired, else: :live
   end
@@ -1825,6 +2194,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp provider_turn_for_task_exit(:normal), do: :completed
   defp provider_turn_for_task_exit(_reason), do: :failed
+
+  defp lifecycle_session_for_log(%LifecycleVerdict{session: session}), do: session
+  defp lifecycle_session_for_log(nil), do: :not_recorded
 
   defp classify_task_exit(:normal, _running_entry, _issue_id, _state), do: :normal
 
@@ -2153,6 +2525,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> Map.keys()
       |> MapSet.new()
       |> MapSet.union(MapSet.new(Map.keys(state.retry_attempts)))
+      |> MapSet.union(MapSet.new(Map.keys(state.blocked_failures)))
 
     state.claimed
     |> MapSet.difference(active_claims)
@@ -2162,10 +2535,15 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp release_issue_claim(%State{} = state, issue_id, issue \\ nil) do
+  defp release_issue_claim(
+         %State{} = state,
+         issue_id,
+         issue \\ nil,
+         expected_run_id \\ nil
+       ) do
     release_result =
       with {:ok, release_issue} <- resolve_claim_release_issue(issue_id, issue) do
-        maybe_release_claim_lease(release_issue)
+        maybe_release_claim_lease(release_issue, expected_run_id)
       end
 
     case release_result do
@@ -2463,17 +2841,45 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp maybe_release_claim_lease(%Issue{} = issue) do
-    claim_lease = current_scope_claim_lease(issue)
+  defp maybe_release_claim_lease(%Issue{} = issue, expected_run_id) do
+    case release_claim_lease_for(issue, expected_run_id) do
+      {:ok, nil} ->
+        :ok
 
-    if is_nil(claim_lease) do
-      :ok
-    else
-      release_claim_lease(issue, claim_lease)
+      {:ok, %ClaimLease{} = claim_lease} ->
+        release_claim_lease(issue, claim_lease)
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  defp maybe_release_claim_lease(_issue), do: :ok
+  defp maybe_release_claim_lease(_issue, _expected_run_id), do: :ok
+
+  defp release_claim_lease_for(%Issue{} = issue, expected_run_id)
+       when is_binary(expected_run_id) do
+    scoped_claims =
+      issue
+      |> issue_claim_leases()
+      |> Enum.filter(fn %ClaimLease{} = claim_lease ->
+        claim_lease_role_matches?(claim_lease) and
+          claim_lease_workspace_matches?(issue, claim_lease)
+      end)
+
+    case Enum.find(scoped_claims, &(&1.run_id == expected_run_id)) do
+      %ClaimLease{} = claim_lease ->
+        {:ok, claim_lease}
+
+      nil when scoped_claims == [] ->
+        {:ok, nil}
+
+      nil ->
+        {:error, :claim_run_identity_changed}
+    end
+  end
+
+  defp release_claim_lease_for(%Issue{} = issue, _expected_run_id),
+    do: {:ok, current_scope_claim_lease(issue)}
 
   defp release_claim_lease(%Issue{} = issue, %ClaimLease{} = claim_lease) do
     attrs =
@@ -2652,16 +3058,16 @@ defmodule SymphonyElixir.Orchestrator do
     attrs = process_ownership_attrs(running_entry)
 
     if ProcessOwnership.owned_process_live?(issue, attrs) do
-      ProcessOwnership.record_quarantined(
-        issue,
+      issue
+      |> ProcessOwnership.record_quarantined(
         attrs,
         "app-server process remained live after normal worker exit"
       )
-
-      :quarantined
+      |> process_ownership_record_status(:quarantined)
     else
-      ProcessOwnership.record_cleaned(issue, attrs)
-      :cleaned
+      issue
+      |> ProcessOwnership.record_cleaned(attrs)
+      |> process_ownership_record_status(:cleaned)
     end
   end
 
@@ -2669,11 +3075,16 @@ defmodule SymphonyElixir.Orchestrator do
     attrs = process_ownership_attrs(running_entry)
 
     if ProcessOwnership.owned_process_live?(issue, attrs) do
-      ProcessOwnership.record_quarantined(issue, attrs, "agent exited before app-server process cleaned: #{inspect(reason)}")
-      :quarantined
+      issue
+      |> ProcessOwnership.record_quarantined(
+        attrs,
+        "agent exited before app-server process cleaned: #{inspect(reason)}"
+      )
+      |> process_ownership_record_status(:quarantined)
     else
-      ProcessOwnership.record_cleaned(issue, attrs)
-      :cleaned
+      issue
+      |> ProcessOwnership.record_cleaned(attrs)
+      |> process_ownership_record_status(:cleaned)
     end
   end
 
@@ -2692,13 +3103,12 @@ defmodule SymphonyElixir.Orchestrator do
        when session in [:live, :unknown, :unreachable] do
     attrs = process_ownership_attrs(running_entry)
 
-    ProcessOwnership.record_quarantined(
-      issue,
+    issue
+    |> ProcessOwnership.record_quarantined(
       attrs,
       "native session liveness=#{session}; owned session cleanup was not verified"
     )
-
-    :quarantined
+    |> process_ownership_record_status(:quarantined)
   end
 
   defp record_process_completion(running_entry, reason, %LifecycleVerdict{session: :absent}),
@@ -2710,7 +3120,15 @@ defmodule SymphonyElixir.Orchestrator do
   defp record_process_completion(running_entry, reason, nil),
     do: record_process_completion(running_entry, reason)
 
+  defp process_ownership_record_status(:ok, success_status), do: success_status
+
+  defp process_ownership_record_status({:error, reason}, _success_status) do
+    Logger.error("Process ownership state could not be persisted: #{inspect(reason)}")
+    :ownership_record_failed
+  end
+
   defp retry_lease_state(:quarantined), do: "quarantined"
+  defp retry_lease_state(:ownership_record_failed), do: "quarantined"
   defp retry_lease_state(_process_completion_status), do: "retrying"
 
   defp retry_lease_state_from_process_ownership(%{state: "quarantined"}), do: "quarantined"
@@ -3267,12 +3685,6 @@ defmodule SymphonyElixir.Orchestrator do
     candidate_issue?(issue, active_state_set(), terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
       !process_ownership_blocks_dispatch?(issue)
-  end
-
-  defp retry_blocked_by_process_ownership?(%Issue{} = issue, terminal_states) do
-    candidate_issue?(issue, active_state_set(), terminal_states) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
-      process_ownership_blocks_dispatch?(issue)
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do

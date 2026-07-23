@@ -118,18 +118,37 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   @doc "Recover stale local run-owned sessions left by a previous role process generation."
   @spec recover_stale_owned_sessions(
-          (map() -> :ok | {:error, term()}),
+          (map() -> :ok | {:ok, :absent} | {:error, term()}),
           (map() -> :live | :absent | :unknown | :unreachable)
         ) :: {:ok, non_neg_integer()}
   def recover_stale_owned_sessions(cleanup_fun, liveness_fun)
       when is_function(cleanup_fun, 1) and is_function(liveness_fun, 1) do
+    recover_stale_owned_sessions(cleanup_fun, liveness_fun, fn _evidence -> :ok end)
+  end
+
+  @doc "Recover stale sessions and report each quarantine to the lifecycle owner."
+  @spec recover_stale_owned_sessions(
+          (map() -> :ok | {:ok, :absent} | {:error, term()}),
+          (map() -> :live | :absent | :unknown | :unreachable),
+          (map() -> term())
+        ) :: {:ok, non_neg_integer()}
+  def recover_stale_owned_sessions(cleanup_fun, liveness_fun, quarantine_fun)
+      when is_function(cleanup_fun, 1) and is_function(liveness_fun, 1) and
+             is_function(quarantine_fun, 1) do
     recovered =
       Config.settings!().workspace.root
       |> owned_record_paths()
       |> Enum.reduce(0, fn path, count ->
         case read_record(path) do
           [record] ->
-            recover_stale_owned_session(path, record, cleanup_fun, liveness_fun, count)
+            recover_stale_owned_session(
+              path,
+              record,
+              cleanup_fun,
+              liveness_fun,
+              quarantine_fun,
+              count
+            )
 
           _ ->
             count
@@ -190,7 +209,14 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     )
   end
 
-  defp recover_stale_owned_session(path, record, cleanup_fun, liveness_fun, count) do
+  defp recover_stale_owned_session(
+         path,
+         record,
+         cleanup_fun,
+         liveness_fun,
+         quarantine_fun,
+         count
+       ) do
     if stale_owned_session_record?(record) do
       ownership_ref = owned_session_ref_value(record)
       cleanup_result = safe_cleanup(cleanup_fun, ownership_ref)
@@ -201,11 +227,21 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
           mark_record_cleaned(path, record)
           count + 1
 
+        {{:ok, :absent}, _status} ->
+          mark_record_cleaned(path, record)
+          count + 1
+
         {result, status} ->
           reason =
             "startup cleanup=#{inspect(result)}; native session liveness=#{status}"
 
-          mark_record_quarantined(path, record, reason)
+          quarantined_record = mark_record_quarantined(path, record, reason)
+
+          notify_startup_quarantine(quarantine_fun, %{
+            record: quarantined_record,
+            cleanup_result: result,
+            session_liveness: status
+          })
 
           Logger.warning("Failed to verify stale run-owned session cleanup #{ownership_ref.session_name}: #{reason}")
 
@@ -280,7 +316,21 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
     with {:ok, body} <- Jason.encode(updated) do
       File.write!(path, body <> "\n")
+      updated
     end
+  end
+
+  defp notify_startup_quarantine(quarantine_fun, evidence) do
+    quarantine_fun.(evidence)
+    :ok
+  rescue
+    error ->
+      Logger.warning("Failed to report startup ownership quarantine: #{Exception.message(error)}")
+      :ok
+  catch
+    kind, reason ->
+      Logger.warning("Failed to report startup ownership quarantine: #{inspect({kind, reason})}")
+      :ok
   end
 
   defp normalize_attrs(attrs) when is_map(attrs) do

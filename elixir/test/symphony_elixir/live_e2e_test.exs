@@ -398,7 +398,7 @@ defmodule SymphonyElixir.LiveE2ETest do
 
   defp receive_runtime_info!(issue_id) do
     receive do
-      {:worker_runtime_info, ^issue_id, %{workspace_path: workspace_path} = runtime_info}
+      {:worker_runtime_info, ^issue_id, _run_id, %{workspace_path: workspace_path} = runtime_info}
       when is_binary(workspace_path) ->
         runtime_info
 

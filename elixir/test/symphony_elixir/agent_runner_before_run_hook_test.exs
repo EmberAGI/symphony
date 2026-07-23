@@ -8,6 +8,34 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
   transport.
   """
 
+  defmodule StartupCleanupFailsTransport do
+    def default_server_snapshot(_context) do
+      {:ok, %{status: "running", version: "v", protocol: 17, socket: "/tmp/default.sock"}}
+    end
+
+    def start_session(spec, _context) do
+      {:ok,
+       %{
+         name: spec.name,
+         socket: "/tmp/#{spec.name}/sock",
+         runtime_root: "/tmp/#{spec.name}"
+       }}
+    end
+
+    def prepare_worker(_session, _worker_spec, _context), do: {:error, :worker_prepare_failed}
+    def stop_session(_session, _context), do: {:error, :server_still_live}
+
+    def owned_session_ref(session, _context) do
+      %{
+        kind: "herdr",
+        session_name: session.name,
+        runtime_root: session.runtime_root,
+        cleanup_module: __MODULE__,
+        cleanup_context: %{}
+      }
+    end
+  end
+
   setup do
     previous_role = System.get_env("SYMPHONY_ROLE")
     System.put_env("SYMPHONY_ROLE", "implementer")
@@ -202,6 +230,52 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
         end)
 
       refute log =~ "typed-secret"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner reports an owned session whose startup cleanup could not be verified" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-startup-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-startup-cleanup",
+        identifier: "EMB-1217",
+        title: "Quarantine failed startup cleanup",
+        state: "In Progress",
+        labels: []
+      }
+
+      issue_id = issue.id
+
+      assert {:irrecoverable_runtime_failed, failure} =
+               catch_exit(
+                 AgentRunner.run(
+                   issue,
+                   self(),
+                   run_id: "run-startup-cleanup",
+                   delegation_transport: StartupCleanupFailsTransport,
+                   delegation_transport_context: %{}
+                 )
+               )
+
+      assert failure.family == :owned_session_cleanup_unverified
+
+      assert_receive {:owned_session_runtime_info, ^issue_id, "run-startup-cleanup",
+                      %{
+                        kind: "herdr",
+                        session_name: "octo-emb-1217-run-startup-cleanup"
+                      }},
+                     500
     after
       File.rm_rf(test_root)
     end

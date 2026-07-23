@@ -180,9 +180,13 @@ defmodule SymphonyElixir.AgentRuntime do
   def stop_session(session), do: session_runtime_adapter(session).stop_session(session)
 
   @doc "Clean up a run-owned runtime from outside the task that created it."
-  @spec cleanup_owned_session(map()) :: :ok | {:error, term()}
+  @spec cleanup_owned_session(map()) :: :ok | {:ok, :absent} | {:error, term()}
   def cleanup_owned_session(%{kind: "herdr"} = ownership_ref) do
-    HerdrTransport.cleanup_owned_session(ownership_ref)
+    Application.get_env(
+      :symphony_elixir,
+      :owned_session_cleanup_module,
+      HerdrTransport
+    ).cleanup_owned_session(ownership_ref)
   end
 
   def cleanup_owned_session(%{cleanup_module: module} = ownership_ref) when is_atom(module) do

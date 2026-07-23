@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Runtime.ProcessOwnership
   alias SymphonyElixir.Tracker.ClaimLease
 
   defmodule LiveOwnedSession do
@@ -162,7 +163,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     assert due_at_ms <= after_state_ms + 10_000
   end
 
-  test "stalled worker restart surfaces quarantined live process ownership on retry status" do
+  test "stalled worker with a live process tree is quarantined without ordinary retry" do
     previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
     previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
 
@@ -249,28 +250,21 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
 
     refute Process.alive?(worker_pid)
     refute Map.has_key?(state.running, issue_id)
-    assert %{attempt: 1} = state.retry_attempts[issue_id]
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+    assert state.blocked_failures[issue_id].family == :owned_session_cleanup_unverified
 
-    assert_receive {:memory_tracker_claim_lease, ^issue_id, quarantined_lease}, 500
-    assert quarantined_lease.state == "quarantined"
-    assert quarantined_lease.retry_reason =~ "stalled for "
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, blocked_lease}, 500
+    assert blocked_lease.state == "blocked"
+    assert blocked_lease.retry_reason =~ "owned process tree remained live"
 
-    snapshot = GenServer.call(pid, :snapshot)
-
-    assert [
-             %{
-               issue_id: ^issue_id,
-               identifier: "MT-STALL-LIVE",
-               claim_lease: %{state: "quarantined"},
-               process_ownership: %{
-                 state: "quarantined",
-                 cleanup_status: "quarantined",
-                 app_server_pid: ^app_server_pid,
-                 live?: true,
-                 quarantine_reason: quarantine_reason
-               }
-             }
-           ] = snapshot.retrying
+    assert %{
+             state: "quarantined",
+             cleanup_status: "quarantined",
+             app_server_pid: ^app_server_pid,
+             live?: true,
+             quarantine_reason: quarantine_reason
+           } = ProcessOwnership.status_for_issue(issue)
 
     assert quarantine_reason =~ "agent exited before app-server process cleaned: :terminated"
 

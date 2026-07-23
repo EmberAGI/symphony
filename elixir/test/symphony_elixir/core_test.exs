@@ -23,6 +23,26 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  defmodule StartupOwnedSessionCleanup do
+    def cleanup_owned_session(ownership_ref) do
+      send(Application.fetch_env!(:symphony_elixir, :startup_owned_session_recipient), {
+        :startup_owned_session_cleanup,
+        ownership_ref
+      })
+
+      {:error, :cleanup_timeout}
+    end
+
+    def owned_session_liveness(ownership_ref) do
+      send(Application.fetch_env!(:symphony_elixir, :startup_owned_session_recipient), {
+        :startup_owned_session_liveness,
+        ownership_ref
+      })
+
+      {:ok, :live}
+    end
+  end
+
   setup do
     previous_role = System.get_env("SYMPHONY_ROLE")
     System.put_env("SYMPHONY_ROLE", "implementer")
@@ -303,6 +323,96 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "terminal teardown retains ownership when an owned process survives session cleanup" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-terminal-process-quarantine-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-terminal-process-quarantine"
+    issue_identifier = "MT-TERMINAL-PROCESS"
+    workspace = Path.join(test_root, issue_identifier)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: test_root,
+      tracker_active_states: ["Todo", "In Progress", "In Review"],
+      tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"]
+    )
+
+    File.mkdir_p!(workspace)
+    File.write!(Path.join(workspace, "evidence.txt"), "preserve until cleanup is verified\n")
+
+    worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+    claim_lease =
+      ClaimLease.new(%{
+        issue_id: issue_id,
+        issue_identifier: issue_identifier,
+        holder: ClaimLease.holder_id(),
+        role: ClaimLease.role_name(),
+        run_id: "run-terminal-process-quarantine",
+        workspace_path: workspace,
+        state: "active"
+      })
+
+    running_issue = %Issue{
+      id: issue_id,
+      identifier: issue_identifier,
+      state: "In Progress",
+      claim_lease: claim_lease
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [running_issue])
+
+    on_exit(fn ->
+      if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
+      Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+      Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      File.rm_rf(test_root)
+    end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: worker_pid,
+          ref: nil,
+          identifier: issue_identifier,
+          issue: running_issue,
+          run_id: "run-terminal-process-quarantine",
+          workspace_path: workspace,
+          codex_app_server_pid: System.pid(),
+          owned_session_ref: %{
+            cleanup_module: RecordingOwnedSessionCleanup,
+            owner: self(),
+            session_name: "octo-mt-terminal-process",
+            liveness: :absent
+          },
+          started_at: DateTime.utc_now(),
+          claim_lease: claim_lease
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    terminal_issue = %{running_issue | state: "Closed"}
+    updated_state = Orchestrator.reconcile_issue_states_for_test([terminal_issue], state)
+
+    assert MapSet.member?(updated_state.claimed, issue_id)
+    assert updated_state.blocked_failures[issue_id].family == :owned_session_cleanup_unverified
+    assert File.exists?(Path.join(workspace, "evidence.txt"))
+    assert ProcessOwnership.owned_process_live?(%{app_server_pid: System.pid()})
+
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, blocked_lease}
+    assert blocked_lease.state == "blocked"
+    assert_receive {:memory_tracker_comment, ^issue_id, note}
+    assert note =~ "symphony-irrecoverable-escalation:v1"
+  end
+
   test "records a run-owned session cleanup capability before cancellation" do
     issue_id = "issue-owned-session"
 
@@ -325,11 +435,162 @@ defmodule SymphonyElixir.CoreTest do
 
     assert {:noreply, updated_state} =
              Orchestrator.handle_info(
-               {:owned_session_runtime_info, issue_id, ownership_ref},
+               {:owned_session_runtime_info, issue_id, "run-owned-session", ownership_ref},
                state
              )
 
     assert updated_state.running[issue_id].owned_session_ref == ownership_ref
+  end
+
+  test "a delayed prior-run session capability cannot overwrite the current owner" do
+    issue_id = "issue-stale-owned-session-message"
+
+    current_ownership_ref = %{
+      cleanup_module: RecordingOwnedSessionCleanup,
+      owner: self(),
+      session_name: "octo-mt-current-session"
+    }
+
+    stale_ownership_ref = %{
+      cleanup_module: RecordingOwnedSessionCleanup,
+      owner: self(),
+      session_name: "octo-mt-stale-session",
+      liveness: :absent
+    }
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          issue: %Issue{id: issue_id, identifier: "MT-STALE-MESSAGE"},
+          run_id: "run-current",
+          owned_session_ref: current_ownership_ref
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{}
+    }
+
+    assert {:noreply, updated_state} =
+             Orchestrator.handle_info(
+               {:owned_session_runtime_info, issue_id, "run-stale", stale_ownership_ref},
+               state
+             )
+
+    assert updated_state.running[issue_id].owned_session_ref == current_ownership_ref
+    assert_receive {:owned_session_cleanup, "octo-mt-stale-session", false}
+    assert_receive {:owned_session_liveness, :absent}
+  end
+
+  test "worker runtime metadata updates only its matching run identity" do
+    issue_id = "issue-worker-runtime-message-fence"
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          issue: %Issue{id: issue_id, identifier: "MT-WORKER-MESSAGE"},
+          run_id: "run-current",
+          worker_host: nil,
+          workspace_path: nil
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{}
+    }
+
+    assert {:noreply, matched_state} =
+             Orchestrator.handle_info(
+               {:worker_runtime_info, issue_id, "run-current", %{worker_host: nil, workspace_path: "/tmp/current-workspace"}},
+               state
+             )
+
+    assert matched_state.running[issue_id].workspace_path == "/tmp/current-workspace"
+
+    assert {:noreply, stale_state} =
+             Orchestrator.handle_info(
+               {:worker_runtime_info, issue_id, "run-stale", %{worker_host: nil, workspace_path: "/tmp/stale-workspace"}},
+               matched_state
+             )
+
+    assert stale_state.running[issue_id].workspace_path == "/tmp/current-workspace"
+  end
+
+  test "late owned-session cleanup failure quarantines durable ownership" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-late-owned-session-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-LATE-symphony")
+    issue_id = "issue-late-owned-session"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-LATE",
+      state: "In Progress",
+      repository: "EmberAGI/symphony",
+      claim_lease:
+        ClaimLease.new(%{
+          issue_id: issue_id,
+          issue_identifier: "MT-LATE",
+          holder: ClaimLease.holder_id(),
+          role: ClaimLease.role_name(),
+          run_id: "run-late-owned-session",
+          workspace_path: workspace,
+          state: "active"
+        })
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+      Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      File.rm_rf(test_root)
+    end)
+
+    ownership_ref = %{
+      cleanup_module: RecordingOwnedSessionCleanup,
+      owner: self(),
+      session_name: "octo-mt-late-owned-session",
+      cleanup_result: {:error, :cleanup_timeout},
+      liveness: :absent,
+      workspace_path: workspace,
+      run_id: "run-late-owned-session"
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      retry_attempts: %{}
+    }
+
+    assert {:noreply, updated_state} =
+             Orchestrator.handle_info(
+               {:owned_session_runtime_info, issue_id, ownership_ref},
+               state
+             )
+
+    assert_receive {:owned_session_cleanup, "octo-mt-late-owned-session", false}
+    assert_receive {:owned_session_liveness, :absent}
+    assert MapSet.member?(updated_state.claimed, issue_id)
+    assert updated_state.blocked_failures[issue_id].family == :owned_session_cleanup_unverified
+
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, blocked_lease}
+    assert blocked_lease.state == "blocked"
+    assert blocked_lease.run_id == "run-late-owned-session"
+
+    assert_receive {:memory_tracker_comment, ^issue_id, note}
+    assert note =~ "symphony-irrecoverable-escalation:v1"
+    assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}
   end
 
   test "process ownership persists only the narrow Herdr cleanup identity" do
@@ -517,6 +778,147 @@ defmodule SymphonyElixir.CoreTest do
     assert status.quarantine_reason =~ "native session liveness=live"
   end
 
+  test "startup cleanup quarantine blocks the claim and raises typed escalation" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-startup-cleanup-escalation-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-STARTUP-symphony")
+    issue_id = "issue-startup-cleanup-escalation"
+    orchestrator_name = Module.concat(__MODULE__, :StartupCleanupEscalation)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 1_000_000
+    )
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-STARTUP",
+      state: "In Progress",
+      repository: "EmberAGI/symphony",
+      claim_lease:
+        ClaimLease.new(%{
+          issue_id: issue_id,
+          issue_identifier: "MT-STARTUP",
+          holder: ClaimLease.holder_id(),
+          role: ClaimLease.role_name(),
+          run_id: "run-startup-cleanup-escalation",
+          workspace_path: workspace,
+          state: "active"
+        })
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :startup_owned_session_recipient, self())
+    Application.put_env(:symphony_elixir, :owned_session_cleanup_module, StartupOwnedSessionCleanup)
+    Application.put_env(:symphony_elixir, :owned_session_liveness_module, StartupOwnedSessionCleanup)
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+      Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      Application.delete_env(:symphony_elixir, :startup_owned_session_recipient)
+      Application.delete_env(:symphony_elixir, :owned_session_cleanup_module)
+      Application.delete_env(:symphony_elixir, :owned_session_liveness_module)
+
+      case Process.whereis(orchestrator_name) do
+        pid when is_pid(pid) -> GenServer.stop(pid)
+        _ -> :ok
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    assert :ok =
+             ProcessOwnership.record_active(issue, %{
+               role: "implementer",
+               holder: "#{ProcessOwnership.current_host()}:999999:implementer",
+               run_id: "run-startup-cleanup-escalation",
+               workspace_path: workspace,
+               owned_session_ref: %{
+                 kind: "herdr",
+                 session_name: "octo-mt-startup-cleanup",
+                 agent_name: "implementer_orchestrator"
+               }
+             })
+
+    assert {:ok, _pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    assert_receive {:startup_owned_session_cleanup, %{session_name: "octo-mt-startup-cleanup"}}
+    assert_receive {:startup_owned_session_liveness, %{session_name: "octo-mt-startup-cleanup"}}
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, blocked_lease}, 500
+    assert blocked_lease.state == "blocked"
+
+    assert_receive {:memory_tracker_comment, ^issue_id, note}, 500
+    assert note =~ "symphony-irrecoverable-escalation:v1"
+    assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}, 500
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}, 500
+  end
+
+  test "startup terminal cleanup preserves a workspace with live process ownership" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-startup-terminal-live-owner-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    issue_id = "issue-startup-terminal-live-owner"
+    issue_identifier = "MT-STARTUP-TERMINAL-LIVE"
+    workspace = Path.join(workspace_root, issue_identifier)
+    marker = Path.join(workspace, "live-owner-marker")
+    orchestrator_name = Module.concat(__MODULE__, :StartupTerminalLiveOwnerOrchestrator)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: issue_identifier,
+      title: "Terminal issue with live owner",
+      state: "Done"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    File.mkdir_p!(workspace)
+    File.write!(marker, "live\n")
+
+    assert :ok =
+             ProcessOwnership.record_quarantined(
+               issue,
+               %{
+                 role: ClaimLease.role_name(),
+                 run_id: "run-startup-terminal-live-owner",
+                 holder: ClaimLease.holder_id(),
+                 workspace_path: workspace,
+                 app_server_pid: System.pid()
+               },
+               "live owner must fence terminal cleanup"
+             )
+
+    assert {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      stop_orchestrator!(pid)
+      File.rm_rf(test_root)
+    end)
+
+    assert File.exists?(marker)
+  end
+
   test "a quarantined record without a live owned process no longer blocks dispatch" do
     test_root =
       Path.join(
@@ -594,6 +996,157 @@ defmodule SymphonyElixir.CoreTest do
     assert retry_lease.state == "retrying"
     assert retry_lease.retry_reason == "active-state-continuation-check"
     assert retry_lease.issue_identifier == "MT-558"
+  end
+
+  test "settled owned-session completion releases the claim without retry scheduling" do
+    issue_id = "issue-settled-owned-session"
+    issue_identifier = "MT-SETTLED"
+    ref = make_ref()
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    claim_lease =
+      ClaimLease.new(%{
+        issue_id: issue_id,
+        issue_identifier: issue_identifier,
+        holder: ClaimLease.holder_id(),
+        role: ClaimLease.role_name(),
+        run_id: "run-settled-owned-session",
+        state: "active"
+      })
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: issue_identifier,
+      state: "In Progress",
+      claim_lease: claim_lease,
+      claim_leases: [claim_lease]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+      Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+    end)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue_identifier,
+      issue: issue,
+      claim_lease: claim_lease,
+      run_id: claim_lease.run_id,
+      owned_session_ref: %{
+        cleanup_module: RecordingOwnedSessionCleanup,
+        owner: self(),
+        session_name: "octo-mt-settled-session",
+        liveness: :absent
+      },
+      started_at: DateTime.utc_now()
+    }
+
+    initial_state = %Orchestrator.State{
+      running: %{issue_id => running_entry},
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{},
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    assert {:noreply, state} =
+             Orchestrator.handle_info(
+               {:DOWN, ref, :process, self(), :normal},
+               initial_state
+             )
+
+    assert_receive {:owned_session_cleanup, "octo-mt-settled-session", false}
+    assert_receive {:owned_session_liveness, :absent}
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    refute MapSet.member?(state.claimed, issue_id)
+    assert MapSet.member?(state.completed, issue_id)
+
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, released_lease}
+    assert released_lease.state == "released"
+  end
+
+  test "ownership record write failure quarantines before claim release" do
+    issue_id = "issue-ownership-record-write-failure"
+    issue_identifier = "MT-OWNERSHIP-WRITE-FAILURE"
+    ref = make_ref()
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-ownership-write-failure-#{System.unique_integer([:positive])}"
+      )
+
+    invalid_workspace = Path.join(test_root, "workspace-is-a-file")
+    File.mkdir_p!(test_root)
+    File.write!(invalid_workspace, "not a directory\n")
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    claim_lease =
+      ClaimLease.new(%{
+        issue_id: issue_id,
+        issue_identifier: issue_identifier,
+        holder: ClaimLease.holder_id(),
+        role: ClaimLease.role_name(),
+        run_id: "run-ownership-record-write-failure",
+        state: "active"
+      })
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: issue_identifier,
+      state: "In Progress",
+      claim_lease: claim_lease,
+      claim_leases: [claim_lease]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+      Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      File.rm_rf(test_root)
+    end)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue_identifier,
+      issue: issue,
+      claim_lease: claim_lease,
+      run_id: claim_lease.run_id,
+      workspace_path: invalid_workspace,
+      owned_session_ref: %{
+        cleanup_module: RecordingOwnedSessionCleanup,
+        owner: self(),
+        session_name: "octo-mt-ownership-write-failure",
+        liveness: :absent
+      },
+      started_at: DateTime.utc_now()
+    }
+
+    state = %Orchestrator.State{
+      running: %{issue_id => running_entry},
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{},
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    assert {:noreply, next_state} =
+             Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+    assert MapSet.member?(next_state.claimed, issue_id)
+    assert Map.has_key?(next_state.blocked_failures, issue_id)
+    refute Map.has_key?(next_state.retry_attempts, issue_id)
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "released"}}
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, blocked_lease}
+    assert blocked_lease.state == "blocked"
   end
 
   test "normal worker exit with a live owned session quarantines instead of rerouting" do
@@ -716,7 +1269,7 @@ defmodule SymphonyElixir.CoreTest do
     assert process_status.quarantine_reason =~ "cleanup was not verified"
   end
 
-  test "normal worker exit quarantines live app-server before continuation retry" do
+  test "normal worker exit blocks ownership when the app-server survives" do
     previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
     previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
 
@@ -784,10 +1337,14 @@ defmodule SymphonyElixir.CoreTest do
 
     state = :sys.get_state(pid)
     refute Map.has_key?(state.running, issue_id)
-    assert %{attempt: 1} = state.retry_attempts[issue_id]
-    assert_receive {:memory_tracker_claim_lease, ^issue_id, quarantined_lease}, 500
-    assert quarantined_lease.state == "quarantined"
-    assert quarantined_lease.retry_reason == "active-state-continuation-check"
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+    assert Map.has_key?(state.blocked_failures, issue_id)
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, blocked_lease}, 500
+    assert blocked_lease.state == "blocked"
+    assert blocked_lease.retry_reason =~ "owned process tree remained live"
+    assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}, 500
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}, 500
 
     process_status = ProcessOwnership.status_for_issue(issue)
     assert process_status.state == "quarantined"
@@ -973,6 +1530,89 @@ defmodule SymphonyElixir.CoreTest do
     assert released_lease.comment_id == "comment-running-terminal-lease"
     assert released_lease.state == "released"
     assert released_lease.recovery_reason == "issue-left-active-dispatch"
+  end
+
+  test "late terminal cleanup releases only the completing run claim" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-stale-terminal-release"
+    now = DateTime.utc_now()
+
+    completing_claim =
+      ClaimLease.new(%{
+        comment_id: "comment-stale-terminal-release",
+        issue_id: issue_id,
+        issue_identifier: "MT-STALE-TERM-LEASE",
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-stale-terminal-release",
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    replacement_claim =
+      ClaimLease.new(%{
+        comment_id: "comment-replacement-terminal-release",
+        issue_id: issue_id,
+        issue_identifier: "MT-STALE-TERM-LEASE",
+        role: "implementer",
+        holder: "replacement-holder",
+        run_id: "run-replacement-terminal-release",
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    running_issue = %Issue{
+      id: issue_id,
+      identifier: "MT-STALE-TERM-LEASE",
+      state: "In Progress",
+      claim_lease: completing_claim,
+      claim_leases: [completing_claim]
+    }
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: nil,
+          identifier: "MT-STALE-TERM-LEASE",
+          issue: running_issue,
+          claim_lease: completing_claim,
+          run_id: completing_claim.run_id,
+          started_at: now
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    refreshed_issue = %{
+      running_issue
+      | state: "Done",
+        claim_lease: replacement_claim,
+        claim_leases: [replacement_claim, completing_claim]
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([refreshed_issue], state)
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, released_lease}, 500
+    assert released_lease.comment_id == completing_claim.comment_id
+    assert released_lease.run_id == completing_claim.run_id
+    assert released_lease.state == "released"
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{run_id: "run-replacement-terminal-release"}}, 100
   end
 
   test "terminal reconciliation quarantines ownership when session cleanup cannot be verified" do
@@ -1226,10 +1866,14 @@ defmodule SymphonyElixir.CoreTest do
 
     state = :sys.get_state(pid)
     refute Map.has_key?(state.running, issue_id)
-    assert %{attempt: 2} = state.retry_attempts[issue_id]
-    assert_receive {:memory_tracker_claim_lease, ^issue_id, quarantined_lease}, 500
-    assert quarantined_lease.state == "quarantined"
-    assert quarantined_lease.retry_reason == "agent exited: :boom"
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+    assert Map.has_key?(state.blocked_failures, issue_id)
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, blocked_lease}, 500
+    assert blocked_lease.state == "blocked"
+    assert blocked_lease.retry_reason =~ "owned process tree remained live"
+    assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}, 500
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}, 500
 
     process_status =
       ProcessOwnership.status_for_issue(%Issue{id: issue_id, identifier: "MT-QUAR"})
@@ -1311,6 +1955,57 @@ defmodule SymphonyElixir.CoreTest do
              identifier: "MT-561",
              error: "agent exited: :boom"
            } = :sys.get_state(pid).retry_attempts[issue_id]
+  end
+
+  test "missing retry timer state preserves a quarantined claim" do
+    issue_id = "issue-missing-quarantined-retry"
+    issue_identifier = "MT-MISSING-QUARANTINED-RETRY"
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    claim_lease =
+      ClaimLease.new(%{
+        issue_id: issue_id,
+        issue_identifier: issue_identifier,
+        holder: ClaimLease.holder_id(),
+        role: ClaimLease.role_name(),
+        run_id: "run-missing-quarantined-retry",
+        state: "blocked"
+      })
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: issue_identifier,
+      state: "In Progress",
+      claim_lease: claim_lease,
+      claim_leases: [claim_lease]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+      Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+    end)
+
+    blocked_failure = %{
+      issue: issue,
+      identifier: issue_identifier,
+      family: :owned_session_cleanup_unverified
+    }
+
+    state = %Orchestrator.State{
+      claimed: MapSet.new([issue_id]),
+      blocked_failures: %{issue_id => blocked_failure}
+    }
+
+    assert {:noreply, next_state} =
+             Orchestrator.handle_info({:retry_issue, issue_id, make_ref()}, state)
+
+    assert MapSet.member?(next_state.claimed, issue_id)
+    assert next_state.blocked_failures[issue_id] == blocked_failure
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "released"}}
   end
 
   test "quarantined retry timer preserves lease and status while live process ownership blocks dispatch" do
@@ -1551,6 +2246,88 @@ defmodule SymphonyElixir.CoreTest do
 
     refute MapSet.member?(state.claimed, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
+  end
+
+  test "terminal retry lookup preserves ownership while an owned process is live" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-terminal-retry-live-process-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    issue_id = "issue-terminal-retry-live-process"
+    issue_identifier = "MT-TERMINAL-LIVE-PROCESS"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    claim_lease =
+      ClaimLease.new(%{
+        issue_id: issue_id,
+        issue_identifier: issue_identifier,
+        role: ClaimLease.role_name(),
+        holder: ClaimLease.holder_id(),
+        run_id: "run-terminal-retry-live-process",
+        state: "quarantined"
+      })
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: issue_identifier,
+      title: "Terminal retry with owned process",
+      state: "Done",
+      claim_lease: claim_lease,
+      claim_leases: [claim_lease]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      File.rm_rf(test_root)
+    end)
+
+    assert :ok =
+             ProcessOwnership.record_quarantined(
+               issue,
+               %{
+                 role: ClaimLease.role_name(),
+                 run_id: claim_lease.run_id,
+                 holder: claim_lease.holder,
+                 app_server_pid: System.pid()
+               },
+               "owned process remains live after task exit"
+             )
+
+    state = %Orchestrator.State{
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{}
+    }
+
+    assert {:noreply, next_state} =
+             Orchestrator.handle_retry_issue_for_test(state, issue_id, 2, %{
+               identifier: issue_identifier,
+               issue: issue,
+               claim_lease: claim_lease,
+               run_id: claim_lease.run_id,
+               retry_reason: "owned process remains live"
+             })
+
+    assert MapSet.member?(next_state.claimed, issue_id)
+
+    assert %{attempt: 3, process_ownership: %{live?: true}} =
+             next_state.retry_attempts[issue_id]
+
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "released"}}
   end
 
   test "claim reconciliation releases only claims that are not running or retrying" do

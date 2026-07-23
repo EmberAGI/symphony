@@ -40,14 +40,19 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
           command_in_port(context, ["--session", name, "server"], env, :infinity)
         end)
 
+      session = %{
+        name: name,
+        runtime_root: runtime_root,
+        env: env,
+        server_task: server_task
+      }
+
       case await_running(context, name, env, server_task) do
         {:ok, status} ->
           finish_session_start(status, name, workspace, runtime_root, env, server_task, context)
 
         {:error, reason} ->
-          shutdown_server_task(server_task)
-          File.rm_rf(runtime_root)
-          {:error, reason}
+          reject_started_session(session, context, reason)
       end
     end
   end
@@ -84,8 +89,21 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   defp reject_started_session(session, context, reason) do
-    cleanup_started_server(session, context)
-    {:error, reason}
+    case stop_session(session, context) do
+      :ok ->
+        {:error, reason}
+
+      {:error, cleanup_failure} ->
+        {:error,
+         {:owned_session_cleanup_unverified,
+          %{
+            subtype: "herdr_session_start",
+            message: "run-owned Herdr session cleanup could not be verified after startup rejection",
+            startup_failure: reason,
+            cleanup_failure: cleanup_failure,
+            owned_session_ref: owned_session_ref(session, context)
+          }}}
+    end
   end
 
   @impl true
@@ -349,16 +367,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   def owned_session_liveness(_ownership_ref), do: {:ok, :unknown}
 
   @doc "Idempotently stop one explicitly owned Herdr server without relying on its owner task finalizer."
-  @spec cleanup_owned_session(map()) :: :ok | {:error, term()}
+  @spec cleanup_owned_session(map()) :: {:ok, :absent} | {:error, term()}
   def cleanup_owned_session(%{kind: "herdr", session_name: name} = ownership_ref)
       when is_binary(name) do
     runtime_root = Map.get(ownership_ref, :runtime_root, short_socket_root(name))
     context = Map.get(ownership_ref, :cleanup_context, %{})
 
     with :ok <- validate_owned_runtime_root(name, runtime_root, context),
-         :ok <- stop_owned_server_if_running(context, name, runtime_root) do
-      File.rm_rf(runtime_root)
-      :ok
+         :ok <- stop_owned_server_if_running(context, name, runtime_root),
+         :ok <- remove_owned_runtime_root(runtime_root) do
+      {:ok, :absent}
     end
   end
 
@@ -417,13 +435,6 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         actual_version: Map.get(status, :version),
         actual_protocol: Map.get(status, :protocol)
       }}}
-  end
-
-  defp cleanup_started_server(%{name: name, env: env, server_task: server_task, runtime_root: runtime_root}, context) do
-    _ = command(context, ["--session", name, "server", "stop"], env)
-    _ = await_server_stop(server_task, Map.get(context, :stop_timeout_ms, @default_stop_timeout_ms))
-    File.rm_rf(runtime_root)
-    :ok
   end
 
   defp do_await_running(context, name, env, server_task, deadline, interval_ms) do
@@ -778,8 +789,66 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp stop_owned_server(context, name, env, deadline) do
     case command_before_deadline(context, ["--session", name, "server", "stop"], env, deadline) do
-      {:ok, _output} -> :ok
+      {:ok, _output} -> verify_owned_server_stopped(context, name, env, deadline)
       {:error, reason} -> {:error, {:herdr_owned_session_stop_failed, reason}}
+    end
+  end
+
+  defp verify_owned_server_stopped(context, name, env, deadline) do
+    if System.monotonic_time(:millisecond) >= deadline do
+      {:error, {:herdr_owned_session_stop_verification_failed, :timeout}}
+    else
+      verify_owned_server_before_deadline(context, name, env, deadline)
+    end
+  end
+
+  defp verify_owned_server_before_deadline(context, name, env, deadline) do
+    case command_before_deadline(context, ["--session", name, "status", "server"], env, deadline) do
+      {:ok, output} ->
+        verify_owned_server_status(context, name, env, deadline, parse_server_status(output))
+
+      {:error, {:port_exit, _status, output}} ->
+        verify_owned_server_port_exit(output)
+
+      {:error, :command_timeout} ->
+        {:error, {:herdr_owned_session_stop_verification_failed, :timeout}}
+
+      {:error, reason} ->
+        {:error, {:herdr_owned_session_stop_verification_failed, reason}}
+    end
+  end
+
+  defp verify_owned_server_port_exit(output) do
+    if String.contains?(String.downcase(output), "not running") do
+      :ok
+    else
+      {:error, {:herdr_owned_session_stop_verification_failed, output}}
+    end
+  end
+
+  defp verify_owned_server_status(_context, _name, _env, _deadline, {:ok, %{status: status}})
+       when status != "running",
+       do: :ok
+
+  defp verify_owned_server_status(context, name, env, deadline, {:ok, %{status: "running"}}) do
+    interval_ms = Map.get(context, :poll_interval_ms, @default_poll_interval_ms)
+    remaining_ms = deadline - System.monotonic_time(:millisecond)
+
+    if remaining_ms <= 0 do
+      {:error, {:herdr_owned_session_stop_verification_failed, :timeout}}
+    else
+      Process.sleep(min(interval_ms, remaining_ms))
+      verify_owned_server_stopped(context, name, env, deadline)
+    end
+  end
+
+  defp verify_owned_server_status(_context, _name, _env, _deadline, {:error, reason}),
+    do: {:error, {:herdr_owned_session_stop_verification_failed, reason}}
+
+  defp remove_owned_runtime_root(runtime_root) do
+    case File.rm_rf(runtime_root) do
+      {:ok, _removed} -> :ok
+      {:error, reason, path} -> {:error, {:herdr_runtime_root_remove_failed, path, reason}}
     end
   end
 

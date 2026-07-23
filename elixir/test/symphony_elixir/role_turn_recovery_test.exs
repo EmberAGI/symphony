@@ -199,6 +199,66 @@ defmodule SymphonyElixir.RoleTurnRecoveryTest do
     assert File.exists?(Path.join(recovery_dir, "live-native-issue.json"))
   end
 
+  test "startup recovery fails closed when live process evidence lacks native session identity" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-role-turn-recovery-process-only-#{System.unique_integer([:positive])}"
+      )
+
+    recovery_dir = Path.join(test_root, "recovery")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace_path = Path.join(workspace_root, "EMB-LIVE-PROCESS-symphony")
+
+    previous_recovery_dir = Application.get_env(:symphony_elixir, :role_turn_recovery_dir)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    Application.put_env(:symphony_elixir, :role_turn_recovery_dir, recovery_dir)
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    on_exit(fn ->
+      restore_app_env(:role_turn_recovery_dir, previous_recovery_dir)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      File.rm_rf(test_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      tracker_active_states: ["In Progress", "Agent Fixes"],
+      tracker_terminal_states: ["Done"]
+    )
+
+    issue = %Issue{
+      id: "live-process-only-issue",
+      identifier: "EMB-LIVE-PROCESS",
+      title: "Still live without native identity",
+      state: "In Progress",
+      branch_name: "agent/live-process-turn",
+      repository: "EmberAGI/symphony"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    assert :ok = RoleTurnRecovery.record_turn_start(issue)
+
+    assert :ok =
+             ProcessOwnership.record_active(issue, %{
+               role: "implementer",
+               holder: "#{ProcessOwnership.current_host()}:999999:implementer",
+               run_id: "run-live-process-recovery",
+               workspace_path: workspace_path,
+               app_server_pid: System.pid()
+             })
+
+    assert :ok = RoleTurnRecovery.recover_pending_turns(@active_states, @terminal_states, [])
+
+    refute_receive {:memory_tracker_comment, "live-process-only-issue", _body}, 100
+    refute_receive {:memory_tracker_state_update, "live-process-only-issue", _state}, 100
+    assert File.exists?(Path.join(recovery_dir, "live-process-only-issue.json"))
+  end
+
   test "role states recover visibly without routing implementation-started work back to Todo" do
     targets = %{
       "In Progress" => "Agent Fixes",

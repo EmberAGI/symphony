@@ -72,7 +72,9 @@ defmodule SymphonyElixir.HerdrTransportTest do
     fi
 
     if [ "$#" -eq 2 ] && [ "$1" = "server" ] && [ "$2" = "stop" ]; then
-      : > "$stopped"
+      if [ "${HERDR_FAKE_STOP_NOOP:-}" != "1" ]; then
+        : > "$stopped"
+      fi
       exit 0
     fi
 
@@ -490,6 +492,40 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert commands =~ "--session octo-emb-1141-incompatible status server"
   end
 
+  test "surfaces an owned cleanup capability when startup rejection cannot stop Herdr", context do
+    session_name = "octo-emb-1217-startup-quarantine"
+
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_FAKE_VERSION", "0.8.0"},
+        {"HERDR_FAKE_PROTOCOL", "17"},
+        {"HERDR_FAKE_STOP_NOOP", "1"}
+      ],
+      start_timeout_ms: 2_000,
+      stop_timeout_ms: 50,
+      poll_interval_ms: 5
+    }
+
+    assert {:error,
+            {:owned_session_cleanup_unverified,
+             %{
+               subtype: "herdr_session_start",
+               startup_failure: {:incompatible_herdr_runtime, _details},
+               cleanup_failure: {:herdr_server_exit_failed, :timeout},
+               owned_session_ref: %{
+                 kind: "herdr",
+                 session_name: ^session_name,
+                 cleanup_module: HerdrTransport
+               }
+             }}} =
+             HerdrTransport.start_session(
+               %{name: session_name, isolated: true, workspace: "/tmp/selected-workspace"},
+               adapter_context
+             )
+  end
+
   test "bounds a stalled readiness probe and cleans the isolated runtime", context do
     status_pid_file = Path.join(Path.dirname(context.bin), "stalled-status.pid")
     server_pid_file = Path.join(Path.dirname(context.bin), "stalled-server.pid")
@@ -804,9 +840,9 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert ownership_ref.kind == "herdr"
     assert ownership_ref.session_name == "octo-emb-1141-abandoned"
     assert {:ok, :live} = HerdrTransport.owned_session_liveness(ownership_ref)
-    assert :ok = HerdrTransport.cleanup_owned_session(ownership_ref)
+    assert {:ok, :absent} = HerdrTransport.cleanup_owned_session(ownership_ref)
 
-    assert :ok =
+    assert {:ok, :absent} =
              HerdrTransport.cleanup_owned_session(%{
                kind: "herdr",
                session_name: ownership_ref.session_name
@@ -906,6 +942,57 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert File.exists?(runtime_root)
   end
 
+  test "owned-session cleanup verifies native server absence after stop acknowledgement", context do
+    runtime_root =
+      Path.join(System.tmp_dir!(), "octo-herdr-cleanup-verify-#{System.unique_integer([:positive])}")
+
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_FAKE_STOP_NOOP", "1"}
+      ],
+      socket_root: runtime_root,
+      start_timeout_ms: 2_000,
+      stop_timeout_ms: 50,
+      poll_interval_ms: 10
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{
+                 name: "octo-emb-1217-cleanup-verify",
+                 isolated: true,
+                 workspace: "/tmp/selected-workspace"
+               },
+               adapter_context
+             )
+
+    on_exit(fn ->
+      stopped =
+        Path.join([
+          runtime_root,
+          "herdr",
+          "sessions",
+          "octo-emb-1217-cleanup-verify",
+          "stopped"
+        ])
+
+      File.mkdir_p!(Path.dirname(stopped))
+      File.touch!(stopped)
+      Process.sleep(50)
+      if Process.alive?(session.server_task.pid), do: Process.exit(session.server_task.pid, :kill)
+      File.rm_rf(runtime_root)
+    end)
+
+    ownership_ref = HerdrTransport.owned_session_ref(session, adapter_context)
+
+    assert {:error, {:herdr_owned_session_stop_verification_failed, :timeout}} =
+             HerdrTransport.cleanup_owned_session(ownership_ref)
+
+    assert File.exists?(runtime_root)
+  end
+
   test "an ownership reference recovers an explicitly owned custom socket root", context do
     runtime_root =
       Path.join(System.tmp_dir!(), "octo-herdr-custom-#{System.unique_integer([:positive])}")
@@ -931,7 +1018,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     ownership_ref = HerdrTransport.owned_session_ref(session, adapter_context)
 
     assert ownership_ref.cleanup_context.socket_root == runtime_root
-    assert :ok = HerdrTransport.cleanup_owned_session(ownership_ref)
+    assert {:ok, :absent} = HerdrTransport.cleanup_owned_session(ownership_ref)
     refute File.exists?(runtime_root)
   end
 

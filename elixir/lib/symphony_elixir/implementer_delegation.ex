@@ -245,8 +245,14 @@ defmodule SymphonyElixir.ImplementerDelegation do
         {:ok, orchestrator}
 
       {:error, reason} ->
-        _ = transport.stop_session(herdr_session, transport_context)
-        {:error, {:implementer_orchestrator_start_failed, reason}}
+        reconcile_failed_start_cleanup(
+          transport,
+          transport_context,
+          herdr_session,
+          "implementer_orchestrator_start",
+          {:implementer_orchestrator_start_failed, reason},
+          reason
+        )
     end
   end
 
@@ -272,8 +278,53 @@ defmodule SymphonyElixir.ImplementerDelegation do
         {:ok, prepared_session}
 
       {:error, reason} ->
-        _ = transport.stop_session(herdr_session, transport_context)
-        {:error, {:implementer_worker_prepare_failed, reason}}
+        reconcile_failed_start_cleanup(
+          transport,
+          transport_context,
+          herdr_session,
+          "implementer_worker_prepare",
+          {:implementer_worker_prepare_failed, reason},
+          reason
+        )
+    end
+  end
+
+  defp reconcile_failed_start_cleanup(
+         transport,
+         transport_context,
+         herdr_session,
+         subtype,
+         startup_error,
+         startup_failure
+       ) do
+    case transport.stop_session(herdr_session, transport_context) do
+      :ok ->
+        {:error, startup_error}
+
+      {:error, cleanup_failure} ->
+        {:error,
+         {:owned_session_cleanup_unverified,
+          %{
+            subtype: subtype,
+            message: "run-owned Herdr session cleanup could not be verified after startup failure",
+            startup_failure: startup_failure,
+            cleanup_failure: cleanup_failure,
+            owned_session_ref:
+              transport_owned_session_ref(
+                transport,
+                herdr_session,
+                transport_context
+              )
+          }}}
+    end
+  end
+
+  defp transport_owned_session_ref(transport, herdr_session, transport_context) do
+    if function_exported?(transport, :owned_session_ref, 2) do
+      case transport.owned_session_ref(herdr_session, transport_context) do
+        ownership_ref when is_map(ownership_ref) -> ownership_ref
+        _ -> nil
+      end
     end
   end
 
