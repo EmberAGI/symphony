@@ -161,12 +161,18 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   defp control_safe_native_arg(arg) do
-    value = to_string(arg)
+    value =
+      arg
+      |> to_string()
+      |> String.replace("\r\n", "\n")
+      |> String.replace("\r", "\n")
+      |> String.replace("\n", "\u2028")
+      |> String.replace("\t", "    ")
 
-    if Regex.match?(~r/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u, value) do
+    if Regex.match?(~r/\p{Cc}/u, value) do
       {:error, {:invalid_herdr_agent_argument, :unrepresentable_control_character}}
     else
-      {:ok, String.replace(value, ~r/[\x09\x0A\x0D]+/u, " ")}
+      {:ok, value}
     end
   end
 

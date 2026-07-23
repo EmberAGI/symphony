@@ -614,7 +614,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
-  test "starts Claude with control-safe native args and strips the executable", context do
+  test "starts Claude with multiline-preserving control-safe native args", context do
     adapter_context = %{
       herdr_bin: context.bin,
       extra_env: [{"HERDR_FAKE_LOG", context.log}],
@@ -647,7 +647,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
                    "--effort",
                    "high",
                    "--append-system-prompt",
-                   "Follow the profile.\n\tDo not delegate.\r\n"
+                   "Follow the profile.\r\n\tDo not delegate.\rFinish safely."
                  ]
                },
                adapter_context
@@ -658,10 +658,17 @@ defmodule SymphonyElixir.HerdrTransportTest do
     commands = File.read!(context.log)
 
     assert commands =~
-             "agent start implementer_orchestrator --kind claude --pane w1:p1 --timeout 45000 -- --model claude-fable-5 --effort high --append-system-prompt Follow the profile. Do not delegate. "
+             "agent start implementer_orchestrator --kind claude --pane w1:p1 --timeout 45000 -- --model claude-fable-5 --effort high --append-system-prompt Follow the profile.\u2028    Do not delegate.\u2028Finish safely."
 
     refute commands =~ "-- -- claude"
-    refute commands =~ ~r/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/
+
+    launched_command =
+      commands
+      |> String.trim_trailing()
+      |> String.split("\n")
+      |> List.last()
+
+    refute Regex.match?(~r/\p{Cc}/u, launched_command)
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
@@ -727,22 +734,26 @@ defmodule SymphonyElixir.HerdrTransportTest do
       if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
     end)
 
-    claude_spec = %{
-      name: "implementer_orchestrator",
-      provider: "claude_code",
-      cwd: "/tmp/selected-workspace",
-      argv: ["claude", "--append-system-prompt", "unsafe\0instruction"]
-    }
+    for control <- ["\0", "\u0085"] do
+      claude_spec = %{
+        name: "implementer_orchestrator",
+        provider: "claude_code",
+        cwd: "/tmp/selected-workspace",
+        argv: ["claude", "--append-system-prompt", "unsafe#{control}instruction"]
+      }
 
-    commands_before = File.read!(context.log)
+      commands_before = File.read!(context.log)
+      invalid_control = {:invalid_herdr_agent_argument, :unrepresentable_control_character}
 
-    assert {:error, {:herdr_agent_start_failed, {:invalid_herdr_agent_argument, :unrepresentable_control_character}}} =
-             HerdrTransport.start_agent(session, claude_spec, adapter_context)
+      assert {:error, {:herdr_agent_start_failed, ^invalid_control}} =
+               HerdrTransport.start_agent(session, claude_spec, adapter_context)
 
-    assert {:error, {:invalid_herdr_agent_argument, :unrepresentable_control_character}} =
-             HerdrTransport.prepare_worker(session, claude_spec, adapter_context)
+      assert {:error, ^invalid_control} =
+               HerdrTransport.prepare_worker(session, claude_spec, adapter_context)
 
-    assert File.read!(context.log) == commands_before
+      assert File.read!(context.log) == commands_before
+    end
+
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
