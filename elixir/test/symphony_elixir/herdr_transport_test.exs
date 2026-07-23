@@ -89,7 +89,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       if [ "${HERDR_FAKE_EXEC_PROVIDER:-}" = "1" ]; then
         while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
         shift
-        HERDR_PANE_ID="$pane" "$kind" "$@" > "$HERDR_FAKE_PROVIDER_OUTPUT"
+        HERDR_PANE_ID="$pane" "$@" > "$HERDR_FAKE_PROVIDER_OUTPUT"
       fi
 
       printf '{"id":"cli:agent:start","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"%s","agent_status":"idle","interactive_ready":true,"revision":1}}}\n' "$name" "$kind"
@@ -163,7 +163,22 @@ defmodule SymphonyElixir.HerdrTransportTest do
     """)
 
     File.chmod!(bin, 0o755)
-    on_exit(fn -> File.rm_rf!(root) end)
+    resolvable_provider_bin = Path.join(root, "resolvable-provider-bin")
+    File.mkdir_p!(resolvable_provider_bin)
+
+    for provider <- ["codex", "claude"] do
+      fake = Path.join(resolvable_provider_bin, provider)
+      File.write!(fake, "#!/bin/sh\nexit 0\n")
+      File.chmod!(fake, 0o755)
+    end
+
+    previous_path = System.get_env("PATH") || ""
+    System.put_env("PATH", resolvable_provider_bin <> ":" <> previous_path)
+
+    on_exit(fn ->
+      System.put_env("PATH", previous_path)
+      File.rm_rf!(root)
+    end)
 
     %{bin: bin, log: log, runtime_root: deliberately_long_runtime_root}
   end
@@ -618,7 +633,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert commands =~ "--session octo-emb-1141-run-7 workspace create --cwd /tmp/selected-workspace --no-focus"
 
     assert commands =~
-             "--session octo-emb-1141-run-7 agent start implementer_orchestrator --kind codex --pane w1:p1 --timeout 120000 -- --symphony-launch-projection"
+             "--session octo-emb-1141-run-7 agent start implementer_orchestrator --kind codex --pane w1:p1 --timeout 120000 -- /"
 
     refute commands =~ "model_reasoning_effort=medium"
 
@@ -979,7 +994,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     commands = File.read!(context.log)
 
     assert commands =~
-             "agent start implementer_orchestrator --kind claude --pane w1:p1 --timeout 45000 -- --symphony-launch-projection"
+             "agent start implementer_orchestrator --kind claude --pane w1:p1 --timeout 45000 -- "
 
     refute commands =~ "Follow the profile."
 
