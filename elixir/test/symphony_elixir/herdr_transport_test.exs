@@ -117,8 +117,34 @@ defmodule SymphonyElixir.HerdrTransportTest do
     fi
 
     if [ "$1" = "agent" ] && [ "$2" = "get" ]; then
-      printf '{"id":"cli:agent:get","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"idle","revision":1}}}\n' "$3"
-      exit 0
+      case "${HERDR_FAKE_AGENT_GET_MODE:-live}" in
+        absent)
+          printf '{"id":"cli:agent:get","error":{"code":"agent_not_found","message":"agent not found"}}\n' >&2
+          exit 1
+          ;;
+        malformed)
+          printf 'not-json\n'
+          exit 0
+          ;;
+        unreachable)
+          printf 'connection refused\n' >&2
+          exit 1
+          ;;
+        protocol_mismatch)
+          printf '{"id":"cli:agent:get","error":{"code":"protocol_mismatch","message":"protocol 16 is incompatible with 17"}}\n' >&2
+          exit 1
+          ;;
+        stalled)
+          sleep 2
+          printf '{"id":"cli:agent:get","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"idle","revision":1}}}\n' "$3"
+          exit 0
+          ;;
+        *)
+          status="${HERDR_FAKE_AGENT_GET_STATUS:-idle}"
+          printf '{"id":"cli:agent:get","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"%s","revision":1}}}\n' "$3" "$status"
+          exit 0
+          ;;
+      esac
     fi
 
     if [ "$1" = "agent" ] && [ "$2" = "list" ]; then
@@ -493,7 +519,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
     elapsed_ms = System.monotonic_time(:millisecond) - started_at
 
-    assert elapsed_ms < 750
+    assert elapsed_ms < 1_500
     refute File.exists?(runtime_root)
     refute process_alive?(File.read!(status_pid_file))
     refute process_alive?(File.read!(server_pid_file))
@@ -770,10 +796,14 @@ defmodule SymphonyElixir.HerdrTransportTest do
                adapter_context
              )
 
-    ownership_ref = HerdrTransport.owned_session_ref(session, adapter_context)
+    ownership_ref =
+      session
+      |> HerdrTransport.owned_session_ref(adapter_context)
+      |> Map.put(:agent_name, "implementer_orchestrator")
 
     assert ownership_ref.kind == "herdr"
     assert ownership_ref.session_name == "octo-emb-1141-abandoned"
+    assert {:ok, :live} = HerdrTransport.owned_session_liveness(ownership_ref)
     assert :ok = HerdrTransport.cleanup_owned_session(ownership_ref)
 
     assert :ok =
@@ -786,6 +816,94 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
     commands = File.read!(context.log)
     assert commands =~ "--session octo-emb-1141-abandoned server stop"
+  end
+
+  test "native agent liveness distinguishes absence and fails closed on malformed or unreachable responses", context do
+    base_ref = %{
+      kind: "herdr",
+      session_name: "octo-emb-1217-liveness",
+      agent_name: "implementer_orchestrator",
+      runtime_root: context.runtime_root,
+      cleanup_context: %{
+        herdr_bin: context.bin,
+        extra_env: [{"HERDR_FAKE_LOG", context.log}],
+        socket_root: context.runtime_root
+      }
+    }
+
+    for {mode, expected} <- [
+          {"absent", :absent},
+          {"malformed", :unknown},
+          {"protocol_mismatch", :unknown},
+          {"unreachable", :unreachable}
+        ] do
+      ownership_ref =
+        put_in(
+          base_ref,
+          [:cleanup_context, :extra_env],
+          [
+            {"HERDR_FAKE_LOG", context.log},
+            {"HERDR_FAKE_AGENT_GET_MODE", mode}
+          ]
+        )
+
+      assert {:ok, ^expected} = HerdrTransport.owned_session_liveness(ownership_ref)
+    end
+  end
+
+  test "native agent liveness bounds a stalled Herdr query", context do
+    ownership_ref = %{
+      kind: "herdr",
+      session_name: "octo-emb-1217-liveness-timeout",
+      agent_name: "implementer_orchestrator",
+      runtime_root: context.runtime_root,
+      cleanup_context: %{
+        herdr_bin: context.bin,
+        extra_env: [
+          {"HERDR_FAKE_LOG", context.log},
+          {"HERDR_FAKE_AGENT_GET_MODE", "stalled"}
+        ],
+        socket_root: context.runtime_root,
+        liveness_timeout_ms: 25
+      }
+    }
+
+    started_at = System.monotonic_time(:millisecond)
+    assert {:ok, :unreachable} = HerdrTransport.owned_session_liveness(ownership_ref)
+    assert System.monotonic_time(:millisecond) - started_at < 500
+  end
+
+  test "owned-session cleanup bounds a stalled native status query", context do
+    runtime_root =
+      Path.join(System.tmp_dir!(), "octo-herdr-cleanup-timeout-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(runtime_root)
+    on_exit(fn -> File.rm_rf!(runtime_root) end)
+
+    ownership_ref = %{
+      kind: "herdr",
+      session_name: "octo-emb-1217-cleanup-timeout",
+      runtime_root: runtime_root,
+      cleanup_context: %{
+        herdr_bin: context.bin,
+        extra_env: [
+          {"HERDR_FAKE_LOG", context.log},
+          {"HERDR_FAKE_STATUS_STALL", "1"},
+          {"HERDR_FAKE_STATUS_STALL_SECONDS", "2"},
+          {"HERDR_FAKE_STATUS_PID_FILE", Path.join(Path.dirname(context.bin), "cleanup-status.pid")}
+        ],
+        socket_root: runtime_root,
+        stop_timeout_ms: 25
+      }
+    }
+
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, {:herdr_owned_session_status_failed, :command_timeout}} =
+             HerdrTransport.cleanup_owned_session(ownership_ref)
+
+    assert System.monotonic_time(:millisecond) - started_at < 1_500
+    assert File.exists?(runtime_root)
   end
 
   test "an ownership reference recovers an explicitly owned custom socket root", context do

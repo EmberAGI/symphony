@@ -6,7 +6,12 @@ defmodule SymphonyElixir.Linear.Adapter do
   @behaviour SymphonyElixir.Tracker
 
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Tracker.ClaimLease
+  alias SymphonyElixir.Tracker.EscalationMarker
+
+  @escalation_label "Human Escalation"
+  @escalation_state "Human Escalation"
 
   @create_comment_mutation """
   mutation SymphonyCreateComment($issueId: String!, $body: String!) {
@@ -107,6 +112,28 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
+  @spec ensure_irrecoverable_escalation(String.t(), map()) ::
+          {:ok, map()} | {:error, term()}
+  def ensure_irrecoverable_escalation(issue_id, attrs)
+      when is_binary(issue_id) and is_map(attrs) do
+    case EscalationMarker.new(attrs) do
+      {:ok, marker} -> reconcile_irrecoverable_escalation(issue_id, marker)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def ensure_irrecoverable_escalation(_issue_id, _attrs),
+    do: {:error, :invalid_irrecoverable_escalation}
+
+  defp reconcile_irrecoverable_escalation(issue_id, marker) do
+    with_escalation_lock(issue_id, marker.key, fn ->
+      case fetch_current_issue(issue_id) do
+        {:ok, %Issue{} = issue} -> ensure_remote_escalation(issue_id, issue, marker)
+        {:error, reason} -> {:error, reason}
+      end
+    end)
+  end
+
   @spec upsert_claim_lease(String.t(), map()) :: {:ok, ClaimLease.t() | nil} | {:error, term()}
   def upsert_claim_lease(issue_id, lease_attrs) when is_binary(issue_id) and is_map(lease_attrs) do
     lease =
@@ -162,6 +189,74 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   defp client_module do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
+  end
+
+  defp fetch_current_issue(issue_id) do
+    case client_module().fetch_issue_states_by_ids([issue_id]) do
+      {:ok, [%Issue{} = issue | _]} -> {:ok, issue}
+      {:ok, []} -> {:error, :issue_not_found}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :issue_fetch_failed}
+    end
+  end
+
+  defp ensure_remote_escalation(issue_id, %Issue{} = issue, %EscalationMarker{} = marker) do
+    {comment_status, errors} = ensure_remote_comment(issue_id, issue, marker)
+    {label_status, errors} = ensure_remote_label(issue_id, issue, errors)
+    {state_status, errors} = ensure_remote_state(issue_id, issue, errors)
+
+    progress = %{
+      key: marker.key,
+      comment: comment_status,
+      label: label_status,
+      state: state_status
+    }
+
+    case errors do
+      [] -> {:ok, progress}
+      _ -> {:error, %{key: marker.key, progress: progress, errors: Enum.reverse(errors)}}
+    end
+  end
+
+  defp ensure_remote_comment(issue_id, %Issue{} = issue, %EscalationMarker{} = marker) do
+    if EscalationMarker.find(issue.comments, marker.key) do
+      {:already_present, []}
+    else
+      case create_comment(issue_id, EscalationMarker.render(marker)) do
+        :ok -> {:created, []}
+        {:error, reason} -> {{:error, reason}, [comment: reason]}
+      end
+    end
+  end
+
+  defp ensure_remote_label(issue_id, %Issue{} = issue, errors) do
+    if Enum.any?(issue.labels, &(normalize_label_name(&1) == normalize_label_name(@escalation_label))) do
+      {:already_present, errors}
+    else
+      case add_issue_label(issue_id, @escalation_label) do
+        :ok -> {:applied, errors}
+        {:error, reason} -> {{:error, reason}, [{:label, reason} | errors]}
+      end
+    end
+  end
+
+  defp ensure_remote_state(issue_id, %Issue{} = issue, errors) do
+    if normalize_label_name(issue.state) == normalize_label_name(@escalation_state) do
+      {:already_present, errors}
+    else
+      case update_issue_state(issue_id, @escalation_state) do
+        :ok -> {:applied, errors}
+        {:error, reason} -> {{:error, reason}, [{:state, reason} | errors]}
+      end
+    end
+  end
+
+  defp with_escalation_lock(issue_id, key, fun) when is_function(fun, 0) do
+    case :global.trans({{__MODULE__, issue_id, key}, self()}, fun) do
+      :aborted -> {:error, :escalation_lock_failed}
+      {:aborted, reason} -> {:error, {:escalation_lock_failed, reason}}
+      result -> result
+    end
   end
 
   defp verified_claim_lease(candidates, %ClaimLease{} = lease) when is_list(candidates) do
@@ -303,4 +398,6 @@ defmodule SymphonyElixir.Linear.Adapter do
     |> String.trim()
     |> String.downcase()
   end
+
+  defp normalize_label_name(_label_name), do: ""
 end

@@ -356,6 +356,85 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :label_not_found} = Adapter.add_issue_label("issue-1", "Missing")
   end
 
+  test "linear escalation reconciliation resumes from its durable marker after restart" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    on_exit(fn ->
+      Process.delete({FakeLinearClient, :graphql_results})
+      Process.delete({FakeLinearClient, :fetch_issue_states_result})
+    end)
+
+    issue_id = "issue-linear-escalation"
+    issue = %Issue{id: issue_id, identifier: "MT-ESC", state: "In Progress", labels: [], comments: []}
+    Process.put({FakeLinearClient, :fetch_issue_states_result}, {:ok, [issue]})
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}},
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "team" => %{
+                 "labels" => %{
+                   "nodes" => [%{"id" => "label-human", "name" => "Human Escalation"}]
+                 }
+               },
+               "labels" => %{"nodes" => []}
+             }
+           }
+         }},
+        {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}},
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "team" => %{"states" => %{"nodes" => [%{"id" => "state-human"}]}}
+             }
+           }
+         }},
+        {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}}
+      ]
+    )
+
+    attrs = %{
+      failure_fingerprint: "fingerprint-linear",
+      retry_epoch: "epoch-linear",
+      run_id: "run-before-restart",
+      operator_note: "## Operator Note\n\nredacted failure"
+    }
+
+    assert {:ok, %{comment: :created, label: :applied, state: :applied, key: key}} =
+             Adapter.ensure_irrecoverable_escalation(issue_id, attrs)
+
+    assert_receive {:graphql_called, create_comment_query, %{body: marker_body, issueId: ^issue_id}}
+    assert create_comment_query =~ "commentCreate"
+    assert marker_body =~ key
+    assert_receive {:graphql_called, _label_lookup, %{issueId: ^issue_id}}
+    assert_receive {:graphql_called, _label_update, %{issueId: ^issue_id, labelId: "label-human"}}
+    assert_receive {:graphql_called, _state_lookup, %{issueId: ^issue_id, stateName: "Human Escalation"}}
+    assert_receive {:graphql_called, _state_update, %{issueId: ^issue_id, stateId: "state-human"}}
+
+    restarted_issue = %{
+      issue
+      | state: "Human Escalation",
+        labels: ["Human Escalation"],
+        comments: [%{id: "comment-escalation", body: marker_body}]
+    }
+
+    Process.put({FakeLinearClient, :fetch_issue_states_result}, {:ok, [restarted_issue]})
+    Process.put({FakeLinearClient, :graphql_results}, [])
+
+    assert {:ok, %{comment: :already_present, label: :already_present, state: :already_present, key: ^key}} =
+             Adapter.ensure_irrecoverable_escalation(
+               issue_id,
+               Map.put(attrs, :run_id, "run-after-restart")
+             )
+
+    refute_receive {:graphql_called, _query, _variables}, 50
+  end
+
   test "linear adapter updates and verifies an existing claim lease comment before dispatch" do
     Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
 

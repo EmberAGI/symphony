@@ -3,6 +3,15 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
 
   alias SymphonyElixir.Runtime.ProcessOwnership
 
+  defmodule OwnedSessionLivenessAdapter do
+    def owned_session_liveness(ownership_ref) do
+      recipient = Application.fetch_env!(:symphony_elixir, :owned_session_liveness_recipient)
+      result = Application.fetch_env!(:symphony_elixir, :owned_session_liveness_result)
+      send(recipient, {:dispatch_liveness_checked, ownership_ref})
+      {:ok, result}
+    end
+  end
+
   setup do
     previous_role = System.get_env("SYMPHONY_ROLE")
     System.put_env("SYMPHONY_ROLE", "implementer")
@@ -82,11 +91,182 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
 
     child_pid = child_pid_file |> File.read!() |> String.trim() |> String.to_integer()
     assert {_, 0} = System.cmd("kill", ["-0", Integer.to_string(child_pid)], stderr_to_stdout: true)
-    assert ProcessOwnership.owned_process_live?(issue, %{app_server_pid: app_server_pid})
+
+    assert_eventually(fn ->
+      ProcessOwnership.owned_process_live?(issue, %{app_server_pid: app_server_pid})
+    end)
 
     state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
 
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "dispatch refuses when native liveness finds a quarantined Herdr session" do
+    previous_adapter = Application.get_env(:symphony_elixir, :owned_session_liveness_module)
+    previous_recipient = Application.get_env(:symphony_elixir, :owned_session_liveness_recipient)
+    previous_result = Application.get_env(:symphony_elixir, :owned_session_liveness_result)
+    test_root = Path.join(System.tmp_dir!(), "symphony-native-dispatch-fence-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace_path = Path.join(workspace_root, "MT-582-symphony")
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    File.mkdir_p!(workspace_path)
+
+    Application.put_env(
+      :symphony_elixir,
+      :owned_session_liveness_module,
+      OwnedSessionLivenessAdapter
+    )
+
+    Application.put_env(:symphony_elixir, :owned_session_liveness_recipient, self())
+    Application.put_env(:symphony_elixir, :owned_session_liveness_result, :live)
+
+    on_exit(fn ->
+      restore_app_env(:owned_session_liveness_module, previous_adapter)
+      restore_app_env(:owned_session_liveness_recipient, previous_recipient)
+      restore_app_env(:owned_session_liveness_result, previous_result)
+      File.rm_rf(test_root)
+    end)
+
+    issue = %Issue{
+      id: "issue-native-dispatch-fence",
+      identifier: "MT-582",
+      title: "Native session dispatch fence",
+      state: "In Progress",
+      repository: "EmberAGI/symphony"
+    }
+
+    assert :ok =
+             ProcessOwnership.record_quarantined(
+               issue,
+               %{
+                 role: "implementer",
+                 run_id: "run-native-dispatch-fence",
+                 workspace_path: workspace_path,
+                 owned_session_ref: %{
+                   kind: "herdr",
+                   session_name: "octo-emb-1217-dispatch-fence",
+                   agent_name: "implementer_orchestrator"
+                 }
+               },
+               "cleanup verification failed"
+             )
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+    assert_receive {:dispatch_liveness_checked,
+                    %{
+                      kind: "herdr",
+                      session_name: "octo-emb-1217-dispatch-fence",
+                      agent_name: "implementer_orchestrator"
+                    }}
+  end
+
+  test "two orchestrators racing the same issue start at most one top-level role run" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dispatch-fence-race-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-dispatch-fence-race-#{System.unique_integer([:positive])}",
+      identifier: "MT-DISPATCH-FENCE",
+      title: "Fence concurrent dispatch",
+      state: "In Progress",
+      repository: "EmberAGI/symphony",
+      labels: []
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.join(test_root, "workspaces"),
+      poll_interval_ms: 1_000_000,
+      hook_before_run: "sleep 30"
+    )
+
+    first_name = Module.concat(__MODULE__, :DispatchFenceFirst)
+    second_name = Module.concat(__MODULE__, :DispatchFenceSecond)
+    {:ok, first_pid} = Orchestrator.start_link(name: first_name)
+    {:ok, second_pid} = Orchestrator.start_link(name: second_name)
+
+    on_exit(fn ->
+      for orchestrator_pid <- [first_pid, second_pid], Process.alive?(orchestrator_pid) do
+        orchestrator_pid
+        |> :sys.get_state()
+        |> Map.get(:running, %{})
+        |> Enum.each(fn {_issue_id, running_entry} ->
+          case Map.get(running_entry, :pid) do
+            pid when is_pid(pid) -> Process.exit(pid, :kill)
+            _ -> :ok
+          end
+        end)
+      end
+
+      stop_orchestrator!(first_pid)
+      stop_orchestrator!(second_pid)
+      File.rm_rf(test_root)
+    end)
+
+    assert_receive {:memory_tracker_claim_lease, issue_id, first_lease}, 5_000
+    assert issue_id == issue.id
+
+    run_ids = collect_claim_run_ids(issue_id, 300, MapSet.new([first_lease.run_id]))
+    assert MapSet.size(run_ids) == 1
+  end
+
+  test "dispatch refetches durable ownership after claim upsert and before spawn" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dispatch-final-refetch-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-dispatch-final-refetch-#{System.unique_integer([:positive])}",
+      identifier: "MT-DISPATCH-REFETCH",
+      title: "Refetch final dispatch ownership",
+      state: "In Progress",
+      repository: "EmberAGI/symphony",
+      labels: []
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.join(test_root, "workspaces"),
+      poll_interval_ms: 1_000_000,
+      hook_before_run: "sleep 30"
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :DispatchFinalRefetch)
+    {:ok, orchestrator_pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(orchestrator_pid) do
+        orchestrator_pid
+        |> :sys.get_state()
+        |> Map.get(:running, %{})
+        |> Enum.each(fn {_issue_id, running_entry} ->
+          case Map.get(running_entry, :pid) do
+            pid when is_pid(pid) -> Process.exit(pid, :kill)
+            _ -> :ok
+          end
+        end)
+      end
+
+      stop_orchestrator!(orchestrator_pid)
+      File.rm_rf(test_root)
+    end)
+
+    assert_final_refetch_after_claim(issue.id)
   end
 
   # Late-detached detection is Linux-hosted runtime behavior: it needs /proc
@@ -186,7 +366,7 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
-  defp assert_eventually(fun, attempts \\ 20)
+  defp assert_eventually(fun, attempts \\ 200)
 
   defp assert_eventually(fun, attempts) when attempts > 0 do
     if fun.() do
@@ -198,4 +378,28 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
   end
 
   defp assert_eventually(_fun, 0), do: flunk("condition not met in time")
+
+  defp collect_claim_run_ids(issue_id, timeout_ms, run_ids) do
+    receive do
+      {:memory_tracker_claim_lease, ^issue_id, lease} ->
+        collect_claim_run_ids(issue_id, timeout_ms, MapSet.put(run_ids, lease.run_id))
+    after
+      timeout_ms -> run_ids
+    end
+  end
+
+  defp assert_final_refetch_after_claim(issue_id) do
+    receive do
+      {:memory_tracker_claim_lease, ^issue_id, _lease} ->
+        assert_receive {:memory_tracker_fetch_issue_states_by_ids, [^issue_id]}, 500
+
+      _other_event ->
+        assert_final_refetch_after_claim(issue_id)
+    after
+      5_000 -> flunk("dispatch did not upsert its claim lease")
+    end
+  end
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 end

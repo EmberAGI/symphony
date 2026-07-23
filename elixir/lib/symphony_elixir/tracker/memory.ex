@@ -7,10 +7,15 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Tracker.ClaimLease
+  alias SymphonyElixir.Tracker.EscalationMarker
+
+  @escalation_store :symphony_elixir_memory_tracker_escalations
+  @escalation_label "Human Escalation"
+  @escalation_state "Human Escalation"
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
-    issues = issue_entries()
+    issues = issue_entries() |> Enum.map(&materialize_issue/1)
     send_event({:memory_tracker_fetch_candidate_issues, Enum.map(issues, & &1.id)})
     {:ok, issues}
   end
@@ -23,7 +28,9 @@ defmodule SymphonyElixir.Tracker.Memory do
       |> MapSet.new()
 
     {:ok,
-     Enum.filter(issue_entries(), fn %Issue{state: state} ->
+     issue_entries()
+     |> Enum.map(&materialize_issue/1)
+     |> Enum.filter(fn %Issue{state: state} ->
        MapSet.member?(normalized_states, normalize_state(state))
      end)}
   end
@@ -34,7 +41,9 @@ defmodule SymphonyElixir.Tracker.Memory do
     wanted_ids = MapSet.new(issue_ids)
 
     {:ok,
-     Enum.filter(issue_entries(), fn %Issue{id: id} ->
+     issue_entries()
+     |> Enum.map(&materialize_issue/1)
+     |> Enum.filter(fn %Issue{id: id} ->
        MapSet.member?(wanted_ids, id)
      end)}
   end
@@ -47,16 +56,33 @@ defmodule SymphonyElixir.Tracker.Memory do
     end
   end
 
+  @spec ensure_irrecoverable_escalation(String.t(), map()) ::
+          {:ok, map()} | {:error, term()}
+  def ensure_irrecoverable_escalation(issue_id, attrs)
+      when is_binary(issue_id) and is_map(attrs) do
+    with {:ok, marker} <- EscalationMarker.new(attrs) do
+      with_escalation_lock(issue_id, marker.key, fn ->
+        ensure_escalation(issue_id, marker)
+      end)
+    end
+  end
+
+  def ensure_irrecoverable_escalation(_issue_id, _attrs),
+    do: {:error, :invalid_irrecoverable_escalation}
+
   @spec upsert_claim_lease(String.t(), map()) ::
           {:ok, ClaimLease.t() | nil} | {:error, term()}
   def upsert_claim_lease(issue_id, lease_attrs) do
-    lease =
-      lease_attrs
-      |> Map.put(:issue_id, issue_id)
-      |> ClaimLease.new()
+    with :ok <- maybe_fail_mutation(:claim_lease) do
+      lease =
+        lease_attrs
+        |> Map.put(:issue_id, issue_id)
+        |> ClaimLease.new()
 
-    send_event({:memory_tracker_claim_lease, issue_id, lease})
-    {:ok, lease}
+      persist_claim_lease(issue_id, lease)
+      send_event({:memory_tracker_claim_lease, issue_id, lease})
+      {:ok, lease}
+    end
   end
 
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
@@ -83,6 +109,157 @@ defmodule SymphonyElixir.Tracker.Memory do
     Enum.filter(configured_issues(), &match?(%Issue{}, &1))
   end
 
+  defp materialize_issue(%Issue{id: issue_id} = issue) do
+    issue = materialize_claim_lease(issue)
+
+    case Agent.get(memory_store(), &Map.get(&1, escalation_state_key(issue_id))) do
+      %{comments: comments, labels: labels, state: state} ->
+        %{issue | comments: comments, labels: labels, state: state}
+
+      _ ->
+        issue
+    end
+  end
+
+  defp ensure_escalation(issue_id, %EscalationMarker{} = marker) do
+    snapshot = escalation_snapshot(issue_id)
+    {snapshot, comment_status, errors} = ensure_escalation_comment(issue_id, snapshot, marker)
+    {snapshot, label_status, errors} = ensure_escalation_label(issue_id, snapshot, errors)
+    {_snapshot, state_status, errors} = ensure_escalation_state(issue_id, snapshot, errors)
+
+    progress = %{
+      key: marker.key,
+      comment: comment_status,
+      label: label_status,
+      state: state_status
+    }
+
+    case errors do
+      [] -> {:ok, progress}
+      _ -> {:error, %{key: marker.key, progress: progress, errors: Enum.reverse(errors)}}
+    end
+  end
+
+  defp ensure_escalation_comment(issue_id, snapshot, %EscalationMarker{} = marker) do
+    if EscalationMarker.find(snapshot.comments, marker.key) do
+      {snapshot, :already_present, []}
+    else
+      case maybe_fail_mutation(:comment) do
+        :ok ->
+          body = EscalationMarker.render(marker)
+          comment = %{id: "memory-escalation-#{marker.key}", body: body}
+          snapshot = %{snapshot | comments: [comment | snapshot.comments]}
+          persist_escalation_snapshot(issue_id, snapshot)
+          send_event({:memory_tracker_comment, issue_id, body})
+          {snapshot, :created, []}
+
+        {:error, reason} ->
+          {snapshot, {:error, reason}, [comment: reason]}
+      end
+    end
+  end
+
+  defp ensure_escalation_label(issue_id, snapshot, errors) do
+    if Enum.any?(snapshot.labels, &(normalize_state(&1) == normalize_state(@escalation_label))) do
+      {snapshot, :already_present, errors}
+    else
+      case maybe_fail_mutation(:label) do
+        :ok ->
+          snapshot = %{snapshot | labels: [@escalation_label | snapshot.labels]}
+          persist_escalation_snapshot(issue_id, snapshot)
+          send_event({:memory_tracker_label_add, issue_id, @escalation_label})
+          {snapshot, :applied, errors}
+
+        {:error, reason} ->
+          {snapshot, {:error, reason}, [{:label, reason} | errors]}
+      end
+    end
+  end
+
+  defp ensure_escalation_state(issue_id, snapshot, errors) do
+    if normalize_state(snapshot.state) == normalize_state(@escalation_state) do
+      {snapshot, :already_present, errors}
+    else
+      case maybe_fail_mutation(:state) do
+        :ok ->
+          snapshot = %{snapshot | state: @escalation_state}
+          persist_escalation_snapshot(issue_id, snapshot)
+          send_event({:memory_tracker_state_update, issue_id, @escalation_state})
+          {snapshot, :applied, errors}
+
+        {:error, reason} ->
+          {snapshot, {:error, reason}, [{:state, reason} | errors]}
+      end
+    end
+  end
+
+  defp escalation_snapshot(issue_id) do
+    base_snapshot =
+      case Enum.find(issue_entries(), &(&1.id == issue_id)) do
+        %Issue{} = issue ->
+          %{comments: List.wrap(issue.comments), labels: List.wrap(issue.labels), state: issue.state}
+
+        _ ->
+          %{comments: [], labels: [], state: nil}
+      end
+
+    case Agent.get(memory_store(), &Map.get(&1, escalation_state_key(issue_id))) do
+      stored_snapshot when is_map(stored_snapshot) ->
+        Map.merge(base_snapshot, stored_snapshot)
+
+      _ ->
+        base_snapshot
+    end
+  end
+
+  defp persist_escalation_snapshot(issue_id, snapshot) do
+    Agent.update(memory_store(), &Map.put(&1, escalation_state_key(issue_id), snapshot))
+    :ok
+  end
+
+  defp persist_claim_lease(issue_id, %ClaimLease{} = lease) do
+    Agent.update(memory_store(), &Map.put(&1, claim_state_key(issue_id), lease))
+    :ok
+  end
+
+  defp materialize_claim_lease(%Issue{id: issue_id} = issue) do
+    case Agent.get(memory_store(), &Map.get(&1, claim_state_key(issue_id))) do
+      %ClaimLease{} = lease -> %{issue | claim_lease: lease, claim_leases: [lease]}
+      _ -> issue
+    end
+  end
+
+  defp escalation_state_key(issue_id), do: {:escalation, memory_scope(), issue_id}
+  defp claim_state_key(issue_id), do: {:claim, memory_scope(), issue_id}
+
+  defp memory_scope do
+    Application.get_env(:symphony_elixir, :memory_tracker_recipient, :default)
+  end
+
+  defp memory_store do
+    case Process.whereis(@escalation_store) do
+      nil ->
+        case Agent.start(fn -> %{} end, name: @escalation_store) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+          {:error, reason} -> raise "failed to start memory escalation store: #{inspect(reason)}"
+        end
+
+      _pid ->
+        :ok
+    end
+
+    @escalation_store
+  end
+
+  defp with_escalation_lock(issue_id, key, fun) when is_function(fun, 0) do
+    case :global.trans({{__MODULE__, issue_id, key}, self()}, fun) do
+      :aborted -> {:error, :escalation_lock_failed}
+      {:aborted, reason} -> {:error, {:escalation_lock_failed, reason}}
+      result -> result
+    end
+  end
+
   defp send_event(message) do
     case Application.get_env(:symphony_elixir, :memory_tracker_recipient) do
       pid when is_pid(pid) -> send(pid, message)
@@ -90,7 +267,7 @@ defmodule SymphonyElixir.Tracker.Memory do
     end
   end
 
-  defp maybe_fail_mutation(kind) when kind in [:comment, :label, :state] do
+  defp maybe_fail_mutation(kind) when kind in [:comment, :label, :state, :claim_lease] do
     case Application.get_env(:symphony_elixir, :memory_tracker_fail_mutations, %{}) do
       failures when is_map(failures) ->
         case Map.get(failures, kind) || Map.get(failures, Atom.to_string(kind)) do

@@ -1113,9 +1113,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           second_retry_lease = receive_claim_lease_state!(issue_id, "retrying")
           refute second_retry_lease.retry_reason =~ "hidden"
           refute second_retry_lease.retry_reason =~ "token="
+          assert_failure_observation_count!(pid, issue_id, 2)
 
           second_retry_run = kill_retry_dispatch!(pid, issue_id, reason)
           assert second_retry_run != first_retry_run
+          assert_failure_observation_count!(pid, issue_id, 3)
 
           blocked_lease = receive_claim_lease_state!(issue_id, "blocked")
           assert blocked_lease.retry_reason =~ "repeated_identical_no_progress_failure"
@@ -1212,7 +1214,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
-        poll_interval_ms: 30_000,
+        poll_interval_ms: 1_000_000_000,
         workspace_root: workspace_root,
         hook_before_run: """
         printf '%s\\n' 'Provider-auth pre-turn withheld: provider-auth provider=claude_code status=unhealthy affected_roles=implementer,qa remediation=run claude setup-token raw=Bearer orchestrator-hook-secret'
@@ -2476,6 +2478,27 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     Process.exit(running.pid, reason)
 
     running.claim_lease.run_id
+  end
+
+  defp assert_failure_observation_count!(pid, issue_id, expected_count) do
+    deadline_ms = System.monotonic_time(:millisecond) + 5_000
+    do_assert_failure_observation_count!(pid, issue_id, expected_count, deadline_ms)
+  end
+
+  defp do_assert_failure_observation_count!(pid, issue_id, expected_count, deadline_ms) do
+    observation = :sys.get_state(pid).failure_observations[issue_id]
+
+    cond do
+      is_map(observation) and observation.count == expected_count ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline_ms ->
+        flunk("expected failure observation count #{expected_count}, got: #{inspect(observation)}")
+
+      true ->
+        Process.sleep(5)
+        do_assert_failure_observation_count!(pid, issue_id, expected_count, deadline_ms)
+    end
   end
 
   defp wait_for_running_entry(pid, issue_id, timeout_ms) do

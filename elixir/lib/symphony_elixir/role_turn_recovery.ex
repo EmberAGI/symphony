@@ -9,7 +9,9 @@ defmodule SymphonyElixir.RoleTurnRecovery do
 
   require Logger
 
-  alias SymphonyElixir.{Linear.Issue, Tracker}
+  alias SymphonyElixir.{AgentRuntime, Linear.Issue, Tracker}
+  alias SymphonyElixir.Runtime.{LifecycleVerdict, ProcessOwnership}
+  alias SymphonyElixir.Tracker.ClaimLease
 
   @marker_version 1
   @comment_marker "symphony:aborted-role-turn-recovery"
@@ -105,6 +107,22 @@ defmodule SymphonyElixir.RoleTurnRecovery do
   end
 
   defp recover_marker(marker, issue, active_states, terminal_states) do
+    case recovery_lifecycle_verdict(issue) do
+      %LifecycleVerdict{workflow_mutation: :refuse} = verdict ->
+        Logger.warning(
+          "Skipping aborted role-turn recovery while lifecycle authority is quarantined " <>
+            "issue_id=#{marker["issue_id"]} session_liveness=#{verdict.session} " <>
+            "lease_liveness=#{verdict.lease}"
+        )
+
+        :ok
+
+      _allow_or_not_applicable ->
+        execute_recovery_plan(marker, issue, active_states, terminal_states)
+    end
+  end
+
+  defp execute_recovery_plan(marker, issue, active_states, terminal_states) do
     case recovery_plan(issue, marker, active_states, terminal_states) do
       :clear ->
         clear_turn(marker["issue_id"])
@@ -129,6 +147,32 @@ defmodule SymphonyElixir.RoleTurnRecovery do
         end
     end
   end
+
+  defp recovery_lifecycle_verdict(%Issue{} = issue) do
+    lease = recovery_lease_liveness(issue)
+
+    case ProcessOwnership.blocking_owned_session_record(
+           issue,
+           &AgentRuntime.owned_session_liveness/1
+         ) do
+      {_record, :live} ->
+        LifecycleVerdict.evaluate(session: :live, lease: lease, provider_turn: :working)
+
+      {_record, status} when status in [:unknown, :unreachable] ->
+        LifecycleVerdict.evaluate(session: status, lease: lease, provider_turn: :failed)
+
+      nil ->
+        LifecycleVerdict.evaluate(session: :absent, lease: lease, provider_turn: :failed)
+    end
+  end
+
+  defp recovery_lifecycle_verdict(_issue), do: nil
+
+  defp recovery_lease_liveness(%Issue{claim_lease: %ClaimLease{} = claim_lease}) do
+    if ClaimLease.expired?(claim_lease, DateTime.utc_now()), do: :expired, else: :live
+  end
+
+  defp recovery_lease_liveness(_issue), do: :missing
 
   defp recovery_plan(nil, _marker, _active_states, _terminal_states), do: :clear
 

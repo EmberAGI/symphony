@@ -624,6 +624,11 @@ claim state.
    - Claim removed because issue is terminal, non-active, missing, or retry path completed without
      re-dispatch.
 
+6. `Quarantined`
+   - Native session absence could not be verified, so ordinary retry, reroute, workflow mutation,
+     and claim release are refused. The durable lifecycle meaning and decision matrix are owned by
+     the Agent Runtime specification.
+
 Important nuance:
 
 - A successful worker exit does not mean the issue is done forever.
@@ -634,9 +639,9 @@ Important nuance:
 - The first turn SHOULD use the full rendered task prompt.
 - Continuation turns SHOULD send only continuation guidance to the existing thread, not resend the
   original task prompt that is already present in thread history.
-- Once the worker exits normally, the orchestrator still schedules a short continuation retry
-  (about 1 second) so it can re-check whether the issue remains active and needs another worker
-  session.
+- Once the worker exits normally, the orchestrator first evaluates the Agent Runtime lifecycle
+  verdict. A short continuation check is allowed only when the owned native session is verified
+  absent; a live, unknown, or unreachable session is quarantined instead.
 
 ### 7.2 Run Attempt Lifecycle
 
@@ -667,14 +672,15 @@ Distinct terminal reasons are important because retry logic and logs differ.
 - `Worker Exit (normal)`
   - Remove running entry.
   - Update aggregate runtime totals.
-  - Schedule continuation retry (attempt `1`) after the worker exhausts or finishes its in-process
-    turn loop.
+  - Query native owned-session liveness and evaluate the Agent Runtime lifecycle verdict.
+  - Schedule continuation retry (attempt `1`) only when that verdict permits it.
 
 - `Worker Exit (abnormal)`
   - Remove running entry.
   - Update aggregate runtime totals.
   - Classify the runtime failure before ordinary retry scheduling.
-  - Schedule exponential-backoff retry only for retryable or unknown failures.
+  - Schedule exponential-backoff retry only for retryable failures whose lifecycle verdict permits
+    durable retry mutation.
   - For irrecoverable runtime failures, avoid ordinary retry scheduling and
     drive the configured tracker escalation path instead.
 
@@ -692,8 +698,10 @@ Distinct terminal reasons are important because retry logic and logs differ.
 
 ### 7.4 Idempotency and Recovery Rules
 
-- The orchestrator serializes state mutations through one authority to avoid duplicate dispatch.
-- `claimed` and `running` checks are REQUIRED before launching any worker.
+- The orchestrator serializes dispatch per issue/workspace/role scope and re-fetches eligibility,
+  durable claim state, and native session liveness inside that fence.
+- `claimed` and `running` checks remain necessary but are not sufficient before launch; the final
+  verified claim/run identity and native/process-ownership re-check are REQUIRED.
 - Reconciliation runs before dispatch on every tick.
 - Restart recovery is tracker-driven and filesystem-driven (without a durable orchestrator DB).
 - Before dispatch, the orchestrator records a pending-turn / pending role-turn marker on local filesystem storage
@@ -1606,14 +1614,16 @@ API design notes:
 ### 14.3 Partial State Recovery (Restart)
 
 Current design is intentionally in-memory for scheduler state.
-Restart recovery means the service can resume useful operation by polling tracker state and reusing
-preserved workspaces. It does not mean retry timers, running sessions, or live worker state survive
-process restart.
+Restart recovery means the service can resume useful operation by polling tracker state, native
+run-owned session liveness, and preserved workspaces. Retry timers and in-memory worker state do not
+survive process restart, but a provider-native session may still be live and remains authoritative
+for its own aliveness.
 
 After restart:
 
 - No retry timers are restored from prior process memory.
-- No running sessions are assumed recoverable.
+- No running session is assumed absent. Exact owned sessions are queried natively; live, unknown,
+  or unreachable results preserve/quarantine the claim and refuse replacement dispatch.
 - Service recovers by:
   - reading pending-turn / pending role-turn markers left by interrupted workers
   - refreshing those issues from the tracker
@@ -1805,6 +1815,17 @@ function reconcile_running_issues(state):
 
 ```text
 function dispatch_issue(issue, state, attempt):
+  # The following revalidation, verified claim, ownership re-check, and launch
+  # execute atomically inside the issue/workspace/role dispatch fence.
+  issue = tracker.refetch_issue_and_claims(issue.id)
+  native_liveness = runtime.native_owned_session_liveness(issue)
+  if issue is not eligible or native_liveness is not absent:
+    return refuse_or_quarantine_dispatch(state, issue, native_liveness)
+
+  claim = tracker.upsert_and_verify_claim(issue, new_run_id())
+  if claim is not exclusively owned or process_or_native_ownership_changed(issue):
+    return refuse_dispatch(state, issue)
+
   worker = spawn_worker(
     fn -> run_agent_attempt(issue, attempt, parent_orchestrator_pid) end
   )
@@ -1895,6 +1916,9 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
     turn_number = turn_number + 1
 
   app_server.stop_session(session)
+  if app_server.native_liveness(session) is not absent:
+    quarantine_owned_session(session)
+    fail_worker("owned session cleanup was not verified")
   run_hook_best_effort("after_run", workspace.path)
 
   exit_normal()
@@ -1906,6 +1930,18 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
 on_worker_exit(issue_id, reason, state):
   running_entry = state.running.remove(issue_id)
   state = add_runtime_seconds_to_totals(state, running_entry)
+
+  verdict = lifecycle_verdict(
+    session=runtime.native_owned_session_liveness(running_entry.owned_session),
+    lease=tracker.claim_lease_liveness(running_entry.claim),
+    provider_turn=provider_turn_state(reason)
+  )
+
+  if verdict refuses workflow mutation or claim release or retry:
+    quarantine_process_ownership(running_entry, verdict)
+    preserve_blocked_claim_and_escalate(issue_id, verdict)
+    notify_observers()
+    return state
 
   if reason == normal:
     state.completed.add(issue_id)  # bookkeeping only
@@ -2033,14 +2069,19 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Non-active state stops running agent without workspace cleanup
 - Terminal state stops running agent and cleans workspace
 - Reconciliation with no running issues is a no-op
-- Normal worker exit schedules a short continuation retry (attempt 1)
-- Abnormal worker exit increments retries with 10s-based exponential backoff
+- Normal worker exit schedules a short continuation retry (attempt 1) only after native session
+  absence is verified
+- Normal or abnormal task death with live, unknown, or unreachable native session liveness
+  quarantines ownership and refuses retry, reroute, claim release, and ordinary workflow mutation
+- Abnormal worker exit with verified-absent native session increments retries with 10s-based
+  exponential backoff
 - Retry backoff cap uses configured `agent.max_retry_backoff_ms`
 - Retry queue entries include attempt, due time, identifier, and error
 - Retry timer refreshes the queued issue by ID rather than fetching the full candidate page
 - Retry timer releases claims for missing or inactive issues and cleans workspaces for terminal
   issues
-- Stall detection kills stalled sessions and schedules retry
+- Stall detection tears down stalled sessions and schedules retry only after bounded native absence
+  verification; failed verification quarantines the claim
 - Slot exhaustion requeues retries with explicit error reason
 - If a snapshot API is implemented, it returns running rows, retry rows, token totals, and rate
   limits

@@ -28,4 +28,9 @@ defmodule SymphonyElixir.ImplementerDelegation.Transport do
               {:ok, agent_ref()} | {:error, term()}
   @callback read_agent(session_ref(), agent_ref(), map(), context()) :: {:ok, map()} | {:error, term()}
   @callback stop_session(session_ref(), context()) :: :ok | {:error, term()}
+  @callback owned_session_ref(session_ref(), context()) :: map()
+  @callback owned_session_liveness(map()) ::
+              {:ok, :live | :absent | :unknown | :unreachable}
+
+  @optional_callbacks owned_session_ref: 2, owned_session_liveness: 1
 end

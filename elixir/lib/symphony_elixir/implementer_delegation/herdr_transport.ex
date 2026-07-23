@@ -12,6 +12,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @default_start_timeout_ms 10_000
   @default_poll_interval_ms 50
   @default_stop_timeout_ms 5_000
+  @default_liveness_timeout_ms 2_000
   @default_agent_start_timeout_ms 30_000
   @required_version "0.7.5"
   @required_protocol 17
@@ -283,19 +284,27 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   @impl true
   def stop_session(%{name: name, env: env, server_task: server_task, runtime_root: runtime_root}, context) do
-    stop_result = command(context, ["--session", name, "server", "stop"], env)
-    task_result = await_server_stop(server_task, Map.get(context, :stop_timeout_ms, @default_stop_timeout_ms))
-    File.rm_rf(runtime_root)
+    timeout_ms = Map.get(context, :stop_timeout_ms, @default_stop_timeout_ms)
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    stop_result = command_before_deadline(context, ["--session", name, "server", "stop"], env, deadline)
+    task_result = await_server_stop(server_task, max(deadline - System.monotonic_time(:millisecond), 0))
 
     case {stop_result, task_result} do
-      {{:ok, _output}, :ok} -> :ok
-      {{:error, reason}, _} -> {:error, {:herdr_session_stop_failed, reason}}
-      {_, {:error, reason}} -> {:error, {:herdr_server_exit_failed, reason}}
+      {{:ok, _output}, :ok} ->
+        File.rm_rf(runtime_root)
+        :ok
+
+      {{:error, reason}, _} ->
+        {:error, {:herdr_session_stop_failed, reason}}
+
+      {_, {:error, reason}} ->
+        {:error, {:herdr_server_exit_failed, reason}}
     end
   end
 
   def stop_session(_session, _context), do: {:error, :invalid_herdr_session_ref}
 
+  @impl true
   @doc "Return the narrow capability needed to clean up this run-owned server outside its owner task."
   @spec owned_session_ref(map(), map()) :: map()
   def owned_session_ref(%{name: name, runtime_root: runtime_root}, context)
@@ -305,9 +314,39 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       session_name: name,
       runtime_root: runtime_root,
       cleanup_module: __MODULE__,
-      cleanup_context: Map.take(context, [:herdr_bin, :extra_env, :socket_root, :stop_timeout_ms])
+      cleanup_context:
+        Map.take(context, [
+          :herdr_bin,
+          :extra_env,
+          :socket_root,
+          :stop_timeout_ms,
+          :liveness_timeout_ms
+        ])
     }
   end
+
+  @impl true
+  @doc "Read one run-owned session's native live-agent status without mutating it."
+  @spec owned_session_liveness(map()) ::
+          {:ok, :live | :absent | :unknown | :unreachable}
+  def owned_session_liveness(
+        %{
+          kind: "herdr",
+          session_name: name,
+          agent_name: agent_name
+        } = ownership_ref
+      )
+      when is_binary(name) and is_binary(agent_name) do
+    runtime_root = Map.get(ownership_ref, :runtime_root, short_socket_root(name))
+    context = Map.get(ownership_ref, :cleanup_context, %{})
+
+    case validate_owned_runtime_root(name, runtime_root, context) do
+      :ok -> read_owned_session_liveness(context, name, agent_name, runtime_root)
+      {:error, _reason} -> {:ok, :unknown}
+    end
+  end
+
+  def owned_session_liveness(_ownership_ref), do: {:ok, :unknown}
 
   @doc "Idempotently stop one explicitly owned Herdr server without relying on its owner task finalizer."
   @spec cleanup_owned_session(map()) :: :ok | {:error, term()}
@@ -324,6 +363,41 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   def cleanup_owned_session(_ownership_ref), do: {:error, :invalid_herdr_ownership_ref}
+
+  defp read_owned_session_liveness(context, name, agent_name, runtime_root) do
+    env = isolated_env(context, runtime_root)
+    timeout_ms = Map.get(context, :liveness_timeout_ms, @default_liveness_timeout_ms)
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+    case command_in_port(context, ["--session", name, "agent", "get", agent_name], env, deadline) do
+      {:ok, output} -> normalize_owned_agent_response(output)
+      {:error, {:incompatible_herdr_runtime, _details}} -> {:ok, :unknown}
+      {:error, reason} -> normalize_owned_agent_error(reason)
+    end
+  end
+
+  defp normalize_owned_agent_response(output) do
+    case decode_agent_response(output) do
+      {:ok, %{agent_status: status}} when status in ["working", "idle", "done", "blocked"] ->
+        {:ok, :live}
+
+      {:ok, %{agent_status: "unknown"}} ->
+        {:ok, :unknown}
+
+      _ ->
+        {:ok, :unknown}
+    end
+  end
+
+  defp normalize_owned_agent_error(reason) do
+    case cli_error_code(reason) do
+      code when code in ["agent_not_running", "agent_not_found", "agent_name_not_found"] ->
+        {:ok, :absent}
+
+      _ ->
+        {:ok, :unreachable}
+    end
+  end
 
   defp await_running(context, name, env, server_task) do
     timeout_ms = Map.get(context, :start_timeout_ms, @default_start_timeout_ms)
@@ -506,12 +580,100 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   defp terminate_port_process(port) do
     case Port.info(port, :os_pid) do
       {:os_pid, os_pid} ->
-        _ = System.cmd("kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
+        os_pid
+        |> command_process_tree_pids()
+        |> Enum.reverse()
+        |> Enum.each(fn pid ->
+          _ = System.cmd("kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
+        end)
+
         await_port_exit(port)
 
       nil ->
         :ok
     end
+  end
+
+  defp command_process_tree_pids(root_pid) when is_integer(root_pid) and root_pid > 0 do
+    if File.dir?(Path.join(["/proc", Integer.to_string(root_pid), "task"])) do
+      collect_linux_command_process_tree([root_pid], [root_pid], MapSet.new([root_pid]))
+    else
+      portable_command_process_tree_pids(root_pid)
+    end
+  rescue
+    _ -> [root_pid]
+  end
+
+  defp collect_linux_command_process_tree([], ordered_pids, _seen), do: ordered_pids
+
+  defp collect_linux_command_process_tree([pid | remaining], ordered_pids, seen) do
+    children = pid |> linux_command_children() |> Enum.reject(&MapSet.member?(seen, &1))
+
+    collect_linux_command_process_tree(
+      remaining ++ children,
+      ordered_pids ++ children,
+      Enum.reduce(children, seen, &MapSet.put(&2, &1))
+    )
+  end
+
+  defp linux_command_children(pid) do
+    path = Path.join(["/proc", Integer.to_string(pid), "task", Integer.to_string(pid), "children"])
+
+    case File.read(path) do
+      {:ok, body} -> body |> String.split(~r/\s+/, trim: true) |> Enum.flat_map(&parse_positive_pid/1)
+      _ -> []
+    end
+  end
+
+  defp parse_positive_pid(value) do
+    case Integer.parse(value) do
+      {pid, ""} when pid > 0 -> [pid]
+      _ -> []
+    end
+  end
+
+  defp portable_command_process_tree_pids(root_pid) do
+    with ps when is_binary(ps) <- System.find_executable("ps"),
+         {output, 0} <- System.cmd(ps, ["-eo", "pid=,ppid="], stderr_to_stdout: true) do
+      process_pairs = output |> String.split("\n", trim: true) |> Enum.flat_map(&parse_process_pair/1)
+
+      collect_command_descendants([root_pid], process_pairs, MapSet.new([root_pid]))
+      |> MapSet.to_list()
+    else
+      _ -> [root_pid]
+    end
+  end
+
+  defp parse_process_pair(line) do
+    case String.split(line, ~r/\s+/, trim: true) do
+      [pid, parent_pid] -> parse_process_pair_values(pid, parent_pid)
+      _ -> []
+    end
+  end
+
+  defp parse_process_pair_values(pid, parent_pid) do
+    with {pid, ""} <- Integer.parse(pid),
+         {parent_pid, ""} <- Integer.parse(parent_pid) do
+      [{pid, parent_pid}]
+    else
+      _ -> []
+    end
+  end
+
+  defp collect_command_descendants([], _process_pairs, seen), do: seen
+
+  defp collect_command_descendants(frontier, process_pairs, seen) do
+    children =
+      for {pid, parent_pid} <- process_pairs,
+          parent_pid in frontier,
+          not MapSet.member?(seen, pid),
+          do: pid
+
+    collect_command_descendants(
+      children,
+      process_pairs,
+      Enum.reduce(children, seen, &MapSet.put(&2, &1))
+    )
   end
 
   defp await_port_exit(port) do
@@ -593,11 +755,13 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp stop_owned_server_if_running(context, name, runtime_root) do
     env = isolated_env(context, runtime_root)
+    timeout_ms = Map.get(context, :stop_timeout_ms, @default_stop_timeout_ms)
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
 
-    case command(context, ["--session", name, "status", "server"], env) do
+    case command_before_deadline(context, ["--session", name, "status", "server"], env, deadline) do
       {:ok, output} ->
         case parse_server_status(output) do
-          {:ok, %{status: "running"}} -> stop_owned_server(context, name, env)
+          {:ok, %{status: "running"}} -> stop_owned_server(context, name, env, deadline)
           {:ok, _status} -> :ok
           {:error, reason} -> {:error, {:herdr_owned_session_status_failed, reason}}
         end
@@ -612,8 +776,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     end
   end
 
-  defp stop_owned_server(context, name, env) do
-    case command(context, ["--session", name, "server", "stop"], env) do
+  defp stop_owned_server(context, name, env, deadline) do
+    case command_before_deadline(context, ["--session", name, "server", "stop"], env, deadline) do
       {:ok, _output} -> :ok
       {:error, reason} -> {:error, {:herdr_owned_session_stop_failed, reason}}
     end

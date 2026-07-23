@@ -164,6 +164,49 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
     end
   end
 
+  test "agent runner consumes a typed deterministic before_run hook result" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-before-run-typed-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_before_run: """
+        printf '%s\\n' '{"kind":"symphony_workspace_hook_result","version":1,"hook":"before_run","classification":"deterministic","family":"missing_required_tool_or_cli","summary":"required wrapper CLI missing token=typed-secret"}'
+        exit 23
+        """
+      )
+
+      issue = %Issue{
+        id: "issue-before-run-typed",
+        identifier: "EMB-1217",
+        title: "Consume typed hook result",
+        state: "In Progress",
+        labels: []
+      }
+
+      log =
+        capture_log(fn ->
+          assert {:irrecoverable_runtime_failed, failure} =
+                   catch_exit(AgentRunner.run(issue, nil, run_id: "run-before-run-typed"))
+
+          assert failure.family == :missing_required_tool_or_cli
+          assert failure.subtype == "before_run_hook"
+          refute failure.retry_reason =~ "typed-secret"
+        end)
+
+      refute log =~ "typed-secret"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   @tag timeout: 15_000
   test "a run whose workflow lost its before_run hook cannot reach real delegation transport" do
     # The EMB-1180 review observed this exact fall-through under suite load:

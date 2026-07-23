@@ -49,7 +49,8 @@ boot_workflow_file = Path.join(boot_workflow_root, "WORKFLOW.md")
 # keeps the boot-sealed singleton alive but inert; polling behavior is
 # always proved on per-test orchestrators with their own config.
 SymphonyElixir.TestSupport.write_workflow_file!(boot_workflow_file,
-  poll_interval_ms: 1_000_000_000
+  poll_interval_ms: 1_000_000_000,
+  workspace_root: Path.join(boot_workflow_root, "workspaces")
 )
 
 Application.put_env(:symphony_elixir, :workflow_file_path, boot_workflow_file)

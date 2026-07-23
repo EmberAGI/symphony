@@ -1,6 +1,20 @@
 defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Tracker.ClaimLease
+
+  defmodule LiveOwnedSession do
+    def cleanup_owned_session(%{owner: owner, session_name: session_name}) do
+      send(owner, {:stalled_session_cleanup, session_name})
+      :ok
+    end
+
+    def owned_session_liveness(%{owner: owner, session_name: session_name}) do
+      send(owner, {:stalled_session_liveness, session_name})
+      {:ok, :live}
+    end
+  end
+
   test "abnormal worker exit writes compact run-scoped retry evidence" do
     previous_run_log_root = Application.get_env(:symphony_elixir, :run_log_root)
 
@@ -264,6 +278,90 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
              issue,
              %Orchestrator.State{max_concurrent_agents: 1, running: %{}, claimed: MapSet.new()}
            )
+  end
+
+  test "stalled worker with a live owned session is quarantined without ordinary retry" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    issue_id = "issue-stalled-live-session"
+    issue = %Issue{id: issue_id, identifier: "MT-STALL-SESSION", state: "In Progress"}
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      codex_stall_timeout_ms: 1_000
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :StalledLiveSessionOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      stop_orchestrator!(pid)
+    end)
+
+    stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
+
+    claim_lease =
+      ClaimLease.new(%{
+        comment_id: "comment-stalled-live-session",
+        issue_id: issue_id,
+        issue_identifier: issue.identifier,
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-stalled-live-session",
+        state: "active",
+        refreshed_at: DateTime.utc_now(),
+        expires_at: DateTime.add(DateTime.utc_now(), 60, :second)
+      })
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: %{issue | claim_lease: claim_lease},
+      claim_lease: claim_lease,
+      run_id: claim_lease.run_id,
+      owned_session_ref: %{
+        cleanup_module: LiveOwnedSession,
+        owner: self(),
+        session_name: "octo-stalled-live-session"
+      },
+      last_codex_timestamp: stale_activity_at,
+      started_at: stale_activity_at
+    }
+
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, :tick)
+
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        not Map.has_key?(state.running, issue_id) and not Process.alive?(worker_pid)
+      end)
+
+    assert_receive {:stalled_session_cleanup, "octo-stalled-live-session"}
+    assert_receive {:stalled_session_liveness, "octo-stalled-live-session"}
+    assert_receive {:memory_tracker_claim_lease, ^issue_id, blocked_lease}
+    assert blocked_lease.state == "blocked"
+    assert Map.has_key?(state.blocked_failures, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)

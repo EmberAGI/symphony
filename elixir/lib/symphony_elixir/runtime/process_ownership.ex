@@ -57,6 +57,39 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     |> Enum.find(&blocking_record?(&1, issue))
   end
 
+  @doc "Return scoped ownership whose native session is not verifiably absent."
+  @spec blocking_owned_session_record(
+          Issue.t(),
+          (map() -> :live | :absent | :unknown | :unreachable)
+        ) :: {map(), :live | :unknown | :unreachable} | nil
+  def blocking_owned_session_record(%Issue{} = issue, liveness_fun)
+      when is_function(liveness_fun, 1) do
+    issue
+    |> candidate_record_paths()
+    |> Enum.flat_map(&read_record/1)
+    |> Enum.filter(fn record ->
+      record["state"] in ["active", "quarantined"] and
+        record_scope_matches?(record, issue)
+    end)
+    |> Enum.find_value(&blocking_owned_session_evidence(&1, liveness_fun))
+  end
+
+  defp blocking_owned_session_evidence(record, liveness_fun) do
+    case owned_session_ref_value(record) do
+      ownership_ref when is_map(ownership_ref) ->
+        blocking_liveness_evidence(record, safe_owned_session_liveness(liveness_fun, ownership_ref))
+
+      nil ->
+        nil
+    end
+  end
+
+  defp blocking_liveness_evidence(record, status) when status in [:live, :unknown, :unreachable],
+    do: {record, status}
+
+  defp blocking_liveness_evidence(_record, :absent), do: nil
+  defp blocking_liveness_evidence(record, _malformed), do: {record, :unknown}
+
   @spec status_for_issue(Issue.t()) :: map() | nil
   def status_for_issue(%Issue{} = issue) do
     records =
@@ -84,15 +117,22 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   def current_role, do: ClaimLease.role_name()
 
   @doc "Recover stale local run-owned sessions left by a previous role process generation."
-  @spec recover_stale_owned_sessions((map() -> :ok | {:error, term()})) :: {:ok, non_neg_integer()}
-  def recover_stale_owned_sessions(cleanup_fun) when is_function(cleanup_fun, 1) do
+  @spec recover_stale_owned_sessions(
+          (map() -> :ok | {:error, term()}),
+          (map() -> :live | :absent | :unknown | :unreachable)
+        ) :: {:ok, non_neg_integer()}
+  def recover_stale_owned_sessions(cleanup_fun, liveness_fun)
+      when is_function(cleanup_fun, 1) and is_function(liveness_fun, 1) do
     recovered =
       Config.settings!().workspace.root
       |> owned_record_paths()
       |> Enum.reduce(0, fn path, count ->
         case read_record(path) do
-          [record] -> recover_stale_owned_session(path, record, cleanup_fun, count)
-          _ -> count
+          [record] ->
+            recover_stale_owned_session(path, record, cleanup_fun, liveness_fun, count)
+
+          _ ->
+            count
         end
       end)
 
@@ -150,17 +190,25 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     )
   end
 
-  defp recover_stale_owned_session(path, record, cleanup_fun, count) do
+  defp recover_stale_owned_session(path, record, cleanup_fun, liveness_fun, count) do
     if stale_owned_session_record?(record) do
       ownership_ref = owned_session_ref_value(record)
+      cleanup_result = safe_cleanup(cleanup_fun, ownership_ref)
+      liveness = safe_owned_session_liveness(liveness_fun, ownership_ref)
 
-      case cleanup_fun.(ownership_ref) do
-        :ok ->
+      case {cleanup_result, liveness} do
+        {:ok, :absent} ->
           mark_record_cleaned(path, record)
           count + 1
 
-        {:error, reason} ->
-          Logger.warning("Failed to recover stale run-owned session #{ownership_ref.session_name}: #{inspect(reason)}")
+        {result, status} ->
+          reason =
+            "startup cleanup=#{inspect(result)}; native session liveness=#{status}"
+
+          mark_record_quarantined(path, record, reason)
+
+          Logger.warning("Failed to verify stale run-owned session cleanup #{ownership_ref.session_name}: #{reason}")
+
           count
       end
     else
@@ -194,11 +242,40 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   defp blank_string?(value), do: !is_binary(value) or String.trim(value) == ""
 
+  defp safe_owned_session_liveness(liveness_fun, ownership_ref) do
+    liveness_fun.(ownership_ref)
+  rescue
+    _error -> :unknown
+  catch
+    _kind, _reason -> :unknown
+  end
+
+  defp safe_cleanup(cleanup_fun, ownership_ref) do
+    cleanup_fun.(ownership_ref)
+  rescue
+    error -> {:error, error}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
   defp mark_record_cleaned(path, record) do
     updated =
       record
       |> Map.put("state", "cleaned")
       |> Map.put("cleanup_status", "cleaned")
+      |> Map.put("updated_at", DateTime.utc_now() |> DateTime.to_iso8601())
+
+    with {:ok, body} <- Jason.encode(updated) do
+      File.write!(path, body <> "\n")
+    end
+  end
+
+  defp mark_record_quarantined(path, record, reason) do
+    updated =
+      record
+      |> Map.put("state", "quarantined")
+      |> Map.put("cleanup_status", "quarantined")
+      |> Map.put("quarantine_reason", reason)
       |> Map.put("updated_at", DateTime.utc_now() |> DateTime.to_iso8601())
 
     with {:ok, body} <- Jason.encode(updated) do
@@ -462,10 +539,14 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     if is_map(ref) do
       kind = string_value(value_for(ref, :kind))
       session_name = string_value(value_for(ref, :session_name))
+      agent_name = string_value(value_for(ref, :agent_name))
+      runtime_root = string_value(value_for(ref, :runtime_root))
 
-      if kind == "herdr" and valid_owned_herdr_session_name?(session_name),
-        do: %{kind: kind, session_name: session_name},
-        else: nil
+      if kind == "herdr" and valid_owned_herdr_session_name?(session_name) do
+        %{kind: kind, session_name: session_name}
+        |> maybe_put_owned_agent_name(agent_name)
+        |> maybe_put_owned_runtime_root(runtime_root, value_for(ref, :cleanup_context))
+      end
     end
   end
 
@@ -476,6 +557,43 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   end
 
   defp valid_owned_herdr_session_name?(_session_name), do: false
+
+  defp maybe_put_owned_agent_name(ref, agent_name)
+       when agent_name in ["implementer_orchestrator"],
+       do: Map.put(ref, :agent_name, agent_name)
+
+  defp maybe_put_owned_agent_name(ref, _agent_name), do: ref
+
+  defp maybe_put_owned_runtime_root(ref, runtime_root, cleanup_context)
+       when is_binary(runtime_root) and is_map(cleanup_context) do
+    expanded_root = Path.expand(runtime_root)
+    expanded_tmp = Path.expand(System.tmp_dir!())
+
+    if String.starts_with?(expanded_root, expanded_tmp <> "/octo-herdr-") and
+         value_for(cleanup_context, :socket_root) == runtime_root do
+      safe_context =
+        %{socket_root: runtime_root}
+        |> maybe_put_owned_timeout(:stop_timeout_ms, value_for(cleanup_context, :stop_timeout_ms))
+        |> maybe_put_owned_timeout(
+          :liveness_timeout_ms,
+          value_for(cleanup_context, :liveness_timeout_ms)
+        )
+
+      ref
+      |> Map.put(:runtime_root, runtime_root)
+      |> Map.put(:cleanup_context, safe_context)
+    else
+      ref
+    end
+  end
+
+  defp maybe_put_owned_runtime_root(ref, _runtime_root, _cleanup_context), do: ref
+
+  defp maybe_put_owned_timeout(context, key, value)
+       when is_integer(value) and value > 0 and value <= 60_000,
+       do: Map.put(context, key, value)
+
+  defp maybe_put_owned_timeout(context, _key, _value), do: context
 
   defp merge_existing_process_tree(attrs, nil), do: attrs
 

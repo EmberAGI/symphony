@@ -100,6 +100,21 @@ session/run identity, inherited role-run environment marker, cleanup status, and
 quarantine reason for the role runtime process tree. This is the OS/process
 cleanup surface; the tracker claim lease remains the durable dispatch gate.
 
+**Native session liveness**: The run-owned provider transport's authoritative
+answer for session/process aliveness: `live`, `absent`, `unknown`, or
+`unreachable`. For Herdr-managed Implementer runs this is native status for the
+exact owned session and agent. Malformed or version-incompatible responses are
+`unknown`, never `absent`.
+
+**Lifecycle verdict**: A typed decision that combines native session
+liveness, claim-lease liveness (`live`, `expired`, or `missing`), and provider
+turn state (`working`, `completed`, or `failed`) before retry, reroute, claim
+release, cleanup, escalation, or another durable workflow mutation.
+
+**Retry epoch**: The stable role-run scope in which identical failure
+observations consume a bounded retry budget. Together with the bounded failure
+fingerprint it identifies one idempotent tracker escalation episode.
+
 ## Rules and invariants
 
 - Codex remains the default and reference runtime.
@@ -163,6 +178,15 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   `permission_denied`, `invalid_workspace_or_runtime_protocol`,
   `unsupported_app_server_contract`, `malformed_provider_event_schema`,
   `human_input_required`, and `repeated_identical_no_progress_failure`.
+- A workspace `before_run` hook may emit one JSON-line
+  `symphony_workspace_hook_result` version `1` payload with `hook`,
+  `classification` (`deterministic` or `transient`), bounded `family`, bounded
+  redacted `summary`, and an optional bounded `retry_limit`. Deterministic
+  results enter the irrecoverable family path immediately. Transient results
+  consume only their declared retry budget; exhaustion becomes
+  `workspace_hook_retry_budget_exhausted`. Malformed typed payloads fail closed
+  as `malformed_provider_event_schema`. Legacy untyped hook output remains
+  backward compatible.
 - Deterministic single-shot irrecoverable failures must escalate immediately
   instead of scheduling or consuming an ordinary role retry. The classification
   must be preserved across adapter, workspace hook, runner, orchestrator,
@@ -192,6 +216,13 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   `Human Escalation` state when the selected workflow supports it, and write a
   concise operator-visible note describing the redacted failure family,
   affected provider/runtime when known, and required human action.
+- Irrecoverable escalation is an Adapter-owned reconciliation operation keyed
+  by the bounded failure fingerprint plus stable retry epoch. Run identity is
+  retained as evidence but does not create a second escalation episode. Its
+  machine-readable tracker marker is checked before creating an Operator Note;
+  label and state are reconciled independently. Repeated or concurrent
+  delivery and process restart create at most one note for that key, and a
+  retry after partial tracker failure applies only the missing mutations.
 - Tracker mutation failures during irrecoverable escalation must not re-enter
   ordinary role retry. They must leave local runtime status and logs visibly
   blocked/escalated with enough redacted evidence for an operator to repair the
@@ -245,6 +276,12 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   app-server process tree. Claim leases and process ownership records for
   different roles or workspaces may coexist, but they must not overwrite or
   hide an active same-scope owner.
+- Top-level dispatch must execute a fenced sequence for the exact
+  issue/workspace/role scope: acquire the scope lock, re-fetch eligibility and
+  claim markers, query native owned-session liveness, upsert and verify the
+  claim lease/run identity, re-check process/native ownership, then launch.
+  Concurrent dispatch attempts may observe stale candidates, but at most one
+  may cross the final launch fence.
 - Legitimate continuation turns inside one role run use the existing runtime
   session and `agent.max_turns` loop; they are not a new top-level dispatch and
   must not be blocked by the duplicate-dispatch gate.
@@ -254,6 +291,11 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   orchestrator restart paths must either clean the owned app-server process
   tree or preserve/quarantine process ownership metadata so replacement
   top-level dispatch refuses until recovery policy allows it.
+- Every path that owns a provider session must request teardown and perform a
+  bounded native absence verification before releasing the claim or mutating
+  workflow state. A cleanup error, timeout, live result, unknown result, or
+  unreachable result preserves/quarantines ownership and escalates; task/PID
+  death alone is not session-death evidence.
 - If stall restart records live owned app-server evidence, the queued retry
   must surface a quarantined claim lease or equivalent blocked cleanup state
   plus the scoped process ownership metadata in status/API payloads; it must
@@ -293,6 +335,28 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   production matrix.
 
 ## Interfaces/contracts
+
+### Lifecycle verdict matrix
+
+The table applies independently to every lease state listed in the `Lease`
+column, so it covers the complete session × lease × provider-turn product.
+Lease evidence remains part of the verdict and diagnostics even where native
+session safety requires the same fail-closed action.
+
+| Native session | Lease | Provider turn | Disposition | Durable permissions |
+|---|---|---|---|---|
+| `live` | live / expired / missing | `working` | running | refuse mutation, release, retry, and escalation |
+| `live` | live / expired / missing | `completed` | cleanup required | refuse mutation, release, and retry; allow cleanup escalation |
+| `live` | live / expired / missing | `failed` | cleanup required | refuse mutation, release, and retry; allow cleanup escalation |
+| `absent` | live / expired / missing | `working` | contradictory/quarantined | refuse mutation, release, and retry; allow escalation |
+| `absent` | live / expired / missing | `completed` | settled | allow workflow mutation and release; refuse retry |
+| `absent` | live / expired / missing | `failed` | retryable | allow classified failure mutation, release, and retry |
+| `unknown` | live / expired / missing | working / completed / failed | quarantined | refuse mutation, release, and retry; allow escalation |
+| `unreachable` | live / expired / missing | working / completed / failed | quarantined | refuse mutation, release, and retry; allow escalation |
+
+`ProcessOwnership` is cleanup and quarantine evidence, not native provider
+liveness authority. The Orchestrator/AgentRunner seam consumes the verdict;
+provider transports only supply their native liveness fact.
 
 Runtime config should support this provider-neutral shape:
 

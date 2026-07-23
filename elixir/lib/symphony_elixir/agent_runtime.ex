@@ -14,8 +14,10 @@ defmodule SymphonyElixir.AgentRuntime do
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
   alias SymphonyElixir.{Config, ImplementationEffort, ImplementerDelegation, SkillExecutionContract, Workspace}
   alias SymphonyElixir.ImplementerDelegation.HerdrTransport
+  alias SymphonyElixir.Workspace.HookResult
 
   @type provider :: :codex | :claude_code
+  @type session_liveness :: :live | :absent | :unknown | :unreachable
   @type failure_family ::
           :provider_authentication_or_revocation
           | :missing_required_runtime_configuration
@@ -25,6 +27,8 @@ defmodule SymphonyElixir.AgentRuntime do
           | :unsupported_app_server_contract
           | :malformed_provider_event_schema
           | :human_input_required
+          | :owned_session_cleanup_unverified
+          | :workspace_hook_retry_budget_exhausted
           | :repeated_identical_no_progress_failure
 
   @type failure_decision :: %{
@@ -53,6 +57,8 @@ defmodule SymphonyElixir.AgentRuntime do
     :unsupported_app_server_contract,
     :malformed_provider_event_schema,
     :human_input_required,
+    :owned_session_cleanup_unverified,
+    :workspace_hook_retry_budget_exhausted,
     :repeated_identical_no_progress_failure
   ]
 
@@ -187,6 +193,23 @@ defmodule SymphonyElixir.AgentRuntime do
 
   def cleanup_owned_session(_ownership_ref), do: {:error, :invalid_owned_session_ref}
 
+  @doc "Return normalized native liveness for a run-owned runtime session."
+  @spec owned_session_liveness(map()) :: session_liveness()
+  def owned_session_liveness(%{kind: "herdr"} = ownership_ref) do
+    adapter = owned_session_liveness_adapter()
+    call_owned_session_liveness(adapter, ownership_ref)
+  end
+
+  def owned_session_liveness(%{cleanup_module: module} = ownership_ref) when is_atom(module) do
+    if function_exported?(module, :owned_session_liveness, 1) do
+      call_owned_session_liveness(module, ownership_ref)
+    else
+      :unknown
+    end
+  end
+
+  def owned_session_liveness(_ownership_ref), do: :unknown
+
   @doc "Return the narrow external-cleanup capability for a runtime session, when supported."
   @spec owned_session_ref(map()) :: map() | nil
   def owned_session_ref(session) when is_map(session) do
@@ -201,6 +224,30 @@ defmodule SymphonyElixir.AgentRuntime do
     do: runtime_adapter
 
   defp session_runtime_adapter(_session), do: adapter()
+
+  defp normalize_owned_session_liveness({:ok, status})
+       when status in [:live, :absent, :unknown, :unreachable],
+       do: status
+
+  defp normalize_owned_session_liveness({:error, _reason}), do: :unreachable
+  defp normalize_owned_session_liveness(_result), do: :unknown
+
+  defp call_owned_session_liveness(module, ownership_ref) do
+    module.owned_session_liveness(ownership_ref)
+    |> normalize_owned_session_liveness()
+  rescue
+    _error -> :unknown
+  catch
+    _kind, _reason -> :unknown
+  end
+
+  defp owned_session_liveness_adapter do
+    Application.get_env(
+      :symphony_elixir,
+      :owned_session_liveness_module,
+      HerdrTransport
+    )
+  end
 
   defp start_implementer_session(workspace, provider, role, opts) do
     issue = Keyword.get(opts, :issue)
@@ -325,6 +372,9 @@ defmodule SymphonyElixir.AgentRuntime do
       irrecoverable_family_reason?(reason) ->
         {family, details} = irrecoverable_family_reason(reason)
         {:irrecoverable, irrecoverable_decision(family, details, context)}
+
+      match?(%HookResult{classification: :transient}, reason) ->
+        {:retryable, retryable_decision(reason, context, :transient_workspace_hook_failure)}
 
       transient_failure?(reason) ->
         {:retryable, retryable_decision(reason, context, :transient_runtime_failure)}
@@ -650,6 +700,15 @@ defmodule SymphonyElixir.AgentRuntime do
      }}
   end
 
+  defp real_irrecoverable_runtime_reason(%HookResult{classification: :deterministic, family: family} = result) do
+    {family,
+     %{
+       subtype: "#{result.hook}_hook",
+       method: result.hook,
+       message: result.summary
+     }}
+  end
+
   defp real_irrecoverable_runtime_reason({:invalid_workspace_cwd, subtype, worker_host, workspace}) do
     details =
       case subtype do
@@ -843,6 +902,27 @@ defmodule SymphonyElixir.AgentRuntime do
 
   defp record_retryable_failure_observation(previous_observation, reason, failure, context) do
     cond do
+      match?(%HookResult{classification: :transient}, reason) ->
+        count = next_observation_count(previous_observation, failure, context)
+        observation = observation_for(failure, context, count)
+
+        if HookResult.retry_exhausted?(reason, count) do
+          exhausted =
+            irrecoverable_decision(
+              :workspace_hook_retry_budget_exhausted,
+              %{
+                subtype: "#{reason.hook}_hook",
+                method: reason.hook,
+                message: "transient workspace hook retry ceiling exhausted after #{count} attempts"
+              },
+              context
+            )
+
+          {observation_for(exhausted, context, count), {:irrecoverable, exhausted}}
+        else
+          {observation, {:retryable, failure}}
+        end
+
       transient_failure?(reason) ->
         {reset_observation(context), {:retryable, failure}}
 
@@ -892,7 +972,6 @@ defmodule SymphonyElixir.AgentRuntime do
   defp reset_marker(context) do
     %{
       retry_epoch: context_string(context, :retry_epoch),
-      claim_lease_run_id: context_string(context, :claim_lease_run_id),
       input_fingerprint: context_string(context, :input_fingerprint),
       operator_repair_id: context_string(context, :operator_repair_id)
     }

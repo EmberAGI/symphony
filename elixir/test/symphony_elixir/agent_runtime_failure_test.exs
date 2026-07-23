@@ -2,6 +2,18 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.AgentRuntime
+  alias SymphonyElixir.Workspace.HookResult
+
+  defmodule OwnedSessionLivenessAdapter do
+    def owned_session_liveness(%{owner: owner, result: result}) do
+      send(owner, {:owned_session_liveness, result})
+      result
+    end
+  end
+
+  defmodule RaisingOwnedSessionLivenessAdapter do
+    def owned_session_liveness(_ownership_ref), do: raise("native status unavailable")
+  end
 
   @context %{
     issue_id: "issue-runtime-failure",
@@ -9,6 +21,100 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     role: "implementer",
     provider: :claude_code
   }
+
+  test "normalizes native owned-session liveness without treating malformed data as absence" do
+    for {adapter_result, expected} <- [
+          {{:ok, :live}, :live},
+          {{:ok, :absent}, :absent},
+          {{:ok, :unknown}, :unknown},
+          {{:ok, :unreachable}, :unreachable},
+          {{:ok, :done}, :unknown},
+          {{:error, :connection_refused}, :unreachable}
+        ] do
+      ownership_ref = %{
+        cleanup_module: OwnedSessionLivenessAdapter,
+        owner: self(),
+        result: adapter_result
+      }
+
+      assert AgentRuntime.owned_session_liveness(ownership_ref) == expected
+      assert_received {:owned_session_liveness, ^adapter_result}
+    end
+  end
+
+  test "fails closed when the native liveness adapter raises" do
+    assert AgentRuntime.owned_session_liveness(%{
+             cleanup_module: RaisingOwnedSessionLivenessAdapter
+           }) == :unknown
+  end
+
+  test "transient typed hook failures stop at their declared retry ceiling" do
+    reason = %HookResult{
+      hook: "before_run",
+      classification: :transient,
+      family: :transient_workspace_hook_failure,
+      summary: "provider readiness temporarily unavailable",
+      retry_limit: 3
+    }
+
+    {observation, {:retryable, first}} =
+      AgentRuntime.record_failure_observation(nil, reason, @context)
+
+    assert first.family == :transient_workspace_hook_failure
+    assert observation.count == 1
+
+    {observation, {:retryable, _second}} =
+      AgentRuntime.record_failure_observation(observation, reason, @context)
+
+    assert observation.count == 2
+
+    assert {_observation, {:irrecoverable, exhausted}} =
+             AgentRuntime.record_failure_observation(observation, reason, @context)
+
+    assert exhausted.family == :workspace_hook_retry_budget_exhausted
+    assert exhausted.retryable? == false
+  end
+
+  test "typed hook schema rejects a deterministic family disguised as transient" do
+    payload =
+      Jason.encode!(%{
+        "kind" => "symphony_workspace_hook_result",
+        "version" => 1,
+        "hook" => "before_run",
+        "classification" => "transient",
+        "family" => "provider_authentication_or_revocation",
+        "summary" => "provider authentication is temporarily unavailable",
+        "retry_limit" => 3
+      })
+
+    assert {:ok,
+            %HookResult{
+              classification: :deterministic,
+              family: :malformed_provider_event_schema
+            }} = HookResult.parse_failure("before_run", 1, payload)
+  end
+
+  test "typed hook schema rejects duplicate result lines" do
+    payload =
+      %{
+        "kind" => "symphony_workspace_hook_result",
+        "version" => 1,
+        "hook" => "before_run",
+        "classification" => "transient",
+        "family" => "transient_workspace_hook_failure",
+        "summary" => "provider readiness temporarily unavailable",
+        "retry_limit" => 3
+      }
+      |> Jason.encode!()
+
+    output = Enum.join([payload, payload], "\n")
+
+    assert {:ok,
+            %HookResult{
+              classification: :deterministic,
+              family: :malformed_provider_event_schema
+            }} = HookResult.parse_failure("before_run", 1, output)
+  end
 
   test "classifies deterministic irrecoverable runtime failure families with redacted summaries" do
     cases = [
@@ -35,6 +141,7 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
           purpose: "MCP server requested human input",
           raw: "Bearer provider-token"
         }}},
+      {:owned_session_cleanup_unverified, {:owned_session_cleanup_unverified, %{subtype: "owned_session_liveness", message: "native session liveness=unreachable"}}},
       {:repeated_identical_no_progress_failure, {:repeated_identical_no_progress_failure, %{subtype: "empty_turn_completed", summary: "same turn emitted no progress"}}}
     ]
 
@@ -214,19 +321,52 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
 
   test "ordinary retry dispatch run ids do not reset identical no-progress observations" do
     reason = {:empty_turn_completed, %{message: "same no progress"}}
+    context = Map.put(@context, :retry_epoch, "retry-epoch-a")
 
     {observation, {:retryable, _first}} =
-      AgentRuntime.record_failure_observation(nil, reason, Map.put(@context, :run_id, "run-a"))
+      AgentRuntime.record_failure_observation(
+        nil,
+        reason,
+        Map.merge(context, %{run_id: "run-a", claim_lease_run_id: "claim-run-a"})
+      )
 
     {observation, {:retryable, _second}} =
-      AgentRuntime.record_failure_observation(observation, reason, Map.put(@context, :run_id, "run-b"))
+      AgentRuntime.record_failure_observation(
+        observation,
+        reason,
+        Map.merge(context, %{run_id: "run-b", claim_lease_run_id: "claim-run-b"})
+      )
 
     assert observation.count == 2
 
     assert {_observation, {:irrecoverable, failure}} =
-             AgentRuntime.record_failure_observation(observation, reason, Map.put(@context, :run_id, "run-c"))
+             AgentRuntime.record_failure_observation(
+               observation,
+               reason,
+               Map.merge(context, %{run_id: "run-c", claim_lease_run_id: "claim-run-c"})
+             )
 
     assert failure.family == :repeated_identical_no_progress_failure
+  end
+
+  test "a new retry epoch resets identical no-progress observations" do
+    reason = {:empty_turn_completed, %{message: "same no progress"}}
+
+    {observation, {:retryable, _first}} =
+      AgentRuntime.record_failure_observation(
+        nil,
+        reason,
+        Map.put(@context, :retry_epoch, "retry-epoch-a")
+      )
+
+    {reset_observation, {:retryable, _after_repair}} =
+      AgentRuntime.record_failure_observation(
+        observation,
+        reason,
+        Map.put(@context, :retry_epoch, "retry-epoch-b")
+      )
+
+    assert reset_observation.count == 1
   end
 
   test "resets no-progress observations for transient failures and different fingerprints" do

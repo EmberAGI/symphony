@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Workspace do
 
   require Logger
   alias SymphonyElixir.{AgentRuntime, Config, PathSafety, SSH}
+  alias SymphonyElixir.Workspace.HookResult
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
 
@@ -416,7 +417,12 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp handle_hook_command_result({output, status}, workspace, issue_context, hook_name) do
-    failure_reason = {:workspace_hook_failed, hook_name, status, output}
+    failure_reason =
+      case HookResult.parse_failure(hook_name, status, output) do
+        {:ok, %HookResult{} = result} -> result
+        :not_typed -> {:workspace_hook_failed, hook_name, status, output}
+      end
+
     sanitized_output = hook_failure_output_for_log(failure_reason, output)
 
     Logger.warning("Workspace hook failed hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} status=#{status} output=#{inspect(sanitized_output)}")
