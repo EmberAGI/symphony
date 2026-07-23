@@ -775,12 +775,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert ownership_ref.kind == "herdr"
     assert ownership_ref.session_name == "octo-emb-1141-abandoned"
     assert :ok = HerdrTransport.cleanup_owned_session(ownership_ref)
-
-    assert :ok =
-             HerdrTransport.cleanup_owned_session(%{
-               kind: "herdr",
-               session_name: ownership_ref.session_name
-             })
+    assert :ok = HerdrTransport.cleanup_owned_session(ownership_ref)
 
     refute File.exists?(session.runtime_root)
 

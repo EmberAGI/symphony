@@ -9,9 +9,6 @@ on:
 jobs:
   make-all:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: elixir
 
     steps:
       - name: Checkout
@@ -34,5 +31,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-mix-
 
-      - name: Verify make all
-        run: make all
+      - name: Run repository gate
+        run: make -C elixir all
+
+      - name: Verify public specs
+        working-directory: elixir
+        run: mix specs.check
