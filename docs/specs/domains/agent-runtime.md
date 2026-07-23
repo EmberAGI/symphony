@@ -481,13 +481,22 @@ selected product checkout and resolves its returned root pane rather than
 predicting topology identifiers. It starts each participant through strict
 `agent start <name> --kind <kind> --pane <id> --timeout <ms> -- <native args>`;
 Herdr validates the live name, provider kind, target pane, and interactive
-readiness before returning. Orchestrator and worker startup share a 120-second
-cold-start budget. Before Claude profile instructions cross Herdr's
-terminal-control seam, CRLF and CR normalize to LF, LF becomes the Unicode line
-separator U+2028, and each tab becomes four spaces. This preserves multiline
-semantics without placing terminal control characters in argv. Any remaining
-Unicode control-category (`Cc`) character fails with a typed
-invalid-agent-argument error. There is no secondary readiness poll.
+readiness before returning. The native arguments are materialized in an
+executable launch-projection file under the isolated session runtime root.
+The pane-shell command receives only a fixed projection sentinel and the short,
+quote-trivial projection path; reusable profile instructions and other
+potentially large or quote-rich provider arguments never cross the pane shell
+as typed argv. The runtime-owned provider wrapper validates that the projection
+is executable and remains inside the named session root, then expands it after
+the pane-shell seam so Codex receives `developer_instructions` and Claude
+receives `--append-system-prompt` unchanged from their provider contracts.
+Orchestrator and worker startup share a 120-second cold-start budget. Before
+Claude profile instructions are written to the projection, CRLF and CR
+normalize to LF, LF becomes the Unicode line separator U+2028, and each tab
+becomes four spaces. This preserves multiline semantics without terminal
+control characters. Any remaining Unicode control-category (`Cc`) character
+fails with a typed invalid-agent-argument error. There is no secondary
+readiness poll.
 
 The orchestrator receives the worker launcher path through
 `OCTO_HERDR_WORKER_LAUNCHER`. Missing or incompatible Herdr, unsafe socket
