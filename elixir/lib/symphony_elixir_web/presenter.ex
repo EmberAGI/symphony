@@ -119,7 +119,6 @@ defmodule SymphonyElixirWeb.Presenter do
         total_tokens: entry.codex_total_tokens
       }
     }
-    |> put_if_present(:claim_lease, claim_lease_payload(Map.get(entry, :claim_lease)))
     |> put_if_present(:process_ownership, process_ownership_payload(Map.get(entry, :process_ownership)))
   end
 
@@ -133,7 +132,6 @@ defmodule SymphonyElixirWeb.Presenter do
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path)
     }
-    |> put_if_present(:claim_lease, claim_lease_payload(Map.get(entry, :claim_lease)))
     |> put_if_present(:process_ownership, process_ownership_payload(Map.get(entry, :process_ownership)))
   end
 
@@ -150,7 +148,7 @@ defmodule SymphonyElixirWeb.Presenter do
       workspace_path: Map.get(entry, :workspace_path),
       blocked_at: iso8601(Map.get(entry, :blocked_at))
     }
-    |> put_if_present(:claim_lease, claim_lease_payload(Map.get(entry, :claim_lease)))
+    |> put_if_present(:process_ownership, process_ownership_payload(Map.get(entry, :process_ownership)))
   end
 
   defp running_issue_payload(running) do
@@ -170,7 +168,6 @@ defmodule SymphonyElixirWeb.Presenter do
         total_tokens: running.codex_total_tokens
       }
     }
-    |> put_if_present(:claim_lease, claim_lease_payload(Map.get(running, :claim_lease)))
     |> put_if_present(:process_ownership, process_ownership_payload(Map.get(running, :process_ownership)))
   end
 
@@ -182,7 +179,6 @@ defmodule SymphonyElixirWeb.Presenter do
       worker_host: Map.get(retry, :worker_host),
       workspace_path: Map.get(retry, :workspace_path)
     }
-    |> put_if_present(:claim_lease, claim_lease_payload(Map.get(retry, :claim_lease)))
     |> put_if_present(:process_ownership, process_ownership_payload(Map.get(retry, :process_ownership)))
   end
 
@@ -213,28 +209,6 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp summarize_message(nil), do: nil
   defp summarize_message(message), do: StatusDashboard.humanize_codex_message(message)
-
-  defp claim_lease_payload(nil), do: nil
-
-  defp claim_lease_payload(lease) when is_map(lease) do
-    %{
-      issue_id: Map.get(lease, :issue_id),
-      issue_identifier: Map.get(lease, :issue_identifier),
-      role: Map.get(lease, :role),
-      holder: Map.get(lease, :holder),
-      run_id: Map.get(lease, :run_id),
-      worker_host: Map.get(lease, :worker_host),
-      workspace_path: Map.get(lease, :workspace_path),
-      session_id: Map.get(lease, :session_id),
-      attempt: Map.get(lease, :attempt),
-      state: Map.get(lease, :state),
-      started_at: iso8601(Map.get(lease, :started_at)),
-      refreshed_at: iso8601(Map.get(lease, :refreshed_at)),
-      expires_at: iso8601(Map.get(lease, :expires_at)),
-      retry_reason: Map.get(lease, :retry_reason),
-      recovery_reason: Map.get(lease, :recovery_reason)
-    }
-  end
 
   defp process_ownership_payload(nil), do: nil
 

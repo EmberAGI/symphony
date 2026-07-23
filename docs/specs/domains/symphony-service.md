@@ -2087,9 +2087,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   changing orchestrator behavior
 - Human attention notifications, when implemented, are triggered by the `Human Escalation` label
   rather than by `Human Review` state transitions alone
-- Irrecoverable runtime failure escalation surfaces must distinguish blocked or
-  escalated claim leases from ordinary retry queue entries, including in any
-  JSON status API, dashboard, or log summary that presents retry state.
+- Irrecoverable runtime failure escalation surfaces must distinguish blocked
+  process ownership from ordinary retry queue entries, including in any JSON
+  status API, dashboard, or log summary that presents retry state.
 
 ### 17.7 CLI and Host Lifecycle
 
@@ -2151,8 +2151,8 @@ Use the same validation profiles as Section 17:
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
-- TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
-  of only via agent tools.
+- TODO: Add first-class tracker state-transition APIs in the orchestrator instead of only via agent
+  tools; runtime correctness must remain independent of tracker comments.
 - TODO: Add pluggable issue tracker adapters beyond Linear.
 
 ### 18.3 Operational Validation Before Production (RECOMMENDED)

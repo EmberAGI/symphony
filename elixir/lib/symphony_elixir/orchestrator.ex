@@ -22,12 +22,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Notifications.Telegram
-  alias SymphonyElixir.Tracker.ClaimLease
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
-  @claim_lease_min_ttl_ms 60_000
-  @claim_lease_refresh_interval_ms 30_000
+  @process_ownership_refresh_interval_ms 30_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
@@ -190,8 +188,8 @@ defmodule SymphonyElixir.Orchestrator do
                 worker_host: Map.get(running_entry, :worker_host),
                 workspace_path: Map.get(running_entry, :workspace_path),
                 issue: Map.get(running_entry, :issue),
-                claim_lease: Map.get(running_entry, :claim_lease),
                 run_id: Map.get(running_entry, :run_id),
+                process_ownership: ProcessOwnership.status_for_issue(Map.get(running_entry, :issue)),
                 session_id: session_id,
                 attempt: Map.get(running_entry, :retry_attempt) || 1,
                 started_at: Map.get(running_entry, :started_at),
@@ -222,8 +220,8 @@ defmodule SymphonyElixir.Orchestrator do
                 worker_host: Map.get(running_entry, :worker_host),
                 workspace_path: Map.get(running_entry, :workspace_path),
                 issue: Map.get(running_entry, :issue),
-                claim_lease: Map.get(running_entry, :claim_lease),
                 run_id: Map.get(running_entry, :run_id),
+                process_ownership: ProcessOwnership.status_for_issue(Map.get(running_entry, :issue)),
                 session_id: session_id,
                 attempt: Map.get(running_entry, :retry_attempt) || 1,
                 started_at: Map.get(running_entry, :started_at),
@@ -251,7 +249,7 @@ defmodule SymphonyElixir.Orchestrator do
           |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
           |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
           |> record_process_ownership(issue_id)
-          |> maybe_refresh_claim_lease(issue_id, true)
+          |> maybe_refresh_process_ownership(issue_id, true)
 
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
@@ -299,7 +297,7 @@ defmodule SymphonyElixir.Orchestrator do
         updated_running_entry =
           updated_running_entry
           |> record_process_ownership(issue_id)
-          |> maybe_refresh_claim_lease(issue_id)
+          |> maybe_refresh_process_ownership(issue_id)
 
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
@@ -615,7 +613,6 @@ defmodule SymphonyElixir.Orchestrator do
         end
 
         record_process_completion(running_entry, :terminated)
-        maybe_release_claim_lease(release_issue || Map.get(running_entry, :issue))
 
         if is_reference(ref) do
           Process.demonitor(ref, [:flush])
@@ -673,7 +670,6 @@ defmodule SymphonyElixir.Orchestrator do
         identifier: identifier,
         error: "stalled for #{elapsed_ms}ms without codex activity",
         issue: Map.get(running_entry, :issue),
-        claim_lease: Map.get(running_entry, :claim_lease),
         run_id: Map.get(running_entry, :run_id),
         retry_reason: "stalled for #{elapsed_ms}ms without codex activity",
         lease_state: retry_lease_state_from_process_ownership(process_ownership),
@@ -821,8 +817,6 @@ defmodule SymphonyElixir.Orchestrator do
          active_states,
          terminal_states
        ) do
-    claim_leases = blocking_claim_leases(issue)
-
     cond do
       !candidate_issue?(issue, active_states, terminal_states) ->
         skipped_candidate_summary(issue, "not_candidate")
@@ -832,12 +826,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       todo_issue_blocked_by_non_terminal?(issue, terminal_states) ->
         skipped_candidate_summary(issue, "blocked_by_non_terminal")
-
-      claim_leases != [] ->
-        claim_lease_skipped_candidate_summary(issue, claim_leases)
-
-      process_ownership_blocks_dispatch?(issue) ->
-        skipped_candidate_summary(issue, "process_ownership_blocked")
 
       true ->
         dispatch_capacity_skip_summary(issue, state, running, claimed)
@@ -1010,31 +998,47 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
         {state, {:skipped, skipped_candidate_summary(issue, "worker_capacity_blocked")}}
 
+      worker_host when is_binary(worker_host) and worker_host != "" ->
+        Logger.warning("Skipping dispatch; remote worker ownership is unsupported for #{issue_context(issue)} worker_host=#{worker_host}")
+        {state, {:failed, "remote_worker_not_supported"}}
+
       worker_host ->
-        run_id = new_run_id(issue)
+        run_id = dispatch_run_id(issue, attempt)
+        ownership_attrs = dispatch_ownership_attrs(issue, run_id, worker_host)
 
-        case upsert_dispatch_claim_lease(issue, attempt, worker_host, run_id) do
-          {:ok, %ClaimLease{} = claim_lease} ->
-            spawn_issue_on_worker_host_with_result(state, issue, attempt, recipient, worker_host, claim_lease)
-
-          {:ok, nil} ->
-            spawn_issue_on_worker_host_with_result(state, issue, attempt, recipient, worker_host, nil)
+        case ProcessOwnership.acquire(issue, ownership_attrs) do
+          {:ok, process_ownership} ->
+            spawn_issue_on_worker_host_with_result(
+              state,
+              issue,
+              attempt,
+              recipient,
+              worker_host,
+              process_ownership
+            )
 
           {:error, reason} ->
-            Logger.warning("Skipping dispatch; claim lease upsert failed for #{issue_context(issue)}: #{inspect(reason)}")
-            {state, {:failed, "claim_lease_upsert_failed"}}
+            Logger.warning("Skipping dispatch; process ownership acquisition failed for #{issue_context(issue)}: #{inspect(reason)}")
+            {state, {:failed, "process_ownership_acquire_failed"}}
         end
     end
   end
 
-  defp spawn_issue_on_worker_host_with_result(%State{} = state, issue, attempt, recipient, worker_host, claim_lease) do
+  defp spawn_issue_on_worker_host_with_result(
+         %State{} = state,
+         issue,
+         attempt,
+         recipient,
+         worker_host,
+         process_ownership
+       ) do
     record_pending_turn_start(issue, worker_host)
 
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
            AgentRunner.run(issue, recipient,
              attempt: attempt,
              worker_host: worker_host,
-             run_id: claim_lease && claim_lease.run_id
+             run_id: process_ownership.run_id
            )
          end) do
       {:ok, pid} ->
@@ -1050,9 +1054,8 @@ defmodule SymphonyElixir.Orchestrator do
             issue: issue,
             worker_host: worker_host,
             workspace_path: nil,
-            claim_lease: claim_lease || Map.get(issue, :claim_lease),
-            claim_lease_refreshed_at_ms: System.monotonic_time(:millisecond),
-            run_id: claim_lease && claim_lease.run_id,
+            process_ownership: process_ownership,
+            run_id: process_ownership.run_id,
             session_id: nil,
             last_codex_message: nil,
             last_codex_timestamp: nil,
@@ -1079,6 +1082,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
+        _ = ProcessOwnership.release(issue, ownership_identity(process_ownership))
         RoleTurnRecovery.clear_turn(issue.id)
         Telegram.notify_agent_failed(issue, reason)
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
@@ -1109,7 +1113,7 @@ defmodule SymphonyElixir.Orchestrator do
     case issue_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
         if retry_candidate_issue?(refreshed_issue, terminal_states) and
-             claim_lease_allows_dispatch?(refreshed_issue, retry_dispatch?) do
+             process_ownership_allows_dispatch?(refreshed_issue, retry_dispatch?) do
           {:ok, refreshed_issue}
         else
           {:skip, refreshed_issue}
@@ -1133,22 +1137,6 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp upsert_dispatch_claim_lease(%Issue{id: issue_id} = issue, attempt, worker_host, run_id)
-       when is_binary(issue_id) do
-    attrs =
-      build_claim_lease_attrs(
-        issue,
-        attempt,
-        worker_host,
-        run_id,
-        claim_lease_update_overrides(issue)
-      )
-
-    Tracker.upsert_claim_lease(issue_id, attrs)
-  end
-
-  defp upsert_dispatch_claim_lease(_issue, _attempt, _worker_host, _run_id), do: {:ok, nil}
-
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
        when is_binary(issue_id) and is_map(metadata) do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
@@ -1160,8 +1148,8 @@ defmodule SymphonyElixir.Orchestrator do
 
     cancel_retry_timer(previous_retry)
 
-    retry_claim_lease =
-      maybe_upsert_retry_claim_lease(issue_id, retry_context.issue, retry_context.claim_lease, next_attempt, delay_ms, %{
+    retry_process_ownership =
+      update_retry_process_ownership(issue_id, retry_context.issue, next_attempt, delay_ms, %{
         error: retry_context.error,
         worker_host: retry_context.worker_host,
         workspace_path: retry_context.workspace_path,
@@ -1176,7 +1164,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{retry_context.identifier} in #{delay_ms}ms (attempt #{next_attempt})#{retry_error_suffix(retry_context.error)}")
 
-    RunLog.record_agent_retry_scheduled(issue_id, retry_context, retry_claim_lease, metadata, %{
+    RunLog.record_agent_retry_scheduled(issue_id, retry_context, retry_process_ownership, metadata, %{
       attempt: next_attempt,
       delay_ms: delay_ms,
       due_at_ms: due_at_ms,
@@ -1190,7 +1178,7 @@ defmodule SymphonyElixir.Orchestrator do
           Map.put(
             state.retry_attempts,
             issue_id,
-            retry_entry(next_attempt, timer_ref, retry_token, due_at_ms, retry_context, retry_claim_lease)
+            retry_entry(next_attempt, timer_ref, retry_token, due_at_ms, retry_context, retry_process_ownership)
           )
     }
   end
@@ -1204,7 +1192,6 @@ defmodule SymphonyElixir.Orchestrator do
           worker_host: Map.get(retry_entry, :worker_host),
           workspace_path: Map.get(retry_entry, :workspace_path),
           issue: Map.get(retry_entry, :issue),
-          claim_lease: Map.get(retry_entry, :claim_lease),
           run_id: Map.get(retry_entry, :run_id),
           process_ownership: Map.get(retry_entry, :process_ownership)
         }
@@ -1384,27 +1371,20 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp runtime_failure_context(issue_id, running_entry) do
     issue = Map.get(running_entry, :issue)
-    claim_lease = Map.get(running_entry, :claim_lease) || (match?(%Issue{}, issue) && Map.get(issue, :claim_lease))
     workspace_path = Map.get(running_entry, :workspace_path)
 
     %{
       issue_id: issue_id,
       workspace_path: workspace_path,
-      role: ClaimLease.role_name(),
+      role: ProcessOwnership.current_role(),
       provider: AgentRuntime.provider(),
       run_id: Map.get(running_entry, :run_id),
-      claim_lease_run_id: claim_lease_scope_id(claim_lease),
+      process_ownership_run_id: Map.get(running_entry, :run_id),
       retry_epoch: Map.get(running_entry, :retry_epoch),
       input_fingerprint: runtime_input_fingerprint(issue, workspace_path),
       operator_repair_id: Map.get(running_entry, :operator_repair_id)
     }
   end
-
-  defp claim_lease_scope_id(%ClaimLease{} = claim_lease) do
-    claim_lease.comment_id
-  end
-
-  defp claim_lease_scope_id(_claim_lease), do: nil
 
   defp runtime_input_fingerprint(%Issue{} = issue, workspace_path) do
     [
@@ -1446,8 +1426,8 @@ defmodule SymphonyElixir.Orchestrator do
     identifier = Map.get(running_entry, :identifier, issue_id)
     issue = Map.get(running_entry, :issue)
 
-    blocked_lease = maybe_upsert_irrecoverable_blocked_claim_lease(issue_id, issue, running_entry, failure)
-    RunLog.record_irrecoverable_runtime_failure(issue_id, running_entry, blocked_lease, failure)
+    blocked_ownership = update_irrecoverable_blocked_ownership(issue, running_entry, failure)
+    RunLog.record_irrecoverable_runtime_failure(issue_id, running_entry, blocked_ownership, failure)
     maybe_escalate_irrecoverable_runtime_failure(issue_id, issue, failure)
 
     Logger.error("Irrecoverable runtime failure for issue_id=#{issue_id} issue_identifier=#{identifier}; blocked ordinary retry family=#{failure.family} summary=#{summary}")
@@ -1461,55 +1441,26 @@ defmodule SymphonyElixir.Orchestrator do
       | running: Map.delete(state.running, issue_id),
         claimed: MapSet.put(state.claimed, issue_id),
         retry_attempts: Map.delete(state.retry_attempts, issue_id),
-        blocked_failures: Map.put(state.blocked_failures, issue_id, blocked_failure_entry(issue_id, running_entry, failure, blocked_lease))
+        blocked_failures:
+          Map.put(
+            state.blocked_failures,
+            issue_id,
+            blocked_failure_entry(issue_id, running_entry, failure, blocked_ownership)
+          )
     }
   end
 
-  defp maybe_upsert_irrecoverable_blocked_claim_lease(issue_id, %Issue{} = issue, running_entry, failure)
-       when is_binary(issue_id) do
-    attrs = irrecoverable_blocked_claim_lease_attrs(issue, running_entry, failure)
-
-    case Tracker.upsert_claim_lease(issue_id, attrs) do
-      {:ok, %ClaimLease{} = blocked_lease} ->
-        blocked_lease
-
-      {:error, upsert_reason} ->
-        Logger.warning("Failed to update irrecoverable blocked claim lease for #{issue_context(issue)}: #{inspect(upsert_reason)}")
-        nil
-
-      _ ->
-        nil
-    end
+  defp update_irrecoverable_blocked_ownership(%Issue{} = issue, running_entry, failure) do
+    update_owned_state(issue, running_entry, "blocked", %{
+      quarantine_reason: Map.fetch!(failure, :retry_reason),
+      session_id: running_entry_session_id(running_entry)
+    })
   end
 
-  defp maybe_upsert_irrecoverable_blocked_claim_lease(_issue_id, _issue, _running_entry, _failure), do: nil
-
-  defp irrecoverable_blocked_claim_lease_attrs(%Issue{} = issue, running_entry, failure) do
-    claim_lease = Map.get(running_entry, :claim_lease) || Map.get(issue, :claim_lease)
-
-    build_claim_lease_attrs(
-      issue,
-      Map.get(running_entry, :retry_attempt),
-      Map.get(running_entry, :worker_host),
-      Map.get(running_entry, :run_id) || (claim_lease && claim_lease.run_id),
-      %{
-        comment_id: claim_lease && claim_lease.comment_id,
-        started_at: (claim_lease && claim_lease.started_at) || Map.get(running_entry, :started_at),
-        workspace_path: Map.get(running_entry, :workspace_path),
-        session_id: running_entry_session_id(running_entry),
-        retry_reason: Map.fetch!(failure, :retry_reason),
-        recovery_reason: Map.get(failure, :recovery_reason),
-        state: "blocked"
-      }
-    )
-  end
-
-  defp maybe_escalate_irrecoverable_runtime_failure(issue_id, %Issue{} = issue, failure) when is_binary(issue_id) do
-    comment_result = Tracker.create_comment(issue_id, irrecoverable_operator_note(failure))
+  defp maybe_escalate_irrecoverable_runtime_failure(issue_id, %Issue{} = issue, _failure) when is_binary(issue_id) do
     label_result = Tracker.add_issue_label(issue_id, "Human Escalation")
     state_result = Tracker.update_issue_state(issue_id, "Human Escalation")
 
-    log_irrecoverable_escalation_result(:comment, comment_result, issue)
     log_irrecoverable_escalation_result(:label, label_result, issue)
     log_irrecoverable_escalation_result(:state, state_result, issue)
 
@@ -1522,48 +1473,10 @@ defmodule SymphonyElixir.Orchestrator do
     :ok
   end
 
-  defp maybe_escalate_irrecoverable_runtime_failure(_issue_id, _issue, _failure), do: :ok
-
   defp log_irrecoverable_escalation_result(_kind, :ok, _issue), do: :ok
 
   defp log_irrecoverable_escalation_result(kind, {:error, reason}, %Issue{} = issue) do
     Logger.warning("Failed irrecoverable Human Escalation #{kind} update for #{issue_context(issue)}: #{inspect(reason)}")
-  end
-
-  defp irrecoverable_operator_note(failure) do
-    [
-      "## Operator Note",
-      "",
-      "Symphony escalated this issue because the runtime reported an irrecoverable runtime failure.",
-      "",
-      "- Failure family: #{failure.family}",
-      "- Failure: #{Map.fetch!(failure, :retry_reason)}",
-      affected_runtime_fragment(failure),
-      "- Effect: ordinary retries stopped and the claim lease was marked blocked.",
-      "- Action required: #{operator_repair_action(failure)}"
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.join("\n")
-  end
-
-  defp affected_runtime_fragment(failure) do
-    case Map.get(failure, :provider) do
-      provider when is_atom(provider) -> "- Affected runtime: #{provider}"
-      provider when is_binary(provider) -> "- Affected runtime: #{provider}"
-      _ -> nil
-    end
-  end
-
-  defp operator_repair_action(%{family: :provider_authentication_or_revocation}) do
-    "refresh or re-authenticate the unattended provider credential, then move the issue back to the appropriate role state."
-  end
-
-  defp operator_repair_action(%{family: :human_input_required}) do
-    "respond to the provider input request or approve a deterministic unattended policy, then move the issue back to the appropriate role state."
-  end
-
-  defp operator_repair_action(%{family: family}) do
-    "repair the #{family} runtime condition, then move the issue back to the appropriate role state."
   end
 
   defp human_escalated_issue(%Issue{} = issue) do
@@ -1576,14 +1489,14 @@ defmodule SymphonyElixir.Orchestrator do
     %{issue | state: "Human Escalation", labels: labels}
   end
 
-  defp blocked_failure_entry(issue_id, running_entry, failure, blocked_lease) do
+  defp blocked_failure_entry(issue_id, running_entry, failure, blocked_ownership) do
     %{
       issue_id: issue_id,
       identifier: Map.get(running_entry, :identifier, issue_id),
       issue: Map.get(running_entry, :issue),
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path),
-      claim_lease: blocked_lease || Map.get(running_entry, :claim_lease),
+      process_ownership: blocked_ownership || Map.get(running_entry, :process_ownership),
       family: Map.get(failure, :family),
       provider: Map.get(failure, :provider),
       subtype: Map.get(failure, :subtype),
@@ -1653,7 +1566,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp release_issue_claim(%State{} = state, issue_id, issue \\ nil) do
-    maybe_release_claim_lease(issue)
+    maybe_release_process_ownership(issue)
     %{state | claimed: MapSet.delete(state.claimed, issue_id)}
   end
 
@@ -1696,7 +1609,6 @@ defmodule SymphonyElixir.Orchestrator do
       worker_host: pick_retry_worker_host(previous_retry, metadata),
       workspace_path: pick_retry_workspace_path(previous_retry, metadata),
       issue: pick_retry_issue(previous_retry, metadata),
-      claim_lease: pick_retry_claim_lease(previous_retry, metadata),
       run_id: pick_retry_run_id(previous_retry, metadata),
       process_ownership: pick_retry_process_ownership(previous_retry, metadata)
     }
@@ -1712,7 +1624,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp retry_error_suffix(error) when is_binary(error), do: " error=#{error}"
   defp retry_error_suffix(_error), do: ""
 
-  defp retry_entry(next_attempt, timer_ref, retry_token, due_at_ms, retry_context, retry_claim_lease) do
+  defp retry_entry(next_attempt, timer_ref, retry_token, due_at_ms, retry_context, process_ownership) do
     %{
       attempt: next_attempt,
       timer_ref: timer_ref,
@@ -1723,9 +1635,8 @@ defmodule SymphonyElixir.Orchestrator do
       worker_host: retry_context.worker_host,
       workspace_path: retry_context.workspace_path,
       issue: retry_context.issue,
-      claim_lease: retry_claim_lease || retry_context.claim_lease,
-      run_id: retry_context.run_id || (retry_claim_lease && retry_claim_lease.run_id),
-      process_ownership: retry_context.process_ownership
+      run_id: retry_context.run_id || (process_ownership && process_ownership.run_id),
+      process_ownership: process_ownership || retry_context.process_ownership
     }
   end
 
@@ -1748,13 +1659,6 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp pick_retry_claim_lease(previous_retry, metadata) do
-    case metadata[:claim_lease] || Map.get(previous_retry, :claim_lease) do
-      %ClaimLease{} = claim_lease -> claim_lease
-      _ -> nil
-    end
-  end
-
   defp pick_retry_run_id(previous_retry, metadata) do
     metadata[:run_id] || Map.get(previous_retry, :run_id)
   end
@@ -1763,259 +1667,132 @@ defmodule SymphonyElixir.Orchestrator do
     metadata[:process_ownership] || Map.get(previous_retry, :process_ownership)
   end
 
-  defp maybe_upsert_retry_claim_lease(_issue_id, nil, _claim_lease, _attempt, _delay_ms, _metadata), do: nil
+  defp update_retry_process_ownership(_issue_id, nil, _attempt, _delay_ms, _metadata), do: nil
 
-  defp maybe_upsert_retry_claim_lease(issue_id, %Issue{} = issue, claim_lease, attempt, delay_ms, metadata) do
-    now = DateTime.utc_now()
-    run_id = retry_claim_run_id(metadata, claim_lease, issue)
-    attrs = retry_claim_lease_attrs(issue, claim_lease, attempt, delay_ms, metadata, now, run_id)
+  defp update_retry_process_ownership(_issue_id, %Issue{} = issue, _attempt, _delay_ms, metadata) do
+    state = metadata[:lease_state] || "retrying"
+    attrs = %{workspace_path: metadata[:workspace_path]}
 
-    issue_id
-    |> Tracker.upsert_claim_lease(attrs)
-    |> retry_claim_lease_result(issue)
+    attrs =
+      if state == "quarantined",
+        do: attrs,
+        else: Map.put(attrs, :quarantine_reason, metadata[:retry_reason] || metadata[:error])
+
+    update_owned_state(issue, metadata, state, attrs)
   end
 
-  defp retry_claim_run_id(metadata, claim_lease, issue) do
-    metadata[:run_id] || (claim_lease && claim_lease.run_id) || new_run_id(issue)
-  end
+  defp maybe_refresh_process_ownership(running_entry, issue_id, force \\ false)
 
-  defp retry_claim_lease_attrs(issue, claim_lease, attempt, delay_ms, metadata, now, run_id) do
-    build_claim_lease_attrs(issue, attempt, metadata[:worker_host], run_id, %{
-      comment_id: claim_lease && claim_lease.comment_id,
-      started_at: (claim_lease && claim_lease.started_at) || now,
-      workspace_path: metadata[:workspace_path],
-      retry_reason: metadata[:retry_reason] || metadata[:error],
-      recovery_reason: metadata[:recovery_reason],
-      state: metadata[:lease_state] || "retrying"
-    })
-    |> Map.put(:expires_at, retry_claim_expires_at(now, delay_ms))
-  end
-
-  defp retry_claim_expires_at(now, delay_ms) do
-    DateTime.add(now, max(delay_ms + claim_lease_ttl_ms(), claim_lease_ttl_ms()), :millisecond)
-  end
-
-  defp retry_claim_lease_result(result, issue) do
-    case result do
-      {:ok, %ClaimLease{} = retry_claim_lease} ->
-        retry_claim_lease
-
-      {:error, reason} ->
-        Logger.warning("Failed to update retry claim lease for #{issue_context(issue)}: #{inspect(reason)}")
-        nil
-
-      _ ->
-        nil
-    end
-  end
-
-  defp maybe_refresh_claim_lease(running_entry, issue_id, force \\ false)
-
-  defp maybe_refresh_claim_lease(%{issue: %Issue{} = issue} = running_entry, issue_id, force)
+  defp maybe_refresh_process_ownership(%{issue: %Issue{} = issue} = running_entry, issue_id, force)
        when is_binary(issue_id) do
-    claim_lease = Map.get(running_entry, :claim_lease) || Map.get(issue, :claim_lease)
+    refreshed_at_ms = Map.get(running_entry, :process_ownership_refreshed_at_ms)
 
-    if should_refresh_claim_lease?(claim_lease, running_entry, force) do
-      refreshed_attrs =
-        build_claim_lease_attrs(
-          issue,
-          Map.get(running_entry, :retry_attempt),
-          Map.get(running_entry, :worker_host),
-          Map.get(running_entry, :run_id) || claim_lease.run_id,
-          %{
-            comment_id: claim_lease.comment_id,
-            started_at: claim_lease.started_at || Map.get(running_entry, :started_at),
-            workspace_path: Map.get(running_entry, :workspace_path),
-            session_id: running_entry_session_id(running_entry)
-          }
-        )
-
-      case Tracker.upsert_claim_lease(issue_id, refreshed_attrs) do
-        {:ok, %ClaimLease{} = refreshed_lease} ->
+    if force or !is_integer(refreshed_at_ms) or
+         System.monotonic_time(:millisecond) - refreshed_at_ms >= @process_ownership_refresh_interval_ms do
+      case update_owned_state(issue, running_entry, "active", process_ownership_attrs(running_entry)) do
+        nil ->
           running_entry
-          |> Map.put(:claim_lease, refreshed_lease)
-          |> Map.put(:claim_lease_refreshed_at_ms, System.monotonic_time(:millisecond))
 
-        _ ->
+        process_ownership ->
           running_entry
+          |> Map.put(:process_ownership, process_ownership)
+          |> Map.put(:process_ownership_refreshed_at_ms, System.monotonic_time(:millisecond))
       end
     else
       running_entry
     end
   end
 
-  defp maybe_refresh_claim_lease(running_entry, _issue_id, _force), do: running_entry
+  defp maybe_refresh_process_ownership(running_entry, _issue_id, _force), do: running_entry
 
-  defp should_refresh_claim_lease?(nil, _running_entry, _force), do: false
-  defp should_refresh_claim_lease?(_claim_lease, _running_entry, true), do: true
-
-  defp should_refresh_claim_lease?(_claim_lease, running_entry, false) do
-    case Map.get(running_entry, :claim_lease_refreshed_at_ms) do
-      refreshed_at_ms when is_integer(refreshed_at_ms) ->
-        System.monotonic_time(:millisecond) - refreshed_at_ms >= @claim_lease_refresh_interval_ms
-
-      _ ->
-        true
+  defp maybe_release_process_ownership(%Issue{} = issue) do
+    case ProcessOwnership.status_for_issue(issue) do
+      %{holder: _holder} = ownership -> release_current_ownership(issue, ownership)
+      _ -> :ok
     end
   end
 
-  defp build_claim_lease_attrs(%Issue{} = issue, attempt, worker_host, run_id, overrides) do
-    now = DateTime.utc_now()
+  defp maybe_release_process_ownership(_issue), do: :ok
 
-    %{
-      holder: ClaimLease.holder_id(),
-      issue_id: issue.id,
-      issue_identifier: issue.identifier,
-      role: ClaimLease.role_name(),
-      run_id: run_id,
-      worker_host: worker_host,
-      workspace_path: nil,
-      session_id: nil,
-      started_at: now,
-      refreshed_at: now,
-      expires_at: DateTime.add(now, claim_lease_ttl_ms(), :millisecond),
-      attempt: normalize_retry_attempt(attempt),
-      state: "active"
-    }
-    |> Map.merge(claim_lease_overrides(overrides))
-  end
-
-  defp claim_lease_overrides(overrides) when is_map(overrides) do
-    overrides
-    |> Map.take([:comment_id, :workspace_path, :session_id, :started_at, :retry_reason, :recovery_reason, :state])
-    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
-    |> Map.new()
-  end
-
-  defp claim_lease_update_overrides(%Issue{} = issue) do
-    case current_scope_claim_lease(issue) do
-      %ClaimLease{} = claim_lease -> %{comment_id: claim_lease.comment_id}
-      _ -> %{}
-    end
-  end
-
-  defp current_scope_claim_lease(%Issue{} = issue) do
-    issue
-    |> issue_claim_leases()
-    |> Enum.find(fn %ClaimLease{} = claim_lease ->
-      claim_lease_role_matches?(claim_lease) and claim_lease_workspace_matches?(issue, claim_lease)
-    end)
-  end
-
-  defp maybe_release_claim_lease(%Issue{} = issue) do
-    claim_lease = current_scope_claim_lease(issue)
-
-    if is_nil(claim_lease) do
-      :ok
+  defp release_current_ownership(issue, ownership) do
+    if ownership.holder == ProcessOwnership.holder_id() do
+      case ProcessOwnership.release(issue, ownership_identity(ownership)) do
+        {:ok, _released} -> :ok
+        {:error, reason} -> Logger.warning("Failed to release process ownership for #{issue_context(issue)}: #{inspect(reason)}")
+      end
     else
-      release_claim_lease(issue, claim_lease)
+      :ok
     end
   end
 
-  defp maybe_release_claim_lease(_issue), do: :ok
+  defp update_owned_state(%Issue{} = issue, context, state, attrs)
+       when is_map(context) and is_binary(state) and is_map(attrs) do
+    ownership = Map.get(context, :process_ownership) || ProcessOwnership.status_for_issue(issue)
 
-  defp release_claim_lease(%Issue{} = issue, %ClaimLease{} = claim_lease) do
-    attrs =
-      build_claim_lease_attrs(
-        issue,
-        claim_lease.attempt,
-        claim_lease.worker_host,
-        claim_lease.run_id || new_run_id(issue),
-        %{
-          comment_id: claim_lease.comment_id,
-          started_at: claim_lease.started_at,
-          workspace_path: claim_lease.workspace_path,
-          session_id: claim_lease.session_id,
-          recovery_reason: "issue-left-active-dispatch",
-          state: "released"
-        }
-      )
+    case ownership do
+      %{holder: _holder} -> update_current_ownership(issue, ownership, state, attrs)
+      _ -> nil
+    end
+  end
 
-    case Tracker.upsert_claim_lease(issue.id, attrs) do
-      {:ok, _claim_lease} ->
-        :ok
+  defp update_owned_state(_issue, _context, _state, _attrs), do: nil
+
+  defp update_current_ownership(issue, ownership, state, attrs) do
+    if ownership.holder == ProcessOwnership.holder_id() do
+      updates =
+        attrs
+        |> Map.put(:state, state)
+        |> Map.put_new(:workspace_path, Map.get(ownership, :workspace_path))
+
+      verify_ownership_update(issue, ownership, updates)
+    end
+  end
+
+  defp verify_ownership_update(issue, ownership, updates) do
+    case ProcessOwnership.verify_and_update(issue, ownership_identity(ownership), updates) do
+      {:ok, updated} ->
+        updated
 
       {:error, reason} ->
-        Logger.warning("Failed to release claim lease for #{issue_context(issue)}: #{inspect(reason)}")
-        :ok
+        Logger.warning("Failed to update process ownership for #{issue_context(issue)}: #{inspect(reason)}")
+        nil
     end
   end
 
-  defp claim_lease_ttl_ms do
-    config = Config.settings!()
-    max(@claim_lease_min_ttl_ms, max(config.codex.stall_timeout_ms, config.polling.interval_ms * 2))
-  end
+  defp process_ownership_allows_dispatch?(%Issue{}, _retry_dispatch?), do: true
 
-  defp claim_lease_allows_top_level_dispatch?(%Issue{} = issue) do
-    blocking_claim_leases(issue) == []
-  end
+  defp dispatch_run_id(%Issue{} = issue, attempt) when is_integer(attempt) do
+    case ProcessOwnership.status_for_issue(issue) do
+      %{state: "retrying", holder: holder, run_id: run_id} when is_binary(run_id) ->
+        if holder == ProcessOwnership.holder_id(), do: run_id, else: new_run_id(issue)
 
-  defp claim_lease_allows_dispatch?(%Issue{} = issue, true) do
-    case blocking_claim_leases(issue) do
-      [] ->
-        true
-
-      claim_leases ->
-        Enum.all?(claim_leases, fn %ClaimLease{} = claim_lease ->
-          ClaimLease.owned_by_current_holder?(claim_lease) and normalize_claim_lease_state(claim_lease.state) == "retrying"
-        end)
+      _ ->
+        new_run_id(issue)
     end
   end
 
-  defp claim_lease_allows_dispatch?(%Issue{} = issue, _retry_dispatch?) do
-    claim_lease_allows_top_level_dispatch?(issue)
+  defp dispatch_run_id(%Issue{} = issue, _attempt), do: new_run_id(issue)
+
+  defp dispatch_ownership_attrs(%Issue{} = issue, run_id, worker_host) do
+    %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      role: ProcessOwnership.current_role(),
+      run_id: run_id,
+      holder: ProcessOwnership.holder_id(),
+      worker_host: worker_host,
+      workspace_path: expected_workspace_path(issue)
+    }
   end
 
-  defp normalize_claim_lease_state(state) when is_binary(state) do
-    state |> String.trim() |> String.downcase()
+  defp ownership_identity(ownership) when is_map(ownership) do
+    %{
+      role: Map.get(ownership, :role),
+      run_id: Map.get(ownership, :run_id),
+      holder: Map.get(ownership, :holder),
+      workspace_path: Map.get(ownership, :workspace_path)
+    }
   end
-
-  defp blocking_claim_leases(%Issue{} = issue) do
-    now = DateTime.utc_now()
-
-    issue
-    |> issue_claim_leases()
-    |> Enum.filter(&claim_lease_blocks_current_dispatch?(issue, &1, now))
-  end
-
-  defp issue_claim_leases(%Issue{} = issue) do
-    leases =
-      issue
-      |> Map.get(:claim_leases, [])
-      |> Enum.filter(&match?(%ClaimLease{}, &1))
-
-    case Map.get(issue, :claim_lease) do
-      %ClaimLease{} = claim_lease -> [claim_lease | leases]
-      _ -> leases
-    end
-    |> Enum.uniq_by(&claim_lease_identity/1)
-  end
-
-  defp claim_lease_identity(%ClaimLease{} = claim_lease) do
-    {claim_lease.comment_id, claim_lease.role, claim_lease.workspace_path, claim_lease.holder, claim_lease.run_id}
-  end
-
-  defp claim_lease_blocks_current_dispatch?(%Issue{} = issue, %ClaimLease{} = claim_lease, %DateTime{} = now) do
-    ClaimLease.active_or_recoverable?(claim_lease, now) and
-      claim_lease_role_matches?(claim_lease) and
-      claim_lease_workspace_matches?(issue, claim_lease)
-  end
-
-  defp claim_lease_role_matches?(%ClaimLease{role: role}) do
-    blank?(role) or role == ClaimLease.role_name()
-  end
-
-  defp claim_lease_workspace_matches?(%Issue{} = issue, %ClaimLease{workspace_path: workspace_path}) do
-    blank?(workspace_path) or
-      workspace_paths_match?(workspace_path, expected_workspace_path(issue))
-  end
-
-  defp workspace_paths_match?(workspace_path, expected_workspace_path)
-       when is_binary(workspace_path) and is_binary(expected_workspace_path) do
-    normalize_workspace_path(workspace_path) == normalize_workspace_path(expected_workspace_path)
-  end
-
-  defp workspace_paths_match?(_workspace_path, _expected_workspace_path), do: false
 
   defp expected_workspace_path(%Issue{} = issue) do
     case issue.identifier || issue.id do
@@ -2044,27 +1821,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp repository_workspace_suffix(_repository), do: nil
 
-  defp normalize_workspace_path(path) when is_binary(path), do: path |> Path.expand() |> Path.absname()
-
   defp safe_workspace_name(value) when is_binary(value), do: String.replace(value, ~r/[^a-zA-Z0-9._-]/, "_")
   defp safe_workspace_name(_value), do: nil
 
-  defp blank?(value), do: !is_binary(value) or String.trim(value) == ""
-
-  defp process_ownership_blocks_dispatch?(%Issue{} = issue) do
-    case ProcessOwnership.blocking_record(issue) do
-      nil ->
-        false
-
-      record ->
-        Logger.warning("Skipping dispatch; process ownership still blocks #{issue_context(issue)} state=#{record["state"]} app_server_pid=#{record["app_server_pid"]}")
-        true
-    end
-  end
-
   defp record_process_ownership(%{issue: %Issue{} = issue} = running_entry, _issue_id) do
-    ProcessOwnership.record_active(issue, process_ownership_attrs(running_entry))
-    running_entry
+    case update_owned_state(issue, running_entry, "active", process_ownership_attrs(running_entry)) do
+      nil -> running_entry
+      process_ownership -> Map.put(running_entry, :process_ownership, process_ownership)
+    end
   end
 
   defp record_process_ownership(running_entry, _issue_id), do: running_entry
@@ -2072,28 +1836,51 @@ defmodule SymphonyElixir.Orchestrator do
   defp record_process_completion(%{issue: %Issue{} = issue} = running_entry, :normal) do
     attrs = process_ownership_attrs(running_entry)
 
-    if ProcessOwnership.owned_process_live?(issue, attrs) do
-      ProcessOwnership.record_quarantined(
-        issue,
-        attrs,
-        "app-server process remained live after normal worker exit"
-      )
+    cond do
+      !blank_worker_host?(Map.get(running_entry, :worker_host)) ->
+        _ =
+          update_owned_state(
+            issue,
+            running_entry,
+            "quarantined",
+            Map.put(attrs, :quarantine_reason, "remote worker completion cannot be verified locally")
+          )
 
-      :quarantined
-    else
-      ProcessOwnership.record_cleaned(issue, attrs)
-      :cleaned
+        :quarantined
+
+      ProcessOwnership.owned_process_live?(issue, attrs) ->
+        _ =
+          update_owned_state(
+            issue,
+            running_entry,
+            "quarantined",
+            Map.put(attrs, :quarantine_reason, "app-server process remained live after normal worker exit")
+          )
+
+        :quarantined
+
+      true ->
+        _ = release_owned_state(issue, running_entry)
+        :cleaned
     end
   end
 
   defp record_process_completion(%{issue: %Issue{} = issue} = running_entry, reason) do
     attrs = process_ownership_attrs(running_entry)
 
-    if ProcessOwnership.owned_process_live?(issue, attrs) do
-      ProcessOwnership.record_quarantined(issue, attrs, "agent exited before app-server process cleaned: #{inspect(reason)}")
+    if !blank_worker_host?(Map.get(running_entry, :worker_host)) or
+         ProcessOwnership.owned_process_live?(issue, attrs) do
+      _ =
+        update_owned_state(
+          issue,
+          running_entry,
+          "quarantined",
+          Map.put(attrs, :quarantine_reason, "agent exited before app-server process cleaned: #{inspect(reason)}")
+        )
+
       :quarantined
     else
-      ProcessOwnership.record_cleaned(issue, attrs)
+      _ = release_owned_state(issue, running_entry)
       :cleaned
     end
   end
@@ -2118,9 +1905,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp process_ownership_attrs(running_entry) when is_map(running_entry) do
     %{
-      role: ClaimLease.role_name(),
+      role: ProcessOwnership.current_role(),
       run_id: Map.get(running_entry, :run_id),
-      holder: ClaimLease.holder_id(),
+      holder: ProcessOwnership.holder_id(),
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path),
       session_id: running_entry_session_id(running_entry),
@@ -2129,9 +1916,25 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
+  defp release_owned_state(%Issue{} = issue, context) when is_map(context) do
+    ownership = Map.get(context, :process_ownership) || ProcessOwnership.status_for_issue(issue)
+
+    case ownership do
+      %{holder: holder} ->
+        if holder == ProcessOwnership.holder_id(),
+          do: ProcessOwnership.release(issue, ownership_identity(ownership)),
+          else: {:error, :ownership_mismatch}
+
+      _ ->
+        {:error, :ownership_missing}
+    end
+  end
+
+  defp blank_worker_host?(value), do: !is_binary(value) or String.trim(value) == ""
+
   defp new_run_id(%Issue{id: issue_id}) do
     unique = System.unique_integer([:positive, :monotonic])
-    "#{ClaimLease.holder_id()}:#{issue_id || "issue"}:#{unique}"
+    "#{ProcessOwnership.holder_id()}:#{issue_id || "issue"}:#{unique}"
   end
 
   defp maybe_put_runtime_value(running_entry, _key, nil), do: running_entry
@@ -2272,7 +2075,6 @@ defmodule SymphonyElixir.Orchestrator do
           state: metadata.issue.state,
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
-          claim_lease: Map.get(metadata, :claim_lease),
           process_ownership: ProcessOwnership.status_for_issue(metadata.issue),
           session_id: metadata.session_id,
           codex_app_server_pid: metadata.codex_app_server_pid,
@@ -2299,7 +2101,6 @@ defmodule SymphonyElixir.Orchestrator do
           error: Map.get(retry, :error),
           worker_host: Map.get(retry, :worker_host),
           workspace_path: Map.get(retry, :workspace_path),
-          claim_lease: Map.get(retry, :claim_lease),
           process_ownership: retry_process_ownership_snapshot(retry)
         }
       end)
@@ -2317,7 +2118,7 @@ defmodule SymphonyElixir.Orchestrator do
           recovery_reason: Map.get(blocked_failure, :recovery_reason),
           worker_host: Map.get(blocked_failure, :worker_host),
           workspace_path: Map.get(blocked_failure, :workspace_path),
-          claim_lease: Map.get(blocked_failure, :claim_lease),
+          process_ownership: Map.get(blocked_failure, :process_ownership),
           blocked_at: Map.get(blocked_failure, :blocked_at)
         }
       end)
@@ -2452,41 +2253,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp skipped_candidate_summary(_issue, reason_family) do
     %{issue_id: nil, issue_identifier: nil, reason_family: reason_family}
-  end
-
-  defp claim_lease_skipped_candidate_summary(%Issue{} = issue, claim_leases) when is_list(claim_leases) do
-    claim_lease = List.first(claim_leases)
-    reason_family = claim_lease_skip_reason_family(claim_lease)
-
-    issue
-    |> skipped_candidate_summary(reason_family)
-    |> Map.put(:claim_lease, claim_lease_diagnostic(claim_lease))
-  end
-
-  defp claim_lease_skip_reason_family(%ClaimLease{} = claim_lease) do
-    if ClaimLease.owned_by_current_holder?(claim_lease) do
-      "claim_lease_blocked"
-    else
-      "stale_claim_lease_blocked"
-    end
-  end
-
-  defp claim_lease_diagnostic(%ClaimLease{} = claim_lease) do
-    %{
-      holder: claim_lease.holder,
-      role: claim_lease.role,
-      state: claim_lease.state,
-      expires_at: iso8601(claim_lease.expires_at),
-      recovery_decision: claim_lease_recovery_decision(claim_lease)
-    }
-  end
-
-  defp claim_lease_recovery_decision(%ClaimLease{} = claim_lease) do
-    if ClaimLease.owned_by_current_holder?(claim_lease) do
-      "current_holder_retry_or_release"
-    else
-      "wait_for_expiry_or_dead_holder_recovery"
-    end
   end
 
   defp safe_issue_identifier(%Issue{identifier: identifier}) when is_binary(identifier) and identifier != "", do: identifier
@@ -2653,13 +2419,17 @@ defmodule SymphonyElixir.Orchestrator do
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
     candidate_issue?(issue, active_state_set(), terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
-      !process_ownership_blocks_dispatch?(issue)
+      !process_ownership_blocks_retry?(issue)
   end
 
   defp retry_blocked_by_process_ownership?(%Issue{} = issue, terminal_states) do
     candidate_issue?(issue, active_state_set(), terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
-      process_ownership_blocks_dispatch?(issue)
+      process_ownership_blocks_retry?(issue)
+  end
+
+  defp process_ownership_blocks_retry?(%Issue{} = issue) do
+    not is_nil(ProcessOwnership.blocking_record(issue))
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do

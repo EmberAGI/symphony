@@ -6,19 +6,13 @@ defmodule SymphonyElixir.RoleTurnRecoveryTest do
   @active_states MapSet.new(["todo", "in progress", "agent fixes", "rework", "agent review", "agent qa", "merging", "backlog"])
   @terminal_states MapSet.new(["done", "closed", "cancelled", "canceled", "duplicate"])
 
-  test "EMB-171-style in-progress workpad without final handoff recovers to Agent Fixes" do
+  test "in-progress turn recovery is independent of issue comments" do
     issue = %Issue{
       id: "issue-171",
       identifier: "EMB-171",
       title: "Restart attempt aborted before handoff",
       state: "In Progress",
-      branch_name: "admin/emb-171-restart-safe-role-stack",
-      comments: [
-        %{
-          id: "workpad",
-          body: "## Codex Workpad\n\nImplementation started; restart attempted before final handoff."
-        }
-      ]
+      branch_name: "admin/emb-171-restart-safe-role-stack"
     }
 
     marker = %{
@@ -29,33 +23,21 @@ defmodule SymphonyElixir.RoleTurnRecoveryTest do
       "started_at" => "2026-05-05T01:02:03Z"
     }
 
-    assert {:recover, "Agent Fixes", body} =
+    assert {:recover, "Agent Fixes"} =
              RoleTurnRecovery.recovery_plan_for_test(issue, marker, @active_states, @terminal_states)
-
-    assert body =~ "## Operator Note"
-    assert body =~ "symphony:aborted-role-turn-recovery"
-    assert body =~ "Detected an aborted Symphony role turn before a final handoff."
-    assert body =~ "Recovery route: `Agent Fixes`."
-    assert body =~ "Branch context preserved: `admin/emb-171-restart-safe-role-stack`."
   end
 
-  test "existing recovery marker prevents duplicate comments while preserving the route" do
+  test "recovery planning needs no comment marker" do
     issue = %Issue{
       id: "issue-171",
       identifier: "EMB-171",
       title: "Already recovered",
-      state: "In Progress",
-      comments: [
-        %{
-          id: "recovery",
-          body: "## Operator Note\n\n<!-- symphony:aborted-role-turn-recovery issue=EMB-171 role=implementer state=In Progress target=Agent Fixes -->"
-        }
-      ]
+      state: "In Progress"
     }
 
     marker = %{"issue_id" => issue.id, "role" => "implementer", "state" => "In Progress"}
 
-    assert :already_recovered =
+    assert {:recover, "Agent Fixes"} =
              RoleTurnRecovery.recovery_plan_for_test(issue, marker, @active_states, @terminal_states)
   end
 
@@ -105,9 +87,8 @@ defmodule SymphonyElixir.RoleTurnRecoveryTest do
 
     assert :ok = RoleTurnRecovery.recover_pending_turns(@active_states, @terminal_states, [])
 
-    assert_receive {:memory_tracker_comment, "live-issue", body}
-    assert body =~ "symphony:aborted-role-turn-recovery"
     assert_receive {:memory_tracker_state_update, "live-issue", "Agent Fixes"}
+    refute_receive {:memory_tracker_comment, _, _}, 50
     refute File.exists?(marker_path)
   end
 
@@ -130,10 +111,9 @@ defmodule SymphonyElixir.RoleTurnRecoveryTest do
 
       marker = %{"issue_id" => issue.id, "role" => "role", "state" => state}
 
-      assert {:recover, ^target, body} =
+      assert {:recover, ^target} =
                RoleTurnRecovery.recovery_plan_for_test(issue, marker, @active_states, @terminal_states)
 
-      assert body =~ "Recovery route: `#{target}`."
       refute target == "Todo"
     end
   end

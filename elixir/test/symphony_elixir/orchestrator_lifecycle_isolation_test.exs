@@ -37,8 +37,6 @@ defmodule SymphonyElixir.OrchestratorLifecycleIsolationTest do
     first_issue = foraging_issue("issue-forage-while-alive")
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [first_issue])
 
-    assert_receive {:memory_tracker_claim_lease, "issue-forage-while-alive", _lease}, 2_000
-
     runner_pid = wait_for_running_pid(pid, "issue-forage-while-alive")
 
     # The pre-fix cleanup pattern: a :normal exit signal to a non-trapping
@@ -55,12 +53,12 @@ defmodule SymphonyElixir.OrchestratorLifecycleIsolationTest do
 
     drain_tracker_messages()
 
-    # A dead orchestrator claims nothing across many would-be 25ms ticks.
+    # A dead orchestrator performs no tracker reads across many would-be 25ms ticks.
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [
       foraging_issue("issue-forage-after-stop")
     ])
 
-    refute_receive {:memory_tracker_claim_lease, "issue-forage-after-stop", _lease}, 300
+    refute_receive {:memory_tracker_fetch_candidate_issues, _issue_ids}, 300
   end
 
   defp foraging_issue(issue_id) do
@@ -96,8 +94,8 @@ defmodule SymphonyElixir.OrchestratorLifecycleIsolationTest do
 
   defp drain_tracker_messages do
     receive do
-      {:memory_tracker_claim_lease, _issue_id, _lease} -> drain_tracker_messages()
-      {:memory_tracker_comment, _issue_id, _body} -> drain_tracker_messages()
+      {:memory_tracker_fetch_candidate_issues, _issue_ids} -> drain_tracker_messages()
+      {:memory_tracker_fetch_issue_states_by_ids, _issue_ids} -> drain_tracker_messages()
       {:memory_tracker_state_update, _issue_id, _state} -> drain_tracker_messages()
       {:memory_tracker_label_add, _issue_id, _label} -> drain_tracker_messages()
     after

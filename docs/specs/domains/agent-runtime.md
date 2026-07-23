@@ -70,14 +70,6 @@ model/effort matrices, and reusable system workflow. Symphony loads the
 collection named by `SYMPHONY_AGENT_PROFILES` and maps the durable
 `Implementation Effort` label to one tier in the selected profile.
 
-**Top-level role claim lease**: A Linear-visible structured marker that records
-which Symphony role run currently owns a top-level issue/workspace/role
-dispatch. The marker includes issue id, issue identifier, role, holder/run
-identity, worker host, workspace path, session id when known, attempt,
-started/refreshed/expiry timestamps, retry or recovery reason when applicable,
-and a state such as `active`, `retrying`, `recoverable`, `blocked`,
-`quarantined`, `released`, or `expired`.
-
 **Irrecoverable runtime failure**: A runtime failure whose next successful
 step requires human, credential, configuration, host, tool, permission,
 protocol, or implementation repair rather than another ordinary role retry.
@@ -93,12 +85,15 @@ step requires a human decision that no approved deterministic unattended policy
 can supply. It is distinct from a generic `turn_input_required` event, which may
 still be resolved by continuation or bounded no-progress recovery.
 
-**Process ownership record**: A local runtime metadata file that records the
-Symphony-owned role run, workspace, worker host, app-server PID when available,
-app-server process group when available, observed descendant PIDs,
-session/run identity, inherited role-run environment marker, cleanup status, and
-quarantine reason for the role runtime process tree. This is the OS/process
-cleanup surface; the tracker claim lease remains the durable dispatch gate.
+**Role-run ownership**: The single-host, local runtime authority that atomically
+fences one Symphony role run for an issue/workspace/role scope. Its
+`Runtime.ProcessOwnership` record contains stable issue, role, holder, run,
+workspace, host, state, cleanup, quarantine, and timestamp fields plus bounded
+process/session cleanup metadata. The exact record path is passed to provider
+processes as `SYMPHONY_ROLE_OWNERSHIP_PATH`; consumers read that path and do not
+reconstruct it. This contract implements the state-driven direction recorded
+by Octo ADR 0022 without adding a database, message bus, transition outbox, task
+dossier, or expanded run log.
 
 ## Rules and invariants
 
@@ -149,7 +144,7 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   and orchestrator retry interface. They must not be converted into generic
   agent failures, must not schedule or consume the ordinary issue retry loop,
   and must emit only redacted operator-visible blocked/status evidence on
-  existing runtime surfaces such as the top-level claim lease. Non-auth
+  existing process-ownership and status surfaces. Non-auth
   workspace hook failures remain ordinary workspace-hook failures. This
   invariant is recorded for EMB-1123 and EMB-1128 and supports the wrapper
   readiness hardening in EMB-1121 while preserving ADR 0002: Claude Code
@@ -177,26 +172,24 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   elapsed wall-clock time between matching observations; a two-minute rapid-loop
   expectation may be used as a feedback SLO, but not as an eligibility cap.
   Reset conditions include an intervening successful progress/completion event,
-  a different failure fingerprint or excluded transient class, a new claim
-  lease or intentionally reset retry epoch, a material issue/branch/workspace
+  a different failure fingerprint or excluded transient class, a new role-run
+  ownership generation or intentionally reset retry epoch, a material issue/branch/workspace
   input change, or an operator-recorded repair action after the prior failure.
   Explicit transient, network, service unavailable, rate-limit, timeout,
   capacity, and operator-interrupted classes are excluded from this persistent
   irrecoverable path unless a later issue records a narrower family-specific
   policy.
 - Every irrecoverable classification must clear or avoid ordinary retry
-  scheduling, write or update the same-scope claim lease to a blocked or
-  escalated state, include redacted `retry_reason` and `recovery_reason`
-  evidence, apply or preserve the tracker issue's exact `Human Escalation`
-  label when the selected tracker supports it, move the issue to the
-  `Human Escalation` state when the selected workflow supports it, and write a
-  concise operator-visible note describing the redacted failure family,
-  affected provider/runtime when known, and required human action.
+  scheduling, update the verified same-scope process ownership to a blocked
+  state with redacted recovery evidence, apply or preserve the tracker issue's
+  exact `Human Escalation` label when the selected tracker supports it, and move
+  the issue to the `Human Escalation` state when the selected workflow supports
+  it. It must not require or create a Linear comment.
 - Tracker mutation failures during irrecoverable escalation must not re-enter
   ordinary role retry. They must leave local runtime status and logs visibly
   blocked/escalated with enough redacted evidence for an operator to repair the
   tracker mutation or runtime environment manually.
-- Irrecoverable failure summaries, claim leases, logs, status payloads, and
+- Irrecoverable failure summaries, process-ownership records, logs, and status payloads
   operator-visible notes must never include bearer tokens, refresh tokens, API
   keys, raw environment values, raw provider payloads, full Linear bodies, or
   unbounded process output.
@@ -208,7 +201,7 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   parsing boundary rather than bypassing it with already-normalized families.
 - Before finalizing classifier fixtures, implementation must run a provider
   evidence discovery pass over available Octo-owned evidence: role run logs,
-  runtime status logs, claim leases, tracker Operator Notes or handoffs for
+  runtime status logs, process-ownership records, tracker state/labels, and
   relevant incidents, local generated runtime state, and existing redacted
   incident notes. Existing authenticated local Codex and Claude CLI contexts may
   also be used for bounded, non-destructive probes that capture exit status and
@@ -218,15 +211,14 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
   redaction decisions, and fixture coverage.
 - Provider server requests for input must be recognized inside the provider
   Adapter's active protocol loop; they must not be treated as opaque
-  notifications or left pending until a transport timeout or claim-lease
-  expiry.
+  notifications or left pending until a transport timeout.
 - An unattended Adapter may answer or reject a provider input request only when
   an approved deterministic non-interactive policy supplies that outcome. If
   no such policy applies, the Adapter must promptly send the provider-native
   decline or cancellation response needed to release the pending protocol
   request and return `human_input_required` as a single-shot irrecoverable
-  failure. The shared lifecycle then clears ordinary retry, records a blocked
-  or escalated claim lease, and uses the existing Human Escalation path.
+  failure. The shared lifecycle then clears ordinary retry, records blocked
+  process ownership, and uses the existing Human Escalation state/label path.
 - Generic `turn_input_required` and approval-required failures retain bounded
   no-progress classification. They must not be reclassified as
   `human_input_required` unless the Adapter has evidence that the unattended
@@ -238,35 +230,35 @@ cleanup surface; the tracker claim lease remains the durable dispatch gate.
 - Runtime adapters must collect or expose artifacts and proof in a normalized
   way so review, QA, landing, and operator status surfaces do not need to know
   which provider produced the evidence.
-- Symphony must not start a second top-level role run for the same
-  issue/workspace/role while any same-scope non-expired claim lease is active,
-  retrying, recoverable, blocked, or quarantined for another holder, or while
-  any same-scope local process ownership record shows a live or quarantined
-  app-server process tree. Claim leases and process ownership records for
-  different roles or workspaces may coexist, but they must not overwrite or
-  hide an active same-scope owner.
+- Symphony must atomically acquire `Runtime.ProcessOwnership` before starting a
+  top-level role run. Exactly one concurrent acquisition may win for the same
+  issue/workspace/role scope. A nonmatching holder/run cannot update or release
+  the record, malformed records fail closed, and stale takeover must claim and
+  archive the exact observed record while holding the scope lock before
+  replacement. After successful takeover, the runtime removes older stale
+  archives for that ownership scope on a best-effort basis; any undeletable
+  residue is inert runtime evidence and never re-enters dispatch authority.
+  Records for different roles or workspaces may coexist.
+- This V1 ownership implementation supports only the local host. Any selected
+  nonblank remote worker host fails closed before dispatch.
 - Legitimate continuation turns inside one role run use the existing runtime
   session and `agent.max_turns` loop; they are not a new top-level dispatch and
   must not be blocked by the duplicate-dispatch gate.
-- Claim lease refreshes must update structured marker state without producing
-  unbounded heartbeat comments or role-authored Symphony Handoff comments.
 - Worker termination, stall restart, abnormal exit, operator restart, and
   orchestrator restart paths must either clean the owned app-server process
   tree or preserve/quarantine process ownership metadata so replacement
   top-level dispatch refuses until recovery policy allows it.
 - If stall restart records live owned app-server evidence, the queued retry
-  must surface a quarantined claim lease or equivalent blocked cleanup state
-  plus the scoped process ownership metadata in status/API payloads; it must
+  must surface quarantined process ownership in status/API payloads; it must
   not appear as an ordinary retry while cleanup remains unresolved.
 - When a running issue leaves active dispatch because it becomes terminal,
-  non-active, unroutable, or reassigned, the runtime must record process
-  completion or quarantine first and then update the same-scope Linear-visible
-  claim lease to `released`.
+  non-active, unroutable, or reassigned, the runtime must verify the holder/run
+  and record process completion or quarantine before releasing ownership.
 - Normal worker completion must not mark process ownership as cleaned until the
   scoped app-server process tree is no longer live. If the app-server PID,
   observed process tree, process group, or inherited ownership-marker process
   is still live when the worker exits normally, the runtime must record
-  quarantine metadata and make the active-state continuation lease fail closed
+  quarantine metadata and make active-state continuation fail closed
   instead of allowing a replacement top-level dispatch.
 - Local app-server launch adapters must pass a scoped, non-secret role-run
   ownership marker to provider processes so descendants that appear after the
@@ -392,22 +384,20 @@ The minimum Octo tool bundle must include controlled equivalents for:
 
 Top-level dispatch must perform these steps before spawning a worker:
 
-- read candidate issue state, including all structured claim lease markers from
-  tracker comments across paginated comment results;
-- refuse dispatch when any same-scope marker is non-expired and owned by
-  another holder in an active/retry/recoverable/blocked/quarantined state;
-- refuse dispatch when local process ownership for the issue/workspace/role is
-  live or quarantined, including when the recorded parent app-server PID has
-  exited but an observed descendant PID, owned process group, or process with a
-  matching inherited role-run ownership marker remains live;
-- write or update the claim lease for the selected holder/run and refetch the
-  issue to verify ownership before spawning the worker; and
-- refresh the same marker from runtime updates rather than creating heartbeat
-  comment streams.
+- read candidate issue state without querying tracker comments;
+- reject a selected nonblank remote worker host;
+- atomically acquire local process ownership for the exact
+  issue/workspace/role/holder/run scope;
+- refuse dispatch while a conflicting or malformed same-scope record exists,
+  including when the recorded parent app-server PID has exited but an observed
+  descendant PID, owned process group, or process with the inherited exact
+  ownership path remains live; and
+- verify the same holder/run for every retry, recovery, cleanup, quarantine,
+  status update, and release.
 
 Runtime status and API/dashboard projections should expose enough read-only
 metadata to diagnose duplicate-prevention decisions: session age versus
-accumulated issue-pass age, claim state, retry or replacement reason, run/session
+accumulated issue-pass age, ownership state, retry or replacement reason, run/session
 identity, worker host, workspace path, app-server PID when available, and
 process cleanup/quarantine status.
 
@@ -889,8 +879,8 @@ slices without weakening the skills/tools release gate.
   family rather than parsing provider-specific raw payloads.
 - EMB-1178 intake: Distinguished deterministically human-required input from
   generic input-required/no-progress events. Provider Adapters release their
-  native pending request promptly, while the existing irrecoverable-failure,
-  claim-lease, and Human Escalation path owns the shared lifecycle response.
+  native pending request promptly, while the irrecoverable-failure,
+  process-ownership, and Human Escalation path owns the shared lifecycle response.
   This extends ADR 0001's Adapter decision and does not require a new ADR.
 - EMB-1199 intake: A provider-neutral skill execution contract is the runtime
   seam between Octo-owned manifest registration and provider-native launch

@@ -3,7 +3,6 @@ defmodule SymphonyElixir.RunLogTest do
   import ExUnit.CaptureLog
 
   alias SymphonyElixir.RunLog
-  alias SymphonyElixir.Tracker.ClaimLease
 
   setup do
     previous_run_log_root = Application.get_env(:symphony_elixir, :run_log_root)
@@ -57,18 +56,17 @@ defmodule SymphonyElixir.RunLogTest do
     run_log_root = Path.join(System.tmp_dir!(), "symphony-run-log-write-#{System.unique_integer([:positive])}")
     Application.put_env(:symphony_elixir, :run_log_root, run_log_root)
 
-    lease =
-      ClaimLease.new(%{
-        issue_identifier: "MT-RUN-LOG-IRRECOVERABLE",
-        run_id: "run-irrecoverable",
-        state: "blocked"
-      })
+    process_ownership = %{
+      issue_identifier: "MT-RUN-LOG-IRRECOVERABLE",
+      run_id: "run-irrecoverable",
+      state: "blocked"
+    }
 
     assert :ok =
              RunLog.record_irrecoverable_runtime_failure(
                "issue-irrecoverable",
                %{run_id: "ignored", retry_attempt: 4},
-               lease,
+               process_ownership,
                %{
                  family: "permission_denied",
                  provider: nil,

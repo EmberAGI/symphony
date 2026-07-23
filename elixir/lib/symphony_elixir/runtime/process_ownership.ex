@@ -9,29 +9,84 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   require Logger
 
   alias SymphonyElixir.{Config, Linear.Issue}
-  alias SymphonyElixir.Tracker.ClaimLease
 
   @registry_dir ".symphony/process-ownership"
+  @lock_owner_file "owner.json"
+  @malformed_lock_stale_after_ms 60_000
+  @valid_states ~w(active retrying blocked quarantined cleaned released)
+  @required_record_strings ~w(issue_id role run_id holder worker_host_id workspace_path updated_at)
 
   @spec registry_path(Issue.t(), String.t() | nil) :: Path.t()
   def registry_path(%Issue{} = issue, workspace_path \\ nil) do
-    base = workspace_path || Config.settings!().workspace.root
-    Path.join([base, @registry_dir, safe_name(issue.id || issue.identifier || "issue") <> ".json"])
+    base = Config.settings!().workspace.root
+    attrs = scope_attrs(issue, normalize_attrs(%{role: current_role(), workspace_path: workspace_path}))
+    Path.join([base, @registry_dir, scoped_registry_filename(issue, attrs)])
   end
 
-  @spec record_active(Issue.t(), map()) :: :ok | {:error, term()}
-  def record_active(%Issue{} = issue, attrs) when is_map(attrs) do
-    write_record(issue, attrs, "active")
+  @doc """
+  Atomically acquires the local issue/workspace/role ownership scope.
+
+  Acquisition is idempotent for the same holder/run. A stale local holder may
+  be replaced only while holding the scope lock and after the exact observed
+  record has been archived. Malformed records and remote workers fail closed.
+  """
+  @spec acquire(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
+  def acquire(%Issue{} = issue, attrs) when is_map(attrs) do
+    normalized_attrs = scope_attrs(issue, normalize_attrs(attrs))
+
+    with :ok <- validate_local_attrs(normalized_attrs),
+         path <- scoped_registry_path(issue, normalized_attrs),
+         :ok <- File.mkdir_p(Path.dirname(path)) do
+      with_scope_lock(path, fn -> acquire_locked(path, issue, normalized_attrs) end)
+      |> case do
+        {:error, :ownership_lock_held} -> {:error, :ownership_held}
+        result -> result
+      end
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to acquire process ownership for issue_id=#{issue.id}: #{Exception.message(error)}")
+      {:error, error}
   end
 
-  @spec record_cleaned(Issue.t(), map()) :: :ok | {:error, term()}
-  def record_cleaned(%Issue{} = issue, attrs) when is_map(attrs) do
-    write_record(issue, attrs, "cleaned")
+  @doc """
+  Updates ownership only when the current holder and run match `expected`.
+  """
+  @spec verify_and_update(Issue.t(), map(), map()) :: {:ok, map()} | {:error, term()}
+  def verify_and_update(%Issue{} = issue, expected, attrs)
+      when is_map(expected) and is_map(attrs) do
+    expected = scope_attrs(issue, normalize_attrs(expected))
+    update_attrs = normalize_attrs(attrs)
+    workspace_path = expected.workspace_path || update_attrs.workspace_path
+    path = scoped_registry_path(issue, %{expected | workspace_path: workspace_path})
+
+    case validate_identity(expected) do
+      :ok -> with_scope_lock(path, fn -> update_locked(path, issue, expected, attrs) end)
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to update process ownership for issue_id=#{issue.id}: #{Exception.message(error)}")
+      {:error, error}
   end
 
-  @spec record_quarantined(Issue.t(), map(), String.t()) :: :ok | {:error, term()}
-  def record_quarantined(%Issue{} = issue, attrs, reason) when is_map(attrs) and is_binary(reason) do
-    write_record(issue, Map.put(attrs, :quarantine_reason, reason), "quarantined")
+  defp update_locked(path, issue, expected, attrs) do
+    with {:ok, record} <- read_exact_record(path),
+         :ok <- verify_owner(record, expected),
+         :ok <- validate_identity_updates(record, attrs),
+         merged_attrs <- merge_record_attrs(record, attrs),
+         :ok <- validate_local_attrs(merged_attrs),
+         state <- string_value(value_for(attrs, :state)) || record["state"] || "active",
+         :ok <- validate_state(state),
+         {:ok, updated} <- replace_record(path, issue, merged_attrs, state) do
+      {:ok, normalize_status(updated)}
+    end
+  end
+
+  @doc "Releases ownership only for the matching holder and run."
+  @spec release(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
+  def release(%Issue{} = issue, expected) when is_map(expected) do
+    verify_and_update(issue, expected, %{state: "cleaned", cleanup_status: "cleaned"})
   end
 
   @spec ownership_env(Issue.t() | nil, map()) :: [{String.t(), String.t()}]
@@ -43,11 +98,18 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       {"SYMPHONY_ROLE_ISSUE_ID", issue_id(issue, normalized_attrs)},
       {"SYMPHONY_ROLE_ISSUE_IDENTIFIER", issue_identifier(issue, normalized_attrs)},
       {"SYMPHONY_ROLE_NAME", normalized_attrs.role || current_role()},
-      {"SYMPHONY_ROLE_HOLDER", normalized_attrs.holder || ClaimLease.holder_id()},
+      {"SYMPHONY_ROLE_HOLDER", normalized_attrs.holder || holder_id()},
       {"SYMPHONY_ROLE_WORKSPACE_PATH", normalized_attrs.workspace_path}
     ]
+    |> Kernel.++(ownership_path_env(issue, normalized_attrs))
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
+
+  defp ownership_path_env(%Issue{} = issue, attrs) do
+    [{"SYMPHONY_ROLE_OWNERSHIP_PATH", scoped_registry_path(issue, scope_attrs(issue, attrs))}]
+  end
+
+  defp ownership_path_env(_issue, _attrs), do: []
 
   @spec blocking_record(Issue.t()) :: map() | nil
   def blocking_record(%Issue{} = issue) do
@@ -81,7 +143,19 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   end
 
   @spec current_role() :: String.t()
-  def current_role, do: ClaimLease.role_name()
+  def current_role do
+    case System.get_env("SYMPHONY_ROLE") do
+      role when is_binary(role) and role != "" -> role
+      _ -> "implementer"
+    end
+  end
+
+  @spec holder_id() :: String.t()
+  def holder_id do
+    Application.get_env(:symphony_elixir, :process_ownership_holder) ||
+      System.get_env("SYMPHONY_PROCESS_OWNERSHIP_HOLDER") ||
+      "#{current_host()}:#{System.pid()}:#{current_role()}"
+  end
 
   @doc "Recover stale local run-owned sessions left by a previous role process generation."
   @spec recover_stale_owned_sessions((map() -> :ok | {:error, term()})) :: {:ok, non_neg_integer()}
@@ -90,58 +164,375 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       Config.settings!().workspace.root
       |> owned_record_paths()
       |> Enum.reduce(0, fn path, count ->
-        case read_record(path) do
-          [record] -> recover_stale_owned_session(path, record, cleanup_fun, count)
-          _ -> count
-        end
+        recover_stale_owned_session(path, cleanup_fun, count)
       end)
 
     {:ok, recovered}
   end
 
-  defp write_record(%Issue{} = issue, attrs, state) do
-    normalized_attrs = normalize_attrs(attrs)
-    workspace_path = normalized_attrs.workspace_path
-    path = scoped_registry_path(issue, normalized_attrs)
-    now = DateTime.utc_now() |> DateTime.to_iso8601()
-    app_server_pgid = normalized_attrs.app_server_pgid || process_group_id(normalized_attrs.app_server_pid)
-    process_tree_pids = process_tree_pids(normalized_attrs.app_server_pid, normalized_attrs.process_tree_pids)
+  defp acquire_locked(path, %Issue{} = issue, attrs) do
+    case read_exact_record(path) do
+      {:error, :enoent} ->
+        case create_record_exclusive(path, issue, attrs, "active") do
+          {:ok, record} -> {:ok, normalize_status(record)}
+          {:error, reason} -> {:error, reason}
+        end
 
-    record =
-      %{
-        "version" => 1,
-        "issue_id" => issue.id,
-        "issue_identifier" => issue.identifier,
-        "role" => normalized_attrs.role || current_role(),
-        "run_id" => normalized_attrs.run_id,
-        "holder" => normalized_attrs.holder || ClaimLease.holder_id(),
-        "worker_host" => normalized_attrs.worker_host,
-        "worker_host_id" => current_host(),
-        "workspace_path" => workspace_path,
-        "session_id" => normalized_attrs.session_id,
-        "worker_pid" => normalized_attrs.worker_pid,
-        "app_server_pid" => normalized_attrs.app_server_pid,
-        "app_server_pgid" => app_server_pgid,
-        "process_tree_pids" => process_tree_pids,
-        "owned_session_ref" => normalized_attrs.owned_session_ref,
-        "ownership_env" => Map.new(ownership_env(issue, normalized_attrs)),
-        "state" => state,
-        "cleanup_status" => state,
-        "quarantine_reason" => normalized_attrs.quarantine_reason,
-        "updated_at" => now
-      }
-      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
-      |> Map.new()
+      {:ok, record} ->
+        cond do
+          same_owner?(record, attrs) ->
+            refresh_owned_record(path, issue, record, attrs)
 
-    with :ok <- File.mkdir_p(Path.dirname(path)),
-         {:ok, body} <- Jason.encode(record) do
-      File.write(path, body <> "\n")
+          stale_record?(record) ->
+            replace_stale_record(path, record, issue, attrs)
+
+          true ->
+            {:error, :ownership_held}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
-  rescue
-    error ->
-      Logger.warning("Failed to write process ownership record for issue_id=#{issue.id}: #{Exception.message(error)}")
-      {:error, error}
   end
+
+  defp refresh_owned_record(path, issue, record, attrs) do
+    case replace_record(path, issue, merge_record_attrs(record, attrs), "active") do
+      {:ok, updated} -> {:ok, normalize_status(updated)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp replace_stale_record(path, record, %Issue{} = issue, attrs) do
+    with {:ok, observed_body} <- Jason.encode(record),
+         digest <- :crypto.hash(:sha256, observed_body) |> Base.encode16(case: :lower),
+         archive_path <- path <> ".stale-" <> binary_part(digest, 0, 16),
+         :ok <- File.rename(path, archive_path) do
+      case create_record_exclusive(path, issue, attrs, "active") do
+        {:ok, replacement} ->
+          prune_stale_archives(path, archive_path)
+          {:ok, normalize_status(replacement)}
+
+        {:error, reason} ->
+          _ = File.rename(archive_path, path)
+          {:error, reason}
+      end
+    end
+  end
+
+  defp prune_stale_archives(path, archive_path_to_keep) do
+    path
+    |> Kernel.<>(".stale-*")
+    |> Path.wildcard()
+    |> Enum.reject(&(&1 == archive_path_to_keep))
+    |> Enum.each(fn stale_path ->
+      case File.rm(stale_path) do
+        :ok -> :ok
+        {:error, reason} -> Logger.warning("Failed to prune stale process ownership archive #{stale_path}: #{inspect(reason)}")
+      end
+    end)
+  end
+
+  defp create_record_exclusive(path, %Issue{} = issue, attrs, state) do
+    record = build_record(issue, attrs, state)
+
+    with {:ok, body} <- Jason.encode(record),
+         {:ok, io} <- File.open(path, [:write, :exclusive]) do
+      result = write_synced(io, body <> "\n")
+
+      close_result = File.close(io)
+
+      case {result, close_result} do
+        {:ok, :ok} -> {:ok, record}
+        {{:error, reason}, _close_result} -> {:error, reason}
+        {:ok, {:error, reason}} -> {:error, reason}
+      end
+    end
+  end
+
+  defp write_synced(io, body) do
+    :ok = IO.binwrite(io, body)
+    :file.sync(io)
+  end
+
+  defp replace_record(path, %Issue{} = issue, attrs, state) do
+    record = build_record(issue, attrs, state)
+    temporary_path = path <> ".tmp-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+
+    with {:ok, body} <- Jason.encode(record),
+         :ok <- File.write(temporary_path, body <> "\n", [:exclusive, :sync]),
+         :ok <- File.rename(temporary_path, path) do
+      {:ok, record}
+    else
+      {:error, reason} ->
+        _ = File.rm(temporary_path)
+        {:error, reason}
+    end
+  end
+
+  defp build_record(%Issue{} = issue, attrs, state) do
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+    app_server_pgid = attrs.app_server_pgid || process_group_id(attrs.app_server_pid)
+    process_tree_pids = process_tree_pids(attrs.app_server_pid, attrs.process_tree_pids)
+
+    %{
+      "version" => 1,
+      "issue_id" => issue.id,
+      "issue_identifier" => issue.identifier,
+      "role" => attrs.role || current_role(),
+      "run_id" => attrs.run_id,
+      "holder" => attrs.holder || holder_id(),
+      "worker_host" => attrs.worker_host,
+      "worker_host_id" => current_host(),
+      "workspace_path" => attrs.workspace_path,
+      "session_id" => attrs.session_id,
+      "worker_pid" => attrs.worker_pid,
+      "app_server_pid" => attrs.app_server_pid,
+      "app_server_pgid" => app_server_pgid,
+      "process_tree_pids" => process_tree_pids,
+      "owned_session_ref" => attrs.owned_session_ref,
+      "ownership_env" => Map.new(ownership_env(issue, attrs)),
+      "state" => state,
+      "cleanup_status" => state,
+      "quarantine_reason" => attrs.quarantine_reason,
+      "updated_at" => now
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp with_scope_lock(path, fun) when is_binary(path) and is_function(fun, 0) do
+    lock_path = path <> ".lock"
+
+    case acquire_scope_lock(lock_path) do
+      {:ok, token} ->
+        run_with_scope_lock(lock_path, token, fun)
+
+      {:error, :ownership_lock_held} ->
+        recover_and_retry_scope_lock(lock_path, fun)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp run_with_scope_lock(lock_path, token, fun) do
+    fun.()
+  after
+    release_scope_lock(lock_path, token)
+  end
+
+  defp recover_and_retry_scope_lock(lock_path, fun) do
+    case recover_stale_scope_lock(lock_path) do
+      :recovered ->
+        case acquire_scope_lock(lock_path) do
+          {:ok, token} -> run_with_scope_lock(lock_path, token, fun)
+          {:error, reason} -> {:error, reason}
+        end
+
+      :not_stale ->
+        {:error, :ownership_lock_held}
+    end
+  end
+
+  defp acquire_scope_lock(lock_path) do
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+
+    case File.mkdir(lock_path) do
+      :ok ->
+        owner = %{
+          "version" => 1,
+          "token" => token,
+          "worker_host_id" => current_host(),
+          "owner_pid" => System.pid(),
+          "created_at_ms" => System.system_time(:millisecond)
+        }
+
+        case File.write(Path.join(lock_path, @lock_owner_file), Jason.encode!(owner) <> "\n", [:exclusive, :sync]) do
+          :ok ->
+            {:ok, token}
+
+          {:error, reason} ->
+            _ = File.rmdir(lock_path)
+            {:error, reason}
+        end
+
+      {:error, :eexist} ->
+        {:error, :ownership_lock_held}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp release_scope_lock(lock_path, token) do
+    owner_path = Path.join(lock_path, @lock_owner_file)
+
+    case read_scope_lock_owner(owner_path) do
+      {:ok, %{"token" => ^token}} ->
+        _ = File.rm(owner_path)
+        _ = File.rmdir(lock_path)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp recover_stale_scope_lock(lock_path) do
+    if stale_scope_lock?(lock_path) do
+      stale_path =
+        lock_path <>
+          ".stale-" <>
+          Integer.to_string(System.unique_integer([:positive, :monotonic]))
+
+      case File.rename(lock_path, stale_path) do
+        :ok ->
+          _ = File.rm_rf(stale_path)
+          :recovered
+
+        {:error, :enoent} ->
+          :recovered
+
+        {:error, _reason} ->
+          :not_stale
+      end
+    else
+      :not_stale
+    end
+  end
+
+  defp stale_scope_lock?(lock_path) do
+    case read_scope_lock_owner(Path.join(lock_path, @lock_owner_file)) do
+      {:ok, %{"version" => 1, "worker_host_id" => host, "owner_pid" => pid}} ->
+        host == current_host() and not pid_live?(pid)
+
+      {:ok, _owner} ->
+        false
+
+      {:error, _reason} ->
+        scope_lock_age_ms(lock_path) >= @malformed_lock_stale_after_ms
+    end
+  end
+
+  defp read_scope_lock_owner(path) do
+    with {:ok, body} <- File.read(path),
+         {:ok, owner} <- Jason.decode(body),
+         true <- is_map(owner) do
+      {:ok, owner}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :malformed_lock_owner}
+    end
+  end
+
+  defp scope_lock_age_ms(lock_path) do
+    case File.stat(lock_path, time: :posix) do
+      {:ok, %{mtime: mtime}} when is_integer(mtime) ->
+        max(System.system_time(:millisecond) - mtime * 1_000, 0)
+
+      _ ->
+        0
+    end
+  end
+
+  defp validate_local_attrs(attrs) do
+    with :ok <- validate_identity(attrs) do
+      if blank_string?(attrs.worker_host), do: :ok, else: {:error, :remote_worker_not_supported}
+    end
+  end
+
+  defp validate_identity(%{holder: holder, run_id: run_id})
+       when is_binary(holder) and holder != "" and is_binary(run_id) and run_id != "",
+       do: :ok
+
+  defp validate_identity(_attrs), do: {:error, :invalid_ownership_identity}
+
+  defp validate_state(state) when state in @valid_states, do: :ok
+  defp validate_state(_state), do: {:error, :invalid_ownership_state}
+
+  defp verify_owner(record, attrs) do
+    if same_owner?(record, attrs), do: :ok, else: {:error, :ownership_mismatch}
+  end
+
+  defp validate_identity_updates(record, attrs) do
+    updates = normalize_attrs(attrs)
+
+    immutable_matches? =
+      optional_equal?(updates.holder, record["holder"]) and
+        optional_equal?(updates.run_id, record["run_id"]) and
+        optional_equal?(updates.role, record["role"]) and
+        optional_workspace_equal?(updates.workspace_path, record["workspace_path"])
+
+    if immutable_matches?, do: :ok, else: {:error, :ownership_identity_change}
+  end
+
+  defp optional_equal?(nil, _existing), do: true
+  defp optional_equal?(value, existing), do: value == existing
+
+  defp optional_workspace_equal?(nil, _existing), do: true
+
+  defp optional_workspace_equal?(value, existing) when is_binary(value) and is_binary(existing) do
+    normalize_workspace_path(value) == normalize_workspace_path(existing)
+  end
+
+  defp optional_workspace_equal?(_value, _existing), do: false
+
+  defp same_owner?(record, attrs) do
+    record["holder"] == attrs.holder and record["run_id"] == attrs.run_id
+  end
+
+  defp stale_record?(%{"worker_host" => worker_host}) when is_binary(worker_host) and worker_host != "",
+    do: false
+
+  defp stale_record?(%{"state" => state}) when state in ["cleaned", "released"],
+    do: true
+
+  defp stale_record?(%{"state" => state} = record)
+       when state in ["active", "retrying", "quarantined", "blocked"] do
+    holder_has_dead_pid?(record["holder"]) and not local_process_live?(record)
+  end
+
+  defp stale_record?(_record), do: false
+
+  defp holder_has_dead_pid?(holder) when is_binary(holder) do
+    case holder |> String.split(":") |> Enum.reverse() do
+      [_role, pid | _host_parts] ->
+        case Integer.parse(pid) do
+          {integer, ""} when integer > 0 -> not pid_live?(integer)
+          _ -> false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  defp holder_has_dead_pid?(_holder), do: false
+
+  defp merge_record_attrs(record, attrs) do
+    updates = normalize_attrs(attrs)
+
+    %{
+      role: prefer_update(updates.role, string_value(record["role"])),
+      run_id: prefer_update(updates.run_id, string_value(record["run_id"])),
+      holder: prefer_update(updates.holder, string_value(record["holder"])),
+      issue_id: prefer_update(updates.issue_id, string_value(record["issue_id"])),
+      issue_identifier: prefer_update(updates.issue_identifier, string_value(record["issue_identifier"])),
+      worker_host: prefer_update(updates.worker_host, string_value(record["worker_host"])),
+      workspace_path: prefer_update(updates.workspace_path, string_value(record["workspace_path"])),
+      session_id: prefer_update(updates.session_id, string_value(record["session_id"])),
+      quarantine_reason: prefer_update(updates.quarantine_reason, string_value(record["quarantine_reason"])),
+      worker_pid: prefer_update(updates.worker_pid, pid_value(record["worker_pid"])),
+      app_server_pid: prefer_update(updates.app_server_pid, pid_value(record["app_server_pid"])),
+      app_server_pgid: prefer_update(updates.app_server_pgid, pid_value(record["app_server_pgid"])),
+      process_tree_pids: prefer_pid_list(updates.process_tree_pids, record["process_tree_pids"]),
+      owned_session_ref: prefer_update(updates.owned_session_ref, owned_session_ref_value(record))
+    }
+  end
+
+  defp prefer_update(nil, existing), do: existing
+  defp prefer_update(value, _existing), do: value
+  defp prefer_pid_list([], existing), do: pid_list_value(existing)
+  defp prefer_pid_list(values, _existing), do: values
 
   defp owned_record_paths(workspace_root) when is_binary(workspace_root) do
     Path.wildcard(
@@ -150,26 +541,43 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     )
   end
 
-  defp recover_stale_owned_session(path, record, cleanup_fun, count) do
-    if stale_owned_session_record?(record) do
-      ownership_ref = owned_session_ref_value(record)
-
-      case cleanup_fun.(ownership_ref) do
-        :ok ->
-          mark_record_cleaned(path, record)
-          count + 1
-
-        {:error, reason} ->
-          Logger.warning("Failed to recover stale run-owned session #{ownership_ref.session_name}: #{inspect(reason)}")
-          count
+  defp recover_stale_owned_session(path, cleanup_fun, count) do
+    with_scope_lock(path, fn ->
+      case read_exact_record(path) do
+        {:ok, record} -> recover_stale_record_locked(path, record, cleanup_fun, count)
+        {:error, _reason} -> count
       end
-    else
-      count
+    end)
+    |> case do
+      result when is_integer(result) -> result
+      _ -> count
     end
   rescue
     error ->
       Logger.warning("Failed to recover stale run-owned session record #{path}: #{Exception.message(error)}")
       count
+  end
+
+  defp recover_stale_record_locked(path, record, cleanup_fun, count) do
+    if stale_owned_session_record?(record) do
+      recover_stale_session(path, record, cleanup_fun, count)
+    else
+      count
+    end
+  end
+
+  defp recover_stale_session(path, record, cleanup_fun, count) do
+    ownership_ref = owned_session_ref_value(record)
+
+    case cleanup_fun.(ownership_ref) do
+      :ok ->
+        :ok = mark_record_cleaned(path, record)
+        count + 1
+
+      {:error, reason} ->
+        Logger.warning("Failed to recover stale run-owned session #{ownership_ref.session_name}: #{inspect(reason)}")
+        count
+    end
   end
 
   defp stale_owned_session_record?(record) when is_map(record) do
@@ -202,7 +610,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       |> Map.put("updated_at", DateTime.utc_now() |> DateTime.to_iso8601())
 
     with {:ok, body} <- Jason.encode(updated) do
-      File.write!(path, body <> "\n")
+      File.write(path, body <> "\n")
     end
   end
 
@@ -242,24 +650,36 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp value_for(attrs, key) when is_atom(key), do: attrs[key] || attrs[Atom.to_string(key)]
 
   defp scoped_registry_path(%Issue{} = issue, normalized_attrs) when is_map(normalized_attrs) do
-    base = normalized_attrs.workspace_path || Config.settings!().workspace.root
+    base = Config.settings!().workspace.root
     Path.join([base, @registry_dir, scoped_registry_filename(issue, normalized_attrs)])
+  end
+
+  defp scope_attrs(%Issue{} = issue, attrs) when is_map(attrs) do
+    if blank_string?(attrs.workspace_path) do
+      %{attrs | workspace_path: expected_workspace_path(issue)}
+    else
+      attrs
+    end
   end
 
   defp scoped_registry_filename(%Issue{} = issue, attrs) do
     issue_scope = safe_name(issue.id || issue.identifier || "issue")
     role_scope = safe_name(attrs.role || current_role() || "role")
     workspace_scope = safe_name(workspace_scope_name(attrs.workspace_path))
-    run_scope = safe_name(attrs.run_id || attrs.holder || "run")
 
-    [issue_scope, role_scope, workspace_scope, run_scope]
+    [issue_scope, role_scope, workspace_scope]
     |> Enum.reject(&is_nil/1)
     |> Enum.join("--")
     |> Kernel.<>(".json")
   end
 
   defp workspace_scope_name(nil), do: "default"
-  defp workspace_scope_name(path) when is_binary(path), do: Path.basename(path)
+
+  defp workspace_scope_name(path) when is_binary(path) do
+    normalized = normalize_workspace_path(path)
+    digest = :crypto.hash(:sha256, normalized) |> Base.encode16(case: :lower) |> binary_part(0, 12)
+    "#{Path.basename(normalized)}-#{digest}"
+  end
 
   defp candidate_record_paths(%Issue{} = issue) do
     workspace_root_path = registry_path(issue, nil)
@@ -295,15 +715,51 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   end
 
   defp read_record(path) when is_binary(path) do
-    with true <- File.exists?(path),
-         {:ok, body} <- File.read(path),
-         {:ok, record} <- Jason.decode(body),
-         true <- record["version"] == 1 do
-      [record]
-    else
-      _ -> []
+    case read_exact_record(path) do
+      {:ok, record} -> [record]
+      {:error, :enoent} -> []
+      {:error, :malformed_ownership_record} -> [malformed_record(path)]
     end
   end
+
+  defp read_exact_record(path) when is_binary(path) do
+    with {:ok, body} <- File.read(path),
+         {:ok, record} <- Jason.decode(body),
+         true <- valid_record?(record) do
+      {:ok, record}
+    else
+      {:error, :enoent} -> {:error, :enoent}
+      _ -> {:error, :malformed_ownership_record}
+    end
+  end
+
+  defp valid_record?(
+         %{
+           "version" => 1,
+           "state" => state,
+           "cleanup_status" => cleanup_status
+         } = record
+       ) do
+    state in @valid_states and
+      cleanup_status in @valid_states and
+      Enum.all?(@required_record_strings, &nonblank_string?(record[&1]))
+  end
+
+  defp valid_record?(_record), do: false
+
+  defp nonblank_string?(value), do: is_binary(value) and String.trim(value) != ""
+
+  defp malformed_record(path) do
+    %{
+      "version" => 1,
+      "state" => "malformed",
+      "cleanup_status" => "malformed",
+      "path" => path,
+      "updated_at" => ""
+    }
+  end
+
+  defp blocking_record?(%{"state" => "malformed"}, %Issue{}), do: true
 
   defp blocking_record?(%{"state" => "active"} = record, %Issue{} = issue) do
     record_scope_matches?(record, issue) and active_record_blocks?(record)
@@ -349,8 +805,22 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp active_record_blocks?(record) do
     process_pids = record_process_pids(record)
 
-    process_pids == [] or Enum.any?(process_pids, &pid_live?/1) or
-      process_group_live?(record["app_server_pgid"]) or ownership_env_process_live?(record)
+    cond do
+      Enum.any?(process_pids, &pid_live?/1) ->
+        true
+
+      process_group_live?(record["app_server_pgid"]) or ownership_env_process_live?(record) ->
+        true
+
+      process_pids == [] and holder_has_dead_pid?(record["holder"]) ->
+        false
+
+      process_pids == [] ->
+        true
+
+      true ->
+        false
+    end
   end
 
   defp quarantined_record_blocks?(%{"worker_host" => worker_host})

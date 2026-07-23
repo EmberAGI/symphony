@@ -103,11 +103,6 @@ defmodule SymphonyElixir.LiveE2ETest do
         name
         type
       }
-      comments(first: 20) {
-        nodes {
-          body
-        }
-      }
     }
   }
   """
@@ -241,12 +236,6 @@ defmodule SymphonyElixir.LiveE2ETest do
   defp issue_completed?(%{"state" => %{"type" => type}}), do: type in ["completed", "canceled"]
   defp issue_completed?(_issue), do: false
 
-  defp issue_has_comment?(%{"comments" => %{"nodes" => comments}}, expected_body) when is_list(comments) do
-    Enum.any?(comments, &(&1["body"] == expected_body))
-  end
-
-  defp issue_has_comment?(_issue, _expected_body), do: false
-
   defp update_entity(mutation, variables, mutation_name, entity_name) do
     case Client.graphql(mutation, variables) do
       {:ok, %{"data" => %{^mutation_name => %{"success" => true}}}} ->
@@ -323,25 +312,16 @@ defmodule SymphonyElixir.LiveE2ETest do
     project_slug=#{project_slug}
 
     Step 2:
-    You must use the `linear_graphql` tool to query the current issue by `{{ issue.id }}` and read:
-    - existing comments
-    - team workflow states
+    You must use the `linear_graphql` tool to query the current issue by `{{ issue.id }}` and read
+    the team workflow states.
 
     A turn that only creates the file is incomplete. Do not stop after Step 1.
 
-    If the exact comment body below is not already present, post exactly one comment on the current issue with this exact body:
-    #{expected_comment("{{ issue.identifier }}", project_slug)}
-
-    Use these exact GraphQL operations:
+    Use this exact GraphQL operation:
 
     ```graphql
     query IssueContext($id: String!) {
       issue(id: $id) {
-        comments(first: 20) {
-          nodes {
-            body
-          }
-        }
         team {
           states(first: 50) {
             nodes {
@@ -351,14 +331,6 @@ defmodule SymphonyElixir.LiveE2ETest do
             }
           }
         }
-      }
-    }
-    ```
-
-    ```graphql
-    mutation AddComment($issueId: String!, $body: String!) {
-      commentCreate(input: {issueId: $issueId, body: $body}) {
-        success
       }
     }
     ```
@@ -377,23 +349,17 @@ defmodule SymphonyElixir.LiveE2ETest do
 
     Step 4:
     Verify all outcomes with one final `linear_graphql` query against `{{ issue.id }}`:
-    - the exact comment body is present
     - the issue state type is `completed`
 
     Do not ask for approval.
-    Stop only after all three conditions are true:
+    Stop only after both conditions are true:
     1. the file exists with the exact contents above
-    2. the Linear comment exists with the exact body above
-    3. the Linear issue is in a completed terminal state
+    2. the Linear issue is in a completed terminal state
     """
   end
 
   defp expected_result(issue_identifier, project_slug) do
     "identifier=#{issue_identifier}\nproject_slug=#{project_slug}\n"
-  end
-
-  defp expected_comment(issue_identifier, project_slug) do
-    "Symphony live e2e comment\nidentifier=#{issue_identifier}\nproject_slug=#{project_slug}"
   end
 
   defp receive_runtime_info!(issue_id) do
@@ -507,8 +473,6 @@ defmodule SymphonyElixir.LiveE2ETest do
 
       issue_snapshot = fetch_issue_details!(issue.id)
       assert issue_completed?(issue_snapshot)
-      assert issue_has_comment?(issue_snapshot, expected_comment(issue.identifier, project["slugId"]))
-
       assert :ok = complete_project(project["id"], completed_project_status["id"])
     after
       restart_orchestrator_if_needed()

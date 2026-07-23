@@ -8,9 +8,6 @@ defmodule SymphonyElixir.Tracker do
   @callback fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
-  @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
-  @callback upsert_claim_lease(String.t(), map()) ::
-              {:ok, SymphonyElixir.Tracker.ClaimLease.t() | nil} | {:error, term()}
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   @callback add_issue_label(String.t(), String.t()) :: :ok | {:error, term()}
 
@@ -27,17 +24,6 @@ defmodule SymphonyElixir.Tracker do
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids) do
     adapter().fetch_issue_states_by_ids(issue_ids)
-  end
-
-  @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
-  def create_comment(issue_id, body) do
-    adapter().create_comment(issue_id, body)
-  end
-
-  @spec upsert_claim_lease(String.t(), map()) ::
-          {:ok, SymphonyElixir.Tracker.ClaimLease.t() | nil} | {:error, term()}
-  def upsert_claim_lease(issue_id, lease_attrs) do
-    adapter().upsert_claim_lease(issue_id, lease_attrs)
   end
 
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}

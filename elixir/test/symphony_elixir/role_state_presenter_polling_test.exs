@@ -13,10 +13,6 @@ defmodule SymphonyElixir.RoleStatePresenterPollingTest do
     def fetch_issue_states_by_ids(_issue_ids) do
       Application.fetch_env!(:symphony_elixir, :dispatch_attempt_refetched_issues)
     end
-
-    def graphql(_query, _variables) do
-      {:ok, %{"data" => %{"commentCreate" => %{"success" => true, "comment" => %{"id" => "claim-comment"}}}}}
-    end
   end
 
   test "role state presenter exposes polling diagnostics from the default orchestrator snapshot" do
