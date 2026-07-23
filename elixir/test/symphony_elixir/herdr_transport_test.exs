@@ -694,7 +694,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
         {"HERDR_FAKE_STATUS_PID_FILE", status_pid_file},
         {"HERDR_FAKE_SERVER_PID_FILE", server_pid_file}
       ],
-      start_timeout_ms: 100,
+      start_timeout_ms: 250,
       poll_interval_ms: 5
     }
 

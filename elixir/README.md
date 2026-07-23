@@ -203,13 +203,27 @@ malformed provider event schemas, and three consecutive identical no-progress
 observations for the same issue/workspace/role/provider fingerprint.
 
 Irrecoverable failures do not consume the ordinary retry loop. The orchestrator
-marks the same-scope claim lease `blocked`, writes redacted retry and recovery
-reasons, records a compact run-log event when run logging is configured, applies
-the `Human Escalation` label, moves the issue to `Human Escalation` when that
-state exists, and writes an Operator Note with the redacted failure family and
-required repair action. After repairing credentials, configuration, missing
-tools, permissions, workspace/protocol state, or provider event handling, move
-the issue back to the appropriate active role state to resume work.
+verifies and marks same-scope process ownership `blocked`, records a compact
+run-log event when run logging is configured, applies the `Human Escalation`
+label, and moves the issue to `Human Escalation` when that state exists. This
+path neither reads nor writes Linear comments. After repairing credentials,
+configuration, missing tools, permissions, workspace/protocol state, or
+provider event handling, move the issue back to the appropriate active role
+state to resume work.
+
+### Comment-independent role-run ownership
+
+Candidate selection and dispatch use Linear issue state only. Before a local
+worker starts, Symphony atomically acquires the exact issue/workspace/role scope
+through `Runtime.ProcessOwnership`; a conflicting or malformed record fails
+closed, and holder/run-mismatched updates or releases are rejected. Remote
+worker dispatch is unsupported in this V1 and fails closed.
+
+Provider processes receive the exact ownership-record path through
+`SYMPHONY_ROLE_OWNERSHIP_PATH`. Runtime consumers must read that value rather
+than reconstructing the path. Retry, recovery, cleanup, quarantine,
+escalation, and status reuse the verified record. Deleting every Linear issue
+comment does not change dispatch or generation-fence behavior.
 
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the

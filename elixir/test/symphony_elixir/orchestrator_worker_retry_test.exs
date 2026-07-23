@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Runtime.ProcessOwnership
+
   test "abnormal worker exit writes compact run-scoped retry evidence" do
     previous_run_log_root = Application.get_env(:symphony_elixir, :run_log_root)
 
@@ -29,13 +31,23 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     long_detail = String.duplicate("run-log-detail-", 500)
     reason = {:shutdown, {:agent_failed, long_detail}}
 
+    issue = %Issue{id: issue_id, identifier: "MT-RUN-LOG", state: "In Progress"}
+
+    assert {:ok, process_ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: run_id,
+               holder: ProcessOwnership.holder_id()
+             })
+
     running_entry = %{
       pid: self(),
       ref: ref,
       identifier: "MT-RUN-LOG",
       retry_attempt: 1,
-      issue: %Issue{id: issue_id, identifier: "MT-RUN-LOG", state: "In Progress"},
+      issue: issue,
       run_id: run_id,
+      process_ownership: process_ownership,
       session_id: session_id,
       started_at: DateTime.utc_now()
     }
@@ -73,9 +85,6 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     assert event["retry"]["delay_ms"] == 20_000
     assert event["retry"]["due_at_ms"] == due_at_ms
     assert event["retry"]["lease_state"] == "retrying"
-    # Under the deterministic memory tracker the lease upsert succeeds, so the
-    # tracker-confirmed state records; nil here was an artifact of the former
-    # suite default issuing a live Linear call that failed with 401.
     assert event["retry"]["claim_lease_state"] == "retrying"
     assert is_binary(event["timestamp"])
   end
@@ -204,6 +213,15 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
     initial_state = :sys.get_state(pid)
 
+    assert {:ok, process_ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: "run-stall-live",
+               holder: ProcessOwnership.holder_id(),
+               workspace_path: Path.join(workspace_root, issue.identifier),
+               app_server_pid: app_server_pid
+             })
+
     running_entry = %{
       pid: worker_pid,
       ref: make_ref(),
@@ -211,6 +229,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
       issue: issue,
       session_id: "thread-stall-live",
       run_id: "run-stall-live",
+      process_ownership: process_ownership,
       workspace_path: Path.join(workspace_root, issue.identifier),
       codex_app_server_pid: app_server_pid,
       last_codex_message: nil,
@@ -237,17 +256,12 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     refute Map.has_key?(state.running, issue_id)
     assert %{attempt: 1} = state.retry_attempts[issue_id]
 
-    assert_receive {:memory_tracker_claim_lease, ^issue_id, quarantined_lease}, 500
-    assert quarantined_lease.state == "quarantined"
-    assert quarantined_lease.retry_reason =~ "stalled for "
-
     snapshot = GenServer.call(pid, :snapshot)
 
     assert [
              %{
                issue_id: ^issue_id,
                identifier: "MT-STALL-LIVE",
-               claim_lease: %{state: "quarantined"},
                process_ownership: %{
                  state: "quarantined",
                  cleanup_status: "quarantined",

@@ -305,8 +305,8 @@ defmodule SymphonyElixir.AgentRuntime do
   @doc """
   Classify a provider/runtime failure before retry policy is applied.
 
-  The returned decision is provider-neutral and safe for logs, claim leases,
-  status surfaces, and Operator Notes. Provider adapters should still parse
+  The returned decision is provider-neutral and safe for logs, process
+  ownership, and status surfaces. Provider adapters should still parse
   provider-native payloads at their own seam; callers should make retry versus
   escalation decisions from this typed result rather than raw process text.
   """
@@ -401,7 +401,7 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   @doc """
-  Format a redacted provider-auth failure for logs, claim leases, and status.
+  Format a redacted provider-auth failure for logs, process ownership, and status.
   """
   @spec provider_auth_failure_summary(term()) :: String.t()
   def provider_auth_failure_summary(reason) do
@@ -899,7 +899,7 @@ defmodule SymphonyElixir.AgentRuntime do
   defp reset_marker(context) do
     %{
       retry_epoch: context_string(context, :retry_epoch),
-      claim_lease_run_id: context_string(context, :claim_lease_run_id),
+      process_ownership_run_id: context_string(context, :process_ownership_run_id),
       input_fingerprint: context_string(context, :input_fingerprint),
       operator_repair_id: context_string(context, :operator_repair_id)
     }

@@ -6,7 +6,6 @@ defmodule SymphonyElixir.Tracker.Memory do
   @behaviour SymphonyElixir.Tracker
 
   alias SymphonyElixir.Linear.Issue
-  alias SymphonyElixir.Tracker.ClaimLease
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
@@ -37,26 +36,6 @@ defmodule SymphonyElixir.Tracker.Memory do
      Enum.filter(issue_entries(), fn %Issue{id: id} ->
        MapSet.member?(wanted_ids, id)
      end)}
-  end
-
-  @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
-  def create_comment(issue_id, body) do
-    with :ok <- maybe_fail_mutation(:comment) do
-      send_event({:memory_tracker_comment, issue_id, body})
-      :ok
-    end
-  end
-
-  @spec upsert_claim_lease(String.t(), map()) ::
-          {:ok, ClaimLease.t() | nil} | {:error, term()}
-  def upsert_claim_lease(issue_id, lease_attrs) do
-    lease =
-      lease_attrs
-      |> Map.put(:issue_id, issue_id)
-      |> ClaimLease.new()
-
-    send_event({:memory_tracker_claim_lease, issue_id, lease})
-    {:ok, lease}
   end
 
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
@@ -90,7 +69,7 @@ defmodule SymphonyElixir.Tracker.Memory do
     end
   end
 
-  defp maybe_fail_mutation(kind) when kind in [:comment, :label, :state] do
+  defp maybe_fail_mutation(kind) when kind in [:label, :state] do
     case Application.get_env(:symphony_elixir, :memory_tracker_fail_mutations, %{}) do
       failures when is_map(failures) ->
         case Map.get(failures, kind) || Map.get(failures, Atom.to_string(kind)) do

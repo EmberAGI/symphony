@@ -5,7 +5,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
   alias SymphonyElixir.Linear.Issue
-  alias SymphonyElixir.Tracker.ClaimLease
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -604,7 +603,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                       ids: ^first_batch_ids,
                       first: 50,
                       relationFirst: 50,
-                      commentFirst: 50,
                       attachmentFirst: 50
                     }}
 
@@ -618,100 +616,41 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                       ids: ^second_batch_ids,
                       first: 5,
                       relationFirst: 50,
-                      commentFirst: 50,
                       attachmentFirst: 50
                     }}
   end
 
-  test "linear client pages issue comments so hidden claim lease markers are included" do
-    now = DateTime.utc_now()
-    issue_ids = ["issue-paginated-comments"]
-
-    first_page_lease =
-      ClaimLease.render(%{
-        issue_id: "issue-paginated-comments",
-        issue_identifier: "MT-580",
-        role: "reviewer",
-        holder: "reviewer-worker",
-        run_id: "run-reviewer",
-        workspace_path: "/tmp/workspaces/MT-580-symphony",
-        refreshed_at: now,
-        expires_at: DateTime.add(now, 60, :second),
-        state: "active"
-      })
-
-    hidden_lease =
-      ClaimLease.render(%{
-        issue_id: "issue-paginated-comments",
-        issue_identifier: "MT-580",
-        role: "implementer",
-        holder: "implementer-worker",
-        run_id: "run-implementer",
-        workspace_path: "/tmp/workspaces/MT-580-symphony",
-        refreshed_at: DateTime.add(now, 1, :second),
-        expires_at: DateTime.add(now, 60, :second),
-        state: "active"
-      })
+  test "state-driven issue fetch never queries or normalizes comments" do
+    issue_ids = ["issue-comment-independent"]
 
     graphql_fun = fn query, variables ->
-      send(self(), {:paginated_comment_query, query, variables})
+      send(self(), {:comment_independent_issue_query, query, variables})
 
-      cond do
-        Map.has_key?(variables, :ids) ->
-          {:ok,
-           %{
-             "data" => %{
-               "issues" => %{
-                 "nodes" => [
-                   %{
-                     "id" => "issue-paginated-comments",
-                     "identifier" => "MT-580",
-                     "title" => "Paginated comments",
-                     "state" => %{"name" => "In Progress"},
-                     "labels" => %{"nodes" => []},
-                     "inverseRelations" => %{"nodes" => []},
-                     "comments" => %{
-                       "nodes" => [
-                         %{"id" => "comment-reviewer", "body" => first_page_lease}
-                       ],
-                       "pageInfo" => %{"hasNextPage" => true, "endCursor" => "cursor-1"}
-                     }
-                   }
-                 ]
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [
+               %{
+                 "id" => "issue-comment-independent",
+                 "identifier" => "MT-580",
+                 "title" => "Comment-independent fetch",
+                 "state" => %{"name" => "In Progress"},
+                 "labels" => %{"nodes" => []},
+                 "inverseRelations" => %{"nodes" => []}
                }
-             }
-           }}
-
-        variables[:issueId] == "issue-paginated-comments" and variables[:commentAfter] == "cursor-1" ->
-          {:ok,
-           %{
-             "data" => %{
-               "issue" => %{
-                 "comments" => %{
-                   "nodes" => [
-                     %{"id" => "comment-implementer", "body" => hidden_lease}
-                   ],
-                   "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
-                 }
-               }
-             }
-           }}
-      end
+             ]
+           }
+         }
+       }}
     end
 
     assert {:ok, [%Issue{} = issue]} = Client.fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun)
+    assert issue.id == "issue-comment-independent"
 
-    assert Enum.map(issue.claim_leases, & &1.comment_id) == ["comment-implementer", "comment-reviewer"]
-    assert issue.claim_lease.comment_id == "comment-implementer"
-
-    assert_receive {:paginated_comment_query, query, %{ids: ^issue_ids, commentFirst: 50}}
-    assert query =~ "comments(first: $commentFirst)"
-    assert query =~ "pageInfo"
-
-    assert_receive {:paginated_comment_query, comment_query, %{issueId: "issue-paginated-comments", commentFirst: 50, commentAfter: "cursor-1"}}
-
-    assert comment_query =~ "SymphonyLinearIssueComments"
-    assert comment_query =~ "comments(first: $commentFirst, after: $commentAfter)"
+    assert_receive {:comment_independent_issue_query, query, %{ids: ^issue_ids} = variables}
+    refute query =~ "comments("
+    refute Map.has_key?(variables, :commentFirst)
   end
 
   test "linear client leaves repository empty when canonical repo label is absent" do

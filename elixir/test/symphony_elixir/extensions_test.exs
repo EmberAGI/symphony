@@ -6,7 +6,6 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Linear.Issue
-  alias SymphonyElixir.Tracker.ClaimLease
   alias SymphonyElixir.Tracker.Memory
 
   @endpoint SymphonyElixirWeb.Endpoint
@@ -194,15 +193,12 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_candidate_issues()
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issues_by_states([" in progress ", 42])
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issue_states_by_ids(["issue-1"])
-    assert :ok = SymphonyElixir.Tracker.create_comment("issue-1", "comment")
     assert :ok = SymphonyElixir.Tracker.update_issue_state("issue-1", "Done")
     assert :ok = SymphonyElixir.Tracker.add_issue_label("issue-1", "Human Escalation")
-    assert_receive {:memory_tracker_comment, "issue-1", "comment"}
     assert_receive {:memory_tracker_state_update, "issue-1", "Done"}
     assert_receive {:memory_tracker_label_add, "issue-1", "Human Escalation"}
 
     Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
-    assert :ok = Memory.create_comment("issue-1", "quiet")
     assert :ok = Memory.update_issue_state("issue-1", "Quiet")
     assert :ok = Memory.add_issue_label("issue-1", "Quiet")
 
@@ -223,33 +219,6 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert {:ok, ["issue-1"]} = Adapter.fetch_issue_states_by_ids(["issue-1"])
     assert_receive {:fetch_issue_states_by_ids_called, ["issue-1"]}
-
-    Process.put(
-      {FakeLinearClient, :graphql_result},
-      {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}}
-    )
-
-    assert :ok = Adapter.create_comment("issue-1", "hello")
-    assert_receive {:graphql_called, create_comment_query, %{body: "hello", issueId: "issue-1"}}
-    assert create_comment_query =~ "commentCreate"
-
-    Process.put(
-      {FakeLinearClient, :graphql_result},
-      {:ok, %{"data" => %{"commentCreate" => %{"success" => false}}}}
-    )
-
-    assert {:error, :comment_create_failed} =
-             Adapter.create_comment("issue-1", "broken")
-
-    Process.put({FakeLinearClient, :graphql_result}, {:error, :boom})
-
-    assert {:error, :boom} = Adapter.create_comment("issue-1", "boom")
-
-    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{}}})
-    assert {:error, :comment_create_failed} = Adapter.create_comment("issue-1", "weird")
-
-    Process.put({FakeLinearClient, :graphql_result}, :unexpected)
-    assert {:error, :comment_create_failed} = Adapter.create_comment("issue-1", "odd")
 
     Process.put(
       {FakeLinearClient, :graphql_results},
@@ -356,146 +325,6 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :label_not_found} = Adapter.add_issue_label("issue-1", "Missing")
   end
 
-  test "linear adapter updates and verifies an existing claim lease comment before dispatch" do
-    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
-
-    on_exit(fn ->
-      Process.delete({FakeLinearClient, :graphql_results})
-      Process.delete({FakeLinearClient, :fetch_issue_states_result})
-    end)
-
-    lease_attrs = %{
-      comment_id: "comment-lease",
-      issue_id: "issue-lease",
-      issue_identifier: "MT-LEASE",
-      role: "implementer",
-      holder: "holder-1",
-      run_id: "run-1",
-      state: "active",
-      refreshed_at: DateTime.utc_now(),
-      expires_at: DateTime.add(DateTime.utc_now(), 60, :second)
-    }
-
-    verified_lease = ClaimLease.new(lease_attrs)
-
-    Process.put({FakeLinearClient, :graphql_results}, [
-      {:ok, %{"data" => %{"commentUpdate" => %{"success" => true}}}}
-    ])
-
-    Process.put(
-      {FakeLinearClient, :fetch_issue_states_result},
-      {:ok, [%Issue{id: "issue-lease", claim_lease: verified_lease}]}
-    )
-
-    assert {:ok, ^verified_lease} = Adapter.upsert_claim_lease("issue-lease", lease_attrs)
-
-    assert_receive {:graphql_called, update_query, %{commentId: "comment-lease", body: body}}
-    assert update_query =~ "commentUpdate"
-    refute update_query =~ "commentCreate"
-    assert body =~ "symphony-claim-lease:v1"
-    assert_receive {:fetch_issue_states_by_ids_called, ["issue-lease"]}
-  end
-
-  test "linear adapter creates a claim lease marker when no comment id exists" do
-    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
-
-    on_exit(fn ->
-      Process.delete({FakeLinearClient, :graphql_results})
-      Process.delete({FakeLinearClient, :fetch_issue_states_result})
-    end)
-
-    now = DateTime.utc_now()
-
-    lease_attrs = %{
-      comment_id: nil,
-      issue_id: "issue-new-lease",
-      issue_identifier: "MT-NEW-LEASE",
-      role: "implementer",
-      holder: "holder-1",
-      run_id: "run-1",
-      state: "active",
-      refreshed_at: now,
-      expires_at: DateTime.add(now, 60, :second)
-    }
-
-    verified_lease = ClaimLease.new(lease_attrs)
-
-    Process.put({FakeLinearClient, :graphql_results}, [
-      {:ok, %{"data" => %{"commentCreate" => %{"success" => true, "comment" => %{"id" => "comment-created"}}}}}
-    ])
-
-    Process.put(
-      {FakeLinearClient, :fetch_issue_states_result},
-      {:ok, [%Issue{id: "issue-new-lease", claim_lease: verified_lease}]}
-    )
-
-    assert {:ok, ^verified_lease} = Adapter.upsert_claim_lease("issue-new-lease", lease_attrs)
-
-    assert_receive {:graphql_called, create_query, %{issueId: "issue-new-lease", body: body}}
-    assert create_query =~ "commentCreate"
-    refute create_query =~ "commentUpdate"
-    assert body =~ "symphony-claim-lease:v1"
-    refute body =~ ~s("comment_id": "nil")
-    assert_receive {:fetch_issue_states_by_ids_called, ["issue-new-lease"]}
-  end
-
-  test "linear adapter rejects claim lease upsert when refetch sees a competing same-scope owner" do
-    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
-
-    on_exit(fn ->
-      Process.delete({FakeLinearClient, :graphql_results})
-      Process.delete({FakeLinearClient, :fetch_issue_states_result})
-    end)
-
-    now = DateTime.utc_now()
-
-    lease_attrs = %{
-      comment_id: "comment-written-lease",
-      issue_id: "issue-competing-lease",
-      issue_identifier: "MT-COMPETE",
-      role: "implementer",
-      holder: "holder-1",
-      run_id: "run-1",
-      workspace_path: "/tmp/workspaces/MT-COMPETE",
-      state: "active",
-      refreshed_at: now,
-      expires_at: DateTime.add(now, 60, :second)
-    }
-
-    written_lease = ClaimLease.new(lease_attrs)
-
-    competing_lease =
-      ClaimLease.new(%{
-        lease_attrs
-        | comment_id: "comment-competing-lease",
-          holder: "holder-2",
-          run_id: "run-2"
-      })
-
-    Process.put({FakeLinearClient, :graphql_results}, [
-      {:ok, %{"data" => %{"commentUpdate" => %{"success" => true}}}}
-    ])
-
-    Process.put(
-      {FakeLinearClient, :fetch_issue_states_result},
-      {:ok,
-       [
-         %Issue{
-           id: "issue-competing-lease",
-           claim_lease: written_lease,
-           claim_leases: [written_lease, competing_lease]
-         }
-       ]}
-    )
-
-    assert {:error, :claim_lease_competing_owner} =
-             Adapter.upsert_claim_lease("issue-competing-lease", lease_attrs)
-
-    assert_receive {:graphql_called, update_query, %{commentId: "comment-written-lease"}}
-    assert update_query =~ "commentUpdate"
-    assert_receive {:fetch_issue_states_by_ids_called, ["issue-competing-lease"]}
-  end
-
   test "phoenix observability api preserves state, issue, and refresh responses" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)
@@ -574,21 +403,19 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "worker_host" => nil,
                  "workspace_path" => "/tmp/workspaces/MT-BLOCKED",
                  "blocked_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("blocked_at"),
-                 "claim_lease" => %{
-                   "attempt" => 3,
-                   "expires_at" => nil,
-                   "holder" => "worker-1",
-                   "issue_id" => "issue-blocked",
-                   "issue_identifier" => "MT-BLOCKED",
-                   "recovery_reason" => "missing-required-tool-or-cli-repair-required",
-                   "refreshed_at" => nil,
-                   "retry_reason" => "missing_required_tool_or_cli claude command not found",
-                   "role" => "implementer",
+                 "process_ownership" => %{
+                   "app_server_pgid" => nil,
+                   "app_server_pid" => nil,
+                   "cleanup_status" => "blocked",
+                   "live" => false,
+                   "process_tree_pids" => nil,
+                   "quarantine_reason" => nil,
                    "run_id" => "run-blocked",
                    "session_id" => nil,
-                   "started_at" => state_payload["blocked"] |> List.first() |> get_in(["claim_lease", "started_at"]),
                    "state" => "blocked",
+                   "updated_at" => nil,
                    "worker_host" => nil,
+                   "worker_pid" => nil,
                    "workspace_path" => "/tmp/workspaces/MT-BLOCKED"
                  }
                }
@@ -667,7 +494,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "blocked" => %{
                "family" => "missing_required_tool_or_cli",
                "error" => "missing_required_tool_or_cli claude command not found",
-               "claim_lease" => %{"state" => "blocked"}
+               "process_ownership" => %{"state" => "blocked"}
              },
              "retry" => nil,
              "running" => nil
@@ -686,25 +513,8 @@ defmodule SymphonyElixir.ExtensionsTest do
              json_response(conn, 202)
   end
 
-  test "presenter exposes claim lease and process ownership payloads when present" do
+  test "presenter exposes process ownership payloads when present" do
     now = DateTime.utc_now()
-
-    claim_lease =
-      ClaimLease.new(%{
-        issue_id: "issue-lease-payload",
-        issue_identifier: "MT-LEASE",
-        role: "implementer",
-        holder: "worker-1",
-        run_id: "run-1",
-        worker_host: "worker-a",
-        workspace_path: "/tmp/workspaces/MT-LEASE",
-        session_id: "thread-turn",
-        attempt: 3,
-        started_at: now,
-        refreshed_at: now,
-        expires_at: DateTime.add(now, 60, :second),
-        state: "active"
-      })
 
     snapshot = %{
       running: [
@@ -714,7 +524,6 @@ defmodule SymphonyElixir.ExtensionsTest do
           state: "In Progress",
           worker_host: "worker-a",
           workspace_path: "/tmp/workspaces/MT-LEASE",
-          claim_lease: claim_lease,
           process_ownership: %{
             state: "active",
             cleanup_status: "active",
@@ -747,35 +556,12 @@ defmodule SymphonyElixir.ExtensionsTest do
     payload = SymphonyElixirWeb.Presenter.state_payload(orchestrator_name, 50)
     running = payload.running |> List.first()
 
-    assert running.claim_lease.role == "implementer"
-    assert running.claim_lease.run_id == "run-1"
-    assert running.claim_lease.state == "active"
     assert running.process_ownership.cleanup_status == "active"
     assert running.process_ownership.app_server_pid == 4242
     assert running.process_ownership.live == true
   end
 
   test "presenter exposes retry process ownership payloads when present" do
-    now = DateTime.utc_now()
-
-    claim_lease =
-      ClaimLease.new(%{
-        issue_id: "issue-retry-ownership",
-        issue_identifier: "MT-RETRY-OWNERSHIP",
-        role: "implementer",
-        holder: "worker-1",
-        run_id: "run-retry-1",
-        worker_host: "worker-a",
-        workspace_path: "/tmp/workspaces/MT-RETRY-OWNERSHIP",
-        session_id: "thread-retry",
-        attempt: 2,
-        started_at: now,
-        refreshed_at: now,
-        expires_at: DateTime.add(now, 60, :second),
-        retry_reason: "stalled for 1000ms",
-        state: "quarantined"
-      })
-
     snapshot = %{
       running: [],
       retrying: [
@@ -787,7 +573,6 @@ defmodule SymphonyElixir.ExtensionsTest do
           error: "stalled for 1000ms",
           worker_host: "worker-a",
           workspace_path: "/tmp/workspaces/MT-RETRY-OWNERSHIP",
-          claim_lease: claim_lease,
           process_ownership: %{
             state: "quarantined",
             cleanup_status: "quarantined",
@@ -813,7 +598,6 @@ defmodule SymphonyElixir.ExtensionsTest do
     payload = SymphonyElixirWeb.Presenter.state_payload(orchestrator_name, 50)
     retry = payload.retrying |> List.first()
 
-    assert retry.claim_lease.state == "quarantined"
     assert retry.process_ownership.cleanup_status == "quarantined"
     assert retry.process_ownership.app_server_pid == 5252
     assert retry.process_ownership.process_tree_pids == [5252, 5253]
@@ -826,7 +610,6 @@ defmodule SymphonyElixir.ExtensionsTest do
                50
              )
 
-    assert issue_payload.retry.claim_lease.state == "quarantined"
     assert issue_payload.retry.process_ownership.cleanup_status == "quarantined"
 
     assert issue_payload.retry.process_ownership.quarantine_reason =~
@@ -1094,8 +877,6 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   defp static_snapshot do
-    blocked_started_at = DateTime.utc_now()
-
     %{
       running: [
         %{
@@ -1145,20 +926,14 @@ defmodule SymphonyElixir.ExtensionsTest do
           worker_host: nil,
           workspace_path: "/tmp/workspaces/MT-BLOCKED",
           blocked_at: DateTime.utc_now(),
-          claim_lease:
-            ClaimLease.new(%{
-              issue_id: "issue-blocked",
-              issue_identifier: "MT-BLOCKED",
-              role: "implementer",
-              holder: "worker-1",
-              run_id: "run-blocked",
-              workspace_path: "/tmp/workspaces/MT-BLOCKED",
-              attempt: 3,
-              retry_reason: "missing_required_tool_or_cli claude command not found",
-              recovery_reason: "missing-required-tool-or-cli-repair-required",
-              state: "blocked",
-              started_at: blocked_started_at
-            })
+          process_ownership: %{
+            state: "blocked",
+            cleanup_status: "blocked",
+            run_id: "run-blocked",
+            worker_host: nil,
+            workspace_path: "/tmp/workspaces/MT-BLOCKED",
+            live?: false
+          }
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},

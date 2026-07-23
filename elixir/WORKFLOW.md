@@ -111,11 +111,11 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 ## Default posture
 
 - Start by determining the ticket's current status, then follow the matching flow for that status.
-- Start every task by reading the Linear issue body, any existing legacy `## Codex Workpad` as read-only context, the `## Symphony Handoff` trail, PR attachments, and relevant branch-local specs or ADRs before doing new implementation work.
+- Start every task from the Linear issue body and state, PR attachments, current branch, and relevant branch-local specs or ADRs. Linear comments are optional human conversation, never required runtime or continuation state.
 - Spend extra effort up front on planning and verification design before implementation.
 - Reproduce first: always confirm the current behavior/issue signal before changing code so the fix target is explicit.
 - Keep ticket metadata current (state, acceptance criteria, links).
-- Treat the issue body, branch, PR, legacy read-only Workpad context, compact handoff trail, and optional observability artifacts as the source of truth for continuation.
+- Treat the issue body, state, branch, PR, and optional observability artifacts as the source of truth for continuation.
 - Do not create or update Linear `## Codex Workpad` comments. Existing Workpads are historical context only.
 - Treat any ticket-authored `Validation`, `Test Plan`, or `Testing` section as non-negotiable acceptance input: execute it before considering the work complete and summarize the result in compact handoff `Work done` or linked evidence.
 - When meaningful out-of-scope improvements are discovered during execution,
@@ -186,16 +186,14 @@ exposure, provider projection, and evaluation behavior.
    - Create a fresh branch from `origin/main` and restart execution flow as a new attempt.
 5. For `Todo` tickets, do startup sequencing in this exact order:
    - `update_issue(..., state: "In Progress")`
-   - read the issue body, legacy Workpad context when present, handoff trail, PR attachments, and relevant specs or ADRs
+   - read the issue body, PR attachments, current branch, and relevant specs or ADRs
    - only then begin analysis/planning/implementation work.
-6. Add a short comment if state and issue content are inconsistent, then proceed with the safest flow.
+6. If state and issue content are inconsistent, preserve the discrepancy in the durable issue body or route to `Human Escalation`; a comment is not required.
 
 ## Step 1: Start/continue execution (Todo or In Progress)
 
 1.  Read the durable source artifacts for the issue:
     - Linear issue body and current state.
-    - Existing legacy `## Codex Workpad` comment when present, as read-only history.
-    - Full `## Symphony Handoff` trail.
     - PR attachments and current branch state.
     - Relevant branch-local specs, ADRs, or issue-linked durable documents.
 2.  If arriving from `Todo`, do not delay on additional status transitions: the issue should already be `In Progress` before this step begins.
@@ -329,17 +327,6 @@ Use this only when completion is blocked by missing required tools or missing au
 - In `Human Review`, do not make changes; wait and poll.
 - If state is terminal (`Done`), do nothing and shut down.
 - Keep issue text concise, specific, and reviewer-oriented.
-- If blocked, add a compact `## Symphony Handoff` describing blocker, impact, and next unblock action.
-
-## Compact handoff template
-
-Use this exact structure for new Linear transition comments:
-
-````md
-## Symphony Handoff
-
-- From -> To:
-- Work done:
-- Role note:
-- Next action:
-````
+- If blocked, update durable issue state/body and the approved status artifact
+  with the blocker, impact, and next unblock action. No Linear transition
+  comment is required.

@@ -35,10 +35,10 @@ defmodule SymphonyElixir.NonLiveTrackerGuardTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
 
-    # Fetches drain quietly with no socket; mutations fail locally so a test
-    # exercising Linear mutation contracts must install its own fake client.
+    # Fetches drain quietly with no socket. Comment mutation is not part of the
+    # tracker Interface, so the non-live gate cannot accidentally exercise it.
     assert {:ok, []} = SymphonyElixir.Tracker.fetch_candidate_issues()
-    assert {:error, _reason} = SymphonyElixir.Tracker.create_comment("issue-1", "body")
+    refute function_exported?(SymphonyElixir.Tracker, :create_comment, 2)
   end
 
   test "linear opt-ins are allowed only against loopback endpoints" do

@@ -4,8 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.{AgentRuntime, Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
-  alias SymphonyElixir.Tracker.ClaimLease
+  alias SymphonyElixir.{AgentRuntime, Config, Linear.Issue, PromptBuilder, Runtime.ProcessOwnership, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
 
@@ -261,7 +260,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp runner_failure_context(%Issue{id: issue_id}) do
     %{
       issue_id: issue_id,
-      role: ClaimLease.role_name(),
+      role: ProcessOwnership.current_role(),
       provider: AgentRuntime.provider()
     }
   end
