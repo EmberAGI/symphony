@@ -499,6 +499,13 @@ startup timeout; it never directly execs the provider or accepts caller-supplied
 model, effort, provider, or command arguments. The matching provider projection
 places the restricted worker Herdr proxy and worker environment in the launched
 process while the orchestrator retains its full run-owned Herdr projection.
+For local Claude Code delegation, `AgentRuntime` projects only the shared
+Claude local-provider-auth environment allowlist into the isolated session
+environment. The same allowlist authority is used by the ordinary Claude
+app-server Adapter. The values reach both the Implementer orchestrator and
+worker through process environment only; they must not appear in Herdr command
+arguments, transcripts, logs, artifacts, or typed errors. Codex delegation
+does not receive Claude provider-auth environment.
 Every mutating Herdr command is scoped to the run-owned named session and
 private configuration root; cleanup verifies that the operator's default server
 snapshot is unchanged.

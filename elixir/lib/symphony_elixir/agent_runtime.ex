@@ -245,7 +245,13 @@ defmodule SymphonyElixir.AgentRuntime do
       "SYMPHONY_ROLE_RUN_ID" => run_id
     })
     |> put_process_environment("SYMPHONY_ORCHESTRATION_ROOT")
+    |> put_local_provider_auth_environment(provider())
   end
+
+  defp put_local_provider_auth_environment(environment, :claude_code),
+    do: Map.merge(environment, SymphonyElixir.ClaudeCode.ProviderAuth.local_env())
+
+  defp put_local_provider_auth_environment(environment, _provider), do: environment
 
   defp put_process_environment(environment, key) do
     case System.get_env(key) do
