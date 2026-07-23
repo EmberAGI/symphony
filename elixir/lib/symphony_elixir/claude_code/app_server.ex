@@ -44,8 +44,8 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   require Logger
 
-  alias SymphonyElixir.{Config, ImplementationEffort, Linear.Issue, PathSafety, SkillExecutionContract, SSH}
   alias SymphonyElixir.ClaudeCode.ProviderAuth
+  alias SymphonyElixir.{Config, ImplementationEffort, Linear.Issue, PathSafety, SkillExecutionContract, SSH}
   alias SymphonyElixir.Runtime.ProcessOwnership
 
   # `claude` exits non-zero when it cannot reach a usable model/auth at all; the

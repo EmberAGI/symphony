@@ -787,7 +787,10 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", provider)
       System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", provider)
       System.put_env("PATH", fake_provider_bin <> ":" <> previous_path)
-      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "native-delegation-secret")
+
+      if provider == "claude_code",
+        do: System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "native-delegation-secret"),
+        else: System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
 
       herdr_bin = Path.join(root, "fake-herdr-#{kind}")
       herdr_log = Path.join(root, "herdr-#{kind}.log")
