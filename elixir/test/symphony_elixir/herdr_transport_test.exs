@@ -354,6 +354,116 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
+  test "large provider instructions stay out of orchestrator and worker pane commands", context do
+    instructions =
+      String.duplicate(
+        """
+        Follow the role's "quoted" instructions.
+        Preserve 'single quotes', $shell tokens, and \\literal escapes.
+        """,
+        80
+      )
+
+    for {provider, executable, instruction_args} <- [
+          {"codex", "codex", ["--config", "developer_instructions=#{inspect(instructions)}"]},
+          {"claude_code", "claude", ["--append-system-prompt", instructions]}
+        ] do
+      session_name = "octo-emb-1234-#{provider}-#{System.unique_integer([:positive])}"
+      provider_bin = Path.join([Path.dirname(context.bin), provider, "provider-bin"])
+      provider_output = Path.join(Path.dirname(context.bin), "#{provider}-provider.out")
+      fake_provider = Path.join(provider_bin, executable)
+      File.mkdir_p!(provider_bin)
+
+      File.write!(fake_provider, """
+      #!/bin/sh
+      printf '%s\n' "$@"
+      """)
+
+      File.chmod!(fake_provider, 0o755)
+
+      adapter_context = %{
+        herdr_bin: context.bin,
+        extra_env: [{"HERDR_FAKE_LOG", context.log}],
+        start_timeout_ms: 2_000,
+        poll_interval_ms: 10
+      }
+
+      assert {:ok, session} =
+               HerdrTransport.start_session(
+                 %{
+                   name: session_name,
+                   isolated: true,
+                   workspace: "/tmp/selected-workspace",
+                   env: %{
+                     "HERDR_FAKE_EXEC_PROVIDER" => "1",
+                     "HERDR_FAKE_PROVIDER_OUTPUT" => provider_output,
+                     "PATH" => provider_bin <> ":" <> (System.get_env("PATH") || "")
+                   }
+                 },
+                 adapter_context
+               )
+
+      on_exit(fn ->
+        if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
+      end)
+
+      argv = [executable, "--model", "test-model"] ++ instruction_args
+
+      assert {:ok, prepared} =
+               HerdrTransport.prepare_worker(
+                 session,
+                 %{provider: provider, argv: argv, env: %{}},
+                 adapter_context
+               )
+
+      File.write!(context.log, "")
+
+      assert {:ok, _agent} =
+               HerdrTransport.start_agent(
+                 prepared,
+                 %{
+                   name: "implementer_orchestrator",
+                   cwd: "/tmp/selected-workspace",
+                   provider: provider,
+                   argv: argv
+                 },
+                 adapter_context
+               )
+
+      orchestrator_command = File.read!(context.log)
+      assert byte_size(orchestrator_command) < 1_024
+      refute orchestrator_command =~ instructions
+
+      expected_provider_instruction =
+        if provider == "codex",
+          do: "developer_instructions=#{inspect(instructions)}",
+          else: String.replace(instructions, "\n", "\u2028")
+
+      assert File.read!(provider_output) =~ expected_provider_instruction
+
+      File.write!(context.log, "")
+
+      assert {_response, 0} =
+               System.cmd(prepared.worker_launcher, ["implementer_worker", "w1:p2"],
+                 env: [
+                   {"HERDR_FAKE_EXEC_PROVIDER", "1"},
+                   {"HERDR_FAKE_LOG", context.log},
+                   {"HERDR_FAKE_PROVIDER_OUTPUT", provider_output},
+                   {"PATH", prepared.orchestrator_bin <> ":" <> provider_bin <> ":" <> (System.get_env("PATH") || "")},
+                   {"XDG_CONFIG_HOME", prepared.runtime_root}
+                 ],
+                 stderr_to_stdout: true
+               )
+
+      worker_command = File.read!(context.log)
+      assert byte_size(worker_command) < 1_024
+      refute worker_command =~ instructions
+      assert File.read!(provider_output) =~ expected_provider_instruction
+
+      assert :ok = HerdrTransport.stop_session(prepared, adapter_context)
+    end
+  end
+
   test "creates, controls, and cleans up only the named isolated session", context do
     adapter_context = %{
       herdr_bin: context.bin,
@@ -419,10 +529,14 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert File.exists?(Path.join(session.orchestrator_bin, "herdr"))
     launcher = File.read!(session.worker_launcher)
     provider_wrapper = File.read!(Path.join(session.orchestrator_bin, "codex"))
+    [worker_projection_path] = Path.wildcard(Path.join(session.runtime_root, "launch-projections/*.sh"))
+    worker_projection = File.read!(worker_projection_path)
 
     assert launcher =~ "agent start \"$1\" --kind 'codex' --pane \"$2\""
-    assert launcher =~ "default_permissions=\"octo_herdr\""
-    assert launcher =~ session.socket
+    refute launcher =~ "default_permissions=\"octo_herdr\""
+    refute launcher =~ session.socket
+    assert worker_projection =~ "default_permissions=\"octo_herdr\""
+    assert worker_projection =~ session.socket
     refute launcher =~ "exec 'codex'"
     assert provider_wrapper =~ "export SYMPHONY_SKILL_EXECUTION_CONTRACTS="
     assert provider_wrapper =~ contract_json
@@ -504,7 +618,9 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert commands =~ "--session octo-emb-1141-run-7 workspace create --cwd /tmp/selected-workspace --no-focus"
 
     assert commands =~
-             "--session octo-emb-1141-run-7 agent start implementer_orchestrator --kind codex --pane w1:p1 --timeout 120000 -- --model gpt-5.6-sol --config model_reasoning_effort=medium"
+             "--session octo-emb-1141-run-7 agent start implementer_orchestrator --kind codex --pane w1:p1 --timeout 120000 -- --symphony-launch-projection"
+
+    refute commands =~ "model_reasoning_effort=medium"
 
     assert commands =~
              "--session octo-emb-1141-run-7 agent prompt implementer_orchestrator Codex assignment --wait --until working --until idle --until done --timeout 3000"
@@ -863,7 +979,16 @@ defmodule SymphonyElixir.HerdrTransportTest do
     commands = File.read!(context.log)
 
     assert commands =~
-             "agent start implementer_orchestrator --kind claude --pane w1:p1 --timeout 45000 -- --model claude-fable-5 --effort high --append-system-prompt Follow the profile.\u2028    Do not delegate.\u2028Finish safely."
+             "agent start implementer_orchestrator --kind claude --pane w1:p1 --timeout 45000 -- --symphony-launch-projection"
+
+    refute commands =~ "Follow the profile."
+
+    [projection_path] = Path.wildcard(Path.join(session.runtime_root, "launch-projections/*.sh"))
+    projection = File.read!(projection_path)
+    assert projection =~ "--model"
+    assert projection =~ "claude-fable-5"
+    assert projection =~ "--append-system-prompt"
+    assert projection =~ "Follow the profile.\u2028    Do not delegate.\u2028Finish safely."
 
     refute commands =~ "-- -- claude"
 

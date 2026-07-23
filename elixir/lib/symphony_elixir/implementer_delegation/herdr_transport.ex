@@ -115,7 +115,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   @impl true
   def start_agent(
-        %{name: session_name, env: env, pane_id: pane_id},
+        %{name: session_name, env: env, pane_id: pane_id, runtime_root: runtime_root},
         %{name: name, cwd: cwd, argv: argv} = spec,
         context
       )
@@ -124,6 +124,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     timeout_ms = Map.get(context, :agent_start_timeout_ms, @default_agent_start_timeout_ms)
 
     with {:ok, kind, native_args} <- native_agent_launch(spec, argv),
+         {:ok, projected_args} <- materialize_launch_projection(runtime_root, name, kind, native_args),
          args =
            [
              "--session",
@@ -138,7 +139,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
              "--timeout",
              to_string(timeout_ms),
              "--"
-           ] ++ native_args,
+           ] ++ projected_args,
          {:ok, output} <- command(context, args, env),
          {:ok, payload} <- Jason.decode(output),
          agent when is_map(agent) <- get_in(payload, ["result", "agent"]) do
@@ -700,7 +701,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     real_herdr = Map.get(context, :herdr_bin) || System.find_executable("herdr") || "herdr"
     worker_env = Map.get(worker, :env, %{})
 
-    with {:ok, kind, native_args} <- native_agent_launch(worker, argv) do
+    with {:ok, kind, native_args} <- native_agent_launch(worker, argv),
+         {:ok, projected_args} <-
+           materialize_launch_projection(runtime_root, "implementer_worker", kind, native_args) do
       provider_command = hd(argv)
       provider_wrapper = Path.join(orchestrator_bin, provider_command)
       inherited_path = inherited_provider_path(session_env, orchestrator_bin)
@@ -720,7 +723,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       marker=$(mktemp #{shell_escape(Path.join(worker_panes, "pending.XXXXXX"))})
       printf '%s\n' "$2" > "$marker"
       trap 'rm -f "$marker"' EXIT HUP INT TERM
-      #{shell_escape(orchestrator_herdr)} --session #{shell_escape(session_name)} agent start "$1" --kind #{shell_escape(kind)} --pane "$2" --timeout #{timeout_ms} -- #{Enum.map_join(native_args, " ", &shell_escape/1)}
+      #{shell_escape(orchestrator_herdr)} --session #{shell_escape(session_name)} agent start "$1" --kind #{shell_escape(kind)} --pane "$2" --timeout #{timeout_ms} -- #{Enum.map_join(projected_args, " ", &shell_escape/1)}
       """
 
       restricted_body = role_herdr_body(real_herdr, :worker)
@@ -751,6 +754,21 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       else
         export PATH=#{shell_escape(orchestrator_bin)}:#{shell_escape(inherited_path)}
       fi
+      if [ "${1:-}" = "--symphony-launch-projection" ] && [ "$#" -eq 2 ]; then
+        case "$2" in
+          #{shell_escape(Path.join(runtime_root, "launch-projections"))}/*)
+            [ -x "$2" ] || {
+              printf '%s\n' 'launch projection is unavailable' >&2
+              exit 64
+            }
+            exec "$2" "$provider_executable"
+            ;;
+          *)
+            printf '%s\n' 'launch projection is outside the session runtime root' >&2
+            exit 64
+            ;;
+        esac
+      fi
       exec "$provider_executable" "$@"
       """
 
@@ -776,6 +794,41 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp materialize_worker_launcher(_session, _worker, _context),
     do: {:error, :invalid_worker_launcher_spec}
+
+  defp materialize_launch_projection(runtime_root, agent_name, kind, native_args)
+       when is_binary(runtime_root) and is_binary(agent_name) and is_binary(kind) and
+              is_list(native_args) do
+    projection_dir = Path.join(runtime_root, "launch-projections")
+
+    digest =
+      :sha256
+      |> :crypto.hash(agent_name <> ":" <> kind)
+      |> Base.encode16(case: :lower)
+      |> binary_part(0, 16)
+
+    path = Path.join(projection_dir, digest <> ".sh")
+
+    body = """
+    #!/bin/sh
+    set -eu
+    if [ "$#" -ne 1 ]; then
+      printf '%s\n' 'usage: launch projection <provider-executable>' >&2
+      exit 64
+    fi
+    exec "$1" #{Enum.map_join(native_args, " ", &shell_escape/1)}
+    """
+
+    with :ok <- File.mkdir_p(projection_dir),
+         :ok <- File.write(path, body),
+         :ok <- File.chmod(path, 0o500) do
+      {:ok, ["--symphony-launch-projection", path]}
+    else
+      {:error, reason} -> {:error, {:launch_projection_materialization_failed, reason}}
+    end
+  end
+
+  defp materialize_launch_projection(_runtime_root, _agent_name, _kind, _native_args),
+    do: {:error, :invalid_launch_projection}
 
   defp inherited_provider_path(session_env, orchestrator_bin) do
     path = session_env |> Map.new() |> Map.get("PATH", System.get_env("PATH") || "")

@@ -622,16 +622,27 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     commands = File.read!(herdr_log)
     assert commands =~ "agent start implementer_orchestrator"
-    assert commands =~ package_root
-    assert commands =~ runtime_input
-    assert commands =~ executable
+    refute commands =~ package_root
+    refute commands =~ runtime_input
+    refute commands =~ executable
     refute commands =~ "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
 
     worker_launcher = File.read!(session.herdr_session.worker_launcher)
-    assert worker_launcher =~ package_root
-    assert worker_launcher =~ runtime_input
-    assert worker_launcher =~ executable
+    refute worker_launcher =~ package_root
+    refute worker_launcher =~ runtime_input
+    refute worker_launcher =~ executable
     refute worker_launcher =~ "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
+
+    projections =
+      runtime_root
+      |> Path.join("launch-projections/*.sh")
+      |> Path.wildcard()
+      |> Enum.map_join(&File.read!/1)
+
+    assert projections =~ package_root
+    assert projections =~ runtime_input
+    assert projections =~ executable
+    refute projections =~ "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
 
     assert {:ok, {next_session, turn}} =
              AgentRuntime.run_turn(session, "Complete the public native turn.", issue(), [])
