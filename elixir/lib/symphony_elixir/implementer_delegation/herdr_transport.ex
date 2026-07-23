@@ -13,6 +13,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @default_poll_interval_ms 50
   @default_stop_timeout_ms 5_000
   @default_agent_start_timeout_ms 120_000
+  @prompt_recovery_attempts 2
   @required_version "0.7.5"
   @required_protocol 17
 
@@ -33,6 +34,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     with :ok <- validate_socket_path(expected_socket),
          :ok <- validate_runtime_root(runtime_root) do
       File.mkdir_p!(runtime_root)
+      File.mkdir_p!(Path.join(runtime_root, "herdr"))
+
+      File.write!(
+        Path.join(runtime_root, "herdr/config.toml"),
+        """
+        [update]
+        version_check = false
+        manifest_check = false
+        """
+      )
 
       server_task =
         Task.async(fn ->
@@ -187,11 +198,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       when is_binary(agent_name) and agent_name != "" and
              is_binary(prompt) and prompt != "" and is_integer(timeout_ms) and timeout_ms >= 0 and
              is_map(context) do
-    args =
-      ["--session", session_name, "agent", "prompt", agent_name, prompt, "--wait"] ++
-        until_args(["working", "idle", "done"]) ++ ["--timeout", to_string(timeout_ms)]
-
-    with {:ok, output} <- command(context, args, env),
+    with {:ok, output} <-
+           submit_prompt(
+             context,
+             session_name,
+             env,
+             agent_name,
+             prompt,
+             timeout_ms,
+             @prompt_recovery_attempts
+           ),
          {:ok, observed} <- decode_agent_response(output),
          {:ok, phase} <- prompt_phase(observed) do
       {:ok, %{phase: phase, agent: preserve_provider(observed, agent)}}
@@ -202,6 +218,24 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   def begin_turn(_session, _agent, _prompt, _timeout_ms, _context),
     do: {:error, :invalid_herdr_begin_turn}
+
+  defp submit_prompt(context, session_name, env, agent_name, prompt, timeout_ms, recoveries_left) do
+    args =
+      ["--session", session_name, "agent", "prompt", agent_name, prompt, "--wait"] ++
+        until_args(["working", "idle", "done"]) ++ ["--timeout", to_string(timeout_ms)]
+
+    case command(context, args, env) do
+      {:error, reason} when recoveries_left > 0 ->
+        if cli_error_code(reason) == "agent_prompt_stalled" do
+          submit_prompt(context, session_name, env, agent_name, " ", timeout_ms, recoveries_left - 1)
+        else
+          {:error, reason}
+        end
+
+      result ->
+        result
+    end
+  end
 
   @impl true
   def await_agent(%{name: session_name, env: env}, %{name: agent_name} = agent, statuses, timeout_ms, context)
@@ -688,25 +722,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       #{shell_escape(orchestrator_herdr)} --session #{shell_escape(session_name)} agent start "$1" --kind #{shell_escape(kind)} --pane "$2" --timeout #{timeout_ms} -- #{Enum.map_join(native_args, " ", &shell_escape/1)}
       """
 
-      restricted_body = """
-      #!/bin/sh
-      set -eu
-      case "${1:-}:${2:-}" in
-        agent:get|agent:list|agent:read|agent:prompt|agent:wait)
-          exec #{shell_escape(real_herdr)} "$@"
-          ;;
-        *)
-          printf '%s\n' "worker Herdr authority denies: $*" >&2
-          exit 64
-          ;;
-      esac
-      """
-
-      orchestrator_body = """
-      #!/bin/sh
-      set -eu
-      exec #{shell_escape(real_herdr)} "$@"
-      """
+      restricted_body = role_herdr_body(real_herdr, :worker)
+      orchestrator_body = role_herdr_body(real_herdr, :orchestrator)
 
       provider_body = """
       #!/bin/sh
@@ -771,6 +788,67 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   defp launcher_env_exports(_env), do: ""
+
+  defp role_herdr_body(real_herdr, role) do
+    authorization =
+      case role do
+        :worker ->
+          """
+          case "${1:-}:${2:-}" in
+            agent:get|agent:list|agent:read|agent:prompt|agent:wait)
+              ;;
+            *)
+              printf '%s\n' "worker Herdr authority denies: $*" >&2
+              exit 64
+              ;;
+          esac
+          """
+
+        :orchestrator ->
+          ""
+      end
+
+    """
+    #!/bin/sh
+    set -eu
+    #{authorization}
+    if [ "${1:-}" = "agent" ] && [ "${2:-}" = "prompt" ] && [ "$#" -ge 4 ]; then
+      agent_name=$3
+      recovery_attempt=0
+      while :; do
+        if [ "$recovery_attempt" -eq 0 ]; then
+          set -- "$@" --wait --until working --until idle --until done --timeout 5000
+        else
+          set -- agent prompt "$agent_name" ' ' --wait --until working --until idle --until done --timeout 5000
+        fi
+
+        set +e
+        output=$(#{shell_escape(real_herdr)} "$@" 2>&1)
+        status=$?
+        set -e
+
+        if [ "$status" -eq 0 ]; then
+          printf '%s' "$output"
+          exit 0
+        fi
+
+        case "$output" in
+          *'"code":"agent_prompt_stalled"'*)
+            if [ "$recovery_attempt" -lt #{@prompt_recovery_attempts} ]; then
+              recovery_attempt=$((recovery_attempt + 1))
+              continue
+            fi
+            ;;
+        esac
+
+        printf '%s\n' "$output" >&2
+        exit "$status"
+      done
+    fi
+
+    exec #{shell_escape(real_herdr)} "$@"
+    """
+  end
 
   defp shell_escape(value) do
     "'" <> String.replace(to_string(value), "'", "'\\''") <> "'"
