@@ -90,6 +90,29 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp blocking_liveness_evidence(_record, :absent), do: nil
   defp blocking_liveness_evidence(record, _malformed), do: {record, :unknown}
 
+  @doc "Return the latest scoped ownership record with normalized native session liveness."
+  @spec lifecycle_owned_session_evidence(
+          Issue.t(),
+          (map() -> :live | :absent | :unknown | :unreachable)
+        ) :: {map(), :live | :absent | :unknown | :unreachable} | nil
+  def lifecycle_owned_session_evidence(%Issue{} = issue, liveness_fun)
+      when is_function(liveness_fun, 1) do
+    issue
+    |> candidate_record_paths()
+    |> Enum.flat_map(&read_record/1)
+    |> Enum.filter(&record_scope_matches?(&1, issue))
+    |> Enum.sort_by(&record_sort_key/1, :desc)
+    |> Enum.find_value(fn record ->
+      case owned_session_ref_value(record) do
+        ownership_ref when is_map(ownership_ref) ->
+          {record, normalized_lifecycle_liveness(liveness_fun, ownership_ref)}
+
+        nil ->
+          nil
+      end
+    end)
+  end
+
   @spec status_for_issue(Issue.t()) :: map() | nil
   def status_for_issue(%Issue{} = issue) do
     records =
@@ -286,6 +309,13 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     _error -> :unknown
   catch
     _kind, _reason -> :unknown
+  end
+
+  defp normalized_lifecycle_liveness(liveness_fun, ownership_ref) do
+    case safe_owned_session_liveness(liveness_fun, ownership_ref) do
+      status when status in [:live, :absent, :unknown, :unreachable] -> status
+      _malformed -> :unknown
+    end
   end
 
   defp safe_cleanup(cleanup_fun, ownership_ref) do

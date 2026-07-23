@@ -13,6 +13,20 @@ defmodule SymphonyElixir.RoleTurnRecoveryTest do
     end
   end
 
+  defmodule StartupCleanupAdapter do
+    def cleanup_owned_session(ownership_ref) do
+      recipient = Application.fetch_env!(:symphony_elixir, :startup_recovery_recipient)
+      send(recipient, {:startup_recovery_cleanup, ownership_ref})
+      :ok
+    end
+
+    def owned_session_liveness(ownership_ref) do
+      recipient = Application.fetch_env!(:symphony_elixir, :startup_recovery_recipient)
+      send(recipient, {:startup_recovery_liveness, ownership_ref})
+      {:ok, :absent}
+    end
+  end
+
   @active_states MapSet.new(["todo", "in progress", "agent fixes", "rework", "agent review", "agent qa", "merging", "backlog"])
   @terminal_states MapSet.new(["done", "closed", "cancelled", "canceled", "duplicate"])
 
@@ -177,8 +191,8 @@ defmodule SymphonyElixir.RoleTurnRecoveryTest do
              ProcessOwnership.record_quarantined(
                issue,
                %{
-                 role: "implementer",
-                 holder: "#{ProcessOwnership.current_host()}:999999:implementer",
+                 role: ProcessOwnership.current_role(),
+                 holder: "#{ProcessOwnership.current_host()}:999999:#{ProcessOwnership.current_role()}",
                  run_id: "run-live-native-recovery",
                  workspace_path: workspace_path,
                  owned_session_ref: %{
@@ -197,6 +211,92 @@ defmodule SymphonyElixir.RoleTurnRecoveryTest do
     refute_receive {:memory_tracker_comment, "live-native-issue", _body}, 100
     refute_receive {:memory_tracker_state_update, "live-native-issue", _state}, 100
     assert File.exists?(Path.join(recovery_dir, "live-native-issue.json"))
+  end
+
+  test "orchestrator startup cleanup carries verified absence into aborted-turn recovery" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-role-turn-recovery-startup-cleaned-#{System.unique_integer([:positive])}"
+      )
+
+    recovery_dir = Path.join(test_root, "recovery")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace_path = Path.join(workspace_root, "EMB-STARTUP-CLEANED-symphony")
+    issue_id = "startup-cleaned-issue"
+    orchestrator_name = Module.concat(__MODULE__, :StartupCleanedRecoveryOrchestrator)
+
+    previous_recovery_dir = Application.get_env(:symphony_elixir, :role_turn_recovery_dir)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_cleanup_adapter = Application.get_env(:symphony_elixir, :owned_session_cleanup_module)
+    previous_liveness_adapter = Application.get_env(:symphony_elixir, :owned_session_liveness_module)
+    previous_startup_recipient = Application.get_env(:symphony_elixir, :startup_recovery_recipient)
+
+    Application.put_env(:symphony_elixir, :role_turn_recovery_dir, recovery_dir)
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :owned_session_cleanup_module, StartupCleanupAdapter)
+    Application.put_env(:symphony_elixir, :owned_session_liveness_module, StartupCleanupAdapter)
+    Application.put_env(:symphony_elixir, :startup_recovery_recipient, self())
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      tracker_active_states: ["In Progress", "Agent Fixes"],
+      tracker_terminal_states: ["Done"],
+      poll_interval_ms: 60_000
+    )
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "EMB-STARTUP-CLEANED",
+      title: "Aborted turn with verified cleanup",
+      state: "In Progress",
+      branch_name: "agent/startup-cleaned-turn",
+      repository: "EmberAGI/symphony"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    assert :ok = RoleTurnRecovery.record_turn_start(issue)
+
+    assert :ok =
+             ProcessOwnership.record_active(issue, %{
+               role: ProcessOwnership.current_role(),
+               holder: "#{ProcessOwnership.current_host()}:999999:#{ProcessOwnership.current_role()}",
+               run_id: "run-startup-cleaned-recovery",
+               workspace_path: workspace_path,
+               owned_session_ref: %{
+                 kind: "herdr",
+                 session_name: "octo-startup-cleaned",
+                 agent_name: "implementer_orchestrator"
+               }
+             })
+
+    assert {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      restore_app_env(:role_turn_recovery_dir, previous_recovery_dir)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:owned_session_cleanup_module, previous_cleanup_adapter)
+      restore_app_env(:owned_session_liveness_module, previous_liveness_adapter)
+      restore_app_env(:startup_recovery_recipient, previous_startup_recipient)
+      stop_orchestrator!(pid)
+      File.rm_rf(test_root)
+    end)
+
+    assert_receive {:startup_recovery_cleanup, %{session_name: "octo-startup-cleaned"}}, 1_000
+    assert_receive {:startup_recovery_liveness, %{session_name: "octo-startup-cleaned"}}, 1_000
+
+    assert_receive {:memory_tracker_comment, ^issue_id, note}, 1_000
+    assert note =~ "symphony:aborted-role-turn-recovery"
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Agent Fixes"}, 1_000
+
+    assert_eventually(fn -> !File.exists?(Path.join(recovery_dir, "#{issue_id}.json")) end)
+    assert ProcessOwnership.status_for_issue(issue).state == "cleaned"
+
+    send(pid, :run_poll_cycle)
+    refute_receive {:memory_tracker_comment, ^issue_id, _duplicate_note}, 200
   end
 
   test "startup recovery fails closed when live process evidence lacks native session identity" do
@@ -359,4 +459,17 @@ defmodule SymphonyElixir.RoleTurnRecoveryTest do
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
   defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
+
+  defp assert_eventually(fun, attempts \\ 100)
+
+  defp assert_eventually(fun, attempts) when attempts > 0 do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(10)
+      assert_eventually(fun, attempts - 1)
+    end
+  end
+
+  defp assert_eventually(_fun, 0), do: flunk("condition not met in time")
 end

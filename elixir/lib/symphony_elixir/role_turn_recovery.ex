@@ -162,14 +162,30 @@ defmodule SymphonyElixir.RoleTurnRecovery do
         LifecycleVerdict.evaluate(session: status, lease: lease, provider_turn: :failed)
 
       nil ->
-        recovery_without_native_session_verdict(issue, lease)
+        recovery_without_blocking_session(issue, lease)
     end
   end
 
   defp recovery_lifecycle_verdict(_issue), do: nil
 
-  defp recovery_without_native_session_verdict(%Issue{}, lease),
-    do: LifecycleVerdict.evaluate(session: :unknown, lease: lease, provider_turn: :failed)
+  defp recovery_without_blocking_session(%Issue{} = issue, lease) do
+    case ProcessOwnership.lifecycle_owned_session_evidence(
+           issue,
+           &AgentRuntime.owned_session_liveness/1
+         ) do
+      {_record, :absent} ->
+        LifecycleVerdict.evaluate(session: :absent, lease: lease, provider_turn: :failed)
+
+      {_record, :live} ->
+        LifecycleVerdict.evaluate(session: :live, lease: lease, provider_turn: :working)
+
+      {_record, status} when status in [:unknown, :unreachable] ->
+        LifecycleVerdict.evaluate(session: status, lease: lease, provider_turn: :failed)
+
+      nil ->
+        LifecycleVerdict.evaluate(session: :unknown, lease: lease, provider_turn: :failed)
+    end
+  end
 
   defp recovery_lease_liveness(%Issue{claim_lease: %ClaimLease{} = claim_lease}) do
     if ClaimLease.expired?(claim_lease, DateTime.utc_now()), do: :expired, else: :live
