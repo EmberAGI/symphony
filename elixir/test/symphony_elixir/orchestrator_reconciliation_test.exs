@@ -53,6 +53,7 @@ defmodule SymphonyElixir.OrchestratorReconciliationTest do
         ref: nil,
         identifier: issue_identifier,
         issue: %Issue{id: issue_id, state: "In Progress", identifier: issue_identifier},
+        run_id: "run-missing-reconcile",
         started_at: DateTime.utc_now()
       }
 
@@ -146,6 +147,7 @@ defmodule SymphonyElixir.OrchestratorReconciliationTest do
             state: "In Progress",
             assigned_to_worker: true
           },
+          run_id: "run-reassigned-reconcile",
           started_at: DateTime.utc_now()
         }
       },

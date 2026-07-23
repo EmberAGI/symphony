@@ -13,6 +13,21 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
     end
   end
 
+  defmodule PostRunOwnedSessionLivenessAdapter do
+    def owned_session_liveness(ownership_ref) do
+      recipient =
+        Map.get(ownership_ref, :owner) ||
+          Application.fetch_env!(:symphony_elixir, :post_run_liveness_recipient)
+
+      result =
+        Map.get(ownership_ref, :result) ||
+          Application.fetch_env!(:symphony_elixir, :post_run_liveness_result)
+
+      send(recipient, {:post_run_liveness_checked, Map.get(ownership_ref, :session_name), result})
+      {:ok, result}
+    end
+  end
+
   setup do
     previous_role = System.get_env("SYMPHONY_ROLE")
     System.put_env("SYMPHONY_ROLE", "implementer")
@@ -163,6 +178,321 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
                       session_name: "octo-emb-1217-dispatch-fence",
                       agent_name: "implementer_orchestrator"
                     }}
+  end
+
+  test "orphaned claim release preserves a claim with live quarantined ownership" do
+    previous_liveness_module = Application.get_env(:symphony_elixir, :owned_session_liveness_module)
+    previous_liveness_recipient = Application.get_env(:symphony_elixir, :post_run_liveness_recipient)
+    previous_liveness_result = Application.get_env(:symphony_elixir, :post_run_liveness_result)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    test_root = Path.join(System.tmp_dir!(), "symphony-post-run-release-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :owned_session_liveness_module,
+      PostRunOwnedSessionLivenessAdapter
+    )
+
+    Application.put_env(:symphony_elixir, :post_run_liveness_recipient, self())
+    Application.put_env(:symphony_elixir, :post_run_liveness_result, :live)
+
+    on_exit(fn ->
+      restore_app_env(:owned_session_liveness_module, previous_liveness_module)
+      restore_app_env(:post_run_liveness_recipient, previous_liveness_recipient)
+      restore_app_env(:post_run_liveness_result, previous_liveness_result)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      File.rm_rf(test_root)
+    end)
+
+    issue_id = "issue-post-run-release-live"
+    issue_identifier = "MT-POST-RUN-LIVE"
+    workspace_path = Path.join(workspace_root, "#{issue_identifier}-symphony")
+
+    claim_lease =
+      ClaimLease.new(%{
+        issue_id: issue_id,
+        issue_identifier: issue_identifier,
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-post-run-release-live",
+        workspace_path: workspace_path,
+        state: "active"
+      })
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: issue_identifier,
+      title: "Post-run claim release",
+      state: "In Progress",
+      repository: "EmberAGI/symphony",
+      claim_lease: claim_lease,
+      claim_leases: [claim_lease]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    assert :ok =
+             ProcessOwnership.record_quarantined(
+               issue,
+               %{
+                 role: "implementer",
+                 run_id: claim_lease.run_id,
+                 workspace_path: workspace_path,
+                 owned_session_ref: %{
+                   kind: "herdr",
+                   session_name: "octo-post-run-live",
+                   agent_name: "implementer_orchestrator"
+                 }
+               },
+               "post-run native ownership"
+             )
+
+    next_state = Orchestrator.reconcile_claims_for_test(%Orchestrator.State{claimed: MapSet.new([issue_id])})
+
+    assert MapSet.member?(next_state.claimed, issue_id)
+    assert_receive {:post_run_liveness_checked, "octo-post-run-live", :live}, 500
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "released"}}, 100
+  end
+
+  test "orphaned claim release refuses a replacement same-scope claim after an absent old session" do
+    previous_liveness_module = Application.get_env(:symphony_elixir, :owned_session_liveness_module)
+    previous_liveness_recipient = Application.get_env(:symphony_elixir, :post_run_liveness_recipient)
+    previous_liveness_result = Application.get_env(:symphony_elixir, :post_run_liveness_result)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    test_root = Path.join(System.tmp_dir!(), "symphony-stale-claim-release-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :owned_session_liveness_module,
+      PostRunOwnedSessionLivenessAdapter
+    )
+
+    Application.put_env(:symphony_elixir, :post_run_liveness_recipient, self())
+    Application.put_env(:symphony_elixir, :post_run_liveness_result, :absent)
+
+    on_exit(fn ->
+      restore_app_env(:owned_session_liveness_module, previous_liveness_module)
+      restore_app_env(:post_run_liveness_recipient, previous_liveness_recipient)
+      restore_app_env(:post_run_liveness_result, previous_liveness_result)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      File.rm_rf(test_root)
+    end)
+
+    issue_id = "issue-stale-claim-release"
+    issue_identifier = "MT-STALE-CLAIM-RELEASE"
+    workspace_path = Path.join(workspace_root, "#{issue_identifier}-symphony")
+
+    replacement_claim =
+      ClaimLease.new(%{
+        issue_id: issue_id,
+        issue_identifier: issue_identifier,
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-replacement",
+        workspace_path: workspace_path,
+        state: "active"
+      })
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: issue_identifier,
+      title: "Replacement claim fencing",
+      state: "In Progress",
+      repository: "EmberAGI/symphony",
+      claim_lease: replacement_claim,
+      claim_leases: [replacement_claim]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    assert :ok =
+             ProcessOwnership.record_quarantined(
+               issue,
+               %{
+                 role: "implementer",
+                 run_id: "run-old-session",
+                 workspace_path: workspace_path,
+                 owned_session_ref: %{
+                   kind: "herdr",
+                   session_name: "octo-stale-old-session",
+                   agent_name: "implementer_orchestrator"
+                 }
+               },
+               "old session is absent"
+             )
+
+    next_state = Orchestrator.reconcile_claims_for_test(%Orchestrator.State{claimed: MapSet.new([issue_id])})
+
+    assert MapSet.member?(next_state.claimed, issue_id)
+    assert next_state.blocked_failures[issue_id].family == :tracker_claim_release_failed
+    assert next_state.blocked_failures[issue_id].error == :claim_run_identity_changed
+    assert_receive {:post_run_liveness_checked, "octo-stale-old-session", :absent}, 500
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "released"}}, 100
+  end
+
+  test "missing-retry release with empty metadata preserves a newer fetched claim without prior run identity" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    issue_id = "issue-missing-retry-no-run-identity"
+    issue_identifier = "MT-MISSING-RETRY-NO-RUN"
+    now = DateTime.utc_now()
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    replacement_claim =
+      ClaimLease.new(%{
+        issue_id: issue_id,
+        issue_identifier: issue_identifier,
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-newer-fetched-claim",
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: issue_identifier,
+      title: "Missing retry identity",
+      state: "Done",
+      repository: "EmberAGI/symphony",
+      claim_lease: replacement_claim,
+      claim_leases: [replacement_claim]
+    }
+
+    assert is_nil(ProcessOwnership.status_for_issue(issue))
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    state = %Orchestrator.State{claimed: MapSet.new([issue_id])}
+
+    assert {:noreply, next_state} =
+             Orchestrator.handle_retry_issue_for_test(state, issue_id, 1, %{})
+
+    assert MapSet.member?(next_state.claimed, issue_id)
+
+    assert %{family: :tracker_claim_release_failed, error: :claim_run_identity_unavailable} =
+             next_state.blocked_failures[issue_id]
+
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "released"}}, 100
+  end
+
+  test "running teardown without a run identity preserves a replacement claim and workspace" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    test_root = Path.join(System.tmp_dir!(), "symphony-nil-run-teardown-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+    issue_id = "issue-nil-run-teardown"
+    issue_identifier = "MT-NIL-RUN-TEARDOWN"
+    now = DateTime.utc_now()
+    workspace_path = Path.join(workspace_root, "#{issue_identifier}-symphony")
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      File.rm_rf(test_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    File.mkdir_p!(workspace_path)
+    File.write!(Path.join(workspace_path, "must-remain"), "replacement workspace")
+
+    old_claim =
+      ClaimLease.new(%{
+        issue_id: issue_id,
+        issue_identifier: issue_identifier,
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: "run-old-teardown",
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    replacement_claim =
+      ClaimLease.new(%{
+        issue_id: issue_id,
+        issue_identifier: issue_identifier,
+        role: "implementer",
+        holder: "replacement-holder",
+        run_id: "run-replacement-teardown",
+        refreshed_at: now,
+        expires_at: DateTime.add(now, 60, :second),
+        state: "active"
+      })
+
+    running_issue = %Issue{
+      id: issue_id,
+      identifier: issue_identifier,
+      title: "Nil run teardown",
+      state: "In Progress",
+      repository: "EmberAGI/symphony",
+      claim_lease: old_claim,
+      claim_leases: [old_claim]
+    }
+
+    terminal_issue = %{
+      running_issue
+      | state: "Done",
+        claim_lease: replacement_claim,
+        claim_leases: [replacement_claim, old_claim]
+    }
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: nil,
+          identifier: issue_identifier,
+          issue: running_issue,
+          claim_lease: old_claim,
+          run_id: nil,
+          workspace_path: workspace_path,
+          started_at: now
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([terminal_issue], state)
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    assert MapSet.member?(updated_state.claimed, issue_id)
+    assert File.exists?(Path.join(workspace_path, "must-remain"))
+
+    assert %{family: :tracker_claim_release_failed, error: :claim_run_identity_unavailable} =
+             updated_state.blocked_failures[issue_id]
+
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "released"}}, 100
   end
 
   test "two orchestrators racing the same issue start at most one top-level role run" do

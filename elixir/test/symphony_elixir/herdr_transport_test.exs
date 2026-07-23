@@ -66,7 +66,14 @@ defmodule SymphonyElixir.HerdrTransportTest do
           'compatible: yes' \
           "socket: $state_root/herdr.sock"
       else
-        printf '%s\n' 'status: not running' "socket: $state_root/herdr.sock"
+        printf '%s\n' "status: ${HERDR_FAKE_STATUS:-not running}"
+        if [ -n "${HERDR_FAKE_NON_RUNNING_VERSION:-}" ]; then
+          printf '%s\n' "version: $HERDR_FAKE_NON_RUNNING_VERSION"
+        fi
+        if [ -n "${HERDR_FAKE_NON_RUNNING_PROTOCOL:-}" ]; then
+          printf '%s\n' "protocol: $HERDR_FAKE_NON_RUNNING_PROTOCOL"
+        fi
+        printf '%s\n' "socket: $state_root/herdr.sock"
       fi
       exit 0
     fi
@@ -1000,6 +1007,64 @@ defmodule SymphonyElixir.HerdrTransportTest do
       )
 
     assert {:ok, :unknown} = HerdrTransport.owned_session_liveness(incompatible_ref)
+  end
+
+  test "native server liveness treats malformed status and incompatible non-running runtime as unknown", context do
+    base_ref = %{
+      kind: "herdr",
+      session_name: "octo-emb-1217-non-running-classification",
+      agent_name: "implementer_orchestrator",
+      runtime_root: context.runtime_root,
+      cleanup_context: %{
+        herdr_bin: context.bin,
+        extra_env: [{"HERDR_FAKE_LOG", context.log}],
+        socket_root: context.runtime_root
+      }
+    }
+
+    malformed_status_ref =
+      put_in(
+        base_ref,
+        [:cleanup_context, :extra_env],
+        [
+          {"HERDR_FAKE_LOG", context.log},
+          {"HERDR_FAKE_STATUS", "not-a-herdr-status"}
+        ]
+      )
+
+    incompatible_runtime_ref =
+      put_in(
+        base_ref,
+        [:cleanup_context, :extra_env],
+        [
+          {"HERDR_FAKE_LOG", context.log},
+          {"HERDR_FAKE_NON_RUNNING_VERSION", "0.7.4"},
+          {"HERDR_FAKE_NON_RUNNING_PROTOCOL", "16"}
+        ]
+      )
+
+    assert {:ok, :unknown} = HerdrTransport.owned_session_liveness(malformed_status_ref)
+    assert {:ok, :unknown} = HerdrTransport.owned_session_liveness(incompatible_runtime_ref)
+  end
+
+  test "native server liveness treats a compatible non-running runtime as absent", context do
+    ownership_ref = %{
+      kind: "herdr",
+      session_name: "octo-emb-1217-compatible-non-running",
+      agent_name: "implementer_orchestrator",
+      runtime_root: context.runtime_root,
+      cleanup_context: %{
+        herdr_bin: context.bin,
+        extra_env: [
+          {"HERDR_FAKE_LOG", context.log},
+          {"HERDR_FAKE_NON_RUNNING_VERSION", "0.7.5"},
+          {"HERDR_FAKE_NON_RUNNING_PROTOCOL", "17"}
+        ],
+        socket_root: context.runtime_root
+      }
+    }
+
+    assert {:ok, :absent} = HerdrTransport.owned_session_liveness(ownership_ref)
   end
 
   test "native agent liveness bounds a stalled Herdr query", context do

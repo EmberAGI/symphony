@@ -6,7 +6,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Linear.Issue
-  alias SymphonyElixir.Tracker.ClaimLease
+  alias SymphonyElixir.Tracker.{ClaimLease, EscalationMarker}
   alias SymphonyElixir.Tracker.Memory
 
   @endpoint SymphonyElixirWeb.Endpoint
@@ -517,6 +517,61 @@ defmodule SymphonyElixir.ExtensionsTest do
              )
 
     refute_receive {:graphql_called, _query, _variables}, 50
+  end
+
+  test "linear escalation dedupes one key but creates a note for a new retry epoch" do
+    Application.put_env(:symphony_elixir, :linear_client_module, StatefulEscalationLinearClient)
+
+    issue_id = "issue-linear-escalation-epoch-#{System.unique_integer([:positive])}"
+    issue = %Issue{id: issue_id, identifier: "MT-ESC-E", state: "In Progress", labels: [], comments: []}
+    {:ok, _pid} = StatefulEscalationLinearClient.start_link(issue)
+
+    on_exit(fn ->
+      if Process.whereis(StatefulEscalationLinearClient),
+        do: Agent.stop(StatefulEscalationLinearClient)
+    end)
+
+    attrs = %{
+      failure_fingerprint: "fingerprint-linear-epoch",
+      retry_epoch: "epoch-linear-one",
+      run_id: "run-linear-one",
+      operator_note: "## Operator Note\n\nbefore_run hook error: [REDACTED]"
+    }
+
+    assert {:ok, %{comment: :created, label: :applied, state: :applied, key: first_key}} =
+             Adapter.ensure_irrecoverable_escalation(issue_id, attrs)
+
+    assert {:ok, %{comment: :already_present, label: :already_present, state: :already_present, key: ^first_key}} =
+             Adapter.ensure_irrecoverable_escalation(
+               issue_id,
+               Map.put(attrs, :run_id, "run-linear-one-restarted")
+             )
+
+    snapshot_after_duplicate = StatefulEscalationLinearClient.snapshot()
+    assert snapshot_after_duplicate.mutations == %{comment: 1, label: 1, state: 1}
+
+    assert {:ok, %{comment: :created, label: :already_present, state: :already_present, key: second_key}} =
+             Adapter.ensure_irrecoverable_escalation(
+               issue_id,
+               attrs
+               |> Map.put(:retry_epoch, "epoch-linear-two")
+               |> Map.put(:run_id, "run-linear-two")
+             )
+
+    refute second_key == first_key
+
+    snapshot = StatefulEscalationLinearClient.snapshot()
+    assert snapshot.mutations == %{comment: 2, label: 1, state: 1}
+
+    assert [{:ok, first_marker}, {:ok, second_marker}] =
+             Enum.map(snapshot.issue.comments, &EscalationMarker.parse(&1.body))
+
+    assert first_marker.key == first_key
+    assert first_marker.retry_epoch == "epoch-linear-one"
+    assert second_marker.key == second_key
+    assert second_marker.retry_epoch == "epoch-linear-two"
+    assert snapshot.issue.labels == ["Human Escalation"]
+    assert snapshot.issue.state == "Human Escalation"
   end
 
   test "linear escalation reconciliation is concurrency-safe for one failure episode" do

@@ -440,8 +440,17 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
           {:error, {:incompatible_herdr_runtime, _details}} -> {:ok, :unknown}
         end
 
-      {:ok, _status} ->
+      {:ok, %{status: "not running", version: @required_version, protocol: @required_protocol}} ->
         {:ok, :absent}
+
+      {:ok, %{status: "not running", version: nil, protocol: nil}} ->
+        {:ok, :absent}
+
+      {:ok, %{status: "not running"}} ->
+        {:ok, :unknown}
+
+      {:ok, _status} ->
+        {:ok, :unknown}
 
       {:error, _reason} ->
         {:ok, :unknown}

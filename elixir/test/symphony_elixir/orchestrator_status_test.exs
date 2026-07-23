@@ -185,6 +185,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           ref: nil,
           identifier: running_issue.identifier,
           issue: running_issue,
+          run_id: "run-human-review-no-escalation",
           started_at: DateTime.utc_now()
         }
       },
@@ -240,6 +241,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           ref: nil,
           identifier: running_issue.identifier,
           issue: running_issue,
+          run_id: "run-human-review-escalation",
           started_at: DateTime.utc_now()
         }
       },

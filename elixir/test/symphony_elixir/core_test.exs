@@ -225,6 +225,7 @@ defmodule SymphonyElixir.CoreTest do
             ref: nil,
             identifier: issue_identifier,
             issue: %Issue{id: issue_id, state: "Todo", identifier: issue_identifier},
+            run_id: "run-inactive-reconcile",
             started_at: DateTime.utc_now()
           }
         },
@@ -288,6 +289,7 @@ defmodule SymphonyElixir.CoreTest do
             ref: nil,
             identifier: issue_identifier,
             issue: %Issue{id: issue_id, state: "In Progress", identifier: issue_identifier},
+            run_id: "run-terminal-reconcile",
             owned_session_ref: %{
               cleanup_module: RecordingOwnedSessionCleanup,
               owner: self(),
@@ -1456,7 +1458,7 @@ defmodule SymphonyElixir.CoreTest do
            )
   end
 
-  test "terminal issue reconciliation releases the visible claim lease" do
+  test "terminal issue reconciliation without prior run identity retains the visible claim lease" do
     previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
 
     on_exit(fn ->
@@ -1499,11 +1501,12 @@ defmodule SymphonyElixir.CoreTest do
 
     updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
 
-    refute MapSet.member?(updated_state.claimed, issue_id)
-    assert_receive {:memory_tracker_claim_lease, ^issue_id, released_lease}, 500
-    assert released_lease.comment_id == "comment-terminal-lease"
-    assert released_lease.state == "released"
-    assert released_lease.recovery_reason == "issue-left-active-dispatch"
+    assert MapSet.member?(updated_state.claimed, issue_id)
+
+    assert %{family: :tracker_claim_release_failed, error: :claim_run_identity_unavailable} =
+             updated_state.blocked_failures[issue_id]
+
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "released"}}, 100
   end
 
   test "failed claim release stays owned and surfaces a typed reconciliation failure" do
@@ -1539,7 +1542,22 @@ defmodule SymphonyElixir.CoreTest do
       })
 
     state = %Orchestrator.State{
-      running: %{},
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: nil,
+          identifier: "MT-RELEASE-FAILED",
+          issue: %Issue{
+            id: issue_id,
+            identifier: "MT-RELEASE-FAILED",
+            state: "In Progress",
+            claim_lease: claim_lease
+          },
+          claim_lease: claim_lease,
+          run_id: claim_lease.run_id,
+          started_at: now
+        }
+      },
       claimed: MapSet.new([issue_id]),
       codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
@@ -1794,7 +1812,7 @@ defmodule SymphonyElixir.CoreTest do
     assert process_status.quarantine_reason =~ "native session liveness=live"
   end
 
-  test "terminal issue reconciliation releases only the current same-scope claim lease" do
+  test "terminal issue reconciliation releases only the exact current same-scope run claim" do
     previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
 
     on_exit(fn ->
@@ -1834,7 +1852,23 @@ defmodule SymphonyElixir.CoreTest do
       })
 
     state = %Orchestrator.State{
-      running: %{},
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: nil,
+          identifier: "MT-SCOPED-TERM",
+          issue: %Issue{
+            id: issue_id,
+            identifier: "MT-SCOPED-TERM",
+            state: "In Progress",
+            claim_lease: implementer_lease,
+            claim_leases: [implementer_lease]
+          },
+          claim_lease: implementer_lease,
+          run_id: implementer_lease.run_id,
+          started_at: now
+        }
+      },
       claimed: MapSet.new([issue_id]),
       codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
@@ -2251,7 +2285,7 @@ defmodule SymphonyElixir.CoreTest do
            )
   end
 
-  test "dead retry timer releases leaked claim so issue can dispatch again" do
+  test "dead retry timer without prior run identity retains the claim for reconciliation" do
     issue_id = "issue-dead-retry"
     orchestrator_name = Module.concat(__MODULE__, :DeadRetryOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -2279,17 +2313,19 @@ defmodule SymphonyElixir.CoreTest do
     send(pid, {:retry_issue, issue_id, make_ref()})
 
     assert_eventually(fn ->
-      pid
-      |> :sys.get_state()
-      |> Map.get(:claimed)
-      |> MapSet.member?(issue_id)
-      |> Kernel.not()
+      state = :sys.get_state(pid)
+
+      MapSet.member?(state.claimed, issue_id) and
+        match?(
+          %{family: :tracker_claim_release_failed, error: :claim_run_identity_unavailable},
+          state.blocked_failures[issue_id]
+        )
     end)
 
     state = :sys.get_state(pid)
 
-    refute MapSet.member?(state.claimed, issue_id)
-    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    assert MapSet.member?(state.claimed, issue_id)
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
   test "retry timer refreshes retried issue by id instead of fetching candidate page" do
@@ -2337,7 +2373,8 @@ defmodule SymphonyElixir.CoreTest do
     {:noreply, state} =
       Orchestrator.handle_retry_issue_for_test(state, issue_id, 1, %{
         identifier: issue.identifier,
-        error: "agent exited: :boom"
+        error: "agent exited: :boom",
+        run_id: "run-retry-by-id"
       })
 
     assert_receive {:memory_tracker_fetch_issue_states_by_ids, [^issue_id]}, 500
@@ -2429,7 +2466,7 @@ defmodule SymphonyElixir.CoreTest do
     refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "released"}}
   end
 
-  test "claim reconciliation releases only claims that are not running or retrying" do
+  test "claim reconciliation retains orphaned claims without prior run identity" do
     running_issue_id = "issue-running-claim"
     retrying_issue_id = "issue-retrying-claim"
     orphaned_issue_id = "issue-orphaned-claim"
@@ -2461,7 +2498,10 @@ defmodule SymphonyElixir.CoreTest do
 
     assert MapSet.member?(state.claimed, running_issue_id)
     assert MapSet.member?(state.claimed, retrying_issue_id)
-    refute MapSet.member?(state.claimed, orphaned_issue_id)
+    assert MapSet.member?(state.claimed, orphaned_issue_id)
+
+    assert %{family: :tracker_claim_release_failed, error: :claim_run_identity_unavailable} =
+             state.blocked_failures[orphaned_issue_id]
   end
 
   test "linear issue normalization extracts latest structured Symphony claim lease marker" do

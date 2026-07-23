@@ -561,7 +561,7 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     case Map.get(state.running, issue_id) do
       nil ->
-        {release_issue_claim(state, issue_id, release_issue), :released}
+        release_claim_after_lifecycle(state, issue_id, release_issue)
 
       %{pid: _pid, ref: _ref} = running_entry ->
         terminate_running_entry(
@@ -573,7 +573,7 @@ defmodule SymphonyElixir.Orchestrator do
         )
 
       _ ->
-        {release_issue_claim(state, issue_id, release_issue), :released}
+        release_claim_after_lifecycle(state, issue_id, release_issue)
     end
   end
 
@@ -649,7 +649,6 @@ defmodule SymphonyElixir.Orchestrator do
          cleanup_workspace,
          release_issue
        ) do
-    maybe_cleanup_terminated_workspace(running_entry, cleanup_workspace)
     release_issue = release_issue || Map.get(running_entry, :issue)
 
     state = %{
@@ -658,19 +657,23 @@ defmodule SymphonyElixir.Orchestrator do
         retry_attempts: Map.delete(state.retry_attempts, issue_id)
     }
 
-    released_state =
-      release_issue_claim(
+    {released_state, release_outcome} =
+      release_claim_after_lifecycle(
         state,
         issue_id,
         release_issue,
         Map.get(running_entry, :run_id)
       )
 
-    unless MapSet.member?(released_state.claimed, issue_id) do
-      RoleTurnRecovery.clear_turn(issue_id)
+    if release_outcome == :released do
+      maybe_cleanup_terminated_workspace(running_entry, cleanup_workspace)
+
+      unless MapSet.member?(released_state.claimed, issue_id) do
+        RoleTurnRecovery.clear_turn(issue_id)
+      end
     end
 
-    {released_state, :released}
+    {released_state, release_outcome}
   end
 
   defp maybe_cleanup_terminated_workspace(_running_entry, false), do: :ok
@@ -1753,7 +1756,8 @@ defmodule SymphonyElixir.Orchestrator do
 
       MapSet.member?(state.claimed, issue_id) ->
         Logger.warning("Retry chain missing for claimed issue_id=#{issue_id}; releasing leaked claim")
-        release_issue_claim(state, issue_id)
+        {next_state, _outcome} = release_claim_after_lifecycle(state, issue_id)
+        next_state
 
       true ->
         Logger.debug("Dropping retry timer for unclaimed issue_id=#{issue_id}")
@@ -1795,8 +1799,14 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
-        cleanup_issue_workspace(issue, metadata[:worker_host])
-        {:noreply, release_issue_claim(state, issue_id, issue)}
+        {next_state, release_outcome} =
+          release_claim_after_lifecycle(state, issue_id, issue, nil, metadata)
+
+        if release_outcome == :released do
+          cleanup_issue_workspace(issue, metadata[:worker_host])
+        end
+
+        {:noreply, next_state}
 
       retry_candidate_issue?(issue, terminal_states) ->
         handle_active_retry(state, issue, attempt, metadata)
@@ -1804,13 +1814,20 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.debug("Issue left active states, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
 
-        {:noreply, release_issue_claim(state, issue_id, issue)}
+        {next_state, _release_outcome} =
+          release_claim_after_lifecycle(state, issue_id, issue, nil, metadata)
+
+        {:noreply, next_state}
     end
   end
 
-  defp handle_retry_issue_lookup(nil, state, issue_id, _attempt, _metadata) do
+  defp handle_retry_issue_lookup(nil, state, issue_id, _attempt, metadata) do
     Logger.debug("Issue no longer visible, removing claim issue_id=#{issue_id}")
-    {:noreply, release_issue_claim(state, issue_id)}
+
+    {next_state, _release_outcome} =
+      release_claim_after_lifecycle(state, issue_id, nil, nil, metadata)
+
+    {:noreply, next_state}
   end
 
   defp cleanup_issue_workspace(identifier, worker_host \\ nil)
@@ -2521,15 +2538,177 @@ defmodule SymphonyElixir.Orchestrator do
     |> MapSet.difference(active_claims)
     |> Enum.reduce(state, fn issue_id, state_acc ->
       Logger.warning("Claimed issue is neither running nor retrying; releasing leaked claim issue_id=#{issue_id}")
-      release_issue_claim(state_acc, issue_id)
+
+      {next_state, _outcome} = release_claim_after_lifecycle(state_acc, issue_id)
+      next_state
     end)
   end
+
+  defp release_claim_after_lifecycle(
+         %State{} = state,
+         issue_id,
+         issue \\ nil,
+         expected_run_id \\ nil,
+         metadata \\ %{}
+       ) do
+    case resolve_claim_release_issue(issue_id, issue) do
+      {:ok, release_issue} ->
+        lifecycle_issue = release_issue || lifecycle_release_issue(issue_id, metadata)
+        session_liveness = lifecycle_release_session_liveness(lifecycle_issue, metadata)
+        durable_ownership = ProcessOwnership.status_for_issue(lifecycle_issue)
+        release_run_id = lifecycle_release_run_id(expected_run_id, metadata, durable_ownership)
+
+        verdict =
+          LifecycleVerdict.evaluate(
+            session: session_liveness,
+            lease: lifecycle_release_lease_liveness(lifecycle_issue, metadata),
+            provider_turn: :failed
+          )
+
+        apply_lifecycle_claim_release(
+          state,
+          issue_id,
+          release_issue,
+          release_run_id,
+          verdict
+        )
+
+      {:error, reason} ->
+        Logger.warning(
+          "Refusing post-run claim release for issue_id=#{issue_id}; " <>
+            "claim release issue lookup failed: #{inspect(reason)}"
+        )
+
+        {state, :quarantined}
+    end
+  end
+
+  defp apply_lifecycle_claim_release(
+         state,
+         issue_id,
+         release_issue,
+         release_run_id,
+         %LifecycleVerdict{claim_release: :allow}
+       )
+       when is_binary(release_run_id) do
+    released_state = release_issue_claim(state, issue_id, release_issue, release_run_id)
+
+    case MapSet.member?(released_state.claimed, issue_id) do
+      true -> {released_state, :quarantined}
+      false -> {released_state, :released}
+    end
+  end
+
+  defp apply_lifecycle_claim_release(
+         state,
+         issue_id,
+         release_issue,
+         _release_run_id,
+         %LifecycleVerdict{claim_release: :allow}
+       ) do
+    Logger.warning(
+      "Refusing post-run claim release for issue_id=#{issue_id}; " <>
+        "exact prior run identity is unavailable"
+    )
+
+    blocked_state =
+      block_claim_release_for_missing_identity(
+        state,
+        issue_id,
+        release_issue
+      )
+
+    {blocked_state, :quarantined}
+  end
+
+  defp apply_lifecycle_claim_release(
+         state,
+         issue_id,
+         _release_issue,
+         _release_run_id,
+         %LifecycleVerdict{claim_release: :refuse} = verdict
+       ) do
+    Logger.warning(
+      "Refusing post-run claim release for issue_id=#{issue_id}; " <>
+        "native session liveness=#{verdict.session}"
+    )
+
+    {state, :quarantined}
+  end
+
+  defp lifecycle_release_issue(issue_id, metadata) when is_map(metadata) do
+    case lifecycle_release_value(metadata, :issue) do
+      %Issue{} = issue -> issue
+      _ -> %Issue{id: issue_id, identifier: lifecycle_release_value(metadata, :identifier) || issue_id}
+    end
+  end
+
+  defp lifecycle_release_session_liveness(%Issue{} = issue, metadata) do
+    process_record = ProcessOwnership.blocking_record(issue)
+
+    native_record =
+      ProcessOwnership.blocking_owned_session_record(
+        issue,
+        &AgentRuntime.owned_session_liveness/1
+      )
+
+    case {process_record, native_record} do
+      {_record, {_native_record, status}} ->
+        status
+
+      {nil, nil} ->
+        lifecycle_release_metadata_liveness(metadata)
+
+      {_record, nil} ->
+        :unknown
+    end
+  end
+
+  defp lifecycle_release_metadata_liveness(metadata) when is_map(metadata) do
+    process_ownership = lifecycle_release_value(metadata, :process_ownership)
+
+    ownership_ref =
+      lifecycle_release_value(metadata, :owned_session_ref) ||
+        lifecycle_release_value(process_ownership || %{}, :owned_session_ref)
+
+    cond do
+      is_map(ownership_ref) -> AgentRuntime.owned_session_liveness(ownership_ref)
+      lifecycle_release_value(process_ownership || %{}, :state) in ["active", "quarantined"] -> :unknown
+      true -> :absent
+    end
+  end
+
+  defp lifecycle_release_lease_liveness(%Issue{} = issue, metadata) do
+    claim_lease =
+      case Map.get(issue, :claim_lease) do
+        %ClaimLease{} = lease -> lease
+        _ -> lifecycle_release_value(metadata, :claim_lease)
+      end
+
+    running_entry_lease_liveness(%{claim_lease: claim_lease})
+  end
+
+  defp lifecycle_release_run_id(expected_run_id, metadata, durable_ownership) do
+    [
+      expected_run_id,
+      lifecycle_release_value(metadata, :run_id),
+      lifecycle_release_value(lifecycle_release_value(metadata, :process_ownership) || %{}, :run_id),
+      lifecycle_release_value(durable_ownership || %{}, :run_id)
+    ]
+    |> Enum.find(fn value -> is_binary(value) and String.trim(value) != "" end)
+  end
+
+  defp lifecycle_release_value(value, key) when is_map(value) and is_atom(key) do
+    Map.get(value, key) || Map.get(value, Atom.to_string(key))
+  end
+
+  defp lifecycle_release_value(_value, _key), do: nil
 
   defp release_issue_claim(
          %State{} = state,
          issue_id,
-         issue \\ nil,
-         expected_run_id \\ nil
+         issue,
+         expected_run_id
        ) do
     release_result =
       with {:ok, release_issue} <- resolve_claim_release_issue(issue_id, issue) do
@@ -2554,6 +2733,19 @@ defmodule SymphonyElixir.Orchestrator do
               )
         }
     end
+  end
+
+  defp block_claim_release_for_missing_identity(%State{} = state, issue_id, issue) do
+    %{
+      state
+      | claimed: MapSet.put(state.claimed, issue_id),
+        blocked_failures:
+          Map.put(
+            state.blocked_failures,
+            issue_id,
+            claim_release_failure_entry(issue_id, issue, :claim_run_identity_unavailable)
+          )
+    }
   end
 
   defp resolve_claim_release_issue(_issue_id, %Issue{} = issue), do: {:ok, issue}
@@ -2867,9 +3059,6 @@ defmodule SymphonyElixir.Orchestrator do
         {:error, :claim_run_identity_changed}
     end
   end
-
-  defp release_claim_lease_for(%Issue{} = issue, _expected_run_id),
-    do: {:ok, current_scope_claim_lease(issue)}
 
   defp release_claim_lease(%Issue{} = issue, %ClaimLease{} = claim_lease) do
     attrs =

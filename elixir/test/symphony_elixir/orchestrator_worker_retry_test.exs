@@ -124,6 +124,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
       ref: make_ref(),
       identifier: "MT-STALL",
       issue: %Issue{id: issue_id, identifier: "MT-STALL", state: "In Progress"},
+      run_id: "run-stalled-worker",
       session_id: "thread-stall-turn-stall",
       last_codex_message: nil,
       last_codex_timestamp: stale_activity_at,
