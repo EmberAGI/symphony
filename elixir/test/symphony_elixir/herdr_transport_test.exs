@@ -89,7 +89,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       if [ "${HERDR_FAKE_EXEC_PROVIDER:-}" = "1" ]; then
         while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
         shift
-        HERDR_PANE_ID="$pane" "$kind" "$@" > "$HERDR_FAKE_PROVIDER_OUTPUT"
+        HERDR_PANE_ID="$pane" "$@" > "$HERDR_FAKE_PROVIDER_OUTPUT"
       fi
 
       printf '{"id":"cli:agent:start","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"%s","agent_status":"idle","interactive_ready":true,"revision":1}}}\n' "$name" "$kind"
@@ -618,7 +618,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert commands =~ "--session octo-emb-1141-run-7 workspace create --cwd /tmp/selected-workspace --no-focus"
 
     assert commands =~
-             "--session octo-emb-1141-run-7 agent start implementer_orchestrator --kind codex --pane w1:p1 --timeout 120000 -- --symphony-launch-projection"
+             "--session octo-emb-1141-run-7 agent start implementer_orchestrator --kind codex --pane w1:p1 --timeout 120000 -- /"
 
     refute commands =~ "model_reasoning_effort=medium"
 
@@ -979,7 +979,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     commands = File.read!(context.log)
 
     assert commands =~
-             "agent start implementer_orchestrator --kind claude --pane w1:p1 --timeout 45000 -- --symphony-launch-projection"
+             "agent start implementer_orchestrator --kind claude --pane w1:p1 --timeout 45000 -- "
 
     refute commands =~ "Follow the profile."
 

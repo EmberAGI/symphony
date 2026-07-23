@@ -123,8 +123,20 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
              is_list(argv) and argv != [] do
     timeout_ms = Map.get(context, :agent_start_timeout_ms, @default_agent_start_timeout_ms)
 
+    orchestrator_bin = Path.join(runtime_root, "orchestrator-bin")
+    orchestrator_path = orchestrator_bin <> ":" <> inherited_provider_path(env, orchestrator_bin)
+
     with {:ok, kind, native_args} <- native_agent_launch(spec, argv),
-         {:ok, projected_args} <- materialize_launch_projection(runtime_root, name, kind, native_args),
+         {:ok, projected_args} <-
+           materialize_launch_projection(
+             runtime_root,
+             name,
+             kind,
+             hd(argv),
+             native_args,
+             %{"PATH" => orchestrator_path},
+             env
+           ),
          args =
            [
              "--session",
@@ -703,7 +715,19 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
     with {:ok, kind, native_args} <- native_agent_launch(worker, argv),
          {:ok, projected_args} <-
-           materialize_launch_projection(runtime_root, "implementer_worker", kind, native_args) do
+           materialize_launch_projection(
+             runtime_root,
+             "implementer_worker",
+             kind,
+             hd(argv),
+             native_args,
+             Map.put(
+               worker_env,
+               "PATH",
+               worker_bin <> ":" <> inherited_provider_path(session_env, orchestrator_bin)
+             ),
+             session_env
+           ) do
       provider_command = hd(argv)
       provider_wrapper = Path.join(orchestrator_bin, provider_command)
       inherited_path = inherited_provider_path(session_env, orchestrator_bin)
@@ -795,9 +819,17 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   defp materialize_worker_launcher(_session, _worker, _context),
     do: {:error, :invalid_worker_launcher_spec}
 
-  defp materialize_launch_projection(runtime_root, agent_name, kind, native_args)
+  defp materialize_launch_projection(
+         runtime_root,
+         agent_name,
+         kind,
+         provider_command,
+         native_args,
+         extra_env,
+         session_env
+       )
        when is_binary(runtime_root) and is_binary(agent_name) and is_binary(kind) and
-              is_list(native_args) do
+              is_binary(provider_command) and is_list(native_args) and is_map(extra_env) do
     projection_dir = Path.join(runtime_root, "launch-projections")
 
     digest =
@@ -808,27 +840,50 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
     path = Path.join(projection_dir, digest <> ".sh")
 
-    body = """
-    #!/bin/sh
-    set -eu
-    if [ "$#" -ne 1 ]; then
-      printf '%s\n' 'usage: launch projection <provider-executable>' >&2
-      exit 64
-    fi
-    exec "$1" #{Enum.map_join(native_args, " ", &shell_escape/1)}
-    """
+    case resolve_provider_executable(provider_command, session_env) do
+      provider_executable when is_binary(provider_executable) ->
+        body = """
+        #!/bin/sh
+        set -eu
+        #{launcher_env_exports(extra_env)}
+        exec #{shell_escape(provider_executable)} #{Enum.map_join(native_args, " ", &shell_escape/1)}
+        """
 
-    with :ok <- File.mkdir_p(projection_dir),
-         :ok <- File.write(path, body),
-         :ok <- File.chmod(path, 0o500) do
-      {:ok, ["--symphony-launch-projection", path]}
-    else
-      {:error, reason} -> {:error, {:launch_projection_materialization_failed, reason}}
+        with :ok <- File.mkdir_p(projection_dir),
+             :ok <- File.write(path, body),
+             :ok <- File.chmod(path, 0o500) do
+          {:ok, [path]}
+        else
+          {:error, reason} -> {:error, {:launch_projection_materialization_failed, reason}}
+        end
+
+      _ ->
+        {:error, {:launch_projection_provider_unavailable, provider_command}}
     end
   end
 
-  defp materialize_launch_projection(_runtime_root, _agent_name, _kind, _native_args),
+  defp materialize_launch_projection(_root, _agent, _kind, _provider, _args, _extra, _session),
     do: {:error, :invalid_launch_projection}
+
+  defp resolve_provider_executable(provider_command, session_env) do
+    search_path =
+      session_env
+      |> normalize_env_map()
+      |> Map.get("PATH", System.get_env("PATH") || "")
+
+    search_path
+    |> String.split(":", trim: true)
+    |> Enum.map(&Path.join(&1, provider_command))
+    |> Enum.find(fn candidate ->
+      case File.stat(candidate) do
+        {:ok, %File.Stat{type: :regular, mode: mode}} -> Bitwise.band(mode, 0o111) != 0
+        _ -> false
+      end
+    end)
+  end
+
+  defp normalize_env_map(env),
+    do: Map.new(env, fn {key, value} -> {to_string(key), to_string(value)} end)
 
   defp inherited_provider_path(session_env, orchestrator_bin) do
     path = session_env |> Map.new() |> Map.get("PATH", System.get_env("PATH") || "")
@@ -840,8 +895,6 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
     |> Enum.map_join(fn {key, value} -> "export #{key}=#{shell_escape(value)}\n" end)
   end
-
-  defp launcher_env_exports(_env), do: ""
 
   defp role_herdr_body(real_herdr, role) do
     authorization =
