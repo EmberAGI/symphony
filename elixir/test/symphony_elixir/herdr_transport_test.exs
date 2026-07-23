@@ -163,7 +163,22 @@ defmodule SymphonyElixir.HerdrTransportTest do
     """)
 
     File.chmod!(bin, 0o755)
-    on_exit(fn -> File.rm_rf!(root) end)
+    resolvable_provider_bin = Path.join(root, "resolvable-provider-bin")
+    File.mkdir_p!(resolvable_provider_bin)
+
+    for provider <- ["codex", "claude"] do
+      fake = Path.join(resolvable_provider_bin, provider)
+      File.write!(fake, "#!/bin/sh\nexit 0\n")
+      File.chmod!(fake, 0o755)
+    end
+
+    previous_path = System.get_env("PATH") || ""
+    System.put_env("PATH", resolvable_provider_bin <> ":" <> previous_path)
+
+    on_exit(fn ->
+      System.put_env("PATH", previous_path)
+      File.rm_rf!(root)
+    end)
 
     %{bin: bin, log: log, runtime_root: deliberately_long_runtime_root}
   end
