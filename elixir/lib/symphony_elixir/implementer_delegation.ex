@@ -105,7 +105,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
       )
       when is_binary(prompt) and prompt != "" and is_list(opts) do
     turn_timeout_ms = Keyword.get(opts, :turn_timeout_ms, 3_600_000)
-    start_timeout_ms = Keyword.get(opts, :start_timeout_ms, 30_000)
+    start_timeout_ms = Keyword.get(opts, :start_timeout_ms, 120_000)
     heartbeat_interval_ms = Keyword.get(opts, :heartbeat_interval_ms, 30_000)
     on_message = Keyword.get(opts, :on_message, fn _message -> :ok end)
 

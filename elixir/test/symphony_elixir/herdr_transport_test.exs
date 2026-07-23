@@ -448,7 +448,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert commands =~ "--session octo-emb-1141-run-7 workspace create --cwd /tmp/selected-workspace --no-focus"
 
     assert commands =~
-             "--session octo-emb-1141-run-7 agent start implementer_orchestrator --kind codex --pane w1:p1 --timeout 30000 -- --model gpt-5.6-sol --config model_reasoning_effort=medium"
+             "--session octo-emb-1141-run-7 agent start implementer_orchestrator --kind codex --pane w1:p1 --timeout 120000 -- --model gpt-5.6-sol --config model_reasoning_effort=medium"
 
     assert commands =~
              "--session octo-emb-1141-run-7 agent prompt implementer_orchestrator Codex assignment --wait --until working --until idle --until done --timeout 3000"
@@ -676,7 +676,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
-  test "starts Claude through the strict native kind and strips the executable from native args", context do
+  test "starts Claude with multiline-preserving control-safe native args", context do
     adapter_context = %{
       herdr_bin: context.bin,
       extra_env: [{"HERDR_FAKE_LOG", context.log}],
@@ -702,7 +702,15 @@ defmodule SymphonyElixir.HerdrTransportTest do
                  name: "implementer_orchestrator",
                  provider: "claude_code",
                  cwd: "/tmp/selected-workspace",
-                 argv: ["claude", "--model", "claude-fable-5", "--effort", "high"]
+                 argv: [
+                   "claude",
+                   "--model",
+                   "claude-fable-5",
+                   "--effort",
+                   "high",
+                   "--append-system-prompt",
+                   "Follow the profile.\r\n\tDo not delegate.\rFinish safely."
+                 ]
                },
                adapter_context
              )
@@ -712,9 +720,102 @@ defmodule SymphonyElixir.HerdrTransportTest do
     commands = File.read!(context.log)
 
     assert commands =~
-             "agent start implementer_orchestrator --kind claude --pane w1:p1 --timeout 45000 -- --model claude-fable-5 --effort high"
+             "agent start implementer_orchestrator --kind claude --pane w1:p1 --timeout 45000 -- --model claude-fable-5 --effort high --append-system-prompt Follow the profile.\u2028    Do not delegate.\u2028Finish safely."
 
     refute commands =~ "-- -- claude"
+
+    launched_command =
+      commands
+      |> String.trim_trailing()
+      |> String.split("\n")
+      |> List.last()
+
+    refute Regex.match?(~r/\p{Cc}/u, launched_command)
+    assert :ok = HerdrTransport.stop_session(session, adapter_context)
+  end
+
+  test "shares the 120-second cold-start budget across orchestrator and worker startup", context do
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [{"HERDR_FAKE_LOG", context.log}],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 5
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{
+                 name: "octo-emb-1227-shared-cold-start-budget",
+                 isolated: true,
+                 workspace: "/tmp/selected-workspace"
+               },
+               adapter_context
+             )
+
+    on_exit(fn ->
+      if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
+    end)
+
+    claude_spec = %{
+      name: "implementer_orchestrator",
+      provider: "claude_code",
+      cwd: "/tmp/selected-workspace",
+      argv: ["claude", "--model", "claude-sonnet-5"]
+    }
+
+    assert {:ok, _agent} = HerdrTransport.start_agent(session, claude_spec, adapter_context)
+    assert {:ok, prepared} = HerdrTransport.prepare_worker(session, claude_spec, adapter_context)
+
+    commands = File.read!(context.log)
+    launcher = File.read!(prepared.worker_launcher)
+
+    assert commands =~ "agent start implementer_orchestrator --kind claude --pane w1:p1 --timeout 120000"
+    assert launcher =~ ~s(agent start "$1" --kind 'claude' --pane "$2" --timeout 120000)
+    assert :ok = HerdrTransport.stop_session(session, adapter_context)
+  end
+
+  test "rejects unrepresentable Claude controls before invoking Herdr", context do
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [{"HERDR_FAKE_LOG", context.log}],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 5
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{
+                 name: "octo-emb-1227-unrepresentable-control",
+                 isolated: true,
+                 workspace: "/tmp/selected-workspace"
+               },
+               adapter_context
+             )
+
+    on_exit(fn ->
+      if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
+    end)
+
+    for control <- ["\0", "\u0085"] do
+      claude_spec = %{
+        name: "implementer_orchestrator",
+        provider: "claude_code",
+        cwd: "/tmp/selected-workspace",
+        argv: ["claude", "--append-system-prompt", "unsafe#{control}instruction"]
+      }
+
+      commands_before = File.read!(context.log)
+      invalid_control = {:invalid_herdr_agent_argument, :unrepresentable_control_character}
+
+      assert {:error, {:herdr_agent_start_failed, ^invalid_control}} =
+               HerdrTransport.start_agent(session, claude_spec, adapter_context)
+
+      assert {:error, ^invalid_control} =
+               HerdrTransport.prepare_worker(session, claude_spec, adapter_context)
+
+      assert File.read!(context.log) == commands_before
+    end
+
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
@@ -843,10 +944,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert {:ok, :absent} = HerdrTransport.cleanup_owned_session(ownership_ref)
 
     assert {:ok, :absent} =
-             HerdrTransport.cleanup_owned_session(%{
-               kind: "herdr",
-               session_name: ownership_ref.session_name
-             })
+             HerdrTransport.cleanup_owned_session(ownership_ref)
 
     refute File.exists?(session.runtime_root)
 

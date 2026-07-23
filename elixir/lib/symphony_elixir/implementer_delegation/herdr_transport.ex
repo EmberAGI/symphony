@@ -13,7 +13,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @default_poll_interval_ms 50
   @default_stop_timeout_ms 5_000
   @default_liveness_timeout_ms 2_000
-  @default_agent_start_timeout_ms 30_000
+  @default_agent_start_timeout_ms 120_000
   @required_version "0.7.5"
   @required_protocol 17
 
@@ -162,9 +162,38 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     do: {:ok, "codex", Enum.map(args, &to_string/1)}
 
   defp native_agent_launch(%{provider: "claude_code"}, ["claude" | args]),
-    do: {:ok, "claude", Enum.map(args, &to_string/1)}
+    do: encode_claude_native_args(args)
 
   defp native_agent_launch(_spec, _argv), do: {:error, :invalid_herdr_agent_provider_launch}
+
+  defp encode_claude_native_args(args) do
+    Enum.reduce_while(args, {:ok, []}, fn arg, {:ok, encoded} ->
+      case control_safe_native_arg(arg) do
+        {:ok, value} -> {:cont, {:ok, [value | encoded]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, encoded} -> {:ok, "claude", Enum.reverse(encoded)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp control_safe_native_arg(arg) do
+    value =
+      arg
+      |> to_string()
+      |> String.replace("\r\n", "\n")
+      |> String.replace("\r", "\n")
+      |> String.replace("\n", "\u2028")
+      |> String.replace("\t", "    ")
+
+    if Regex.match?(~r/\p{Cc}/u, value) do
+      {:error, {:invalid_herdr_agent_argument, :unrepresentable_control_character}}
+    else
+      {:ok, value}
+    end
+  end
 
   @impl true
   def begin_turn(

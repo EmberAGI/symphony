@@ -545,7 +545,13 @@ selected product checkout and resolves its returned root pane rather than
 predicting topology identifiers. It starts each participant through strict
 `agent start <name> --kind <kind> --pane <id> --timeout <ms> -- <native args>`;
 Herdr validates the live name, provider kind, target pane, and interactive
-readiness before returning. There is no secondary readiness poll.
+readiness before returning. Orchestrator and worker startup share a 120-second
+cold-start budget. Before Claude profile instructions cross Herdr's
+terminal-control seam, CRLF and CR normalize to LF, LF becomes the Unicode line
+separator U+2028, and each tab becomes four spaces. This preserves multiline
+semantics without placing terminal control characters in argv. Any remaining
+Unicode control-category (`Cc`) character fails with a typed
+invalid-agent-argument error. There is no secondary readiness poll.
 
 The orchestrator receives the worker launcher path through
 `OCTO_HERDR_WORKER_LAUNCHER`. Missing or incompatible Herdr, unsafe socket
