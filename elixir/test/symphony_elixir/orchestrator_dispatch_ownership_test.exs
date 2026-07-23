@@ -28,6 +28,12 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
     end
   end
 
+  defmodule PlannedOwnedSessionTransport do
+    def planned_owned_session_ref(session_name, _context) do
+      %{kind: "herdr", session_name: session_name}
+    end
+  end
+
   setup do
     previous_role = System.get_env("SYMPHONY_ROLE")
     System.put_env("SYMPHONY_ROLE", "implementer")
@@ -259,7 +265,12 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
     next_state = Orchestrator.reconcile_claims_for_test(%Orchestrator.State{claimed: MapSet.new([issue_id])})
 
     assert MapSet.member?(next_state.claimed, issue_id)
+    assert next_state.blocked_failures[issue_id].family == :owned_session_cleanup_unverified
     assert_receive {:post_run_liveness_checked, "octo-post-run-live", :live}, 500
+    assert_receive {:memory_tracker_comment, ^issue_id, note}, 500
+    assert note =~ "owned_session_cleanup_unverified"
+    assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}, 500
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}, 500
     refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "released"}}, 100
   end
 
@@ -652,6 +663,244 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
     assert released_lease.comment_id == claim_lease.comment_id
     assert released_lease.run_id == run_id
     assert released_lease.state == "released"
+  end
+
+  test "final dispatch fence queries the planned run-owned Herdr session before spawn" do
+    previous_adapter = Application.get_env(:symphony_elixir, :owned_session_liveness_module)
+    previous_recipient = Application.get_env(:symphony_elixir, :owned_session_liveness_recipient)
+    previous_result = Application.get_env(:symphony_elixir, :owned_session_liveness_result)
+    previous_transport = Application.get_env(:symphony_elixir, :delegation_transport_module)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    issue_id = "issue-planned-session-final-fence"
+    run_id = "run-planned-session-final-fence"
+
+    on_exit(fn ->
+      restore_app_env(:owned_session_liveness_module, previous_adapter)
+      restore_app_env(:owned_session_liveness_recipient, previous_recipient)
+      restore_app_env(:owned_session_liveness_result, previous_result)
+      restore_app_env(:delegation_transport_module, previous_transport)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+    end)
+
+    Application.put_env(
+      :symphony_elixir,
+      :owned_session_liveness_module,
+      OwnedSessionLivenessAdapter
+    )
+
+    Application.put_env(:symphony_elixir, :owned_session_liveness_recipient, self())
+    Application.put_env(:symphony_elixir, :owned_session_liveness_result, :live)
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(
+      :symphony_elixir,
+      :delegation_transport_module,
+      PlannedOwnedSessionTransport
+    )
+
+    claim_lease =
+      ClaimLease.new(%{
+        comment_id: "comment-planned-session-final-fence",
+        issue_id: issue_id,
+        issue_identifier: "MT-PLANNED-SESSION-FENCE",
+        role: "implementer",
+        holder: ClaimLease.holder_id(),
+        run_id: run_id,
+        refreshed_at: DateTime.utc_now(),
+        expires_at: DateTime.add(DateTime.utc_now(), 60, :second),
+        state: "active"
+      })
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PLANNED-SESSION-FENCE",
+      title: "Planned session final fence",
+      state: "In Progress",
+      repository: "EmberAGI/symphony",
+      claim_lease: claim_lease,
+      claim_leases: [claim_lease]
+    }
+
+    fetcher = fn [^issue_id] -> {:ok, [issue]} end
+    state = %Orchestrator.State{claimed: MapSet.new()}
+
+    assert {next_state, {:error, {:native_session_liveness_changed, :live}}} =
+             Orchestrator.reconcile_final_dispatch_fence_for_test(
+               state,
+               issue,
+               run_id,
+               fetcher
+             )
+
+    assert next_state == state
+
+    assert_receive {:dispatch_liveness_checked,
+                    %{
+                      kind: "herdr",
+                      session_name: session_name,
+                      agent_name: "implementer_orchestrator"
+                    }}
+
+    assert String.starts_with?(session_name, "octo-mt-planned-session")
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, %{state: "released"}}, 100
+  end
+
+  test "dispatch persists planned session ownership before launching the task" do
+    previous_adapter = Application.get_env(:symphony_elixir, :owned_session_liveness_module)
+    previous_recipient = Application.get_env(:symphony_elixir, :owned_session_liveness_recipient)
+    previous_result = Application.get_env(:symphony_elixir, :owned_session_liveness_result)
+    previous_transport = Application.get_env(:symphony_elixir, :delegation_transport_module)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-prelaunch-session-ownership-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-prelaunch-session-ownership",
+      identifier: "MT-PRELAUNCH-SESSION",
+      title: "Prelaunch session ownership",
+      state: "In Progress",
+      repository: "EmberAGI/symphony",
+      labels: []
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.join(test_root, "workspaces"),
+      poll_interval_ms: 1_000_000,
+      hook_before_run: "sleep 30"
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :owned_session_liveness_module,
+      OwnedSessionLivenessAdapter
+    )
+
+    Application.put_env(:symphony_elixir, :owned_session_liveness_recipient, self())
+    Application.put_env(:symphony_elixir, :owned_session_liveness_result, :absent)
+
+    Application.put_env(
+      :symphony_elixir,
+      :delegation_transport_module,
+      PlannedOwnedSessionTransport
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :PrelaunchSessionOwnership)
+    {:ok, orchestrator_pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(orchestrator_pid) do
+        orchestrator_pid
+        |> :sys.get_state()
+        |> Map.get(:running, %{})
+        |> Enum.each(fn {_issue_id, running_entry} ->
+          case Map.get(running_entry, :pid) do
+            pid when is_pid(pid) -> Process.exit(pid, :kill)
+            _ -> :ok
+          end
+        end)
+      end
+
+      stop_orchestrator!(orchestrator_pid)
+      restore_app_env(:owned_session_liveness_module, previous_adapter)
+      restore_app_env(:owned_session_liveness_recipient, previous_recipient)
+      restore_app_env(:owned_session_liveness_result, previous_result)
+      restore_app_env(:delegation_transport_module, previous_transport)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      File.rm_rf(test_root)
+    end)
+
+    assert_receive {:dispatch_liveness_checked, %{session_name: session_name}}, 5_000
+    assert_receive {:memory_tracker_claim_lease, issue_id, claim_lease}, 5_000
+    assert issue_id == issue.id
+    assert_receive {:dispatch_liveness_checked, %{session_name: ^session_name}}, 5_000
+
+    assert_eventually(fn ->
+      case ProcessOwnership.status_for_issue(issue) do
+        %{
+          state: "active",
+          run_id: run_id,
+          owned_session_ref: %{
+            kind: "herdr",
+            session_name: ^session_name,
+            agent_name: "implementer_orchestrator"
+          }
+        } ->
+          run_id == claim_lease.run_id
+
+        _ ->
+          false
+      end
+    end)
+  end
+
+  test "actual dispatch refuses a live planned session before claim upsert or spawn" do
+    previous_adapter = Application.get_env(:symphony_elixir, :owned_session_liveness_module)
+    previous_recipient = Application.get_env(:symphony_elixir, :owned_session_liveness_recipient)
+    previous_result = Application.get_env(:symphony_elixir, :owned_session_liveness_result)
+    previous_transport = Application.get_env(:symphony_elixir, :delegation_transport_module)
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-live-planned-session-dispatch-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-live-planned-session-dispatch",
+      identifier: "MT-LIVE-PLANNED-SESSION",
+      title: "Live planned session dispatch",
+      state: "In Progress",
+      repository: "EmberAGI/symphony",
+      labels: []
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.join(test_root, "workspaces"),
+      poll_interval_ms: 1_000_000,
+      hook_before_run: "sleep 30"
+    )
+
+    Application.put_env(:symphony_elixir, :owned_session_liveness_module, OwnedSessionLivenessAdapter)
+    Application.put_env(:symphony_elixir, :owned_session_liveness_recipient, self())
+    Application.put_env(:symphony_elixir, :owned_session_liveness_result, :live)
+    Application.put_env(:symphony_elixir, :delegation_transport_module, PlannedOwnedSessionTransport)
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :LivePlannedSessionDispatch)
+    {:ok, orchestrator_pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      stop_orchestrator!(orchestrator_pid)
+      restore_app_env(:owned_session_liveness_module, previous_adapter)
+      restore_app_env(:owned_session_liveness_recipient, previous_recipient)
+      restore_app_env(:owned_session_liveness_result, previous_result)
+      restore_app_env(:delegation_transport_module, previous_transport)
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      File.rm_rf(test_root)
+    end)
+
+    assert_receive {:dispatch_liveness_checked, %{kind: "herdr", agent_name: "implementer_orchestrator"}},
+                   5_000
+
+    issue_id = issue.id
+    refute_receive {:memory_tracker_claim_lease, ^issue_id, _lease}, 500
+    assert :sys.get_state(orchestrator_pid).running == %{}
+    refute ProcessOwnership.status_for_issue(issue)
   end
 
   # Late-detached detection is Linux-hosted runtime behavior: it needs /proc

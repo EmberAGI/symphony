@@ -779,6 +779,78 @@ defmodule SymphonyElixir.CoreTest do
     assert status.quarantine_reason =~ "owned process tree remains live"
   end
 
+  test "startup recovery quarantines cleanup absence when native liveness is not absent" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-owned-session-recovery-native-live-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    cases = [
+      {:live, "LIVE"},
+      {:unknown, "UNKNOWN"}
+    ]
+
+    issues =
+      Enum.map(cases, fn {_liveness, suffix} ->
+        issue = %Issue{
+          id: "issue-owned-session-recovery-#{suffix}",
+          identifier: "MT-RECOVER-#{suffix}",
+          repository: "EmberAGI/symphony"
+        }
+
+        workspace = Path.join(workspace_root, "#{issue.identifier}-symphony")
+
+        assert :ok =
+                 ProcessOwnership.record_active(issue, %{
+                   role: "implementer",
+                   holder: "#{ProcessOwnership.current_host()}:999999:implementer",
+                   run_id: "run-owned-session-recovery-#{suffix}",
+                   workspace_path: workspace,
+                   owned_session_ref: %{
+                     kind: "herdr",
+                     session_name: "octo-mt-recover-#{String.downcase(suffix)}"
+                   }
+                 })
+
+        issue
+      end)
+
+    liveness_by_session = %{
+      "octo-mt-recover-live" => :live,
+      "octo-mt-recover-unknown" => :unknown
+    }
+
+    assert {:ok, 0} =
+             ProcessOwnership.recover_stale_owned_sessions(
+               fn _ownership_ref -> {:ok, :absent} end,
+               fn ownership_ref -> Map.fetch!(liveness_by_session, ownership_ref.session_name) end,
+               fn evidence ->
+                 send(self(), {
+                   :startup_native_liveness_quarantine,
+                   evidence.session_liveness,
+                   evidence
+                 })
+               end
+             )
+
+    for {liveness, _suffix} <- cases do
+      assert_receive {:startup_native_liveness_quarantine, ^liveness, evidence}
+      assert evidence.session_liveness == liveness
+    end
+
+    for {issue, {liveness, _suffix}} <- Enum.zip(issues, cases) do
+      status = ProcessOwnership.status_for_issue(issue)
+      assert status.state == "quarantined"
+      assert status.cleanup_status == "quarantined"
+      assert status.quarantine_reason =~ "native session liveness=#{liveness}"
+    end
+  end
+
   test "startup recovery quarantines a stale session when cleanup cannot prove absence" do
     test_root =
       Path.join(

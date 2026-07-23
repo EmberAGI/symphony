@@ -1067,6 +1067,22 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert {:ok, :absent} = HerdrTransport.owned_session_liveness(ownership_ref)
   end
 
+  test "native server liveness treats versionless and protocolless non-running runtime as unknown", context do
+    ownership_ref = %{
+      kind: "herdr",
+      session_name: "octo-emb-1217-versionless-non-running",
+      agent_name: "implementer_orchestrator",
+      runtime_root: context.runtime_root,
+      cleanup_context: %{
+        herdr_bin: context.bin,
+        extra_env: [{"HERDR_FAKE_LOG", context.log}],
+        socket_root: context.runtime_root
+      }
+    }
+
+    assert {:ok, :unknown} = HerdrTransport.owned_session_liveness(ownership_ref)
+  end
+
   test "native agent liveness bounds a stalled Herdr query", context do
     ownership_ref = %{
       kind: "herdr",

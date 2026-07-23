@@ -34,6 +34,18 @@ Application.put_env(
   SymphonyElixir.TestSupport.NonLiveDelegationTransport
 )
 
+Application.put_env(
+  :symphony_elixir,
+  :owned_session_cleanup_module,
+  SymphonyElixir.TestSupport.NonLiveDelegationTransport
+)
+
+Application.put_env(
+  :symphony_elixir,
+  :owned_session_liveness_module,
+  SymphonyElixir.TestSupport.NonLiveDelegationTransport
+)
+
 boot_workflow_root =
   Path.join(System.tmp_dir!(), "symphony-elixir-boot-seal-#{System.unique_integer([:positive])}")
 

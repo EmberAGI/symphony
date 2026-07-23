@@ -3,6 +3,46 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   alias SymphonyElixir.Tracker.ClaimLease
 
+  defmodule PausedNonLiveDelegationTransport do
+    @behaviour SymphonyElixir.ImplementerDelegation.Transport
+
+    @impl true
+    def default_server_snapshot(_context) do
+      Process.sleep(:infinity)
+    end
+
+    @impl true
+    def start_session(_spec, _context), do: {:error, :non_live}
+
+    @impl true
+    def prepare_worker(_session, _worker_spec, _context), do: {:error, :non_live}
+
+    @impl true
+    def start_agent(_session, _agent_spec, _context), do: {:error, :non_live}
+
+    @impl true
+    def begin_turn(_session, _agent, _prompt, _timeout_ms, _context), do: {:error, :non_live}
+
+    @impl true
+    def await_agent(_session, _agent, _statuses, _timeout_ms, _context), do: {:error, :non_live}
+
+    @impl true
+    def read_agent(_session, _agent, _opts, _context), do: {:error, :non_live}
+
+    @impl true
+    def stop_session(_session, _context), do: :ok
+
+    @impl true
+    def planned_owned_session_ref(session_name, _context) do
+      %{kind: "herdr", session_name: session_name}
+    end
+
+    @impl true
+    def owned_session_liveness(%{kind: "herdr"}), do: {:ok, :absent}
+
+    def cleanup_owned_session(%{kind: "herdr"}), do: {:ok, :absent}
+  end
+
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
     parent = self()
@@ -1041,8 +1081,25 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         tracker_kind: "memory",
         workspace_root: workspace_root,
         poll_interval_ms: 1_000_000_000,
-        max_retry_backoff_ms: 1,
-        hook_before_run: "sleep 30"
+        max_retry_backoff_ms: 1
+      )
+
+      Application.put_env(
+        :symphony_elixir,
+        :delegation_transport_module,
+        PausedNonLiveDelegationTransport
+      )
+
+      Application.put_env(
+        :symphony_elixir,
+        :owned_session_cleanup_module,
+        PausedNonLiveDelegationTransport
+      )
+
+      Application.put_env(
+        :symphony_elixir,
+        :owned_session_liveness_module,
+        PausedNonLiveDelegationTransport
       )
 
       issue_id = "issue-no-progress-retry-dispatch"

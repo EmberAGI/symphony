@@ -228,7 +228,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
           mark_record_cleaned(path, record)
           count + 1
 
-        {{:ok, :absent}, _status, false} ->
+        {{:ok, :absent}, :absent, false} ->
           mark_record_cleaned(path, record)
           count + 1
 

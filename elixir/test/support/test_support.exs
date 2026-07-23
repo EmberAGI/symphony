@@ -55,9 +55,27 @@ defmodule SymphonyElixir.TestSupport do
         previous_delegation_transport =
           Application.get_env(:symphony_elixir, :delegation_transport_module)
 
+        previous_owned_session_cleanup =
+          Application.get_env(:symphony_elixir, :owned_session_cleanup_module)
+
+        previous_owned_session_liveness =
+          Application.get_env(:symphony_elixir, :owned_session_liveness_module)
+
         Application.put_env(
           :symphony_elixir,
           :delegation_transport_module,
+          SymphonyElixir.TestSupport.NonLiveDelegationTransport
+        )
+
+        Application.put_env(
+          :symphony_elixir,
+          :owned_session_cleanup_module,
+          SymphonyElixir.TestSupport.NonLiveDelegationTransport
+        )
+
+        Application.put_env(
+          :symphony_elixir,
+          :owned_session_liveness_module,
           SymphonyElixir.TestSupport.NonLiveDelegationTransport
         )
 
@@ -83,6 +101,16 @@ defmodule SymphonyElixir.TestSupport do
           case previous_delegation_transport do
             nil -> Application.delete_env(:symphony_elixir, :delegation_transport_module)
             module -> Application.put_env(:symphony_elixir, :delegation_transport_module, module)
+          end
+
+          case previous_owned_session_cleanup do
+            nil -> Application.delete_env(:symphony_elixir, :owned_session_cleanup_module)
+            module -> Application.put_env(:symphony_elixir, :owned_session_cleanup_module, module)
+          end
+
+          case previous_owned_session_liveness do
+            nil -> Application.delete_env(:symphony_elixir, :owned_session_liveness_module)
+            module -> Application.put_env(:symphony_elixir, :owned_session_liveness_module, module)
           end
 
           SymphonyElixir.TestSupport.restore_boot_workflow_path()

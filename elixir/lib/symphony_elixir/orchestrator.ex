@@ -1375,14 +1375,22 @@ defmodule SymphonyElixir.Orchestrator do
            retry_dispatch?(attempt)
          ) do
       {:ok, %Issue{} = refreshed_issue} ->
-        dispatch_with_verified_claim(
-          state,
-          refreshed_issue,
-          attempt,
-          recipient,
-          worker_host,
-          run_id
-        )
+        case revalidate_planned_session_liveness(refreshed_issue, run_id) do
+          :ok ->
+            dispatch_with_verified_claim(
+              state,
+              refreshed_issue,
+              attempt,
+              recipient,
+              worker_host,
+              run_id
+            )
+
+          {:error, reason} ->
+            Logger.warning("Skipping dispatch; planned native session liveness refused #{issue_context(refreshed_issue)}: #{inspect(reason)}")
+
+            {state, {:failed, "dispatch_fence_refused"}}
+        end
 
       {:skip, _reason} ->
         {state, {:skipped, skipped_candidate_summary(issue, "dispatch_fence_stale")}}
@@ -1452,6 +1460,10 @@ defmodule SymphonyElixir.Orchestrator do
     case refetch_dispatch_fence(issue, run_id, issue_fetcher) do
       {:ok, %Issue{} = refreshed_issue, %ClaimLease{} = refreshed_claim_lease} ->
         {state, {:ok, refreshed_issue, refreshed_claim_lease}}
+
+      {:error, {:native_session_liveness_changed, status} = reason, %Issue{}}
+      when status in [:live, :unknown, :unreachable] ->
+        {state, {:error, reason}}
 
       {:error, reason, %Issue{} = refreshed_issue} ->
         case release_refused_dispatch_claim(refreshed_issue, run_id) do
@@ -1539,8 +1551,25 @@ defmodule SymphonyElixir.Orchestrator do
         {:error, :native_or_process_ownership_changed}
 
       true ->
+        revalidate_planned_session_liveness(issue, run_id)
+    end
+  end
+
+  defp revalidate_planned_session_liveness(%Issue{} = issue, run_id) do
+    case planned_dispatch_owned_session_ref(issue, run_id) do
+      ownership_ref when is_map(ownership_ref) ->
+        case AgentRuntime.owned_session_liveness(ownership_ref) do
+          :absent -> :ok
+          status -> {:error, {:native_session_liveness_changed, status}}
+        end
+
+      nil ->
         :ok
     end
+  end
+
+  defp planned_dispatch_owned_session_ref(%Issue{} = issue, run_id) do
+    AgentRuntime.planned_owned_session_ref(issue: issue, run_id: run_id)
   end
 
   defp spawn_issue_on_worker_host_with_result(
@@ -1551,8 +1580,40 @@ defmodule SymphonyElixir.Orchestrator do
          worker_host,
          %ClaimLease{} = claim_lease
        ) do
-    record_pending_turn_start(issue, worker_host)
+    owned_session_ref = planned_dispatch_owned_session_ref(issue, claim_lease.run_id)
+    ownership_attrs = planned_dispatch_ownership_attrs(issue, worker_host, claim_lease, owned_session_ref)
 
+    with :ok <- record_pending_turn_start(issue, worker_host, ownership_attrs.workspace_path),
+         :ok <- ProcessOwnership.record_active(issue, ownership_attrs) do
+      start_owned_issue_task(
+        state,
+        issue,
+        attempt,
+        recipient,
+        worker_host,
+        claim_lease,
+        owned_session_ref,
+        ownership_attrs
+      )
+    else
+      {:error, reason} ->
+        RoleTurnRecovery.clear_turn(issue.id)
+        release_refused_dispatch_claim(issue, claim_lease.run_id)
+        Logger.error("Unable to persist dispatch ownership for #{issue_context(issue)}: #{inspect(reason)}")
+        {state, {:failed, "dispatch_ownership_persistence_failed"}}
+    end
+  end
+
+  defp start_owned_issue_task(
+         state,
+         issue,
+         attempt,
+         recipient,
+         worker_host,
+         claim_lease,
+         owned_session_ref,
+         ownership_attrs
+       ) do
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
            AgentRunner.run(issue, recipient,
              attempt: attempt,
@@ -1572,11 +1633,12 @@ defmodule SymphonyElixir.Orchestrator do
             identifier: issue.identifier,
             issue: issue,
             worker_host: worker_host,
-            workspace_path: nil,
+            workspace_path: ownership_attrs.workspace_path,
             claim_lease: claim_lease,
             claim_lease_refreshed_at_ms: System.monotonic_time(:millisecond),
             run_id: claim_lease.run_id,
             session_id: nil,
+            owned_session_ref: owned_session_ref,
             last_codex_message: nil,
             last_codex_timestamp: nil,
             last_codex_event: nil,
@@ -1603,6 +1665,7 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
         RoleTurnRecovery.clear_turn(issue.id)
+        ProcessOwnership.record_cleaned(issue, ownership_attrs)
         Telegram.notify_agent_failed(issue, reason)
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
@@ -1617,13 +1680,40 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp record_pending_turn_start(%Issue{} = issue, worker_host) do
-    case RoleTurnRecovery.record_turn_start(issue, worker_host: worker_host) do
+  defp planned_dispatch_ownership_attrs(issue, worker_host, claim_lease, owned_session_ref) do
+    %{
+      role: ClaimLease.role_name(),
+      run_id: claim_lease.run_id,
+      holder: ClaimLease.holder_id(),
+      worker_host: worker_host,
+      workspace_path: dispatch_workspace_path(issue, claim_lease),
+      owned_session_ref: owned_session_ref,
+      issue_identifier: issue.identifier
+    }
+  end
+
+  defp dispatch_workspace_path(%Issue{} = issue, %ClaimLease{} = claim_lease) do
+    case claim_lease.workspace_path do
+      workspace_path when is_binary(workspace_path) and workspace_path != "" ->
+        workspace_path
+
+      _missing ->
+        expected_workspace_path(issue)
+    end
+  end
+
+  defp record_pending_turn_start(%Issue{} = issue, worker_host, workspace_path) do
+    case RoleTurnRecovery.record_turn_start(
+           issue,
+           worker_host: worker_host,
+           workspace_path: workspace_path
+         ) do
       :ok ->
         :ok
 
       {:error, reason} ->
         Logger.warning("Failed to record pending role turn for #{issue_context(issue)}: #{inspect(reason)}")
+        {:error, reason}
     end
   end
 
@@ -2624,8 +2714,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp apply_lifecycle_claim_release(
          state,
          issue_id,
-         _release_issue,
-         _release_run_id,
+         release_issue,
+         release_run_id,
          %LifecycleVerdict{claim_release: :refuse} = verdict
        ) do
     Logger.warning(
@@ -2633,7 +2723,46 @@ defmodule SymphonyElixir.Orchestrator do
         "native session liveness=#{verdict.session}"
     )
 
-    {state, :quarantined}
+    running_entry = lifecycle_claim_release_entry(release_issue, release_run_id)
+
+    blocked_state =
+      case lifecycle_task_exit_failure(verdict, issue_id, running_entry) do
+        {:irrecoverable, failure, failure_observation} ->
+          block_task_exit_failure(
+            state,
+            issue_id,
+            running_entry,
+            failure,
+            failure_observation
+          )
+
+        :continue ->
+          state
+      end
+
+    {blocked_state, :quarantined}
+  end
+
+  defp lifecycle_claim_release_entry(%Issue{} = issue, release_run_id) do
+    claim_lease = issue.claim_lease
+
+    %{
+      issue: issue,
+      identifier: issue.identifier || issue.id,
+      claim_lease: claim_lease,
+      run_id: release_run_id,
+      retry_epoch: claim_lease_value(claim_lease, :comment_id),
+      workspace_path: claim_lease_value(claim_lease, :workspace_path),
+      started_at: claim_lease_value(claim_lease, :started_at) || DateTime.utc_now()
+    }
+  end
+
+  defp lifecycle_claim_release_entry(_issue, release_run_id) do
+    %{
+      run_id: release_run_id,
+      retry_epoch: @missing_retry_epoch,
+      started_at: DateTime.utc_now()
+    }
   end
 
   defp lifecycle_release_issue(issue_id, metadata) when is_map(metadata) do

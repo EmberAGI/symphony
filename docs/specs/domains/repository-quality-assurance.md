@@ -264,6 +264,21 @@ assumptions. The gate result MUST NOT depend on ambient terminal geometry:
 executions, and tests that assert rendered terminal output MUST pin an
 explicit width instead of inheriting the ambient terminal's.
 
+## Required CI Check Surface
+
+GitHub Actions MUST run the repository's declared non-live gate for every pull
+request and every push to `main`. The required `make-all` check MUST use a
+GitHub-hosted runner, install the Erlang and Elixir versions declared in
+`elixir/mise.toml`, and execute both `make -C elixir all` and
+`mix specs.check`. It MUST remain repository-local and secret-free: no external
+service, paid infrastructure, or operator-provisioned credential is required
+to establish the mechanical gate.
+
+Agent Review and Agent QA MAY cite a successful, current `make-all` pull-request
+check as evidence for these mechanical commands. They remain responsible for
+confirming that the check applies to the reviewed commit and for evaluating
+issue-specific acceptance criteria that the repository gate does not cover.
+
 ## Edge Cases
 
 - Browser binary is missing.
