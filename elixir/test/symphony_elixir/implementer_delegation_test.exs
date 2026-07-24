@@ -3,6 +3,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
   alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation, SkillExecutionContract}
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.TestSupport.FakeHerdr
 
   defmodule RecordingTransport do
     def default_server_snapshot(%{owner: owner}) do
@@ -931,93 +932,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
   end
 
   defp write_fake_herdr!(path) do
-    File.write!(path, """
-    #!/bin/sh
-    set -eu
-    printf '%s\n' "$*" >> "$HERDR_FAKE_LOG"
-
-    if [ "$#" -eq 2 ] && [ "$1" = "status" ] && [ "$2" = "server" ]; then
-      printf '%s\n' 'status: running' 'version: 0.7.5' 'protocol: 17' 'compatible: yes' 'socket: /tmp/operator-default/herdr.sock'
-      exit 0
-    fi
-
-    session="${2:-default}"
-    state_root="$XDG_CONFIG_HOME/herdr/sessions/$session"
-    running="$state_root/running"
-    stopped="$state_root/stopped"
-
-    if [ "${1:-}" = "--session" ]; then
-      shift 2
-    fi
-
-    if [ "$#" -eq 1 ] && [ "$1" = "server" ]; then
-      mkdir -p "$state_root"
-      : > "$running"
-      while [ ! -f "$stopped" ]; do sleep 0.01; done
-      rm -f "$running"
-      exit 0
-    fi
-
-    if [ "$#" -eq 2 ] && [ "$1" = "status" ] && [ "$2" = "server" ]; then
-      printf '%s\n' 'status: running' 'version: 0.7.5' 'protocol: 17' 'compatible: yes' "socket: $state_root/herdr.sock"
-      exit 0
-    fi
-
-    if [ "$#" -eq 2 ] && [ "$1" = "server" ] && [ "$2" = "stop" ]; then
-      : > "$stopped"
-      exit 0
-    fi
-
-    if [ "$#" -eq 5 ] && [ "$1" = "workspace" ] && [ "$2" = "create" ] && [ "$3" = "--cwd" ] && [ "$5" = "--no-focus" ]; then
-      printf '{"id":"cli:workspace:create","result":{"workspace":{"workspace_id":"w1"},"root_pane":{"pane_id":"w1:p1"}}}\n'
-      exit 0
-    fi
-
-    if [ "$#" -eq 6 ] && [ "$1" = "pane" ] && [ "$2" = "split" ] && [ "$3" = "--current" ] && [ "$4" = "--direction" ] && [ "$5" = "right" ] && [ "$6" = "--no-focus" ]; then
-      printf '{"id":"cli:pane:split","result":{"pane":{"pane_id":"w7:p42"}}}\n'
-      exit 0
-    fi
-
-    if [ "$1" = "agent" ] && [ "$2" = "start" ]; then
-      name="$3"
-      kind="$5"
-      pane="$7"
-
-      if [ "${HERDR_FAKE_EXEC_PROVIDER:-}" = "1" ]; then
-        while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
-        shift
-
-        if ! HERDR_FAKE_AGENT_NAME="$name" HERDR_PANE_ID="$pane" "$kind" "$@" >/dev/null; then
-          printf 'fake provider failed for %s on %s\n' "$name" "$pane" >&2
-          tail -n 20 "$HERDR_FAKE_LOG" >&2
-          exit 1
-        fi
-      fi
-
-      printf '{"id":"cli:agent:start","result":{"agent":{"name":"%s","pane_id":"%s","agent":"%s","agent_status":"idle","interactive_ready":true,"revision":1}}}\n' "$name" "$pane" "$kind"
-      exit 0
-    fi
-
-    if [ "$1" = "agent" ] && [ "$2" = "prompt" ]; then
-      printf '{"id":"cli:agent:prompt","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"working","revision":2}}}\n' "$3"
-      exit 0
-    fi
-
-    if [ "$1" = "agent" ] && [ "$2" = "wait" ]; then
-      printf '{"id":"cli:agent:wait","result":{"agent":{"name":"%s","pane_id":"w1:p1","agent":"codex","agent_status":"idle","revision":3}}}\n' "$3"
-      exit 0
-    fi
-
-    if [ "$1" = "agent" ] && [ "$2" = "read" ]; then
-      printf 'IMPLEMENTER_TURN_COMPLETE'
-      exit 0
-    fi
-
-    printf 'unsupported fake Herdr command: %s\n' "$*" >&2
-    exit 64
-    """)
-
-    File.chmod!(path, 0o755)
+    FakeHerdr.write!(path)
   end
 
   defp contract(provider) do

@@ -15,6 +15,7 @@ System.delete_env("OCTO_RUNTIME_WORKER_PROVIDER")
 Code.require_file("support/non_live_linear_client.exs", __DIR__)
 Code.require_file("support/non_live_delegation_transport.exs", __DIR__)
 Code.require_file("support/test_support.exs", __DIR__)
+Code.require_file("support/fake_herdr.exs", __DIR__)
 Code.require_file("support/linear_traffic_sentinel.exs", __DIR__)
 
 supervisor_already_alive_before_boot? = !is_nil(Process.whereis(SymphonyElixir.Supervisor))
@@ -68,6 +69,13 @@ SymphonyElixir.TestSupport.LinearTrafficSentinel.install!()
 {:ok, _apps} = Application.ensure_all_started(:symphony_elixir)
 
 ExUnit.start()
+
+# CD-tier real-binary Herdr smoke: runtime opt-in, decided on every run so a
+# warm _build can neither stale-skip nor stale-run it.
+unless System.get_env("RUN_HERDR_REAL_SMOKE") == "1" do
+  ExUnit.configure(exclude: [:herdr_real_smoke])
+end
+
 Code.require_file("support/snapshot_support.exs", __DIR__)
 Code.require_file("support/claude_shim_fixture.exs", __DIR__)
 Code.require_file("support/agent_profile_fixture.exs", __DIR__)
