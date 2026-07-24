@@ -18,7 +18,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   @spec registry_path(Issue.t(), String.t() | nil) :: Path.t()
   def registry_path(%Issue{} = issue, workspace_path \\ nil) do
-    base = Config.settings!().workspace.root
+    base = local_registry_root()
     attrs = scope_attrs(issue, normalize_attrs(%{role: current_role(), workspace_path: workspace_path}))
     Path.join([base, @registry_dir, scoped_registry_filename(issue, attrs)])
   end
@@ -161,7 +161,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   @spec recover_stale_owned_sessions((map() -> :ok | {:error, term()})) :: {:ok, non_neg_integer()}
   def recover_stale_owned_sessions(cleanup_fun) when is_function(cleanup_fun, 1) do
     recovered =
-      Config.settings!().workspace.root
+      local_registry_root()
       |> owned_record_paths()
       |> Enum.reduce(0, fn path, count ->
         recover_stale_owned_session(path, cleanup_fun, count)
@@ -650,8 +650,13 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp value_for(attrs, key) when is_atom(key), do: attrs[key] || attrs[Atom.to_string(key)]
 
   defp scoped_registry_path(%Issue{} = issue, normalized_attrs) when is_map(normalized_attrs) do
-    base = Config.settings!().workspace.root
+    base = local_registry_root()
     Path.join([base, @registry_dir, scoped_registry_filename(issue, normalized_attrs)])
+  end
+
+  defp local_registry_root do
+    Config.settings!().workspace.root
+    |> Path.expand()
   end
 
   defp scope_attrs(%Issue{} = issue, attrs) when is_map(attrs) do
