@@ -6,6 +6,8 @@ defmodule SymphonyElixir.WorkAdmissionTest do
   @endpoint SymphonyElixirWeb.Endpoint
 
   setup do
+    terminate_test_runner_tasks!()
+
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -30,6 +32,7 @@ defmodule SymphonyElixir.WorkAdmissionTest do
     )
 
     on_exit(fn ->
+      terminate_test_runner_tasks!()
       restore_application_env!(:role_turn_recovery_dir, previous_recovery_dir)
       File.rm_rf(test_root)
     end)
@@ -717,5 +720,21 @@ defmodule SymphonyElixir.WorkAdmissionTest do
       nil -> Application.delete_env(:symphony_elixir, name)
       value -> Application.put_env(:symphony_elixir, name, value)
     end
+  end
+
+  defp terminate_test_runner_tasks! do
+    SymphonyElixir.TaskSupervisor
+    |> Task.Supervisor.children()
+    |> Enum.each(fn pid ->
+      ref = Process.monitor(pid)
+
+      case Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) do
+        :ok ->
+          assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
+
+        {:error, :not_found} ->
+          Process.demonitor(ref, [:flush])
+      end
+    end)
   end
 end
