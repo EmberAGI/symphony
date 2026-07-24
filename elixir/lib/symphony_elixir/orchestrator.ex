@@ -789,6 +789,7 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(issue_id) and is_map(running_entry) do
     with :ok <- terminate_registered_task(running_entry),
          :ok <- cleanup_owned_session(running_entry),
+         :ok <- cleanup_owned_marker_processes(running_entry),
          {:ok, ownership} <- release_cancelled_owned_state(running_entry),
          :ok <- verify_cancelled_owned_state(ownership) do
       Logger.info("Role-run cancellation cleanup verified issue_id=#{issue_id} owned_pids=[] live_after=0")
@@ -817,6 +818,17 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp terminate_registered_task(_running_entry), do: :ok
+
+  defp cleanup_owned_marker_processes(%{issue: %Issue{} = issue, process_ownership: ownership})
+       when is_map(ownership) do
+    case ProcessOwnership.terminate_owned_processes(issue, ownership_identity(ownership)) do
+      {:ok, %{live_after: 0}} -> :ok
+      {:error, :enoent} -> {:error, :ownership_missing}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp cleanup_owned_marker_processes(_running_entry), do: {:error, :ownership_missing}
 
   defp release_cancelled_owned_state(%{issue: %Issue{} = issue} = running_entry) do
     case release_owned_state(issue, running_entry) do
