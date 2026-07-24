@@ -25,6 +25,7 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
   """
 
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Runtime.ProcessOwnership
 
   # A delegated session whose orchestrator turn always settles successfully.
   # The only variable is what the session reports about its worker
@@ -54,7 +55,11 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     def start_agent(_session, spec, _context),
       do: {:ok, %{name: spec.name, pane_id: "w1:p1", agent_status: "idle"}}
 
-    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+    def begin_turn(_session, agent, prompt, _timeout_ms, context) do
+      if test_pid = Map.get(context, :test_pid) do
+        send(test_pid, {:worker_outcome_turn_started, prompt})
+      end
+
       {:ok,
        %{
          phase: :completed,
@@ -70,6 +75,20 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
 
     def stop_session(_session, %{stop_result: stop_result}), do: stop_result
     def stop_session(_session, _context), do: :ok
+
+    def owned_session_ref(session, context) do
+      %{
+        cleanup_module: __MODULE__,
+        owner: Map.get(context, :test_pid),
+        issue_id: Map.get(context, :issue_id),
+        session_name: session.name
+      }
+    end
+
+    def cleanup_owned_session(%{owner: owner, session_name: session_name}) do
+      if is_pid(owner), do: send(owner, {:owned_session_cleanup_called, session_name})
+      :ok
+    end
 
     def worker_assignments(_session, %{assignments: assignments}), do: {:ok, assignments}
     def worker_assignments(_session, _context), do: {:ok, []}
@@ -157,6 +176,75 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     assert_typed_failed_run(reason)
   end
 
+  test "a post-turn routing hook failure stops before normal continuation" do
+    reason =
+      run_reason("routing-hook-no-continuation",
+        hook_after_run: "exit 3",
+        max_turns: 2,
+        test_pid: self(),
+        issue_state_fetcher: fn [issue_id] ->
+          {:ok, [%{issue("routing-hook-no-continuation") | id: issue_id}]}
+        end
+      )
+
+    assert_typed_failed_run(reason)
+    assert_receive {:worker_outcome_turn_started, first_prompt}
+    refute first_prompt =~ "previous Codex turn completed normally"
+    refute_receive {:worker_outcome_turn_started, _continuation_prompt}, 100
+  end
+
+  test "the orchestrator acknowledges the Implementer cleanup capability before the first prompt" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-owned-session-ack-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    File.mkdir_p!(workspace_root)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    issue = issue("owned-session-ack")
+    test_pid = self()
+
+    assert {:ok, process_ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: "run-owned-session-ack",
+               holder: ProcessOwnership.holder_id()
+             })
+
+    {:ok, pid} =
+      Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+        AgentRunner.run(issue, test_pid,
+          run_id: "run-owned-session-ack",
+          role: "implementer",
+          process_ownership: process_ownership,
+          delegation_transport: WorkerOutcomeTransport,
+          delegation_transport_context: %{
+            assignments: [],
+            issue_id: issue.id,
+            test_pid: test_pid
+          }
+        )
+      end)
+
+    monitor_ref = Process.monitor(pid)
+
+    assert_receive {:owned_session_runtime_info, issue_id, ownership_ref, ack_recipient, ack_ref},
+                   1_000
+
+    assert issue_id == issue.id
+    assert ownership_ref.issue_id == issue.id
+    assert ownership_ref.session_name =~ "octo-emb-hotfix"
+    refute_receive {:worker_outcome_turn_started, _prompt}, 100
+
+    send(ack_recipient, {:owned_session_runtime_info_ack, ack_ref})
+    assert_receive {:worker_outcome_turn_started, _prompt}, 1_000
+    assert_receive {:DOWN, ^monitor_ref, :process, ^pid, :normal}, 2_000
+  end
+
   test "a failed owned-session cleanup exits with a typed failure, not :normal" do
     reason =
       run_reason("cleanup-failed",
@@ -164,6 +252,41 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
       )
 
     assert_typed_failed_run(reason)
+  end
+
+  test "missing process ownership fails before any role hook or provider prompt" do
+    {reason, before_marker, after_marker} =
+      run_with_invalid_ownership("ownership-missing", nil)
+
+    assert reason ==
+             {:agent_runtime_failed, {:process_ownership_publication_failed, :ownership_missing}}
+
+    refute File.exists?(before_marker)
+    refute File.exists?(after_marker)
+    refute_receive {:worker_outcome_turn_started, _prompt}, 100
+  end
+
+  test "mismatched process ownership fails before any role hook or provider prompt" do
+    invalid_ownership = fn issue ->
+      assert {:ok, ownership} =
+               ProcessOwnership.acquire(issue, %{
+                 role: "implementer",
+                 run_id: "run-ownership-mismatch",
+                 holder: ProcessOwnership.holder_id()
+               })
+
+      {%{ownership | run_id: "wrong-run"}, ownership}
+    end
+
+    {reason, before_marker, after_marker} =
+      run_with_invalid_ownership("ownership-mismatch", invalid_ownership)
+
+    assert reason ==
+             {:agent_runtime_failed, {:process_ownership_publication_failed, :ownership_mismatch}}
+
+    refute File.exists?(before_marker)
+    refute File.exists?(after_marker)
+    refute_receive {:worker_outcome_turn_started, _prompt}, 100
   end
 
   # The Orchestrator has exactly one success signal at its monitored-task
@@ -197,18 +320,36 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
 
     on_exit(fn -> File.rm_rf(test_root) end)
 
+    issue = issue(label)
+
+    assert {:ok, process_ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: "run-#{label}",
+               holder: ProcessOwnership.holder_id()
+             })
+
+    on_exit(fn ->
+      _ =
+        ProcessOwnership.release(issue, %{
+          holder: process_ownership.holder,
+          run_id: process_ownership.run_id,
+          workspace_path: process_ownership.workspace_path
+        })
+    end)
+
     runner_opts =
       [
         run_id: "run-#{label}",
         role: "implementer",
+        process_ownership: process_ownership,
         delegation_transport: WorkerOutcomeTransport,
         delegation_transport_context: %{
           assignments: Keyword.get(opts, :assignments, []),
-          stop_result: Keyword.get(opts, :stop_result, :ok)
+          stop_result: Keyword.get(opts, :stop_result, :ok),
+          test_pid: Keyword.get(opts, :test_pid)
         }
       ] ++ Keyword.take(opts, [:max_turns, :issue_state_fetcher])
-
-    issue = issue(label)
 
     {reason, _log} =
       with_log(fn ->
@@ -228,6 +369,76 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
 
     reason
   end
+
+  defp run_with_invalid_ownership(label, ownership_builder) do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-ownership-pre-hook-#{label}-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    before_marker = Path.join(test_root, "before-run-called")
+    after_marker = Path.join(test_root, "after-run-called")
+    File.mkdir_p!(workspace_root)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      hook_before_run: "touch #{before_marker}",
+      hook_after_run: "touch #{after_marker}"
+    )
+
+    issue = issue(label)
+
+    {process_ownership, ownership_to_release} =
+      case ownership_builder do
+        builder when is_function(builder, 1) -> builder.(issue)
+        _ -> {nil, nil}
+      end
+
+    on_exit(fn ->
+      if is_map(ownership_to_release) do
+        _ =
+          ProcessOwnership.release(issue, %{
+            holder: ownership_to_release.holder,
+            run_id: ownership_to_release.run_id,
+            workspace_path: ownership_to_release.workspace_path
+          })
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    runner_opts =
+      [
+        run_id: "run-#{label}",
+        role: "implementer",
+        delegation_transport: WorkerOutcomeTransport,
+        delegation_transport_context: %{assignments: [], test_pid: self()}
+      ]
+      |> maybe_put_process_ownership(process_ownership)
+
+    {:ok, pid} =
+      Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+        AgentRunner.run(issue, nil, runner_opts)
+      end)
+
+    ref = Process.monitor(pid)
+
+    reason =
+      receive do
+        {:DOWN, ^ref, :process, ^pid, exit_reason} -> exit_reason
+      after
+        5_000 -> flunk("runner task for #{label} did not finish")
+      end
+
+    {reason, before_marker, after_marker}
+  end
+
+  defp maybe_put_process_ownership(opts, nil), do: opts
+
+  defp maybe_put_process_ownership(opts, ownership),
+    do: Keyword.put(opts, :process_ownership, ownership)
 
   defp issue(label) do
     %Issue{

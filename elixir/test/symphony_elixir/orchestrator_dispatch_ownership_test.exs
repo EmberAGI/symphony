@@ -118,6 +118,175 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
     assert [_archive] = Path.wildcard(ProcessOwnership.registry_path(issue) <> ".stale-*")
   end
 
+  test "dispatch publishes readable ownership before the first role hook or prompt" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-dispatch-ownership-before-prompt-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    observed_record = Path.join(test_root, "ownership-before-prompt.json")
+
+    issue = %Issue{
+      id: "issue-ownership-before-prompt",
+      identifier: "EMB-1237-OWNERSHIP",
+      title: "Publish ownership before role execution",
+      description: "The guarded role mutation must see its exact ownership record.",
+      state: "In Progress",
+      repository: "EmberAGI/symphony"
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 30_000,
+      hook_before_run: """
+      set -eu
+      test -n "$SYMPHONY_ROLE_RUN_ID"
+      test -r "$SYMPHONY_ROLE_OWNERSHIP_PATH"
+      cp "$SYMPHONY_ROLE_OWNERSHIP_PATH" #{observed_record}
+      exit 17
+      """
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :OwnershipBeforePromptOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      stop_orchestrator!(pid)
+      File.rm_rf(test_root)
+    end)
+
+    assert_eventually(fn -> File.regular?(observed_record) end)
+
+    record = observed_record |> File.read!() |> Jason.decode!()
+    assert record["issue_id"] == issue.id
+    assert record["role"] == "implementer"
+    assert record["state"] == "active"
+    assert record["cleanup_status"] == "active"
+    assert is_binary(record["run_id"]) and record["run_id"] != ""
+    assert record["run_id"] == get_in(record, ["ownership_env", "SYMPHONY_ROLE_RUN_ID"])
+    assert record["workspace_path"] == get_in(record, ["ownership_env", "SYMPHONY_ROLE_WORKSPACE_PATH"])
+  end
+
+  test "registered orchestrator stop settles active ownership after its process tree is gone" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-registered-stop-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+
+    issue = %Issue{
+      id: "issue-registered-stop-cleanup",
+      identifier: "EMB-1237-STOP",
+      title: "Settle ownership on registered stop",
+      description: "Stopped role processes cannot leave active ownership behind.",
+      state: "In Progress",
+      repository: "EmberAGI/symphony"
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 30_000,
+      hook_before_run: "sleep 30"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :RegisteredStopCleanupOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      stop_orchestrator!(pid)
+      File.rm_rf(test_root)
+    end)
+
+    issue_id = issue.id
+
+    running_pid =
+      assert_eventually_value(fn ->
+        case :sys.get_state(pid) do
+          %{running: %{^issue_id => %{pid: runner_pid}}} when is_pid(runner_pid) -> runner_pid
+          _ -> nil
+        end
+      end)
+
+    assert %{state: "active", cleanup_status: "active"} =
+             ProcessOwnership.status_for_issue(issue)
+
+    log =
+      capture_log(fn ->
+        assert :ok = GenServer.stop(pid, :normal, 5_000)
+      end)
+
+    refute Process.alive?(running_pid)
+
+    assert %{state: "cleaned", cleanup_status: "cleaned"} =
+             ProcessOwnership.status_for_issue(issue)
+
+    assert log =~
+             "Role-run cancellation cleanup verified issue_id=#{issue.id} owned_pids=[] live_after=0"
+  end
+
+  test "registered orchestrator stop fails loudly when ownership cleanup cannot be recorded" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-registered-stop-cleanup-failure-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+
+    issue = %Issue{
+      id: "issue-registered-stop-cleanup-failure",
+      identifier: "EMB-1237-STOP-FAILURE",
+      title: "Expose cancellation cleanup failure",
+      description: "Missing cleanup evidence must remain visible.",
+      state: "In Progress",
+      repository: "EmberAGI/symphony"
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 30_000,
+      hook_before_run: "sleep 30"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :RegisteredStopCleanupFailureOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      stop_orchestrator!(pid)
+      File.rm_rf(test_root)
+    end)
+
+    assert_eventually(fn ->
+      match?(
+        %{state: "active", cleanup_status: "active"},
+        ProcessOwnership.status_for_issue(issue)
+      )
+    end)
+
+    :ok = File.rm(ProcessOwnership.registry_path(issue))
+
+    log =
+      capture_log(fn ->
+        assert :ok = GenServer.stop(pid, :normal, 5_000)
+      end)
+
+    assert log =~ "Role-run cancellation cleanup failed issue_id=#{issue.id}"
+    assert log =~ "ownership_missing"
+  end
+
   test "irrecoverable task exit blocks process ownership without comment traffic" do
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")

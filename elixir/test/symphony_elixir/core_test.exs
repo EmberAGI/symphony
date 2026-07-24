@@ -282,7 +282,7 @@ defmodule SymphonyElixir.CoreTest do
 
       refute Map.has_key?(updated_state.running, issue_id)
       refute MapSet.member?(updated_state.claimed, issue_id)
-      assert_receive {:owned_session_cleanup, "octo-mt-556-run-1", true}
+      assert_receive {:owned_session_cleanup, "octo-mt-556-run-1", false}
       refute Process.alive?(agent_pid)
       refute File.exists?(workspace)
     after
@@ -1263,6 +1263,7 @@ defmodule SymphonyElixir.CoreTest do
       )
 
       issue = %Issue{
+        id: "issue-smoke-workspace",
         identifier: "S-99",
         title: "Smoke test",
         description: "Run and keep workspace",
@@ -1272,7 +1273,7 @@ defmodule SymphonyElixir.CoreTest do
       }
 
       before = MapSet.new(File.ls!(workspace_root))
-      assert :ok = AgentRunner.run(issue, nil, role: "reviewer")
+      assert :ok = run_agent_with_ownership(issue, nil, role: "reviewer")
       entries_after = MapSet.new(File.ls!(workspace_root))
 
       created =
@@ -1362,7 +1363,7 @@ defmodule SymphonyElixir.CoreTest do
       test_pid = self()
 
       assert :ok =
-               AgentRunner.run(
+               run_agent_with_ownership(
                  issue,
                  test_pid,
                  role: "reviewer",
@@ -1490,7 +1491,14 @@ defmodule SymphonyElixir.CoreTest do
 
       log =
         capture_log(fn ->
-          assert catch_exit(AgentRunner.run(issue, nil, run_id: "run-auth", role: "reviewer")) ==
+          assert catch_exit(
+                   run_agent_with_ownership(
+                     issue,
+                     nil,
+                     run_id: "run-auth",
+                     role: "reviewer"
+                   )
+                 ) ==
                    {:provider_auth_failed, %{provider: :claude_code, api_error_status: 403, subtype: "login_required"}}
         end)
 
@@ -1607,7 +1615,14 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, role: "reviewer", issue_state_fetcher: state_fetcher)
+      assert :ok =
+               run_agent_with_ownership(
+                 issue,
+                 nil,
+                 role: "reviewer",
+                 issue_state_fetcher: state_fetcher
+               )
+
       assert_receive {:issue_state_fetch, 1}
       assert_receive {:issue_state_fetch, 2}
 
@@ -1729,7 +1744,7 @@ defmodule SymphonyElixir.CoreTest do
       }
 
       assert catch_exit(
-               AgentRunner.run(issue, nil,
+               run_agent_with_ownership(issue, nil,
                  role: "reviewer",
                  issue_state_fetcher: state_fetcher
                )

@@ -13,6 +13,8 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   @registry_dir ".symphony/process-ownership"
   @lock_owner_file "owner.json"
   @malformed_lock_stale_after_ms 60_000
+  @owned_process_exit_attempts 25
+  @owned_process_exit_interval_ms 10
   @valid_states ~w(active retrying blocked quarantined cleaned released)
   @required_record_strings ~w(issue_id role run_id holder worker_host_id workspace_path updated_at)
 
@@ -67,6 +69,59 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   rescue
     error ->
       Logger.warning("Failed to update process ownership for issue_id=#{issue.id}: #{Exception.message(error)}")
+      {:error, error}
+  end
+
+  @doc """
+  Reads the exact ownership scope and verifies its immutable identity without
+  taking the mutation lock.
+  """
+  @spec verify(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
+  def verify(%Issue{} = issue, expected) when is_map(expected) do
+    expected = scope_attrs(issue, normalize_attrs(expected))
+    path = scoped_registry_path(issue, expected)
+
+    with :ok <- validate_identity(expected),
+         {:ok, record} <- read_exact_record(path),
+         :ok <- verify_owner(record, expected),
+         :ok <- validate_identity_updates(record, expected) do
+      {:ok, normalize_status(record)}
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to verify process ownership for issue_id=#{issue.id}: #{Exception.message(error)}")
+
+      {:error, error}
+  end
+
+  @doc """
+  Terminates only local OS processes that still carry the exact verified
+  issue/role/run ownership environment.
+
+  Every PID is rechecked immediately before signaling. TERM receives a bounded
+  grace period; exact-marker survivors receive KILL and a second bounded wait.
+  """
+  @spec terminate_owned_processes(Issue.t(), map()) ::
+          {:ok, %{term_pids: [pos_integer()], kill_pids: [pos_integer()], live_after: 0}}
+          | {:error, term()}
+  def terminate_owned_processes(%Issue{} = issue, expected) when is_map(expected) do
+    with {:ok, ownership} <- verify(issue, expected),
+         criteria <- ownership_env_criteria(ownership),
+         true <- ownership_env_criteria_scoped?(criteria),
+         term_pids <- signal_matching_processes(criteria, "TERM"),
+         _term_survivors <- await_matching_processes(criteria, @owned_process_exit_attempts),
+         kill_pids <- signal_matching_processes(criteria, "KILL"),
+         [] <- await_matching_processes(criteria, @owned_process_exit_attempts) do
+      {:ok, %{term_pids: term_pids, kill_pids: kill_pids, live_after: 0}}
+    else
+      false -> {:error, :unscoped_ownership_environment}
+      live_pids when is_list(live_pids) -> {:error, {:owned_processes_remain, live_pids}}
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to terminate owned processes for issue_id=#{issue.id}: #{Exception.message(error)}")
+
       {:error, error}
   end
 
@@ -1162,11 +1217,47 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     criteria = ownership_env_criteria(attrs_or_record)
 
     if ownership_env_criteria_scoped?(criteria) do
-      process_table()
-      |> Enum.map(fn {pid, _ppid, _pgid} -> pid end)
-      |> Enum.filter(&process_env_matches?(&1, criteria))
+      matching_processes(criteria)
     else
       []
+    end
+  end
+
+  defp matching_processes(criteria) when is_list(criteria) do
+    process_table()
+    |> Enum.map(fn {pid, _ppid, _pgid} -> pid end)
+    |> Enum.filter(&process_env_matches?(&1, criteria))
+  end
+
+  defp signal_matching_processes(criteria, signal, candidates \\ nil)
+       when is_list(criteria) and signal in ["TERM", "KILL"] do
+    pids = if is_list(candidates), do: candidates, else: matching_processes(criteria)
+
+    matching_pids = Enum.filter(pids, &process_env_matches?(&1, criteria))
+    Enum.each(matching_pids, &signal_process(&1, signal))
+
+    matching_pids
+  end
+
+  defp signal_process(pid, signal) when is_integer(pid) and signal in ["TERM", "KILL"] do
+    _ =
+      System.cmd("kill", ["-#{signal}", Integer.to_string(pid)], stderr_to_stdout: true)
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp await_matching_processes(criteria, 0), do: matching_processes(criteria)
+
+  defp await_matching_processes(criteria, attempts) when attempts > 0 do
+    case matching_processes(criteria) do
+      [] ->
+        []
+
+      _live_pids ->
+        Process.sleep(@owned_process_exit_interval_ms)
+        await_matching_processes(criteria, attempts - 1)
     end
   end
 

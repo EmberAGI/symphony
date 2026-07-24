@@ -113,7 +113,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
 
       capture_log(fn ->
         catch_exit(
-          AgentRunner.run(issue, self(),
+          run_agent_with_ownership(issue, self(),
             run_id: "run-preserve-#{label}",
             role: "implementer",
             delegation_transport: transport,

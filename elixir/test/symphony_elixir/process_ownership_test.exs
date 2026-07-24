@@ -561,6 +561,76 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
              ProcessOwnership.acquire(issue, ownership_attrs("replacement-run", "replacement-holder"))
   end
 
+  test "exact-marker cleanup terminates shell descendants without touching another run", %{
+    issue: issue
+  } do
+    if File.dir?("/proc") do
+      attrs = ownership_attrs("owned-marker-run", ProcessOwnership.holder_id())
+      assert {:ok, ownership} = ProcessOwnership.acquire(issue, attrs)
+
+      owned_env = ProcessOwnership.ownership_env(issue, ownership)
+      other_env = List.keystore(owned_env, "SYMPHONY_ROLE_RUN_ID", 0, {"SYMPHONY_ROLE_RUN_ID", "other-run"})
+
+      owned_port =
+        start_owned_process(
+          "trap '' TERM; while :; do sleep 300; done",
+          owned_env
+        )
+
+      other_port = start_owned_process("exec sleep 300", other_env)
+      {:os_pid, owned_shell_pid} = Port.info(owned_port, :os_pid)
+      {:os_pid, other_run_pid} = Port.info(other_port, :os_pid)
+
+      on_exit(fn ->
+        signal_test_pid(owned_shell_pid, "KILL")
+        signal_test_pid(other_run_pid, "KILL")
+        close_port(owned_port)
+        close_port(other_port)
+      end)
+
+      assert_eventually(fn ->
+        case ProcessOwnership.status_for_issue(issue) do
+          %{ownership_env_pids: pids} ->
+            owned_shell_pid in pids and length(pids) >= 2
+
+          _ ->
+            false
+        end
+      end)
+
+      beam_os_pid = String.to_integer(System.pid())
+      refute beam_os_pid in ProcessOwnership.status_for_issue(issue).ownership_env_pids
+
+      assert {:ok,
+              %{
+                term_pids: term_pids,
+                kill_pids: kill_pids,
+                live_after: 0
+              }} =
+               ProcessOwnership.terminate_owned_processes(issue, %{
+                 holder: ownership.holder,
+                 run_id: ownership.run_id,
+                 workspace_path: ownership.workspace_path
+               })
+
+      assert owned_shell_pid in term_pids
+      assert is_list(kill_pids)
+      refute other_run_pid in kill_pids
+      refute os_process_alive?(owned_shell_pid)
+      assert os_process_alive?(other_run_pid)
+      assert Process.alive?(self())
+
+      assert {:ok, %{state: "cleaned", ownership_env_pids: []}} =
+               ProcessOwnership.release(issue, %{
+                 holder: ownership.holder,
+                 run_id: ownership.run_id,
+                 workspace_path: ownership.workspace_path
+               })
+    else
+      assert true
+    end
+  end
+
   defp ownership_attrs(run_id, holder) do
     %{
       role: "implementer",
@@ -569,4 +639,50 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
       workspace_path: nil
     }
   end
+
+  defp start_owned_process(script, env) do
+    Port.open({:spawn_executable, System.find_executable("bash")}, [
+      :binary,
+      :exit_status,
+      args: [~c"-lc", String.to_charlist(script)],
+      env:
+        Enum.map(env, fn {key, value} ->
+          {String.to_charlist(key), String.to_charlist(value)}
+        end)
+    ])
+  end
+
+  defp signal_test_pid(pid, signal) do
+    _ = System.cmd("kill", ["-#{signal}", Integer.to_string(pid)], stderr_to_stdout: true)
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp os_process_alive?(pid) do
+    case System.cmd("kill", ["-0", Integer.to_string(pid)], stderr_to_stdout: true) do
+      {_output, 0} -> true
+      _ -> false
+    end
+  end
+
+  defp close_port(port) do
+    if Port.info(port), do: Port.close(port)
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp assert_eventually(fun, attempts \\ 100)
+
+  defp assert_eventually(fun, attempts) when attempts > 0 do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(10)
+      assert_eventually(fun, attempts - 1)
+    end
+  end
+
+  defp assert_eventually(_fun, 0), do: flunk("condition not met in time")
 end

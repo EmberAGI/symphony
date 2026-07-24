@@ -512,6 +512,18 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert orchestrator_spec.env["SYMPHONY_ROLE_HOLDER"] == ProcessOwnership.holder_id()
     assert orchestrator_spec.env["SYMPHONY_ROLE_OWNERSHIP_PATH"] =~ "process-ownership"
 
+    ownership_path = orchestrator_spec.env["SYMPHONY_ROLE_OWNERSHIP_PATH"]
+
+    assert Enum.any?(
+             orchestrator_spec.argv,
+             &String.contains?(&1, "#{inspect(ownership_path)}=\"read\"")
+           )
+
+    refute Enum.any?(
+             orchestrator_spec.argv,
+             &String.contains?(&1, "#{inspect(Path.dirname(ownership_path))}=\"read\"")
+           )
+
     assert orchestrator_spec.env |> Map.delete("PATH") |> Map.drop(ownership_keys) == %{
              "OCTO_HERDR_WORKER_LAUNCHER" => "/tmp/octo-emb-1141-runtime-seam/launch-worker",
              "SYMPHONY_SKILL_EXECUTION_CONTRACTS" => encoded_contract,

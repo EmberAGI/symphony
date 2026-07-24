@@ -258,6 +258,13 @@ admission opens.
   archives for that ownership scope on a best-effort basis; any undeletable
   residue is inert runtime evidence and never re-enters dispatch authority.
   Records for different roles or workspaces may coexist.
+- Before the first role hook or provider prompt, the runner must verify the
+  exact acquired holder/run identity through a read-only ownership check and
+  project that record's non-secret ownership environment unchanged. The
+  referenced ownership file must already be readable. For the Implementer
+  Codex orchestrator, the provider sandbox grants read access to that exact
+  file only; it must not grant the parent registry directory or broaden the
+  workspace permission.
 - This V1 ownership implementation supports only the local host. Any selected
   nonblank remote worker host fails closed before dispatch.
 - Legitimate continuation turns inside one role run use the existing runtime
@@ -747,6 +754,28 @@ leave the owned-session reference recoverable. A successful checkpoint
 permits bounded shutdown. The runner and monitored-task boundary both consume
 the same idempotent owned-session cleanup capability so success, failure,
 cancellation, timeout, and abrupt task exit converge on bounded teardown.
+The Implementer runner must publish that cleanup capability to the registered
+top-level orchestrator and receive its acknowledgement before sending the first
+provider prompt. A missing acknowledgement is a typed failed run and the
+runner cleans the session instead of proceeding. Registered orchestrator
+shutdown stops only its exact tracked task/session entries, consumes the
+acknowledged capability, verifies `live_after=0`, and settles the matching
+process-ownership record; missing or unwriteable settlement evidence is logged
+as a cleanup failure rather than left silently active. The same terminal
+cleanup boundary runs after normal or abnormal task exit and after forced
+stall, timeout, state, routing, or shutdown cancellation for every role. If an
+issue-owned hook or provider descendant survives task/session stop, cleanup
+rechecks each PID's complete ownership environment before signaling it,
+permits one bounded TERM grace period, and sends KILL only to exact-marker
+survivors. A different issue, role, run, or unmarked process is never eligible,
+and ownership release waits until the exact-marker live set is empty. Cleanup
+failure replaces normal completion with a typed runtime failure and is logged
+before retry or terminal classification.
+If the acquired ownership record is missing, malformed, or does not match the
+run capability before hook dispatch, the attempt returns the typed
+`process_ownership_publication_failed` result directly. Neither `before_run`,
+`after_run`, nor the provider prompt may execute because no owned role session
+started.
 Successful cleanup removes the private runtime root, including ephemeral worker
 message evidence, and emits a bounded existing-log/status summary keyed by
 issue, run-owned Herdr session, exact owned PID evidence when available, and

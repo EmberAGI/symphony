@@ -362,7 +362,13 @@ defmodule SymphonyElixir.ImplementerDelegation do
       provider: contract_provider(contract, :orchestrator),
       profile: contract.orchestrator,
       cwd: workspace,
-      argv: launcher_argv(contract_provider(contract, :orchestrator), contract.orchestrator, workspace, herdr_session),
+      argv:
+        launcher_argv(
+          contract_provider(contract, :orchestrator),
+          contract.orchestrator,
+          workspace,
+          orchestrator_permission_session(herdr_session, orchestrator_env)
+        ),
       env: orchestrator_env
     }
 
@@ -383,6 +389,21 @@ defmodule SymphonyElixir.ImplementerDelegation do
   end
 
   defp validate_orchestrator_env(_env), do: {:error, :invalid_implementer_orchestrator_environment}
+
+  defp orchestrator_permission_session(herdr_session, orchestrator_env) do
+    case Map.get(orchestrator_env, "SYMPHONY_ROLE_OWNERSHIP_PATH") do
+      path when is_binary(path) and path != "" ->
+        Map.update(
+          herdr_session,
+          :permission_read_roots,
+          [path],
+          &Enum.uniq([path | &1])
+        )
+
+      _ ->
+        herdr_session
+    end
+  end
 
   defp project_orchestrator_herdr_path(env, %{orchestrator_bin: orchestrator_bin})
        when is_binary(orchestrator_bin) and orchestrator_bin != "" do

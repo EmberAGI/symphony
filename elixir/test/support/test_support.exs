@@ -1,4 +1,7 @@
 defmodule SymphonyElixir.TestSupport do
+  alias SymphonyElixir.AgentRunner
+  alias SymphonyElixir.Runtime.ProcessOwnership
+
   @workflow_prompt "You are an agent for this repository."
 
   # Mirrors the production schema default so an omitted endpoint is treated
@@ -31,6 +34,8 @@ defmodule SymphonyElixir.TestSupport do
           write_workflow_file!: 1,
           write_workflow_file!: 2,
           restore_env: 2,
+          run_agent_with_ownership: 2,
+          run_agent_with_ownership: 3,
           stop_default_http_server: 0,
           stop_orchestrator!: 1
         ]
@@ -150,6 +155,70 @@ defmodule SymphonyElixir.TestSupport do
 
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
+
+  def run_agent_with_ownership(issue, recipient, opts \\ []) do
+    run_id =
+      Keyword.get_lazy(
+        opts,
+        :run_id,
+        fn -> "test-run-#{System.unique_integer([:positive])}" end
+      )
+
+    role = Keyword.get(opts, :role, ProcessOwnership.current_role())
+
+    {:ok, ownership} =
+      ProcessOwnership.acquire(issue, %{
+        role: role,
+        run_id: run_id,
+        holder: ProcessOwnership.holder_id(),
+        worker_host: Keyword.get(opts, :worker_host)
+      })
+
+    runner_recipient = ownership_ack_recipient(recipient)
+
+    try do
+      AgentRunner.run(
+        issue,
+        runner_recipient,
+        opts
+        |> Keyword.put(:run_id, run_id)
+        |> Keyword.put(:process_ownership, ownership)
+      )
+    after
+      _ =
+        ProcessOwnership.release(issue, %{
+          holder: ownership.holder,
+          run_id: ownership.run_id,
+          workspace_path: ownership.workspace_path
+        })
+
+      if is_pid(runner_recipient) and runner_recipient != recipient do
+        send(runner_recipient, :stop)
+      end
+    end
+  end
+
+  defp ownership_ack_recipient(recipient) when is_pid(recipient) do
+    spawn_link(fn -> forward_runner_updates(recipient) end)
+  end
+
+  defp ownership_ack_recipient(recipient), do: recipient
+
+  defp forward_runner_updates(recipient) do
+    receive do
+      {:owned_session_runtime_info, issue_id, ownership_ref, ack_recipient, ack_ref} ->
+        send(recipient, {:owned_session_runtime_info, issue_id, ownership_ref})
+        send(ack_recipient, {:owned_session_runtime_info_ack, ack_ref})
+        forward_runner_updates(recipient)
+
+      :stop ->
+        :ok
+
+      message ->
+        send(recipient, message)
+        forward_runner_updates(recipient)
+    end
+  end
 
   # Cross-test isolation: `Process.exit(pid, :normal)` is a no-op for a
   # non-trapping GenServer, and the `start_link` link is equally inert once
