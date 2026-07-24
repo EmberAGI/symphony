@@ -111,9 +111,9 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
          criteria <- ownership_env_criteria(ownership),
          true <- ownership_env_criteria_scoped?(criteria),
          {:ok, term_pids} <- signal_matching_processes(criteria, "TERM"),
-         {:ok, _term_survivors} <- await_matching_processes(criteria, @owned_process_exit_attempts),
-         {:ok, kill_pids} <- signal_matching_processes(criteria, "KILL"),
-         {:ok, []} <- await_matching_processes(criteria, @owned_process_exit_attempts) do
+         {:ok, _term_survivors} <- await_matching_processes(criteria, term_pids, @owned_process_exit_attempts),
+         {:ok, kill_pids} <- signal_matching_processes(criteria, "KILL", term_pids),
+         {:ok, []} <- await_matching_processes(criteria, kill_pids, @owned_process_exit_attempts) do
       {:ok, %{term_pids: term_pids, kill_pids: kill_pids, live_after: 0}}
     else
       false -> {:error, :unscoped_ownership_environment}
@@ -1088,12 +1088,13 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   defp active_record_blocks?(record) do
     process_pids = record_process_pids(record)
+    table = checked_process_table()
 
     cond do
-      any_pid_live?(process_pids) ->
+      any_pid_live_in_table?(process_pids, table) ->
         true
 
-      process_group_live?(record["app_server_pgid"]) or ownership_env_process_live?(record) ->
+      process_group_live_in_snapshot?(record["app_server_pgid"], table) or ownership_env_process_live?(record) ->
         true
 
       process_pids == [] and holder_has_dead_pid?(record["holder"]) ->
@@ -1114,8 +1115,10 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp quarantined_record_blocks?(record), do: local_process_live?(record)
 
   defp local_process_live?(record) do
-    any_pid_live?(record_process_pids(record)) or
-      process_group_live?(record["app_server_pgid"]) or ownership_env_process_live?(record)
+    table = checked_process_table()
+
+    any_pid_live_in_table?(record_process_pids(record), table) or
+      process_group_live_in_snapshot?(record["app_server_pgid"], table) or ownership_env_process_live?(record)
   end
 
   @spec owned_process_live?(map()) :: boolean()
@@ -1123,9 +1126,13 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     normalized_attrs = normalize_attrs(attrs)
     app_server_pgid = normalized_attrs.app_server_pgid || process_group_id(normalized_attrs.app_server_pid)
     process_tree_pids = process_tree_pids(normalized_attrs.app_server_pid, normalized_attrs.process_tree_pids)
+    table = checked_process_table()
 
-    any_pid_live?([normalized_attrs.app_server_pid, normalized_attrs.worker_pid | process_tree_pids]) or
-      process_group_live?(app_server_pgid) or ownership_env_process_live?(normalized_attrs)
+    any_pid_live_in_table?(
+      [normalized_attrs.app_server_pid, normalized_attrs.worker_pid | process_tree_pids],
+      table
+    ) or
+      process_group_live_in_snapshot?(app_server_pgid, table) or ownership_env_process_live?(normalized_attrs)
   end
 
   @spec owned_process_live?(Issue.t(), map()) :: boolean()
@@ -1173,6 +1180,36 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   end
 
   defp pid_live?(_pid), do: false
+
+  # Batched liveness: decide a recorded pid set against ONE process-table
+  # snapshot instead of forking `kill -0` per pid. Production records carried
+  # hundreds of stale pids, so the per-pid fan-out shelled `System.cmd` hundreds
+  # of times per evaluation and wedged the caller (EMB-1260).
+  # The snapshot is the TYPED read (`checked_process_table/0`), so batching never
+  # costs the fail-closed guarantee: an unusable read is not evidence of an empty
+  # table (EMB-1259), it reports the recorded pids LIVE and blocks admission.
+  defp any_pid_live_in_table?([], _table), do: false
+
+  defp any_pid_live_in_table?(pids, {:ok, processes}) when is_list(pids) do
+    live = live_pid_set(processes)
+    Enum.any?(pids, fn pid -> MapSet.member?(live, pid_value(pid)) end)
+  end
+
+  defp any_pid_live_in_table?(pids, {:error, reason}) when is_list(pids) do
+    case pids |> Enum.map(&pid_value/1) |> Enum.reject(&is_nil/1) do
+      [] ->
+        false
+
+      candidates ->
+        Logger.warning("Process table unreadable (#{inspect(reason)}); treating owned pids #{inspect(candidates)} as live")
+
+        true
+    end
+  end
+
+  defp live_pid_set(table) when is_list(table) do
+    MapSet.new(table, fn {pid, _ppid, _pgid} -> pid end)
+  end
 
   defp normalize_status(nil), do: nil
 
@@ -1373,7 +1410,19 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp process_tree_pids(nil, existing_pids), do: existing_pids
 
   defp process_tree_pids(app_server_pid, existing_pids) do
-    ([app_server_pid] ++ existing_pids ++ descendant_pids(app_server_pid))
+    # One table snapshot serves both descendant discovery and pruning: recorded
+    # pids that are dead in this same snapshot are dropped so a rebuilt record
+    # stops accumulating stale trees across active refreshes (the production
+    # record had ~300 dead pids). The app-server anchor is always retained;
+    # terminal settlement captures its own evidence pre-teardown (EMB-1259), so
+    # dropping dead pids here never changes cleanup_evidence semantics.
+    table = process_table()
+    live = live_pid_set(table)
+    anchor = pid_value(app_server_pid)
+
+    live_existing = Enum.filter(existing_pids, fn pid -> MapSet.member?(live, pid_value(pid)) end)
+
+    ([app_server_pid] ++ live_existing ++ descendants_from_process_table(table, anchor))
     |> Enum.map(&pid_value/1)
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
@@ -1386,19 +1435,8 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     |> Enum.uniq()
   end
 
-  defp descendant_pids(pid) do
-    pid
-    |> pid_value()
-    |> case do
-      nil -> []
-      integer -> descendants_from_process_table(integer)
-    end
-  end
-
-  defp descendants_from_process_table(root_pid) when is_integer(root_pid) do
-    process_table()
-    |> descendants_from_process_table(root_pid)
-  end
+  defp descendants_from_process_table(processes, root_pid) when is_list(processes) and not is_integer(root_pid),
+    do: []
 
   defp descendants_from_process_table(processes, root_pid) when is_list(processes) and is_integer(root_pid) do
     children_by_parent =
@@ -1433,10 +1471,16 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     end
   end
 
-  defp process_group_live?(pgid) do
+  # Normalises the recorded pgid, then decides it against a snapshot the caller
+  # already read, so one evaluation forks `ps` once (EMB-1260) without giving up
+  # the typed fail-closed behaviour below (EMB-1259). A record with no recorded
+  # pgid is not "live via its group" — the pid and env checks still run.
+  # (Replaces the former `process_group_live?/1`, which was exactly this over an
+  # unshared `checked_process_table/0` read.)
+  defp process_group_live_in_snapshot?(pgid, table) do
     case pid_value(pgid) do
       nil -> false
-      integer -> process_group_live_in_table?(integer, checked_process_table())
+      integer -> process_group_live_in_table?(integer, table)
     end
   end
 
@@ -1512,9 +1556,16 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     end
   end
 
-  defp signal_matching_processes(criteria, signal)
+  # With a candidate list (the KILL pass over TERM survivors, EMB-1260) only
+  # those pids are env-rechecked before signalling; without one the initial
+  # TERM pass discovers candidates from a checked table read that stays typed
+  # on failure (EMB-1259 66-F1).
+  defp signal_matching_processes(criteria, signal, candidates \\ nil)
        when is_list(criteria) and signal in ["TERM", "KILL"] do
-    case checked_matching_processes(criteria) do
+    candidates_result =
+      if is_list(candidates), do: {:ok, candidates}, else: checked_matching_processes(criteria)
+
+    case candidates_result do
       {:ok, pids} ->
         matching_pids = Enum.filter(pids, &process_env_matches?(&1, criteria))
         Enum.each(matching_pids, &signal_process(&1, signal))
@@ -1535,16 +1586,40 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     _ -> :ok
   end
 
-  defp await_matching_processes(criteria, 0), do: checked_matching_processes(criteria)
+  # Re-check only the still-live candidate pids each iteration, not the whole
+  # process table's environs: one table read decides which candidates are still
+  # alive, and the ownership-environment re-check runs only for those survivors
+  # (EMB-1260). A failed table read stays typed instead of reading as "all
+  # candidates exited" (EMB-1259 66-F1): teardown then fails
+  # settlement_evidence_unavailable rather than forging a clean wait.
+  defp await_matching_processes(criteria, candidates, 0),
+    do: still_matching_candidates(criteria, candidates)
 
-  defp await_matching_processes(criteria, attempts) when attempts > 0 do
-    case checked_matching_processes(criteria) do
+  defp await_matching_processes(criteria, candidates, attempts) when attempts > 0 do
+    case still_matching_candidates(criteria, candidates) do
       {:ok, []} ->
         {:ok, []}
 
-      {:ok, _live_pids} ->
+      {:ok, survivors} ->
         Process.sleep(@owned_process_exit_interval_ms)
-        await_matching_processes(criteria, attempts - 1)
+        await_matching_processes(criteria, survivors, attempts - 1)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp still_matching_candidates(_criteria, []), do: {:ok, []}
+
+  defp still_matching_candidates(criteria, candidates) when is_list(candidates) do
+    case checked_process_table() do
+      {:ok, processes} ->
+        live = live_pid_set(processes)
+
+        {:ok,
+         Enum.filter(candidates, fn pid ->
+           MapSet.member?(live, pid) and process_env_matches?(pid, criteria)
+         end)}
 
       {:error, reason} ->
         {:error, reason}

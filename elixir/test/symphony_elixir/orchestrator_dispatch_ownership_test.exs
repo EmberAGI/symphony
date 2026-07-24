@@ -328,8 +328,10 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
 
     reason = {:missing_required_tool_or_cli, %{tool: "claude", message: "command not found"}}
 
-    assert {:noreply, updated} =
-             Orchestrator.handle_info({:DOWN, ref, :process, self(), reason}, state)
+    # Terminal settlement is off the serial path (EMB-1260): dispatch the DOWN
+    # and drive the settlement-result message through handle_info so this direct
+    # call observes the finalized (blocked) state. Assertions unchanged.
+    updated = drive_down_settlement(state, ref, reason)
 
     assert updated.running == %{}
     assert updated.retry_attempts == %{}
@@ -521,6 +523,23 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
                holder: "replacement-holder",
                workspace_path: workspace_path
              })
+  end
+
+  # Drive an off-loop terminal settlement (EMB-1260) to completion for a
+  # direct-handle_info test: dispatch the DOWN, then feed the settlement task's
+  # {:settlement_result, ...} message through handle_info as a live loop would,
+  # returning the finalized state.
+  defp drive_down_settlement(state, ref, reason) do
+    assert {:noreply, dispatched} =
+             Orchestrator.handle_info({:DOWN, ref, :process, self(), reason}, state)
+
+    receive do
+      {:settlement_result, _token, _result} = message ->
+        assert {:noreply, finalized} = Orchestrator.handle_info(message, dispatched)
+        finalized
+    after
+      5_000 -> flunk("terminal settlement did not report its result in time")
+    end
   end
 
   defp assert_eventually(fun, attempts \\ 20)
