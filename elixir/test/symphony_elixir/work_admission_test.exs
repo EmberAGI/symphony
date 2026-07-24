@@ -471,60 +471,62 @@ defmodule SymphonyElixir.WorkAdmissionTest do
              Orchestrator.snapshot(orchestrator_name, 1_000)
   end
 
-  test "closed restart terminates orphaned runner tasks before reporting drained", %{
+  test "public default-path restart preserves runners and reports not drained for open and closed admission", %{
     test_root: test_root
   } do
-    marker_path = Path.join(test_root, "work-admission.json")
-    orchestrator_name = Module.concat(__MODULE__, :RestartCleanupOrchestrator)
-    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    restore_env!("SYMPHONY_EXECUTION_GENERATION", System.get_env("SYMPHONY_EXECUTION_GENERATION"))
+    restore_env!("SYMPHONY_ORCHESTRATION_ROOT", System.get_env("SYMPHONY_ORCHESTRATION_ROOT"))
+    restore_env!("SYMPHONY_WORK_ADMISSION_PATH", System.get_env("SYMPHONY_WORK_ADMISSION_PATH"))
+    System.put_env("SYMPHONY_EXECUTION_GENERATION", "generation-current")
+    System.delete_env("SYMPHONY_WORK_ADMISSION_PATH")
 
-    {:ok, first_pid} =
-      Orchestrator.start_link(
-        name: orchestrator_name,
-        execution_generation: "generation-current",
-        work_admission_marker_path: marker_path
-      )
+    Enum.each(["open", "closed"], fn expected_status ->
+      case_root = Path.join(test_root, expected_status)
+      System.put_env("SYMPHONY_ORCHESTRATION_ROOT", case_root)
+      orchestrator_name = Module.concat(__MODULE__, :"Restart#{expected_status}Orchestrator")
+      restart_issue = issue("issue-restart-#{expected_status}", "MT-RESTART-#{String.upcase(expected_status)}")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
-    assert {:ok, %{status: "open"}} =
-             Orchestrator.open_work_admission(orchestrator_name, "generation-current")
+      {:ok, first_pid} = Orchestrator.start_link(name: orchestrator_name)
 
-    wait_for_completed_poll(orchestrator_name)
+      assert {:ok, %{status: "open"}} =
+               Orchestrator.open_work_admission(orchestrator_name, "generation-current")
 
-    restart_issue = issue("issue-restart-orphan", "MT-RESTART-ORPHAN")
-    Application.put_env(:symphony_elixir, :memory_tracker_issues, [restart_issue])
-    send(first_pid, :run_poll_cycle)
+      wait_for_completed_poll(orchestrator_name)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [restart_issue])
+      send(first_pid, :run_poll_cycle)
 
-    assert {:ok, %{status: "closed"}} =
-             Orchestrator.close_work_admission(orchestrator_name, "generation-current")
+      if expected_status == "closed" do
+        assert {:ok, %{status: "closed"}} =
+                 Orchestrator.close_work_admission(orchestrator_name, "generation-current")
+      end
 
-    runner_pid = :sys.get_state(first_pid).running[restart_issue.id].pid
-    assert Process.alive?(runner_pid)
+      runner_pid = :sys.get_state(first_pid).running[restart_issue.id].pid
+      assert Process.alive?(runner_pid)
 
-    Process.unlink(first_pid)
-    first_ref = Process.monitor(first_pid)
-    Process.exit(first_pid, :kill)
-    assert_receive {:DOWN, ^first_ref, :process, ^first_pid, :killed}, 1_000
-    assert Process.alive?(runner_pid)
+      Process.unlink(first_pid)
+      first_ref = Process.monitor(first_pid)
+      Process.exit(first_pid, :kill)
+      assert_receive {:DOWN, ^first_ref, :process, ^first_pid, :killed}, 1_000
+      assert Process.alive?(runner_pid)
 
-    {:ok, restarted_pid} =
-      Orchestrator.start_link(
-        name: orchestrator_name,
-        execution_generation: "generation-current",
-        work_admission_marker_path: marker_path
-      )
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+      {:ok, restarted_pid} = Orchestrator.start_link(name: orchestrator_name)
 
-    on_exit(fn -> stop_orchestrator!(restarted_pid) end)
+      assert Process.alive?(runner_pid)
 
-    refute Process.alive?(runner_pid)
+      assert %{
+               work_admission: %{
+                 status: ^expected_status,
+                 target_generation: "generation-current",
+                 drained: false
+               },
+               running: []
+             } = Orchestrator.snapshot(orchestrator_name, 1_000)
 
-    assert %{
-             work_admission: %{
-               status: "closed",
-               target_generation: "generation-current",
-               drained: true
-             },
-             running: []
-           } = Orchestrator.snapshot(orchestrator_name, 1_000)
+      Process.exit(runner_pid, :kill)
+      stop_orchestrator!(restarted_pid)
+    end)
   end
 
   test "configured marker path without an execution generation starts closed and cannot open", %{

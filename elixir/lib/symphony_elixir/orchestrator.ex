@@ -107,7 +107,6 @@ defmodule SymphonyElixir.Orchestrator do
       latest_dispatch_summary: empty_dispatch_summary("not_checked")
     }
 
-    terminate_orphaned_runner_tasks()
     recover_stale_owned_sessions()
     run_terminal_workspace_cleanup()
     state = schedule_tick(state, 0)
@@ -2931,31 +2930,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp work_admission_open?(%State{work_admission: %{status: "open"}}), do: true
   defp work_admission_open?(_state), do: false
-
-  defp terminate_orphaned_runner_tasks do
-    runner_pids =
-      case active_runner_pids() do
-        {:ok, pids} ->
-          pids
-
-        {:error, reason} ->
-          Logger.error("Unable to inspect runner tasks before orchestrator polling: #{inspect(reason)}")
-          []
-      end
-
-    Enum.each(runner_pids, fn runner_pid ->
-      case Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, runner_pid) do
-        :ok -> :ok
-        {:error, :not_found} -> :ok
-      end
-    end)
-
-    if runner_pids != [] do
-      Logger.warning("Terminated #{length(runner_pids)} orphaned runner task(s) before orchestrator polling")
-    end
-
-    :ok
-  end
 
   defp active_runner_count do
     case active_runner_pids() do

@@ -318,10 +318,13 @@ admission opens.
   execution generation so the verified bootstrap can explicitly open it.
   Standalone Symphony without marker integration preserves open behavior.
 - On Orchestrator initialization, runner tasks surviving an earlier
-  Orchestrator process are terminated before polling and before stale
-  process-ownership recovery. `drained` is true only when both the
-  Orchestrator running map and the shared TaskSupervisor child set are empty;
-  TaskSupervisor inspection errors or exits report `drained: false`.
+  Orchestrator process continue under the shared TaskSupervisor; admission
+  state does not terminate already-running work. `drained` is true only when
+  both the Orchestrator running map and the shared TaskSupervisor child set are
+  empty; TaskSupervisor inspection errors or exits report `drained: false`.
+  The restarted Orchestrator does not reconstruct the earlier process's
+  in-memory scheduler entries; surviving children remain drain observations,
+  not adopted `running` entries.
 - The marker is a small atomically replaced JSON record containing only schema
   version, `open`/`closed` status, and target generation. It is neither a
   transition outbox nor a run log, dossier, lock service, or new shared storage
