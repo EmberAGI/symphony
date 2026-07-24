@@ -524,7 +524,9 @@ defmodule SymphonyElixir.WorkAdmissionTest do
                running: []
              } = Orchestrator.snapshot(orchestrator_name, 1_000)
 
+      runner_ref = Process.monitor(runner_pid)
       Process.exit(runner_pid, :kill)
+      assert_receive {:DOWN, ^runner_ref, :process, ^runner_pid, :killed}, 1_000
       stop_orchestrator!(restarted_pid)
     end)
   end
