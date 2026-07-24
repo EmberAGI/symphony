@@ -314,6 +314,100 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
     assert File.regular?(ownership_path)
   end
 
+  test "stale recovery scans canonical and one-level legacy registries without descending deeper" do
+    home_relative_root =
+      "~/.symphony-elixir-process-ownership-recovery-#{System.unique_integer([:positive])}"
+
+    workspace_root = Path.expand(home_relative_root)
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      workspace_root: home_relative_root
+    )
+
+    canonical_issue = %Issue{
+      id: "canonical-recovery",
+      identifier: "MT-CANONICAL",
+      title: "Canonical recovery",
+      state: "In Progress"
+    }
+
+    legacy_issue = %Issue{
+      id: "legacy-recovery",
+      identifier: "MT-LEGACY",
+      title: "Legacy recovery",
+      state: "In Progress"
+    }
+
+    deep_issue = %Issue{
+      id: "deep-recovery",
+      identifier: "MT-DEEP",
+      title: "Deep recovery decoy",
+      state: "In Progress"
+    }
+
+    for {issue, session_name} <- [
+          {canonical_issue, "octo-canonical-recovery"},
+          {legacy_issue, "octo-legacy-recovery"},
+          {deep_issue, "octo-deep-recovery"}
+        ] do
+      attrs =
+        ownership_attrs("#{issue.id}-run", "localhost:999999:implementer")
+        |> Map.put(:owned_session_ref, %{kind: "herdr", session_name: session_name})
+
+      assert {:ok, _ownership} = ProcessOwnership.acquire(issue, attrs)
+    end
+
+    legacy_source = ProcessOwnership.registry_path(legacy_issue)
+
+    legacy_path =
+      Path.join([
+        workspace_root,
+        "legacy-workspace",
+        ".symphony",
+        "process-ownership",
+        Path.basename(legacy_source)
+      ])
+
+    File.mkdir_p!(Path.dirname(legacy_path))
+    File.rename!(legacy_source, legacy_path)
+
+    deep_source = ProcessOwnership.registry_path(deep_issue)
+
+    deep_path =
+      Path.join([
+        workspace_root,
+        "outer-workspace",
+        "nested-workspace",
+        ".symphony",
+        "process-ownership",
+        Path.basename(deep_source)
+      ])
+
+    File.mkdir_p!(Path.dirname(deep_path))
+    File.rename!(deep_source, deep_path)
+
+    test_pid = self()
+
+    assert {:ok, 2} =
+             ProcessOwnership.recover_stale_owned_sessions(fn ownership_ref ->
+               send(test_pid, {:recovered, ownership_ref.session_name})
+               :ok
+             end)
+
+    assert_receive {:recovered, first_session}
+    assert_receive {:recovered, second_session}
+
+    assert MapSet.new([first_session, second_session]) ==
+             MapSet.new(["octo-canonical-recovery", "octo-legacy-recovery"])
+
+    assert File.read!(deep_path) =~ ~s("state":"active")
+  end
+
   test "same workspace basename in different paths has distinct ownership scope", %{issue: issue} do
     first =
       ProcessOwnership.ownership_env(

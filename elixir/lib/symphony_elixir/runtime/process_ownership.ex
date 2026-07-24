@@ -535,10 +535,12 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp prefer_pid_list(values, _existing), do: values
 
   defp owned_record_paths(workspace_root) when is_binary(workspace_root) do
-    Path.wildcard(
-      Path.join([workspace_root, "**", ".symphony", "process-ownership", "*.json"]),
-      match_dot: true
-    )
+    [
+      Path.join([workspace_root, ".symphony", "process-ownership", "*.json"]),
+      Path.join([workspace_root, "*", ".symphony", "process-ownership", "*.json"])
+    ]
+    |> Enum.flat_map(&Path.wildcard(&1, match_dot: true))
+    |> Enum.uniq()
   end
 
   defp recover_stale_owned_session(path, cleanup_fun, count) do
