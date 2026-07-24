@@ -1,0 +1,18 @@
+{
+  "argv": [
+    "--session",
+    "emb1244rec",
+    "agent",
+    "list"
+  ],
+  "derivation": null,
+  "exit_status": 0,
+  "herdr_binary_sha256": "37350546b0012555943b92eaf962665de4e264395baeb44227b8015e8ff5b0d6",
+  "herdr_version": "herdr 0.7.5",
+  "name": "agent-list",
+  "provenance": "recorded",
+  "recorded_at": "2026-07-24T01:26:01.025686+00:00",
+  "redaction": "parameterized: run-varying fields replaced with {{AGENT_KIND}}/{{AGENT_NAME}}/{{WORKSPACE_CWD}} placeholders; envelope otherwise verbatim from the recorded command outcome; argv preserved verbatim. none required: no secret-bearing fields present (verified by scan for username, tokens, keys)",
+  "stderr": "",
+  "stdout": "{\"id\":\"cli:agent:list\",\"result\":{\"agents\":[{\"agent\":\"{{AGENT_KIND}}\",\"agent_session\":{\"agent\":\"{{AGENT_KIND}}\",\"kind\":\"id\",\"source\":\"herdr:{{AGENT_KIND}}\",\"value\":\"b373924d-81ff-442d-a210-4269352fa071\"},\"agent_status\":\"idle\",\"cwd\":\"{{WORKSPACE_CWD}}\",\"focused\":true,\"interactive_ready\":true,\"name\":\"{{AGENT_NAME}}\",\"pane_id\":\"w1:p1\",\"revision\":0,\"state_change_seq\":0,\"tab_id\":\"w1:t1\",\"terminal_id\":\"term_65751546aac7d1\",\"workspace_id\":\"w1\"},{\"agent\":\"{{AGENT_KIND}}\",\"agent_session\":{\"agent\":\"{{AGENT_KIND}}\",\"kind\":\"id\",\"source\":\"herdr:{{AGENT_KIND}}\",\"value\":\"e662ef8f-b7aa-450f-9002-a25ea1d28f00\"},\"agent_status\":\"idle\",\"cwd\":\"{{WORKSPACE_CWD}}\",\"focused\":false,\"interactive_ready\":true,\"name\":\"{{AGENT_NAME}}\",\"pane_id\":\"w3:p1\",\"revision\":0,\"state_change_seq\":0,\"tab_id\":\"w3:t1\",\"terminal_id\":\"term_65751546abb993\",\"workspace_id\":\"w3\"}],\"type\":\"agent_list\"}}\n"
+}

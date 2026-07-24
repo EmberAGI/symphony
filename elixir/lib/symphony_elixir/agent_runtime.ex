@@ -815,6 +815,63 @@ defmodule SymphonyElixir.AgentRuntime do
     end
   end
 
+  defp real_irrecoverable_runtime_reason({:implementer_agent_blocked, evidence}) when is_map(evidence) do
+    {:human_input_required,
+     %{
+       provider: :implementer_delegation,
+       source: "herdr_supervision",
+       mode: "blocked_agent",
+       purpose:
+         "delegated Implementer agent is blocked awaiting a human decision; " <>
+           "the live session is preserved with checkpoint evidence"
+     }}
+  end
+
+  defp real_irrecoverable_runtime_reason({:incompatible_herdr_runtime, details, evidence})
+       when is_map(details) and is_map(evidence) do
+    real_irrecoverable_runtime_reason({:incompatible_herdr_runtime, details})
+  end
+
+  defp real_irrecoverable_runtime_reason({:herdr_agent_blocked, agent_name}) when is_binary(agent_name) do
+    {:human_input_required,
+     %{
+       provider: :implementer_delegation,
+       source: "herdr_transport",
+       mode: "blocked_agent",
+       purpose: "delegated Implementer prompt or wait settled blocked awaiting a human decision"
+     }}
+  end
+
+  defp real_irrecoverable_runtime_reason({:implementer_checkpoint_failed, details}) when is_map(details) do
+    {:invalid_workspace_or_runtime_protocol,
+     %{
+       subtype: "work_preservation_checkpoint_failed",
+       message:
+         "work-preservation checkpoint failed (#{safe_detail_fragment(Map.get(details, :shutdown_reason))}); " <>
+           "destructive shutdown of the delegated session is blocked"
+     }}
+  end
+
+  defp real_irrecoverable_runtime_reason({_tag, %{checkpoint: {:error, {:implementer_checkpoint_failed, _} = inner}}}) do
+    real_irrecoverable_runtime_reason(inner)
+  end
+
+  defp real_irrecoverable_runtime_reason({_tag, _detail, %{checkpoint: {:error, {:implementer_checkpoint_failed, _} = inner}}}) do
+    real_irrecoverable_runtime_reason(inner)
+  end
+
+  defp real_irrecoverable_runtime_reason({:unexpected_herdr_agent_status, status}) do
+    {:invalid_workspace_or_runtime_protocol,
+     %{
+       subtype: "unexpected_herdr_agent_status",
+       message: "Herdr reported the out-of-enum agent status #{safe_detail_fragment(status)}"
+     }}
+  end
+
+  defp real_irrecoverable_runtime_reason({:unexpected_herdr_agent_status, status, evidence}) when is_map(evidence) do
+    real_irrecoverable_runtime_reason({:unexpected_herdr_agent_status, status})
+  end
+
   defp real_irrecoverable_runtime_reason(_reason), do: nil
 
   defp irrecoverable_decision(family, details, context) do

@@ -1,0 +1,18 @@
+{
+  "argv": [
+    "/opt/homebrew/bin/herdr",
+    "agent",
+    "prompt",
+    "--help"
+  ],
+  "derivation": null,
+  "exit_status": 0,
+  "herdr_binary_sha256": "37350546b0012555943b92eaf962665de4e264395baeb44227b8015e8ff5b0d6",
+  "herdr_version": "herdr 0.7.5",
+  "name": "agent-prompt-help",
+  "provenance": "recorded",
+  "recorded_at": "2026-07-24T01:26:00.862798+00:00",
+  "redaction": "none required: no secret-bearing fields present (verified by scan for username, tokens, keys)",
+  "stderr": "",
+  "stdout": "Submit a prompt to an agent\n\nUsage: herdr agent prompt <TARGET> <TEXT> [OPTIONS]\n\nArguments:\n  <TARGET>\n          \n\n  <TEXT>\n          \n\nOptions:\n      --wait\n          Wait for the first matching state observed after submission\n\n      --until <STATUS>\n          State to match after --wait; repeat for more than one state\n          \n          [possible values: idle, working, blocked, done, unknown]\n\n      --timeout <MS>\n          Fail after this many milliseconds\n\nWhen submission starts from a non-working state, --wait first requires an observed state change within 5000ms; otherwise it returns agent_prompt_stalled. A shorter --timeout returns timeout instead. It then matches idle, done, or blocked by default, or any exact --until state. It does not track turns: if the agent is already working, that active turn's completion may match. Without --timeout, the settled-state wait is indefinite.\n\n"
+}

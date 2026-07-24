@@ -11,6 +11,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
   alias SymphonyElixir.ImplementationEffort
+  alias SymphonyElixir.ImplementerDelegation.Supervision
 
   @max_session_name_bytes 44
   @session_name_digest_chars 16
@@ -108,6 +109,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
     turn_timeout_ms = Keyword.get(opts, :turn_timeout_ms, 3_600_000)
     start_timeout_ms = Keyword.get(opts, :start_timeout_ms, 120_000)
     heartbeat_interval_ms = Keyword.get(opts, :heartbeat_interval_ms, 30_000)
+    status_read_timeout_ms = Keyword.get(opts, :status_read_timeout_ms, Supervision.default_status_read_timeout_ms())
     on_message = Keyword.get(opts, :on_message, fn _message -> :ok end)
 
     with {:ok, turn_start} <-
@@ -134,15 +136,19 @@ defmodule SymphonyElixir.ImplementerDelegation do
                 {:ok, observed}
 
               :working ->
-                await_completion(
+                supervise_working(
                   %{
                     transport: transport,
                     context: transport_context,
                     session: herdr_session,
                     orchestrator: orchestrator,
-                    timeout_ms: turn_timeout_ms,
-                    deadline: nil,
-                    heartbeat_interval_ms: heartbeat_interval_ms,
+                    hard_budget_ms: turn_timeout_ms,
+                    interval_ms: max(1, heartbeat_interval_ms),
+                    status_read_timeout_ms: status_read_timeout_ms,
+                    max_indeterminate_reads: Keyword.get(opts, :max_indeterminate_reads, 4),
+                    stale_working_ms: Keyword.get(opts, :stale_working_ms, 900_000),
+                    max_recovery_attempts: Keyword.get(opts, :max_recovery_attempts, 2),
+                    settle_window_ms: Keyword.get(opts, :settle_window_ms, Supervision.default_settle_window_ms()),
                     on_message: on_message,
                     contract: Map.get(session, :contract, %{})
                   },
@@ -180,7 +186,21 @@ defmodule SymphonyElixir.ImplementerDelegation do
   def run_turn(_session, _prompt, _issue, _opts), do: {:error, :invalid_implementer_delegation_turn}
 
   defp begin_turn(transport, context, session, orchestrator, prompt, timeout_ms) do
-    transport.begin_turn(session, orchestrator, prompt, timeout_ms, context)
+    case transport.begin_turn(session, orchestrator, prompt, timeout_ms, context) do
+      {:error, {:herdr_agent_blocked, _name}} ->
+        # A prompt that settles blocked is preserved with the same
+        # evidence-shaped outcome supervision produces, so the runner's
+        # checkpoint-gated shutdown decision applies before any teardown.
+        Supervision.blocked_outcome(%{
+          transport: transport,
+          context: context,
+          session: session,
+          orchestrator: orchestrator
+        })
+
+      other ->
+        other
+    end
   end
 
   @spec stop_session(session()) :: :ok | {:error, term()}
@@ -269,54 +289,38 @@ defmodule SymphonyElixir.ImplementerDelegation do
     end
   end
 
-  defp await_completion(_state, %{agent_status: status} = agent)
+  defp supervise_working(_state, %{agent_status: status} = agent)
        when status in ["idle", "done"],
        do: {:ok, agent}
 
-  defp await_completion(state, %{agent_status: "working"}) do
-    await_completion_with_heartbeat(%{
-      state
-      | deadline: System.monotonic_time(:millisecond) + state.timeout_ms,
-        heartbeat_interval_ms: max(1, state.heartbeat_interval_ms)
+  defp supervise_working(state, %{agent_status: "working"} = observed_start) do
+    Supervision.supervise(%{
+      transport: state.transport,
+      context: state.context,
+      session: state.session,
+      orchestrator: state.orchestrator,
+      hard_budget_ms: state.hard_budget_ms,
+      interval_ms: state.interval_ms,
+      status_read_timeout_ms: state.status_read_timeout_ms,
+      max_indeterminate_reads: state.max_indeterminate_reads,
+      stale_working_ms: state.stale_working_ms,
+      max_recovery_attempts: state.max_recovery_attempts,
+      settle_window_ms: state.settle_window_ms,
+      baseline_revision: Map.get(observed_start, :revision),
+      on_heartbeat: fn observed ->
+        emit_message(state.on_message, :turn_heartbeat, %{
+          provider: contract_provider(state.contract, :orchestrator),
+          herdr_session: Map.get(state.session, :name),
+          agent: Map.get(state.orchestrator, :name),
+          agent_status: Map.get(observed, :agent_status),
+          session_id: nil
+        })
+      end
     })
   end
 
-  defp await_completion(_state, agent),
+  defp supervise_working(_state, agent),
     do: {:error, {:unexpected_herdr_agent_status, Map.get(agent, :agent_status)}}
-
-  defp await_completion_with_heartbeat(state) do
-    remaining_ms = max(0, state.deadline - System.monotonic_time(:millisecond))
-    wait_ms = min(remaining_ms, state.heartbeat_interval_ms)
-
-    case state.transport.await_agent(
-           state.session,
-           state.orchestrator,
-           ["idle", "done"],
-           wait_ms,
-           state.context
-         ) do
-      {:ok, completed} ->
-        {:ok, completed}
-
-      {:error, {:herdr_agent_status_timeout, _agent_name, _statuses}} = timeout ->
-        if remaining_ms <= state.heartbeat_interval_ms do
-          timeout
-        else
-          emit_message(state.on_message, :turn_heartbeat, %{
-            provider: contract_provider(state.contract, :orchestrator),
-            herdr_session: Map.get(state.session, :name),
-            agent: Map.get(state.orchestrator, :name),
-            agent_status: "working",
-            session_id: nil
-          })
-
-          await_completion_with_heartbeat(state)
-        end
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
 
   defp emit_started(on_message, herdr_session, orchestrator, observed, contract) do
     emit_message(on_message, :session_started, %{

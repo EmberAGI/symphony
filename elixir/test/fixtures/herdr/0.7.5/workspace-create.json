@@ -1,0 +1,22 @@
+{
+  "argv": [
+    "/opt/homebrew/bin/herdr",
+    "--session",
+    "emb1244rec",
+    "workspace",
+    "create",
+    "--cwd",
+    "/private/tmp/emb1244-rec/ws",
+    "--no-focus"
+  ],
+  "derivation": null,
+  "exit_status": 0,
+  "herdr_binary_sha256": "37350546b0012555943b92eaf962665de4e264395baeb44227b8015e8ff5b0d6",
+  "herdr_version": "herdr 0.7.5",
+  "name": "workspace-create",
+  "provenance": "recorded",
+  "recorded_at": "2026-07-24T01:26:01.127413+00:00",
+  "redaction": "parameterized: run-varying fields replaced with {{WORKSPACE_CWD}} placeholders; envelope otherwise verbatim from the recorded command outcome; argv preserved verbatim. none required: no secret-bearing fields present (verified by scan for username, tokens, keys)",
+  "stderr": "",
+  "stdout": "{\"id\":\"cli:workspace:create\",\"result\":{\"root_pane\":{\"agent_status\":\"unknown\",\"cwd\":\"{{WORKSPACE_CWD}}\",\"focused\":true,\"foreground_cwd\":\"{{WORKSPACE_CWD}}\",\"pane_id\":\"w1:p1\",\"revision\":0,\"scroll\":{\"max_offset_from_bottom\":0,\"offset_from_bottom\":0,\"viewport_rows\":24},\"tab_id\":\"w1:t1\",\"terminal_id\":\"term_65751416053001\",\"workspace_id\":\"w1\"},\"tab\":{\"agent_status\":\"unknown\",\"focused\":true,\"label\":\"1\",\"number\":1,\"pane_count\":1,\"tab_id\":\"w1:t1\",\"workspace_id\":\"w1\"},\"type\":\"workspace_created\",\"workspace\":{\"active_tab_id\":\"w1:t1\",\"agent_status\":\"unknown\",\"focused\":true,\"label\":\"ws\",\"number\":1,\"pane_count\":1,\"tab_count\":1,\"workspace_id\":\"w1\"}}}\n"
+}

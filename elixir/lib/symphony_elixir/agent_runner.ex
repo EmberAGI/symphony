@@ -121,12 +121,38 @@ defmodule SymphonyElixir.AgentRunner do
       send_owned_session_runtime_info(codex_update_recipient, issue, session)
 
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
-      after
-        AgentRuntime.stop_session(session)
+        result =
+          do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+
+        if destructive_stop_blocked?(result) do
+          Logger.error(
+            "Preserving delegated runtime session for #{issue_context(issue)}: work-preservation checkpoint failed, destructive shutdown is blocked; recover via the owned session reference"
+          )
+        else
+          AgentRuntime.stop_session(session)
+        end
+
+        result
+      catch
+        kind, reason ->
+          AgentRuntime.stop_session(session)
+          :erlang.raise(kind, reason, __STACKTRACE__)
       end
     end
   end
+
+  # A typed preservation failure forbids destroying the live pane/session; the
+  # owned session reference already sent to the recipient stays recoverable.
+  defp destructive_stop_blocked?({:error, reason}), do: checkpoint_blocked?(reason)
+  defp destructive_stop_blocked?(_result), do: false
+
+  defp checkpoint_blocked?({:implementer_checkpoint_failed, %{destructive_shutdown_blocked: true}}), do: true
+
+  defp checkpoint_blocked?({_tag, %{checkpoint: {:error, inner}}}), do: checkpoint_blocked?(inner)
+
+  defp checkpoint_blocked?({_tag, _detail, %{checkpoint: {:error, inner}}}), do: checkpoint_blocked?(inner)
+
+  defp checkpoint_blocked?(_reason), do: false
 
   defp send_owned_session_runtime_info(recipient, %Issue{id: issue_id}, session)
        when is_binary(issue_id) and is_pid(recipient) do

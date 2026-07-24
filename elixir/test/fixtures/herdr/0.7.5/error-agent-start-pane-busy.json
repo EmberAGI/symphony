@@ -1,0 +1,29 @@
+{
+  "argv": [
+    "--session",
+    "emb1244rec7",
+    "agent",
+    "start",
+    "busyprobe",
+    "--kind",
+    "claude",
+    "--pane",
+    "w1:p1",
+    "--timeout",
+    "8000",
+    "--",
+    "claude",
+    "--model",
+    "haiku"
+  ],
+  "derivation": null,
+  "exit_status": 1,
+  "herdr_binary_sha256": "37350546b0012555943b92eaf962665de4e264395baeb44227b8015e8ff5b0d6",
+  "herdr_version": "herdr 0.7.5",
+  "name": "error-agent-start-pane-busy",
+  "provenance": "recorded",
+  "recorded_at": "2026-07-24T02:03:19.151970+00:00",
+  "redaction": "none required: no secret-bearing fields present (verified by scan for username, tokens, keys)",
+  "stderr": "{\"error\":{\"code\":\"agent_pane_busy\",\"message\":\"agent target pane w1:p1 is not an available shell\"},\"id\":\"cli:agent:start\"}\n",
+  "stdout": ""
+}

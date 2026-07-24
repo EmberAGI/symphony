@@ -1,0 +1,22 @@
+{
+  "argv": [
+    "--session",
+    "emb1244rec5",
+    "pane",
+    "split",
+    "w1:p1",
+    "--direction",
+    "right",
+    "--no-focus"
+  ],
+  "derivation": null,
+  "exit_status": 0,
+  "herdr_binary_sha256": "37350546b0012555943b92eaf962665de4e264395baeb44227b8015e8ff5b0d6",
+  "herdr_version": "herdr 0.7.5",
+  "name": "pane-split",
+  "provenance": "recorded",
+  "recorded_at": "2026-07-24T01:35:38.358175+00:00",
+  "redaction": "parameterized: run-varying fields replaced with {{WORKSPACE_CWD}} placeholders; envelope otherwise verbatim from the recorded command outcome; argv preserved verbatim. none required: no secret-bearing fields present (verified by scan for username, tokens, keys)",
+  "stderr": "",
+  "stdout": "{\"id\":\"cli:pane:split\",\"result\":{\"pane\":{\"agent_status\":\"unknown\",\"cwd\":\"{{WORKSPACE_CWD}}\",\"focused\":false,\"foreground_cwd\":\"{{WORKSPACE_CWD}}\",\"pane_id\":\"w1:p2\",\"revision\":0,\"scroll\":{\"max_offset_from_bottom\":0,\"offset_from_bottom\":0,\"viewport_rows\":23},\"tab_id\":\"w1:t1\",\"terminal_id\":\"term_6575163c5a4972\",\"workspace_id\":\"w1\"},\"type\":\"pane_info\"}}\n"
+}

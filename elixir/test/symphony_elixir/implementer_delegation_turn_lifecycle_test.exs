@@ -30,9 +30,11 @@ defmodule SymphonyElixir.ImplementerDelegationTurnLifecycleTest do
       {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
     end
 
-    def await_agent(_session, agent, _statuses, _timeout_ms, _context) do
-      {:error, {:herdr_agent_status_timeout, agent.name, ["idle", "done"]}}
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      {:ok, %{name: agent.name, agent_status: "working", agent_session: nil}}
     end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "still working"}}
   end
 
   defmodule OtherAwaitErrorTransport do
@@ -40,7 +42,9 @@ defmodule SymphonyElixir.ImplementerDelegationTurnLifecycleTest do
       {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
     end
 
-    def await_agent(_session, _agent, _statuses, _timeout_ms, _context), do: {:error, :boom}
+    def get_agent(_session, _agent, _timeout_ms, _context), do: {:error, :boom}
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "pane evidence"}}
   end
 
   defmodule LoginRequiredTransport do
@@ -80,19 +84,22 @@ defmodule SymphonyElixir.ImplementerDelegationTurnLifecycleTest do
              ImplementerDelegation.run_turn(session(UnexpectedStatusTransport), "prompt", %{}, [])
   end
 
-  test "a turn that never reaches idle/done within the timeout returns the terminal timeout error" do
-    assert {:error, {:herdr_agent_status_timeout, "implementer_orchestrator", ["idle", "done"]}} =
+  test "a turn that exhausts the hard budget checkpoints and preserves instead of timing out silently" do
+    assert {:error, {:implementer_hard_budget_exhausted, %{checkpoint: {:ok, checkpoint}}}} =
              ImplementerDelegation.run_turn(session(AlwaysTimeoutTransport), "prompt", %{},
                turn_timeout_ms: 10,
                heartbeat_interval_ms: 10_000
              )
+
+    assert checkpoint.pane_tail == "still working"
+    assert checkpoint.shutdown_reason == :hard_budget_exhausted
   end
 
-  test "a non-timeout error while awaiting semantic completion fails the turn closed" do
-    assert {:error, :boom} =
+  test "a persistent non-timeout status-read error escalates typed after bounded retries" do
+    assert {:error, {:implementer_status_reads_failed, %{last_error: :boom}}} =
              ImplementerDelegation.run_turn(session(OtherAwaitErrorTransport), "prompt", %{},
                turn_timeout_ms: 10_000,
-               heartbeat_interval_ms: 10_000
+               heartbeat_interval_ms: 1
              )
   end
 

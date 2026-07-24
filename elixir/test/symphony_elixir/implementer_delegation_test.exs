@@ -3,7 +3,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
   alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation, SkillExecutionContract}
   alias SymphonyElixir.Linear.Issue
-  alias SymphonyElixir.TestSupport.FakeHerdr
+  alias SymphonyElixir.TestSupport.HerdrReplayFixture
 
   defmodule RecordingTransport do
     def default_server_snapshot(%{owner: owner}) do
@@ -70,15 +70,14 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
        }}
     end
 
-    def await_agent(session, agent, statuses, timeout_ms, %{owner: owner}) do
-      send(owner, {:transport, :await_agent, session, agent, statuses, timeout_ms})
-      status = if "working" in statuses, do: "working", else: "done"
+    def get_agent(session, agent, timeout_ms, %{owner: owner}) do
+      send(owner, {:transport, :get_agent, session, agent, timeout_ms})
 
       {:ok,
        %{
          name: agent.name,
          pane_id: agent.pane_id,
-         agent_status: status,
+         agent_status: "done",
          agent_session: %{value: "codex-session-7"}
        }}
     end
@@ -110,12 +109,12 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
        }}
     end
 
-    def await_agent(_session, agent, ["idle", "done"], _timeout_ms, _context) do
+    def get_agent(_session, agent, _timeout_ms, _context) do
       attempt = Process.get({__MODULE__, :attempt}, 0) + 1
       Process.put({__MODULE__, :attempt}, attempt)
 
       if attempt < 3 do
-        {:error, {:herdr_agent_status_timeout, agent.name, ["done", "idle"]}}
+        {:ok, %{name: agent.name, agent_status: "working", agent_session: nil}}
       else
         {:ok,
          %{
@@ -138,7 +137,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
        }}
     end
 
-    def await_agent(_session, agent, ["idle", "done"], _timeout_ms, _context) do
+    def get_agent(_session, agent, _timeout_ms, _context) do
       {:ok, %{name: agent.name, agent_status: "idle", agent_session: nil}}
     end
 
@@ -272,7 +271,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     assert_receive {:transport, :begin_turn, %{name: "octo-emb-1141-run-7"}, %{name: "implementer_orchestrator"}, "Implement the bounded tracer task.", 120_000}
 
-    assert_receive {:transport, :await_agent, _, _, ["idle", "done"], 30_000}
+    assert_receive {:transport, :get_agent, _, _, 5_000}
     assert_receive {:transport, :read_agent, _, _, %{lines: 240, source: :recent_unwrapped}}
 
     assert turn_result.session_id == "codex-session-7"
@@ -661,7 +660,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert {:ok, {next_session, turn}} =
              AgentRuntime.run_turn(session, "Complete the public native turn.", issue(), [])
 
-    assert turn.response == "IMPLEMENTER_TURN_COMPLETE"
+    assert turn.response == HerdrReplayFixture.stdout!("agent-read-recent")
     assert :ok = AgentRuntime.stop_session(next_session)
   end
 
@@ -848,9 +847,9 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       commands = File.read!(herdr_log)
 
       assert commands =~
-               "--session #{session.name} agent start implementer_worker --kind #{kind} --pane w7:p42 --timeout 120000 --"
+               "--session #{session.name} agent start implementer_worker --kind #{kind} --pane w1:p2 --timeout 120000 --"
 
-      assert commands =~ "NATIVE_PROVIDER_EXEC agent=implementer_worker pane=w7:p42"
+      assert commands =~ "NATIVE_PROVIDER_EXEC agent=implementer_worker pane=w1:p2"
       assert commands =~ "path=#{runtime_root}/worker-bin:#{fake_provider_bin}:"
 
       if provider == "claude_code" do
@@ -932,7 +931,9 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
   end
 
   defp write_fake_herdr!(path) do
-    FakeHerdr.write!(path)
+    replay_dir = Path.join(Path.dirname(path), "herdr-replay-#{System.unique_integer([:positive])}")
+    HerdrReplayFixture.materialize_replay_dir!(replay_dir)
+    HerdrReplayFixture.write_fake_herdr!(path, replay_dir)
   end
 
   defp contract(provider) do

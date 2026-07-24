@@ -550,20 +550,93 @@ snapshot is unchanged.
 
 Herdr owns terminal input, bracketed-paste handling, provider keyboard protocol,
 prompt acknowledgement, and lifecycle waiting behind its native live-agent
-Interface. Symphony submits initial turns, worker results, and consultation
-responses through the same verified `agent prompt` operation. Each submission
-waits for Herdr to observe an agent state change and accepts `working`, `idle`,
-or `done`, so a started turn and a turn that finishes before observation are
-both represented without revision heuristics. The submission wait must exceed
-Herdr 0.7.5's 5000 ms prompt-effect window so an unchanged
+Interface. Herdr 0.7.5's agent status vocabulary is exactly `idle`, `working`,
+`blocked`, `done`, and `unknown`, and every Symphony status read types all five
+as first-class outcomes. `working` starts a turn; `idle` and `done` complete
+one. `blocked` (a recognized approval/question UI) settles a prompt or wait but
+is never success: it is the typed blocked outcome, surfaced within one bounded
+observation interval. `unknown` never proves completion or turn start; it is
+surfaced immediately as the typed unknown outcome, and the Stage 2
+supervision machine below owns transient-versus-persistent unknown
+resolution through its bounded indeterminate-read retries. A status
+string outside the five-state enum is a typed protocol/version error, never
+coerced to `unknown`; command failures remain a distinct error class.
+
+Symphony submits initial turns, worker results, and consultation responses
+through the same verified `agent prompt` operation. Prompt submissions settle
+on the upstream default settle set (`idle`, `done`, `blocked`) plus `working`
+so a started turn and a turn that finishes before observation are both
+represented without revision heuristics; the settle set is never re-narrowed
+below the upstream default and never includes `unknown`. Bounded lifecycle
+observation with `agent wait` requests exactly the upstream default settle set
+(`idle`, `done`, `blocked`), stated explicitly on the wire and rejected typed
+if a caller asks for anything narrower or wider. The submission wait must
+exceed Herdr 0.7.5's 5000 ms prompt-effect window so an unchanged
 `state_change_seq` is classified as the typed `agent_prompt_stalled` result
-rather than an ordinary timeout. On that result, the transport re-drives
+rather than an ordinary timeout; the transport deliberately raises any smaller
+caller budget to a 5001 ms floor. On a stall, the transport re-drives
 submission with a follow-up submit input at most twice.
 Only an observed state change succeeds; exhausting the recovery bound preserves
 the typed prompt-stall failure. This provider-neutral recovery applies to
 orchestrator turns and both generated inter-agent prompt projections for Codex
-and Claude. Subsequent bounded lifecycle observation uses server-owned `agent
-wait`, never client-side sleep/poll loops.
+and Claude.
+
+After submission, turn lifecycle observation is a bounded, idempotent
+supervision state machine (EMB-1244 Stage 2), not a single budget-length
+server wait. The transport reads the typed agent status (`agent get`) on a
+bounded cadence: a 30-second observation interval, a 5-second per-read
+timeout, and 0 ms jitter (deterministic cadence; no randomization surface). A
+`blocked` status must therefore surface within one observation interval plus
+one read timeout. All five Herdr 0.7.5 statuses (`idle`, `working`,
+`blocked`, `done`, `unknown`) are first-class typed observations; an
+out-of-enum status is a typed protocol error, never coerced to `unknown` and
+never retried.
+
+Progress is distinct from status: `working` can persist without progress, so
+the supervisor consumes an observable progress cursor (recent agent output)
+alongside each working read. Wall-clock time is never the sole stuck signal.
+The supervision transitions are: an observed `working` with progress
+continues; `blocked` is preserved and surfaced as a typed blocked outcome —
+the runtime never auto-answers a permission or question prompt absent an
+authorized policy, and bypass-permissions launches do not exempt blocked
+handling; `unknown` statuses and status-read failures (including per-read
+command timeouts) get bounded retries (default four consecutive
+indeterminate reads) before a typed escalation carrying independent pane
+evidence, except that a status read failing with the typed
+incompatible-runtime protocol error halts immediately with a checkpoint —
+a deterministic protocol failure is never retried as indeterminate; stale working (no cursor movement past the stale threshold,
+default fifteen minutes) gets bounded recovery through the server-owned
+terminal wait (at most two attempts) before a typed stalled escalation; the
+hard turn budget triggers checkpoint-and-preserve, then shutdown. A read
+that observes `idle`/`done` with an unchanged agent revision inside the
+prompt-transition settle window (default 5000 ms, matching Herdr's
+prompt-effect window) is transitional, not completion; this is read-only
+revision observation, not 0.7.4 revision-acknowledgement choreography.
+
+Work preservation is scoped to the technically observable. Before any halt
+that can precede a destructive shutdown — including a prompt submission that
+itself settles blocked — the supervisor records a
+best-effort checkpoint in the turn's typed outcome: pane tail, Herdr session
+name and runtime root, workspace identity, agent name/pane, agent resume
+reference when observed, last typed status, progress cursor, recovery
+history, and shutdown reason. A checkpoint failure is itself typed and
+blocks destructive shutdown absent an explicit emergency policy: the runner
+must not stop the delegated session on a typed preservation failure and must
+leave the owned-session reference recoverable. A successful checkpoint
+permits bounded shutdown. Supervised typed outcomes feed the shared runtime
+failure families: a blocked agent — whether surfaced by supervision or as the
+bare typed blocked outcome of a prompt or wait — classifies as
+`human_input_required`, a
+work-preservation checkpoint failure (direct or embedded in a supervised
+outcome) and an out-of-enum protocol status classify as
+`invalid_workspace_or_runtime_protocol` — all irrecoverable, never ordinary
+retry — while hard-budget, stale, unknown, read-failure, and closed outcomes
+with preserved checkpoints keep ordinary bounded retry semantics. Failure
+summaries never include pane transcript content. This supervision layer is
+observation only: it
+emits typed outcomes and never grows lifecycle arbitration, teardown, or
+quarantine verdict semantics, which EMB-1217 owns over what this layer
+emits.
 
 Completed terminal output is consumed from native `agent read` text; Symphony
 does not expect a JSON response envelope from that command.
@@ -573,10 +646,13 @@ recovery is exhausted. A prompt or wait whose named live agent has closed is a
 typed closed-agent failure. Native timeouts remain bounded status-timeout
 results and protocol mismatch remains a machine-readable incompatible-runtime
 failure. Symphony does not retain the 0.7.4 `pane run` prompt-submission,
-manual confirmation, revision acknowledgement, top-level wait,
+manual confirmation, revision-acknowledgement choreography, top-level wait,
 provider-specific multiline handling, translation, dual-version, or
 compatibility machinery; `pane run` survives only as the launch PATH
-preparation and preflight primitive described above.
+preparation and preflight primitive described above, and read-only
+observation of the reported agent `revision` (for example the
+prompt-transition settle guard) is not acknowledgement choreography and
+remains permitted.
 
 Inter-agent messaging uses the same `agent prompt` command for Codex and Claude.
 The runtime-owned orchestrator and restricted worker projections add the same
@@ -598,6 +674,21 @@ uses unattended bypass-permissions mode and disables the provider-native
 `Agent` tool. A restricted worker Herdr proxy is
 defense in depth rather than a complete process sandbox; one-generation
 delegation remains a profile invariant backed by evals.
+
+Herdr protocol test evidence is recorded, not authored (EMB-1244 Stage 1).
+Every protocol read in the deterministic suite replays a response recorded from
+the real herdr 0.7.5 binary, committed with raw provenance: argv, stdout,
+stderr, exit status, timestamp, binary version and SHA-256, and the declared
+redaction/parameterization method. Placeholder substitution is permitted only
+for run-varying identity/path fields, never for statuses, error codes, or other
+semantic fields; a fidelity check fails the suite on any out-of-enum status
+claim, unrecorded error code, missing provenance, or non-recorded fixture. The
+only executable test double behavior is launch/timing physics that cannot be a
+recording (server run loop, provider execution for `agent start`, the 5000 ms
+prompt-effect window), and that behavior is differentially validated against
+the real binary by an opt-in CD-tier fake-vs-real harness that runs identical
+operations against both and fails on divergence. Recording is a CD-tier
+operation; committed fixtures are CI inputs.
 
 Symphony observes Herdr identity/status and emits its existing normalized
 top-level runtime events. Runtime contract tests prove that resolved profiles
