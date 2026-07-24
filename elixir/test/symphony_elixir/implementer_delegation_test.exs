@@ -70,15 +70,14 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
        }}
     end
 
-    def await_agent(session, agent, statuses, timeout_ms, %{owner: owner}) do
-      send(owner, {:transport, :await_agent, session, agent, statuses, timeout_ms})
-      status = if "working" in statuses, do: "working", else: "done"
+    def get_agent(session, agent, timeout_ms, %{owner: owner}) do
+      send(owner, {:transport, :get_agent, session, agent, timeout_ms})
 
       {:ok,
        %{
          name: agent.name,
          pane_id: agent.pane_id,
-         agent_status: status,
+         agent_status: "done",
          agent_session: %{value: "codex-session-7"}
        }}
     end
@@ -110,12 +109,12 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
        }}
     end
 
-    def await_agent(_session, agent, ["idle", "done", "blocked"], _timeout_ms, _context) do
+    def get_agent(_session, agent, _timeout_ms, _context) do
       attempt = Process.get({__MODULE__, :attempt}, 0) + 1
       Process.put({__MODULE__, :attempt}, attempt)
 
       if attempt < 3 do
-        {:error, {:herdr_agent_status_timeout, agent.name, ["done", "idle"]}}
+        {:ok, %{name: agent.name, agent_status: "working", agent_session: nil}}
       else
         {:ok,
          %{
@@ -138,7 +137,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
        }}
     end
 
-    def await_agent(_session, agent, ["idle", "done", "blocked"], _timeout_ms, _context) do
+    def get_agent(_session, agent, _timeout_ms, _context) do
       {:ok, %{name: agent.name, agent_status: "idle", agent_session: nil}}
     end
 
@@ -272,7 +271,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     assert_receive {:transport, :begin_turn, %{name: "octo-emb-1141-run-7"}, %{name: "implementer_orchestrator"}, "Implement the bounded tracer task.", 120_000}
 
-    assert_receive {:transport, :await_agent, _, _, ["idle", "done", "blocked"], 30_000}
+    assert_receive {:transport, :get_agent, _, _, 5_000}
     assert_receive {:transport, :read_agent, _, _, %{lines: 240, source: :recent_unwrapped}}
 
     assert turn_result.session_id == "codex-session-7"

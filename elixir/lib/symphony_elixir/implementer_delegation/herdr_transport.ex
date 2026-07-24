@@ -309,6 +309,41 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   def await_agent(_session, _agent, _statuses, _timeout_ms, _context), do: {:error, :invalid_herdr_agent_wait}
 
+  @impl true
+  def get_agent(%{name: session_name, env: env}, %{name: agent_name} = agent, timeout_ms, context)
+      when is_binary(agent_name) and agent_name != "" and is_integer(timeout_ms) and timeout_ms > 0 do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+    case command_in_port(context, ["--session", session_name, "agent", "get", agent_name], env, deadline) do
+      {:ok, output} ->
+        with {:ok, observed} <- decode_agent_response(output),
+             {:ok, _status} <- classify_agent_status(observed.agent_status) do
+          {:ok, preserve_provider(observed, agent)}
+        end
+
+      {:error, :command_timeout} ->
+        {:error, {:herdr_agent_get_timeout, agent_name}}
+
+      {:error, {:incompatible_herdr_runtime, _details} = reason} ->
+        {:error, reason}
+
+      {:error, reason} ->
+        get_error(reason, agent_name)
+    end
+  end
+
+  def get_agent(_session, _agent, _timeout_ms, _context), do: {:error, :invalid_herdr_agent_get}
+
+  defp get_error(reason, agent_name) do
+    case cli_error_code(reason) do
+      code when code in ["agent_not_running", "agent_not_found", "agent_name_not_found"] ->
+        {:error, {:herdr_agent_closed, agent_name}}
+
+      _ ->
+        {:error, {:herdr_agent_get_failed, reason}}
+    end
+  end
+
   defp validate_wait_statuses(statuses) do
     if Enum.sort(statuses) == ["blocked", "done", "idle"],
       do: :ok,

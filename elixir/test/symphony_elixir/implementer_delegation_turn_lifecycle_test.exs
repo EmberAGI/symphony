@@ -30,8 +30,8 @@ defmodule SymphonyElixir.ImplementerDelegationTurnLifecycleTest do
       {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
     end
 
-    def await_agent(_session, agent, _statuses, _timeout_ms, _context) do
-      {:error, {:herdr_agent_status_timeout, agent.name, ["idle", "done", "blocked"]}}
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      {:ok, %{name: agent.name, agent_status: "working", agent_session: nil}}
     end
   end
 
@@ -40,7 +40,7 @@ defmodule SymphonyElixir.ImplementerDelegationTurnLifecycleTest do
       {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
     end
 
-    def await_agent(_session, _agent, _statuses, _timeout_ms, _context), do: {:error, :boom}
+    def get_agent(_session, _agent, _timeout_ms, _context), do: {:error, :boom}
   end
 
   defmodule LoginRequiredTransport do
@@ -81,7 +81,7 @@ defmodule SymphonyElixir.ImplementerDelegationTurnLifecycleTest do
   end
 
   test "a turn that never reaches idle/done within the timeout returns the terminal timeout error" do
-    assert {:error, {:herdr_agent_status_timeout, "implementer_orchestrator", ["idle", "done", "blocked"]}} =
+    assert {:error, {:herdr_agent_status_timeout, "implementer_orchestrator", ["idle", "done"]}} =
              ImplementerDelegation.run_turn(session(AlwaysTimeoutTransport), "prompt", %{},
                turn_timeout_ms: 10,
                heartbeat_interval_ms: 10_000
