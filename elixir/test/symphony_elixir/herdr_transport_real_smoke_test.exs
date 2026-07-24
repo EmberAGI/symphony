@@ -123,7 +123,7 @@ defmodule SymphonyElixir.HerdrTransportRealSmokeTest do
     # Status detection holds after the full exec chain: the stub renders a
     # prompt-less foreground loop, which Herdr 0.7.5 classifies as idle.
     assert {:ok, observed} =
-             HerdrTransport.await_agent(session, agent, ["idle", "done"], 10_000, adapter_context)
+             HerdrTransport.await_agent(session, agent, ["idle", "done", "blocked"], 10_000, adapter_context)
 
     assert observed.agent_status == "idle"
 

@@ -159,18 +159,21 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
       System.cmd(
         fake,
         ["--session", session, "agent", "start", "diff_agent", "--kind", "claude", "--pane", pane] ++
-          ["--timeout", "120000", "--", stub_claude, "--model", "haiku"],
+          ["--timeout", "120000", "--", "claude", "--model", "haiku"],
         env:
           fake_session_env ++
-            [{"HERDR_FAKE_EXEC_PROVIDER", "1"}, {"HERDR_FAKE_PROVIDER_OUTPUT", provider_capture}],
+            [
+              {"HERDR_FAKE_LOGIN_PATH", stub_bin <> ":" <> (System.get_env("PATH") || "")},
+              {"HERDR_FAKE_PROVIDER_OUTPUT", provider_capture}
+            ],
         stderr_to_stdout: true
       )
 
     assert json_shape(real_start) == json_shape(fake_start)
     assert real_start =~ ~s("interactive_ready":true)
 
-    assert File.read!(provider_capture) == "--model\nhaiku\n",
-           "the double must hand the provider its native argv byte-exact"
+    assert File.read!(provider_capture) == "--dangerously-skip-permissions\nclaude\n--model\nhaiku\n",
+           "the double must prepend the pinned Herdr flag and hand the provider its native argv byte-exact"
 
     # 5000 ms prompt-effect boundary on a genuinely non-reactive UI (claude
     # onboarding selection screen ignores typed characters): above the window
@@ -223,7 +226,7 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
 
     {fake_busy, 1} =
       System.cmd(fake, start_args.(busy_pane),
-        env: fake_session_env ++ [{"HERDR_REPLAY_AGENT_START", "error-agent-start-pane-busy"}],
+        env: fake_session_env ++ [{"HERDR_FAKE_PANE_BUSY_COUNT", "1"}],
         stderr_to_stdout: true
       )
 
