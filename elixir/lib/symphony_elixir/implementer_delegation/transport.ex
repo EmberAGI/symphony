@@ -21,9 +21,25 @@ defmodule SymphonyElixir.ImplementerDelegation.Transport do
   @callback prepare_worker(session_ref(), map(), context()) ::
               {:ok, session_ref()} | {:error, term()}
   @callback start_agent(session_ref(), map(), context()) :: {:ok, agent_ref()} | {:error, term()}
+  @doc """
+  Submit one verified prompt and observe how it settles.
+
+  The effective prompt wait always exceeds Herdr 0.7.5's 5000 ms prompt-effect
+  window (a smaller caller budget is raised to 5001 ms) so an unchanged
+  `state_change_seq` is the typed `agent_prompt_stalled` result, never an
+  ordinary timeout. A `blocked` settle is the typed blocked outcome, and an
+  `unknown` observation is the typed unknown outcome — neither is success.
+  """
   @callback begin_turn(session_ref(), agent_ref(), String.t(), non_neg_integer(), context()) ::
               {:ok, %{required(:phase) => :working | :completed, required(:agent) => agent_ref()}}
               | {:error, term()}
+  @doc """
+  Await a settled agent status with the server-owned wait.
+
+  Callers must request exactly the upstream default settle set
+  (`idle`, `done`, `blocked`); `blocked` settles as a typed non-success
+  outcome and `unknown` never proves completion.
+  """
   @callback await_agent(session_ref(), agent_ref(), [String.t()], non_neg_integer(), context()) ::
               {:ok, agent_ref()} | {:error, term()}
   @callback read_agent(session_ref(), agent_ref(), map(), context()) :: {:ok, map()} | {:error, term()}

@@ -1,0 +1,24 @@
+{
+  "argv": [
+    "/opt/homebrew/bin/herdr",
+    "--session",
+    "emb1244rec4",
+    "agent",
+    "wait",
+    "tclaude",
+    "--until",
+    "working",
+    "--timeout",
+    "15000"
+  ],
+  "derivation": null,
+  "exit_status": 0,
+  "herdr_binary_sha256": "37350546b0012555943b92eaf962665de4e264395baeb44227b8015e8ff5b0d6",
+  "herdr_version": "herdr 0.7.5",
+  "name": "agent-wait-working",
+  "provenance": "recorded",
+  "recorded_at": "2026-07-24T01:33:40.176611+00:00",
+  "redaction": "parameterized: run-varying fields replaced with {{AGENT_KIND}}/{{AGENT_NAME}}/{{WORKSPACE_CWD}} placeholders; envelope otherwise verbatim from the recorded command outcome; argv preserved verbatim. none required: no secret-bearing fields present (verified by scan for username, tokens, keys)",
+  "stderr": "",
+  "stdout": "{\"id\":\"cli:agent:wait\",\"result\":{\"agent\":{\"agent\":\"{{AGENT_KIND}}\",\"agent_session\":{\"agent\":\"{{AGENT_KIND}}\",\"kind\":\"id\",\"source\":\"herdr:{{AGENT_KIND}}\",\"value\":\"4c8bc687-46af-4ddb-b6a0-672785c70c67\"},\"agent_status\":\"working\",\"cwd\":\"{{WORKSPACE_CWD}}\",\"focused\":true,\"foreground_cwd\":\"{{WORKSPACE_CWD}}\",\"interactive_ready\":true,\"name\":\"{{AGENT_NAME}}\",\"pane_id\":\"w1:p1\",\"revision\":1,\"state_change_seq\":4,\"tab_id\":\"w1:t1\",\"terminal_id\":\"term_657515c340cba1\",\"terminal_title\":\"\u2802 Claude Code\",\"terminal_title_stripped\":\"Claude Code\",\"workspace_id\":\"w1\"},\"type\":\"agent_info\"}}\n"
+}

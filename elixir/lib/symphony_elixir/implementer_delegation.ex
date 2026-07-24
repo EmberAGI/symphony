@@ -291,7 +291,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
     case state.transport.await_agent(
            state.session,
            state.orchestrator,
-           ["idle", "done"],
+           ["idle", "done", "blocked"],
            wait_ms,
            state.context
          ) do

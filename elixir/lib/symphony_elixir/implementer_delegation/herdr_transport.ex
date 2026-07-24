@@ -28,6 +28,12 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     :herdr_provider_start_failed
   ]
 
+  # Herdr 0.7.5 live-agent status vocabulary (recorded from `agent wait --help`).
+  @herdr_agent_statuses ~w(idle working blocked done unknown)
+  # Herdr 0.7.5 classifies an unchanged state_change_seq within this window as
+  # agent_prompt_stalled; a shorter --timeout returns a generic timeout instead.
+  @prompt_effect_window_ms 5_000
+
   @impl true
   def default_server_snapshot(context) when is_map(context) do
     with {:ok, output} <- command(context, ["status", "server"], default_env(context)) do
@@ -170,10 +176,13 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
          {:ok, output} <- start_agent_command(context, args, env, runtime_root, launch_token),
          :ok <- await_launch_acks(runtime_root, launch_token, context),
          {:ok, payload} <- Jason.decode(output),
-         agent when is_map(agent) <- get_in(payload, ["result", "agent"]) do
-      {:ok, agent |> atomize_known_agent_fields() |> Map.put(:provider, Map.get(spec, :provider))}
+         agent when is_map(agent) <- get_in(payload, ["result", "agent"]),
+         observed = atomize_known_agent_fields(agent),
+         {:ok, _status} <- classify_agent_status(observed.agent_status) do
+      {:ok, Map.put(observed, :provider, Map.get(spec, :provider))}
     else
       {:error, {stage, _details} = reason} when stage in @launch_stage_failures -> {:error, reason}
+      {:error, {:incompatible_herdr_runtime, _details} = reason} -> {:error, reason}
       {:error, reason} -> {:error, {:herdr_agent_start_failed, reason}}
       _ -> {:error, :invalid_herdr_agent_start_response}
     end
@@ -240,7 +249,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
              @prompt_recovery_attempts
            ),
          {:ok, observed} <- decode_agent_response(output),
-         {:ok, phase} <- prompt_phase(observed) do
+         {:ok, phase} <- prompt_outcome(observed, agent_name) do
       {:ok, %{phase: phase, agent: preserve_provider(observed, agent)}}
     else
       {:error, reason} -> prompt_error(reason, agent_name)
@@ -251,9 +260,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     do: {:error, :invalid_herdr_begin_turn}
 
   defp submit_prompt(context, session_name, env, agent_name, prompt, timeout_ms, recoveries_left) do
+    # The wait must exceed the 5000 ms prompt-effect window so an unchanged
+    # state_change_seq is the typed agent_prompt_stalled result, never an
+    # ordinary timeout. The until set is the upstream default settle set plus
+    # working, so a started turn is observed without waiting for completion.
+    effective_timeout_ms = max(timeout_ms, @prompt_effect_window_ms + 1)
+
     args =
       ["--session", session_name, "agent", "prompt", agent_name, prompt, "--wait"] ++
-        until_args(["working", "idle", "done"]) ++ ["--timeout", to_string(timeout_ms)]
+        until_args(["working", "idle", "done", "blocked"]) ++
+        ["--timeout", to_string(effective_timeout_ms)]
 
     case command(context, args, env) do
       {:error, reason} when recoveries_left > 0 ->
@@ -271,19 +287,80 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @impl true
   def await_agent(%{name: session_name, env: env}, %{name: agent_name} = agent, statuses, timeout_ms, context)
       when is_list(statuses) and statuses != [] and is_integer(timeout_ms) and timeout_ms >= 0 do
-    args =
-      ["--session", session_name, "agent", "wait", agent_name] ++
-        until_args(statuses) ++ ["--timeout", to_string(timeout_ms)]
-
-    with {:ok, output} <- command(context, args, env),
-         {:ok, observed} <- decode_agent_response(output) do
+    # The requested settle set must be exactly the upstream default
+    # (idle|done|blocked): never re-narrowed below it, never widened with
+    # unknown. The set is passed explicitly so the wire request states what
+    # the caller asked for.
+    with :ok <- validate_wait_statuses(statuses),
+         args =
+           ["--session", session_name, "agent", "wait", agent_name] ++
+             until_args(statuses) ++ ["--timeout", to_string(timeout_ms)],
+         {:ok, output} <- command(context, args, env),
+         {:ok, observed} <- decode_agent_response(output),
+         :ok <- wait_outcome(observed, agent_name) do
       {:ok, preserve_provider(observed, agent)}
     else
+      {:error, {:herdr_agent_blocked, _name} = reason} -> {:error, reason}
+      {:error, {:herdr_agent_status_unknown, _name} = reason} -> {:error, reason}
+      {:error, {:herdr_agent_wait_unsettled, _name, _status} = reason} -> {:error, reason}
       {:error, reason} -> wait_error(reason, agent_name, statuses)
     end
   end
 
   def await_agent(_session, _agent, _statuses, _timeout_ms, _context), do: {:error, :invalid_herdr_agent_wait}
+
+  defp validate_wait_statuses(statuses) do
+    if Enum.sort(statuses) == ["blocked", "done", "idle"],
+      do: :ok,
+      else: {:error, {:invalid_herdr_wait_settle_set, statuses}}
+  end
+
+  # Classify one observed Herdr 0.7.5 agent status string. The five statuses
+  # are first-class outcomes. Any other string is a typed protocol/version
+  # error, never coerced to `unknown`; command failures remain a distinct
+  # class handled by the CLI error mapping.
+  defp classify_agent_status(status) when status in @herdr_agent_statuses, do: {:ok, status}
+
+  defp classify_agent_status(status) do
+    {:error,
+     {:incompatible_herdr_runtime,
+      %{
+        error_code: "unrecognized_agent_status",
+        actual_status: status,
+        expected_statuses: @herdr_agent_statuses
+      }}}
+  end
+
+  # Typed outcome of one verified prompt submission observation. `working`
+  # starts a turn; `idle`/`done` complete it. `blocked` settles but is never
+  # success. `unknown` never proves completion or turn start. Out-of-enum
+  # statuses are typed protocol/version errors.
+  defp prompt_outcome(%{agent_status: status} = _observed, agent_name) do
+    with {:ok, status} <- classify_agent_status(status) do
+      case status do
+        "working" -> {:ok, :working}
+        settled when settled in ["idle", "done"] -> {:ok, :completed}
+        "blocked" -> {:error, {:herdr_agent_blocked, agent_name}}
+        "unknown" -> {:error, {:herdr_agent_status_unknown, agent_name}}
+      end
+    end
+  end
+
+  # Typed outcome of one settled `agent wait` observation. Only `idle` and
+  # `done` are successful completion. `blocked` settles but is never success.
+  # `unknown` never proves completion and is surfaced immediately as the typed
+  # unknown outcome; Stage 2 supervision owns transient-vs-persistent behavior.
+  # A `working` settle is typed unsettled — it is never completion.
+  defp wait_outcome(%{agent_status: status} = _observed, agent_name) do
+    with {:ok, status} <- classify_agent_status(status) do
+      case status do
+        settled when settled in ["idle", "done"] -> :ok
+        "working" -> {:error, {:herdr_agent_wait_unsettled, agent_name, "working"}}
+        "blocked" -> {:error, {:herdr_agent_blocked, agent_name}}
+        "unknown" -> {:error, {:herdr_agent_status_unknown, agent_name}}
+      end
+    end
+  end
 
   defp preserve_provider(observed, %{provider: provider}) when is_binary(provider),
     do: Map.put(observed, :provider, provider)
@@ -291,10 +368,6 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   defp preserve_provider(observed, _agent), do: observed
 
   defp until_args(statuses), do: Enum.flat_map(statuses, &["--until", &1])
-
-  defp prompt_phase(%{agent_status: "working"}), do: {:ok, :working}
-  defp prompt_phase(%{agent_status: status}) when status in ["idle", "done"], do: {:ok, :completed}
-  defp prompt_phase(%{agent_status: status}), do: {:error, {:unexpected_herdr_agent_status, status}}
 
   defp decode_agent_response(output) do
     with {:ok, payload} <- Jason.decode(output),
@@ -306,6 +379,11 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   defp prompt_error({:incompatible_herdr_runtime, _details} = reason, _agent_name),
+    do: {:error, reason}
+
+  defp prompt_error({:herdr_agent_blocked, _name} = reason, _agent_name), do: {:error, reason}
+
+  defp prompt_error({:herdr_agent_status_unknown, _name} = reason, _agent_name),
     do: {:error, reason}
 
   defp prompt_error(reason, agent_name) do
@@ -1275,9 +1353,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       recovery_attempt=0
       while :; do
         if [ "$recovery_attempt" -eq 0 ]; then
-          set -- "$@" --wait --until working --until idle --until done --timeout #{@generated_prompt_timeout_ms}
+          set -- "$@" --wait --until working --until idle --until done --until blocked --timeout #{@generated_prompt_timeout_ms}
         else
-          set -- agent prompt "$agent_name" ' ' --wait --until working --until idle --until done --timeout #{@generated_prompt_timeout_ms}
+          set -- agent prompt "$agent_name" ' ' --wait --until working --until idle --until done --until blocked --timeout #{@generated_prompt_timeout_ms}
         fi
 
         set +e

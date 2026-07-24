@@ -1,0 +1,31 @@
+{
+  "argv": [
+    "--session",
+    "emb1244rec6",
+    "agent",
+    "prompt",
+    "stallprobe",
+    "x",
+    "--wait",
+    "--until",
+    "working",
+    "--until",
+    "idle",
+    "--until",
+    "done",
+    "--until",
+    "blocked",
+    "--timeout",
+    "6500"
+  ],
+  "derivation": null,
+  "exit_status": 1,
+  "herdr_binary_sha256": "37350546b0012555943b92eaf962665de4e264395baeb44227b8015e8ff5b0d6",
+  "herdr_version": "herdr 0.7.5",
+  "name": "error-agent-prompt-stalled",
+  "provenance": "recorded",
+  "recorded_at": "2026-07-24T01:44:22.959730+00:00",
+  "redaction": "none required: no secret-bearing fields present (verified by scan for username, tokens, keys)",
+  "stderr": "{\"error\":{\"code\":\"agent_prompt_stalled\",\"message\":\"agent prompt produced no observed state change within 5000 ms; status is idle and state_change_seq remained 1\"},\"id\":\"cli:agent:prompt\"}\n",
+  "stdout": ""
+}

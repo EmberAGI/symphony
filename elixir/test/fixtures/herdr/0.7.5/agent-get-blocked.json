@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "/opt/homebrew/bin/herdr",
+    "--session",
+    "emb1244rec",
+    "agent",
+    "get",
+    "plan_agent"
+  ],
+  "derivation": null,
+  "exit_status": 0,
+  "herdr_binary_sha256": "37350546b0012555943b92eaf962665de4e264395baeb44227b8015e8ff5b0d6",
+  "herdr_version": "herdr 0.7.5",
+  "name": "agent-get-blocked",
+  "provenance": "recorded",
+  "recorded_at": "2026-07-24T01:28:10.969499+00:00",
+  "redaction": "parameterized: run-varying fields replaced with {{AGENT_KIND}}/{{AGENT_NAME}}/{{WORKSPACE_CWD}} placeholders; envelope otherwise verbatim from the recorded command outcome; argv preserved verbatim. none required: no secret-bearing fields present (verified by scan for username, tokens, keys)",
+  "stderr": "",
+  "stdout": "{\"id\":\"cli:agent:get\",\"result\":{\"agent\":{\"agent\":\"{{AGENT_KIND}}\",\"agent_session\":{\"agent\":\"{{AGENT_KIND}}\",\"kind\":\"id\",\"source\":\"herdr:{{AGENT_KIND}}\",\"value\":\"e662ef8f-b7aa-450f-9002-a25ea1d28f00\"},\"agent_status\":\"blocked\",\"cwd\":\"{{WORKSPACE_CWD}}\",\"focused\":false,\"foreground_cwd\":\"{{WORKSPACE_CWD}}\",\"interactive_ready\":true,\"name\":\"{{AGENT_NAME}}\",\"pane_id\":\"w3:p1\",\"revision\":2,\"state_change_seq\":12,\"tab_id\":\"w3:t1\",\"terminal_id\":\"term_6575148686efd3\",\"terminal_title\":\"\u2733 Create plan.txt file\",\"terminal_title_stripped\":\"Create plan.txt file\",\"workspace_id\":\"w3\"},\"type\":\"agent_info\"}}\n"
+}

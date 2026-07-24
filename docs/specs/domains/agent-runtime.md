@@ -550,14 +550,30 @@ snapshot is unchanged.
 
 Herdr owns terminal input, bracketed-paste handling, provider keyboard protocol,
 prompt acknowledgement, and lifecycle waiting behind its native live-agent
-Interface. Symphony submits initial turns, worker results, and consultation
-responses through the same verified `agent prompt` operation. Each submission
-waits for Herdr to observe an agent state change and accepts `working`, `idle`,
-or `done`, so a started turn and a turn that finishes before observation are
-both represented without revision heuristics. The submission wait must exceed
-Herdr 0.7.5's 5000 ms prompt-effect window so an unchanged
+Interface. Herdr 0.7.5's agent status vocabulary is exactly `idle`, `working`,
+`blocked`, `done`, and `unknown`, and every Symphony status read types all five
+as first-class outcomes. `working` starts a turn; `idle` and `done` complete
+one. `blocked` (a recognized approval/question UI) settles a prompt or wait but
+is never success: it is the typed blocked outcome, surfaced within one bounded
+observation interval. `unknown` never proves completion or turn start; it is
+surfaced immediately as the typed unknown outcome, and transient-versus-
+persistent unknown resolution belongs to the later supervision stage. A status
+string outside the five-state enum is a typed protocol/version error, never
+coerced to `unknown`; command failures remain a distinct error class.
+
+Symphony submits initial turns, worker results, and consultation responses
+through the same verified `agent prompt` operation. Prompt submissions settle
+on the upstream default settle set (`idle`, `done`, `blocked`) plus `working`
+so a started turn and a turn that finishes before observation are both
+represented without revision heuristics; the settle set is never re-narrowed
+below the upstream default and never includes `unknown`. Bounded lifecycle
+observation with `agent wait` requests exactly the upstream default settle set
+(`idle`, `done`, `blocked`), stated explicitly on the wire and rejected typed
+if a caller asks for anything narrower or wider. The submission wait must
+exceed Herdr 0.7.5's 5000 ms prompt-effect window so an unchanged
 `state_change_seq` is classified as the typed `agent_prompt_stalled` result
-rather than an ordinary timeout. On that result, the transport re-drives
+rather than an ordinary timeout; the transport deliberately raises any smaller
+caller budget to a 5001 ms floor. On a stall, the transport re-drives
 submission with a follow-up submit input at most twice.
 Only an observed state change succeeds; exhausting the recovery bound preserves
 the typed prompt-stall failure. This provider-neutral recovery applies to
@@ -598,6 +614,21 @@ uses unattended bypass-permissions mode and disables the provider-native
 `Agent` tool. A restricted worker Herdr proxy is
 defense in depth rather than a complete process sandbox; one-generation
 delegation remains a profile invariant backed by evals.
+
+Herdr protocol test evidence is recorded, not authored (EMB-1244 Stage 1).
+Every protocol read in the deterministic suite replays a response recorded from
+the real herdr 0.7.5 binary, committed with raw provenance: argv, stdout,
+stderr, exit status, timestamp, binary version and SHA-256, and the declared
+redaction/parameterization method. Placeholder substitution is permitted only
+for run-varying identity/path fields, never for statuses, error codes, or other
+semantic fields; a fidelity check fails the suite on any out-of-enum status
+claim, unrecorded error code, missing provenance, or non-recorded fixture. The
+only executable test double behavior is launch/timing physics that cannot be a
+recording (server run loop, provider execution for `agent start`, the 5000 ms
+prompt-effect window), and that behavior is differentially validated against
+the real binary by an opt-in CD-tier fake-vs-real harness that runs identical
+operations against both and fails on divergence. Recording is a CD-tier
+operation; committed fixtures are CI inputs.
 
 Symphony observes Herdr identity/status and emits its existing normalized
 top-level runtime events. Runtime contract tests prove that resolved profiles
