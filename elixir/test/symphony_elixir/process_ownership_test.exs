@@ -614,7 +614,8 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
                })
 
       assert owned_shell_pid in term_pids
-      assert kill_pids != []
+      assert is_list(kill_pids)
+      refute other_run_pid in kill_pids
       refute os_process_alive?(owned_shell_pid)
       assert os_process_alive?(other_run_pid)
       assert Process.alive?(self())

@@ -254,6 +254,41 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     assert_typed_failed_run(reason)
   end
 
+  test "missing process ownership fails before any role hook or provider prompt" do
+    {reason, before_marker, after_marker} =
+      run_with_invalid_ownership("ownership-missing", nil)
+
+    assert reason ==
+             {:agent_runtime_failed, {:process_ownership_publication_failed, :ownership_missing}}
+
+    refute File.exists?(before_marker)
+    refute File.exists?(after_marker)
+    refute_receive {:worker_outcome_turn_started, _prompt}, 100
+  end
+
+  test "mismatched process ownership fails before any role hook or provider prompt" do
+    invalid_ownership = fn issue ->
+      assert {:ok, ownership} =
+               ProcessOwnership.acquire(issue, %{
+                 role: "implementer",
+                 run_id: "run-ownership-mismatch",
+                 holder: ProcessOwnership.holder_id()
+               })
+
+      {%{ownership | run_id: "wrong-run"}, ownership}
+    end
+
+    {reason, before_marker, after_marker} =
+      run_with_invalid_ownership("ownership-mismatch", invalid_ownership)
+
+    assert reason ==
+             {:agent_runtime_failed, {:process_ownership_publication_failed, :ownership_mismatch}}
+
+    refute File.exists?(before_marker)
+    refute File.exists?(after_marker)
+    refute_receive {:worker_outcome_turn_started, _prompt}, 100
+  end
+
   # The Orchestrator has exactly one success signal at its monitored-task
   # seam. A `:normal` exit is recorded as a completed agent run, so a failed
   # run must never produce one, and the reason must be a typed runtime
@@ -317,6 +352,76 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
 
     reason
   end
+
+  defp run_with_invalid_ownership(label, ownership_builder) do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-ownership-pre-hook-#{label}-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    before_marker = Path.join(test_root, "before-run-called")
+    after_marker = Path.join(test_root, "after-run-called")
+    File.mkdir_p!(workspace_root)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      hook_before_run: "touch #{before_marker}",
+      hook_after_run: "touch #{after_marker}"
+    )
+
+    issue = issue(label)
+
+    {process_ownership, ownership_to_release} =
+      case ownership_builder do
+        builder when is_function(builder, 1) -> builder.(issue)
+        _ -> {nil, nil}
+      end
+
+    on_exit(fn ->
+      if is_map(ownership_to_release) do
+        _ =
+          ProcessOwnership.release(issue, %{
+            holder: ownership_to_release.holder,
+            run_id: ownership_to_release.run_id,
+            workspace_path: ownership_to_release.workspace_path
+          })
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    runner_opts =
+      [
+        run_id: "run-#{label}",
+        role: "implementer",
+        delegation_transport: WorkerOutcomeTransport,
+        delegation_transport_context: %{assignments: [], test_pid: self()}
+      ]
+      |> maybe_put_process_ownership(process_ownership)
+
+    {:ok, pid} =
+      Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+        AgentRunner.run(issue, nil, runner_opts)
+      end)
+
+    ref = Process.monitor(pid)
+
+    reason =
+      receive do
+        {:DOWN, ^ref, :process, ^pid, exit_reason} -> exit_reason
+      after
+        5_000 -> flunk("runner task for #{label} did not finish")
+      end
+
+    {reason, before_marker, after_marker}
+  end
+
+  defp maybe_put_process_ownership(opts, nil), do: opts
+
+  defp maybe_put_process_ownership(opts, ownership),
+    do: Keyword.put(opts, :process_ownership, ownership)
 
   defp issue(label) do
     %Issue{
