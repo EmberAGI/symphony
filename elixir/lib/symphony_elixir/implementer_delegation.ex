@@ -186,7 +186,21 @@ defmodule SymphonyElixir.ImplementerDelegation do
   def run_turn(_session, _prompt, _issue, _opts), do: {:error, :invalid_implementer_delegation_turn}
 
   defp begin_turn(transport, context, session, orchestrator, prompt, timeout_ms) do
-    transport.begin_turn(session, orchestrator, prompt, timeout_ms, context)
+    case transport.begin_turn(session, orchestrator, prompt, timeout_ms, context) do
+      {:error, {:herdr_agent_blocked, _name}} ->
+        # A prompt that settles blocked is preserved with the same
+        # evidence-shaped outcome supervision produces, so the runner's
+        # checkpoint-gated shutdown decision applies before any teardown.
+        Supervision.blocked_outcome(%{
+          transport: transport,
+          context: context,
+          session: session,
+          orchestrator: orchestrator
+        })
+
+      other ->
+        other
+    end
   end
 
   @spec stop_session(session()) :: :ok | {:error, term()}

@@ -507,6 +507,91 @@ defmodule SymphonyElixir.ImplementerSupervisionTest do
     end
   end
 
+  defmodule IncompatibleStatusReadTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, _agent, _timeout_ms, %{owner: owner}) do
+      send(owner, :status_read)
+
+      {:error, {:incompatible_herdr_runtime, %{error_code: "unrecognized_agent_status", actual_status: "rebooting"}}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "pane before protocol failure"}}
+  end
+
+  test "an incompatible-runtime status read halts immediately with a checkpoint, never indeterminate retry" do
+    session = supervised_session(IncompatibleStatusReadTransport)
+
+    assert {:error, {:incompatible_herdr_runtime, details, evidence}} =
+             ImplementerDelegation.run_turn(session, "Do bounded work.", %{}, supervision_opts())
+
+    assert details.error_code == "unrecognized_agent_status"
+    assert {:ok, checkpoint} = evidence.checkpoint
+    assert checkpoint.pane_tail == "pane before protocol failure"
+    assert checkpoint.shutdown_reason == :incompatible_runtime
+    assert count_received(:status_read) == 1
+  end
+
+  defmodule PromptBlockedTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, %{owner: owner}) do
+      send(owner, :prompt_submitted)
+      {:error, {:herdr_agent_blocked, agent.name}}
+    end
+
+    def read_agent(_session, _agent, %{source: :visible}, _context) do
+      {:ok, %{text: "Approve plan? [y/n]"}}
+    end
+  end
+
+  test "a prompt that settles blocked is preserved with the same evidence shape as supervision" do
+    session = supervised_session(PromptBlockedTransport)
+
+    assert {:error, {:implementer_agent_blocked, evidence}} =
+             ImplementerDelegation.run_turn(session, "Do bounded work.", %{}, supervision_opts())
+
+    assert evidence.agent_status == "blocked"
+    assert {:ok, checkpoint} = evidence.checkpoint
+    assert checkpoint.pane_tail == "Approve plan? [y/n]"
+    assert checkpoint.shutdown_reason == :blocked
+    assert_received :prompt_submitted
+    refute_received :prompt_submitted
+  end
+
+  defmodule BlockedDuringRecoveryTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      {:ok, %{name: agent.name, agent_status: "working", agent_session: nil}}
+    end
+
+    def await_agent(_session, agent, _statuses, _timeout_ms, %{owner: owner}) do
+      send(owner, :recovery_probe)
+      {:error, {:herdr_agent_blocked, agent.name}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "blocked during recovery"}}
+  end
+
+  test "a blocked outcome during stale recovery halts as observed blocked, not a failed recovery" do
+    session = supervised_session(BlockedDuringRecoveryTransport)
+
+    assert {:error, {:implementer_agent_blocked, evidence}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Do bounded work.",
+               %{},
+               supervision_opts(stale_working_ms: 5, heartbeat_interval_ms: 2)
+             )
+
+    assert [%{result: :observed_blocked}] = evidence.recovery_history
+    assert {:ok, %{shutdown_reason: :blocked}} = evidence.checkpoint
+    assert count_received(:recovery_probe) == 1
+  end
+
   defp supervised_session(transport) do
     %{
       transport: transport,

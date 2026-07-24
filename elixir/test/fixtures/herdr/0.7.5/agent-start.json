@@ -24,7 +24,7 @@
   "name": "agent-start",
   "provenance": "recorded",
   "recorded_at": "2026-07-24T01:26:04.485240+00:00",
-  "redaction": "parameterized: run-varying fields replaced with {{AGENT_KIND}}/{{AGENT_NAME}}/{{WORKSPACE_CWD}} placeholders; envelope otherwise verbatim from the recorded command outcome; argv preserved verbatim. none required: no secret-bearing fields present (verified by scan for username, tokens, keys)",
+  "redaction": "parameterized: run-varying fields replaced with {{AGENT_KIND}}/{{AGENT_NAME}}/{{PANE_ID}}/{{WORKSPACE_CWD}} placeholders; envelope otherwise verbatim from the recorded command outcome; argv preserved verbatim. none required: no secret-bearing fields present (verified by scan for username, tokens, keys)",
   "stderr": "",
-  "stdout": "{\"id\":\"cli:agent:start\",\"result\":{\"agent\":{\"agent\":\"{{AGENT_KIND}}\",\"agent_status\":\"idle\",\"cwd\":\"{{WORKSPACE_CWD}}\",\"focused\":true,\"foreground_cwd\":\"{{WORKSPACE_CWD}}\",\"interactive_ready\":true,\"name\":\"{{AGENT_NAME}}\",\"pane_id\":\"w1:p1\",\"revision\":0,\"state_change_seq\":1,\"tab_id\":\"w1:t1\",\"terminal_id\":\"term_65751416053001\",\"workspace_id\":\"w1\"},\"argv\":[\"claude\",\"claude\",\"--model\",\"haiku\"],\"type\":\"agent_started\"}}\n"
+  "stdout": "{\"id\":\"cli:agent:start\",\"result\":{\"agent\":{\"agent\":\"{{AGENT_KIND}}\",\"agent_status\":\"idle\",\"cwd\":\"{{WORKSPACE_CWD}}\",\"focused\":true,\"foreground_cwd\":\"{{WORKSPACE_CWD}}\",\"interactive_ready\":true,\"name\":\"{{AGENT_NAME}}\",\"pane_id\":\"{{PANE_ID}}\",\"revision\":0,\"state_change_seq\":1,\"tab_id\":\"w1:t1\",\"terminal_id\":\"term_65751416053001\",\"workspace_id\":\"w1\"},\"argv\":[\"claude\",\"claude\",\"--model\",\"haiku\"],\"type\":\"agent_started\"}}\n"
 }

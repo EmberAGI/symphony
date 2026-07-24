@@ -602,7 +602,9 @@ authorized policy, and bypass-permissions launches do not exempt blocked
 handling; `unknown` statuses and status-read failures (including per-read
 command timeouts) get bounded retries (default four consecutive
 indeterminate reads) before a typed escalation carrying independent pane
-evidence; stale working (no cursor movement past the stale threshold,
+evidence, except that a status read failing with the typed
+incompatible-runtime protocol error halts immediately with a checkpoint —
+a deterministic protocol failure is never retried as indeterminate; stale working (no cursor movement past the stale threshold,
 default fifteen minutes) gets bounded recovery through the server-owned
 terminal wait (at most two attempts) before a typed stalled escalation; the
 hard turn budget triggers checkpoint-and-preserve, then shutdown. A read
@@ -612,7 +614,8 @@ prompt-effect window) is transitional, not completion; this is read-only
 revision observation, not 0.7.4 revision-acknowledgement choreography.
 
 Work preservation is scoped to the technically observable. Before any halt
-that can precede a destructive shutdown, the supervisor records a
+that can precede a destructive shutdown — including a prompt submission that
+itself settles blocked — the supervisor records a
 best-effort checkpoint in the turn's typed outcome: pane tail, Herdr session
 name and runtime root, workspace identity, agent name/pane, agent resume
 reference when observed, last typed status, progress cursor, recovery

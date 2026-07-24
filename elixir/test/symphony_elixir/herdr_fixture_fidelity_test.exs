@@ -71,6 +71,13 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
     end
   end
 
+  test "the agent-start envelope parameterizes its run-varying target pane" do
+    assert HerdrReplayFixture.stdout!("agent-start") =~ ~s("pane_id":"{{PANE_ID}}"),
+           "agent-start must not pin the recording's pane: workers start on other panes"
+
+    assert HerdrReplayFixture.load!("agent-start")["redaction"] =~ "{{PANE_ID}}"
+  end
+
   test "fixtures use only the declared run-varying placeholders" do
     for name <- HerdrReplayFixture.fixture_names() do
       fixture = HerdrReplayFixture.load!(name)

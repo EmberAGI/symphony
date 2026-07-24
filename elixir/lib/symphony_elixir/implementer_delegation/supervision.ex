@@ -82,6 +82,9 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
   defp classify(state, {:error, {:herdr_agent_closed, _name} = reason}, _now_ms),
     do: {{:halt, {:closed, reason}}, state}
 
+  defp classify(state, {:error, {:incompatible_herdr_runtime, _details} = reason}, _now_ms),
+    do: {{:halt, {:incompatible, reason}}, state}
+
   defp classify(state, {:error, reason}, _now_ms),
     do: indeterminate(state, {:status_reads_failed, reason})
 
@@ -143,6 +146,24 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
       | recovery_attempts: state.recovery_attempts + 1,
         recovery_history: state.recovery_history ++ [%{at_ms: now_ms, result: attempt_result}]
     }
+  end
+
+  @doc """
+  Preserve and surface an agent observed blocked at prompt submission.
+
+  Produces the same evidence-shaped blocked outcome as the supervised halt so
+  the runner's checkpoint-gated shutdown decision applies uniformly.
+  """
+  @spec blocked_outcome(config()) :: {:error, term()}
+  def blocked_outcome(config) do
+    state = %{
+      last_status: "blocked",
+      last_cursor: :unavailable,
+      last_agent_session: nil,
+      recovery_history: []
+    }
+
+    halt(config, state, :blocked)
   end
 
   @doc """
@@ -244,7 +265,7 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
       {:ok, %{agent_status: status} = agent} when status in ["idle", "done"] ->
         {:ok, agent}
 
-      {:ok, %{agent_status: "blocked"}} ->
+      {:error, {:herdr_agent_blocked, _name}} ->
         halt(config, record_recovery(state, :observed_blocked, now), :blocked)
 
       other ->
@@ -304,6 +325,11 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
         checkpoint: checkpoint(config, state, :stale_working),
         recovery_history: state.recovery_history
       }}}
+  end
+
+  defp halt(config, state, {:incompatible, {:incompatible_herdr_runtime, details}}) do
+    saved = checkpoint(config, state, :incompatible_runtime)
+    {:error, {:incompatible_herdr_runtime, details, %{checkpoint: saved}}}
   end
 
   defp halt(config, state, {:closed, {:herdr_agent_closed, agent_name}}) do

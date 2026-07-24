@@ -55,6 +55,20 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
     end
   end
 
+  defmodule PromptBlockedPreservationTransport do
+    defdelegate default_server_snapshot(context), to: SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
+    defdelegate start_session(spec, context), to: SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
+    defdelegate prepare_worker(session, spec, context), to: SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
+    defdelegate start_agent(session, spec, context), to: SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
+    defdelegate read_agent(session, agent, opts, context), to: SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
+    defdelegate stop_session(session, context), to: SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
+    defdelegate owned_session_ref(session, context), to: SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
+
+    def begin_turn(_session, agent, _prompt, _timeout_ms, %{owner: _owner}) do
+      {:error, {:herdr_agent_blocked, agent.name}}
+    end
+  end
+
   setup do
     previous_role = System.get_env("SYMPHONY_ROLE")
     previous_orchestrator = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
@@ -72,7 +86,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
     :ok
   end
 
-  defp run_preservation_case(label, checkpoint_readable) do
+  defp run_preservation_case(label, checkpoint_readable, transport \\ PreservationTransport) do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -100,7 +114,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
           AgentRunner.run(issue, self(),
             run_id: "run-preserve-#{label}",
             role: "implementer",
-            delegation_transport: PreservationTransport,
+            delegation_transport: transport,
             delegation_transport_context: %{owner: self(), checkpoint_readable: checkpoint_readable}
           )
         )
@@ -121,6 +135,21 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
 
   test "a successful checkpoint still permits the runner's bounded session stop" do
     _log = run_preservation_case("shutdown", true)
+
+    refute_received :checkpoint_read_failed
+    assert_received {:stop_session, _name}
+  end
+
+  test "a prompt-blocked turn with a failed checkpoint blocks the runner's destructive session stop" do
+    log = run_preservation_case("prompt-blocked", false, PromptBlockedPreservationTransport)
+
+    assert_received :checkpoint_read_failed
+    refute_received {:stop_session, _name}
+    assert log =~ "destructive shutdown is blocked"
+  end
+
+  test "a prompt-blocked turn with a successful checkpoint still permits bounded shutdown" do
+    _log = run_preservation_case("prompt-blocked-ok", true, PromptBlockedPreservationTransport)
 
     refute_received :checkpoint_read_failed
     assert_received {:stop_session, _name}

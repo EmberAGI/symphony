@@ -111,6 +111,17 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
 
     assert nested_triple.family == :invalid_workspace_or_runtime_protocol
 
+    # An incompatible-runtime protocol error carrying supervision evidence keeps
+    # its irrecoverable invalid-protocol identity.
+    assert {:irrecoverable, incompatible_with_evidence} =
+             AgentRuntime.classify_failure(
+               {:incompatible_herdr_runtime, %{error_code: "unrecognized_agent_status", actual_status: "rebooting"}, %{checkpoint: good_checkpoint}},
+               @context
+             )
+
+    assert incompatible_with_evidence.family == :invalid_workspace_or_runtime_protocol
+    refute incompatible_with_evidence.summary =~ "pane-secret"
+
     # Supervised out-of-enum protocol status → invalid_workspace_or_runtime_protocol.
     for reason <- [
           {:unexpected_herdr_agent_status, "rebooting"},

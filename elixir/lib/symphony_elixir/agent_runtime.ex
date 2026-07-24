@@ -827,6 +827,11 @@ defmodule SymphonyElixir.AgentRuntime do
      }}
   end
 
+  defp real_irrecoverable_runtime_reason({:incompatible_herdr_runtime, details, evidence})
+       when is_map(details) and is_map(evidence) do
+    real_irrecoverable_runtime_reason({:incompatible_herdr_runtime, details})
+  end
+
   defp real_irrecoverable_runtime_reason({:herdr_agent_blocked, agent_name}) when is_binary(agent_name) do
     {:human_input_required,
      %{

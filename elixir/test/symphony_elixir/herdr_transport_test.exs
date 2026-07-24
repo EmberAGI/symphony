@@ -1569,6 +1569,27 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
+  test "an agent started on a worker pane replays that pane in the observed envelope", context do
+    state_root = Path.join(Path.dirname(context.bin), "pane-replay-state")
+    File.mkdir_p!(state_root)
+
+    assert {start_output, 0} =
+             System.cmd(
+               context.bin,
+               ["--session", "s1", "agent", "start", "implementer_worker", "--kind", "claude"] ++
+                 ["--pane", "w1:p2", "--timeout", "1000", "--", "claude", "--model", "haiku"],
+               env: [
+                 {"HERDR_FAKE_LOG", context.log},
+                 {"XDG_CONFIG_HOME", state_root},
+                 {"HERDR_FAKE_SKIP_LAUNCH", "1"}
+               ],
+               stderr_to_stdout: true
+             )
+
+    assert start_output =~ ~s("pane_id":"w1:p2")
+    refute start_output =~ ~s("pane_id":"w1:p1")
+  end
+
   test "the status vocabulary documented by the recorded real-binary help output is the pinned five-state enum" do
     assert HerdrReplayFixture.documented_statuses!() == HerdrReplayFixture.known_statuses()
     assert HerdrReplayFixture.known_statuses() == ["idle", "working", "blocked", "done", "unknown"]
