@@ -319,11 +319,11 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info({:codex_worker_update, _issue_id, _update}, state), do: {:noreply, state}
 
   def handle_info(
-        {:retry_issue, _issue_id, _retry_token},
+        {:retry_issue, issue_id, retry_token},
         %State{work_admission: %{status: "closed"}} = state
       ) do
     notify_dashboard()
-    {:noreply, state}
+    {:noreply, hold_fired_retry_attempt(state, issue_id, retry_token)}
   end
 
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
@@ -1226,6 +1226,26 @@ defmodule SymphonyElixir.Orchestrator do
         :missing
     end
   end
+
+  # A closed admission only holds a retry after its own timer has fired.  Other
+  # queued retries keep their original timer and deadline while admission is
+  # closed, so reopening cannot turn an unexpired backoff into immediate work.
+  defp hold_fired_retry_attempt(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
+    case Map.get(state.retry_attempts, issue_id) do
+      %{retry_token: ^retry_token} = retry ->
+        held_retry =
+          retry
+          |> Map.put(:timer_ref, nil)
+          |> Map.put(:held_by_admission, true)
+
+        %{state | retry_attempts: Map.put(state.retry_attempts, issue_id, held_retry)}
+
+      _ ->
+        state
+    end
+  end
+
+  defp hold_fired_retry_attempt(%State{} = state, _issue_id, _retry_token), do: state
 
   defp handle_missing_retry_attempt(%State{} = state, issue_id) when is_binary(issue_id) do
     cond do
@@ -2913,7 +2933,15 @@ defmodule SymphonyElixir.Orchestrator do
   defp work_admission_open?(_state), do: false
 
   defp terminate_orphaned_runner_tasks do
-    runner_pids = active_runner_pids()
+    runner_pids =
+      case active_runner_pids() do
+        {:ok, pids} ->
+          pids
+
+        {:error, reason} ->
+          Logger.error("Unable to inspect runner tasks before orchestrator polling: #{inspect(reason)}")
+          []
+      end
 
     Enum.each(runner_pids, fn runner_pid ->
       case Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, runner_pid) do
@@ -2929,25 +2957,30 @@ defmodule SymphonyElixir.Orchestrator do
     :ok
   end
 
-  defp active_runner_count, do: length(active_runner_pids())
+  defp active_runner_count do
+    case active_runner_pids() do
+      {:ok, runner_pids} -> {:ok, length(runner_pids)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   defp work_admission_payload(%State{} = state) do
     %{
       status: state.work_admission.status,
       target_generation: state.work_admission.target_generation,
-      drained: map_size(state.running) == 0 and active_runner_count() == 0
+      drained: map_size(state.running) == 0 and active_runner_count() == {:ok, 0}
     }
   end
 
   defp active_runner_pids do
     case Process.whereis(SymphonyElixir.TaskSupervisor) do
-      pid when is_pid(pid) -> Task.Supervisor.children(SymphonyElixir.TaskSupervisor)
-      _ -> []
+      pid when is_pid(pid) -> {:ok, Task.Supervisor.children(SymphonyElixir.TaskSupervisor)}
+      _ -> {:error, :task_supervisor_unavailable}
     end
   rescue
-    _error -> []
+    error -> {:error, {:inspection_failed, error}}
   catch
-    :exit, _reason -> []
+    :exit, reason -> {:error, {:inspection_exited, reason}}
   end
 
   defp execution_generation(opts) do
@@ -3110,15 +3143,19 @@ defmodule SymphonyElixir.Orchestrator do
   defp rearm_held_retry_timers(%State{} = state) do
     retry_attempts =
       Enum.into(state.retry_attempts, %{}, fn {issue_id, retry} ->
-        cancel_retry_timer(retry)
-        retry_token = make_ref()
-        timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_token}, 0)
+        if Map.get(retry, :held_by_admission, false) do
+          retry_token = make_ref()
+          delay_ms = max(Map.get(retry, :due_at_ms, System.monotonic_time(:millisecond)) - System.monotonic_time(:millisecond), 0)
+          timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
 
-        {issue_id,
-         retry
-         |> Map.put(:retry_token, retry_token)
-         |> Map.put(:timer_ref, timer_ref)
-         |> Map.put(:due_at_ms, System.monotonic_time(:millisecond))}
+          {issue_id,
+           retry
+           |> Map.put(:retry_token, retry_token)
+           |> Map.put(:timer_ref, timer_ref)
+           |> Map.delete(:held_by_admission)}
+        else
+          {issue_id, retry}
+        end
       end)
 
     %{state | retry_attempts: retry_attempts}

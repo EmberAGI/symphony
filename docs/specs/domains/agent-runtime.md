@@ -299,8 +299,11 @@ admission opens.
   earlier selected dispatch has become visible in `running`, or before any
   later dispatch can start.
 - Closed admission blocks normal and retry dispatch but does not stop
-  reconciliation or already-running work. Retry entries whose timers fire
-  while closed remain held and are re-armed if the same process later opens.
+  reconciliation or already-running work. Only a retry whose matching timer
+  actually fires while closed becomes held; unexpired retry timers keep their
+  original `due_at_ms` deadline. On a later open in the same process, held
+  retries are re-armed for `max(due_at_ms - now, 0)` while still-pending timers
+  are left untouched.
 - Opening admission requires the target generation to equal the process
   execution generation and the current admission target. A missing or invalid
   execution generation cannot open admission.
@@ -317,7 +320,8 @@ admission opens.
 - On Orchestrator initialization, runner tasks surviving an earlier
   Orchestrator process are terminated before polling and before stale
   process-ownership recovery. `drained` is true only when both the
-  Orchestrator running map and the shared TaskSupervisor child set are empty.
+  Orchestrator running map and the shared TaskSupervisor child set are empty;
+  TaskSupervisor inspection errors or exits report `drained: false`.
 - The marker is a small atomically replaced JSON record containing only schema
   version, `open`/`closed` status, and target generation. It is neither a
   transition outbox nor a run log, dossier, lock service, or new shared storage
@@ -1125,8 +1129,11 @@ slices without weakening the skills/tools release gate.
   serialization is the invariant home. The Octo wrapper owns complete
   generation construction, closing all role processes, bounded drain,
   materialization/restart verification, and opening the verified target.
-  This completes the atomic lifecycle direction already owned by Octo ADR
-  0016; no new Symphony ADR is required.
+  This specification is the authority for the new Symphony admission
+  interface. Octo ADR 0016 retains its existing wrapper ownership and is not
+  expanded into a complete-generation-cutover decision here. The marker is an
+  implementation detail of that interface, not a new cross-system authority or
+  service, so no new Symphony ADR is required.
 
 ## References to source issues
 

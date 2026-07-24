@@ -799,6 +799,7 @@ defmodule SymphonyElixir.CoreTest do
           error: "agent exited: :boom"
         }
       })
+      |> Map.put(:claimed, MapSet.new([issue_id]))
     end)
 
     send(pid, {:retry_issue, issue_id, stale_retry_token})
@@ -810,6 +811,8 @@ defmodule SymphonyElixir.CoreTest do
              identifier: "MT-561",
              error: "agent exited: :boom"
            } = :sys.get_state(pid).retry_attempts[issue_id]
+
+    assert MapSet.member?(:sys.get_state(pid).claimed, issue_id)
   end
 
   test "retry timer refreshes retried issue by id instead of fetching candidate page" do

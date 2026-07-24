@@ -79,6 +79,18 @@ Pass a custom workflow file path to `./bin/symphony` when starting the service:
 
 If no path is passed, Symphony defaults to `./WORKFLOW.md`.
 
+### Atomic cutover bootstrap
+
+When Octo performs an atomic cutover, its wrapper supplies
+`SYMPHONY_EXECUTION_GENERATION` and, when the orchestration root is not used,
+`SYMPHONY_WORK_ADMISSION_PATH` to the Symphony process. The marker path is
+otherwise derived as
+`$SYMPHONY_ORCHESTRATION_ROOT/.runtime/symphony/work-admission.json`. Symphony
+only reads and atomically writes that small admission marker; the wrapper owns
+generation construction, close/drain, process materialization, and verified
+reopen. A configured missing or invalid marker starts Symphony closed, so the
+wrapper must explicitly open the matching generation after verification.
+
 Optional flags:
 
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)

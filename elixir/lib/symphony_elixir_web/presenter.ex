@@ -15,9 +15,9 @@ defmodule SymphonyElixirWeb.Presenter do
           generated_at: generated_at,
           work_admission:
             Map.get(snapshot, :work_admission, %{
-              status: "open",
+              status: "closed",
               target_generation: "unknown",
-              drained: true
+              drained: false
             }),
           execution_generation: Map.get(snapshot, :execution_generation, "unknown"),
           counts: %{
