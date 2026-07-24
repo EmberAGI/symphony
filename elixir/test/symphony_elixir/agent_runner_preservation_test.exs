@@ -56,13 +56,15 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
   end
 
   defmodule PromptBlockedPreservationTransport do
-    defdelegate default_server_snapshot(context), to: SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
-    defdelegate start_session(spec, context), to: SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
-    defdelegate prepare_worker(session, spec, context), to: SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
-    defdelegate start_agent(session, spec, context), to: SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
-    defdelegate read_agent(session, agent, opts, context), to: SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
-    defdelegate stop_session(session, context), to: SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
-    defdelegate owned_session_ref(session, context), to: SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
+    alias SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
+
+    defdelegate default_server_snapshot(context), to: PreservationTransport
+    defdelegate start_session(spec, context), to: PreservationTransport
+    defdelegate prepare_worker(session, spec, context), to: PreservationTransport
+    defdelegate start_agent(session, spec, context), to: PreservationTransport
+    defdelegate read_agent(session, agent, opts, context), to: PreservationTransport
+    defdelegate stop_session(session, context), to: PreservationTransport
+    defdelegate owned_session_ref(session, context), to: PreservationTransport
 
     def begin_turn(_session, agent, _prompt, _timeout_ms, %{owner: _owner}) do
       {:error, {:herdr_agent_blocked, agent.name}}
