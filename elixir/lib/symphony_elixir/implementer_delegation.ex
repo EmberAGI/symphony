@@ -145,6 +145,10 @@ defmodule SymphonyElixir.ImplementerDelegation do
                     hard_budget_ms: turn_timeout_ms,
                     interval_ms: max(1, heartbeat_interval_ms),
                     status_read_timeout_ms: status_read_timeout_ms,
+                    max_indeterminate_reads: Keyword.get(opts, :max_indeterminate_reads, 4),
+                    stale_working_ms: Keyword.get(opts, :stale_working_ms, 900_000),
+                    max_recovery_attempts: Keyword.get(opts, :max_recovery_attempts, 2),
+                    settle_window_ms: Keyword.get(opts, :settle_window_ms, 0),
                     on_message: on_message,
                     contract: Map.get(session, :contract, %{})
                   },
@@ -275,7 +279,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
        when status in ["idle", "done"],
        do: {:ok, agent}
 
-  defp supervise_working(state, %{agent_status: "working"}) do
+  defp supervise_working(state, %{agent_status: "working"} = observed_start) do
     Supervision.supervise(%{
       transport: state.transport,
       context: state.context,
@@ -284,6 +288,11 @@ defmodule SymphonyElixir.ImplementerDelegation do
       hard_budget_ms: state.hard_budget_ms,
       interval_ms: state.interval_ms,
       status_read_timeout_ms: state.status_read_timeout_ms,
+      max_indeterminate_reads: state.max_indeterminate_reads,
+      stale_working_ms: state.stale_working_ms,
+      max_recovery_attempts: state.max_recovery_attempts,
+      settle_window_ms: state.settle_window_ms,
+      baseline_revision: Map.get(observed_start, :revision),
       on_heartbeat: fn observed ->
         emit_message(state.on_message, :turn_heartbeat, %{
           provider: contract_provider(state.contract, :orchestrator),

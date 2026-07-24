@@ -86,6 +86,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       name: name,
       socket: status.socket,
       runtime_root: runtime_root,
+      workspace: workspace,
       env: env,
       server_task: server_task
     }

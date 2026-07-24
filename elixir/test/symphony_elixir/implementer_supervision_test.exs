@@ -54,4 +54,165 @@ defmodule SymphonyElixir.ImplementerSupervisionTest do
     assert_receive {:runtime_message, %{event: :turn_heartbeat, agent_status: "working"}}
     assert_receive {:runtime_message, %{event: :turn_completed, agent_status: "done"}}
   end
+
+  defmodule BlockedTransport do
+    def begin_turn(_session, agent, prompt, _timeout_ms, %{owner: owner}) do
+      send(owner, {:prompt_submitted, prompt})
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, %{owner: owner}) do
+      send(owner, :status_read)
+      {:ok, %{name: agent.name, agent_status: "blocked", agent_session: nil}}
+    end
+
+    def read_agent(_session, _agent, %{source: source}, %{owner: owner}) do
+      send(owner, {:pane_read, source})
+      {:ok, %{text: "Allow this tool? [y/n]"}}
+    end
+  end
+
+  test "a blocked agent is preserved and surfaced as a typed outcome without auto-answering" do
+    session = supervised_session(BlockedTransport)
+
+    assert {:error, {:implementer_agent_blocked, evidence}} =
+             ImplementerDelegation.run_turn(session, "Do bounded work.", %{}, supervision_opts())
+
+    assert evidence.agent_status == "blocked"
+    assert {:ok, checkpoint} = evidence.checkpoint
+    assert checkpoint.pane_tail == "Allow this tool? [y/n]"
+    assert checkpoint.shutdown_reason == :blocked
+    assert checkpoint.herdr_session == "octo-emb-1244-supervised"
+
+    assert_receive {:prompt_submitted, "Do bounded work."}
+    refute_receive {:prompt_submitted, _other}
+  end
+
+  defmodule TransientUnknownTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      reads = Process.get({__MODULE__, :reads}, 0) + 1
+      Process.put({__MODULE__, :reads}, reads)
+      status = if reads < 3, do: "unknown", else: "done"
+      {:ok, %{name: agent.name, agent_status: status, agent_session: %{value: "recovered"}}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "UNKNOWN_RECOVERED"}}
+  end
+
+  test "transient unknown statuses are retried within the bound and can still complete" do
+    Process.delete({TransientUnknownTransport, :reads})
+    session = supervised_session(TransientUnknownTransport)
+
+    assert {:ok, %{response: "UNKNOWN_RECOVERED", agent_status: "done"}} =
+             ImplementerDelegation.run_turn(session, "Do bounded work.", %{}, supervision_opts())
+  end
+
+  defmodule PersistentUnknownTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, %{owner: owner}) do
+      send(owner, :status_read)
+      {:ok, %{name: agent.name, agent_status: "unknown", agent_session: nil}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "pane still renders a TUI"}}
+  end
+
+  test "persistent unknown escalates as a typed outcome with independent pane evidence" do
+    session = supervised_session(PersistentUnknownTransport)
+
+    assert {:error, {:implementer_agent_unobservable, evidence}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Do bounded work.",
+               %{},
+               supervision_opts(max_indeterminate_reads: 3)
+             )
+
+    assert {:ok, checkpoint} = evidence.checkpoint
+    assert checkpoint.pane_tail == "pane still renders a TUI"
+    assert checkpoint.shutdown_reason == :persistent_unknown
+
+    reads = count_received(:status_read)
+    assert reads == 3
+  end
+
+  defmodule FailingReadTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, %{owner: owner}) do
+      send(owner, :status_read)
+      {:error, {:herdr_agent_get_timeout, agent.name}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "pane evidence"}}
+  end
+
+  test "persistent status-read failures exhaust the bounded retries into a typed escalation" do
+    session = supervised_session(FailingReadTransport)
+
+    assert {:error, {:implementer_status_reads_failed, evidence}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Do bounded work.",
+               %{},
+               supervision_opts(max_indeterminate_reads: 2)
+             )
+
+    assert evidence.last_error == {:herdr_agent_get_timeout, "implementer_orchestrator"}
+    assert {:ok, %{shutdown_reason: :status_reads_failed}} = evidence.checkpoint
+    assert count_received(:status_read) == 2
+  end
+
+  defmodule ClosedAgentTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context), do: {:error, {:herdr_agent_closed, agent.name}}
+  end
+
+  test "a closed agent remains a typed closed-agent failure without retry" do
+    session = supervised_session(ClosedAgentTransport)
+
+    assert {:error, {:herdr_agent_closed, "implementer_orchestrator"}} =
+             ImplementerDelegation.run_turn(session, "Do bounded work.", %{}, supervision_opts())
+  end
+
+  defp supervised_session(transport) do
+    %{
+      transport: transport,
+      transport_context: %{owner: self()},
+      contract: %{provider: "codex"},
+      herdr_session: %{name: "octo-emb-1244-supervised", runtime_root: "/tmp/octo-emb-1244-supervised"},
+      orchestrator: %{name: "implementer_orchestrator", pane_id: "w1:p1"}
+    }
+  end
+
+  defp supervision_opts(extra \\ []) do
+    Keyword.merge(
+      [
+        turn_timeout_ms: 5_000,
+        heartbeat_interval_ms: 1,
+        status_read_timeout_ms: 250
+      ],
+      extra
+    )
+  end
+
+  defp count_received(message, count \\ 0) do
+    receive do
+      ^message -> count_received(message, count + 1)
+    after
+      0 -> count
+    end
+  end
 end
