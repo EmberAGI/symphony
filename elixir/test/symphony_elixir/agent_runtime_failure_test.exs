@@ -52,6 +52,77 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     end
   end
 
+  test "classifies supervised delegation outcomes into runtime failure families with redaction" do
+    pane_secret = "PANE TRANSCRIPT token=pane-secret"
+    good_checkpoint = {:ok, %{pane_tail: pane_secret, shutdown_reason: :blocked}}
+
+    failed_checkpoint =
+      {:error, {:implementer_checkpoint_failed, %{reason: :pane_unreadable, shutdown_reason: :stale_working, destructive_shutdown_blocked: true}}}
+
+    # Blocked → the existing human_input_required family, never ordinary retry.
+    assert {:irrecoverable, blocked} =
+             AgentRuntime.classify_failure(
+               {:implementer_agent_blocked, %{agent_status: "blocked", checkpoint: good_checkpoint, recovery_history: []}},
+               @context
+             )
+
+    assert blocked.family == :human_input_required
+    assert blocked.retryable? == false
+    refute blocked.summary =~ "pane-secret"
+    refute blocked.summary =~ "PANE TRANSCRIPT"
+    refute blocked.retry_reason =~ "pane-secret"
+
+    # Direct checkpoint failure → irrecoverable, ordinary retry prevented.
+    assert {:irrecoverable, direct} =
+             AgentRuntime.classify_failure(
+               {:implementer_checkpoint_failed, %{reason: :pane_unreadable, shutdown_reason: :hard_budget_exhausted, destructive_shutdown_blocked: true}},
+               @context
+             )
+
+    assert direct.family == :invalid_workspace_or_runtime_protocol
+    assert direct.retryable? == false
+
+    # Checkpoint failure nested inside a supervised outcome → same irrecoverable family.
+    assert {:irrecoverable, nested} =
+             AgentRuntime.classify_failure(
+               {:implementer_agent_stalled, %{checkpoint: failed_checkpoint, recovery_history: []}},
+               @context
+             )
+
+    assert nested.family == :invalid_workspace_or_runtime_protocol
+
+    assert {:irrecoverable, nested_triple} =
+             AgentRuntime.classify_failure(
+               {:herdr_agent_closed, "implementer_orchestrator", %{checkpoint: failed_checkpoint}},
+               @context
+             )
+
+    assert nested_triple.family == :invalid_workspace_or_runtime_protocol
+
+    # Supervised out-of-enum protocol status → invalid_workspace_or_runtime_protocol.
+    for reason <- [
+          {:unexpected_herdr_agent_status, "rebooting"},
+          {:unexpected_herdr_agent_status, "rebooting", %{checkpoint: good_checkpoint}}
+        ] do
+      assert {:irrecoverable, protocol} = AgentRuntime.classify_failure(reason, @context)
+      assert protocol.family == :invalid_workspace_or_runtime_protocol
+      assert protocol.summary =~ "rebooting"
+      refute protocol.summary =~ "pane-secret"
+    end
+
+    # Preserved-checkpoint supervised outcomes keep their existing retry semantics.
+    for reason <- [
+          {:implementer_hard_budget_exhausted, %{checkpoint: {:ok, %{pane_tail: pane_secret}}, last_status: "working"}},
+          {:implementer_agent_stalled, %{checkpoint: {:ok, %{pane_tail: pane_secret}}, recovery_history: []}},
+          {:implementer_agent_unobservable, %{checkpoint: {:ok, %{pane_tail: pane_secret}}, recovery_history: []}},
+          {:implementer_status_reads_failed, %{checkpoint: {:ok, %{}}, last_error: :boom}}
+        ] do
+      assert {:retryable, retryable} = AgentRuntime.classify_failure(reason, @context)
+      refute retryable.retry_reason =~ "pane-secret"
+      refute retryable.retry_reason =~ "PANE TRANSCRIPT"
+    end
+  end
+
   test "classifies real adapter and runtime error shapes without pre-normalized families" do
     incompatible_runtime = %{
       expected_version: "0.7.5",

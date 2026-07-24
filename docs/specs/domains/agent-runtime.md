@@ -617,7 +617,15 @@ history, and shutdown reason. A checkpoint failure is itself typed and
 blocks destructive shutdown absent an explicit emergency policy: the runner
 must not stop the delegated session on a typed preservation failure and must
 leave the owned-session reference recoverable. A successful checkpoint
-permits bounded shutdown. This supervision layer is observation only: it
+permits bounded shutdown. Supervised typed outcomes feed the shared runtime
+failure families: a blocked agent classifies as `human_input_required`, a
+work-preservation checkpoint failure (direct or embedded in a supervised
+outcome) and an out-of-enum protocol status classify as
+`invalid_workspace_or_runtime_protocol` — all irrecoverable, never ordinary
+retry — while hard-budget, stale, unknown, read-failure, and closed outcomes
+with preserved checkpoints keep ordinary bounded retry semantics. Failure
+summaries never include pane transcript content. This supervision layer is
+observation only: it
 emits typed outcomes and never grows lifecycle arbitration, teardown, or
 quarantine verdict semantics, which EMB-1217 owns over what this layer
 emits.
