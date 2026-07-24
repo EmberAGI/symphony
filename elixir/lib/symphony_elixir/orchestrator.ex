@@ -189,12 +189,12 @@ defmodule SymphonyElixir.Orchestrator do
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
-        cleanup_result = cleanup_terminal_owned_runtime(running_entry)
+        {cleanup_result, cleanup_evidence} = cleanup_terminal_owned_runtime(running_entry)
         log_terminal_cleanup_failure(issue_id, cleanup_result)
         reason = cleanup_task_exit_reason(reason, cleanup_result)
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
-        process_completion_status = record_process_completion(running_entry, reason)
+        process_completion_status = record_process_completion(running_entry, reason, cleanup_evidence)
 
         state =
           case classify_task_exit(reason, running_entry, issue_id, state) do
@@ -518,13 +518,6 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
-  @spec verify_owned_process_cleanup_for_test(map(), Issue.t()) :: :ok | {:error, term()}
-  def verify_owned_process_cleanup_for_test(ownership_ref, %Issue{} = issue)
-      when is_map(ownership_ref) do
-    verify_owned_process_cleanup(ownership_ref, issue)
-  end
-
-  @doc false
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
@@ -705,14 +698,14 @@ defmodule SymphonyElixir.Orchestrator do
       terminate_task(pid)
     end
 
-    cleanup_result = cleanup_terminal_owned_runtime(running_entry)
+    {cleanup_result, cleanup_evidence} = cleanup_terminal_owned_runtime(running_entry)
     termination_reason = cleanup_task_exit_reason(:terminated, cleanup_result)
     log_terminal_cleanup_failure(issue_id, cleanup_result)
 
     termination_outcome =
       classify_forced_terminal_cleanup(cleanup_result, running_entry, issue_id, state)
 
-    record_forced_process_completion(running_entry, termination_reason, termination_outcome)
+    record_forced_process_completion(running_entry, termination_reason, termination_outcome, cleanup_evidence)
 
     if is_reference(ref) do
       Process.demonitor(ref, [:flush])
@@ -732,16 +725,17 @@ defmodule SymphonyElixir.Orchestrator do
     {state, termination_outcome}
   end
 
-  defp record_forced_process_completion(running_entry, termination_reason, :ok) do
-    record_process_completion(running_entry, termination_reason)
+  defp record_forced_process_completion(running_entry, termination_reason, :ok, cleanup_evidence) do
+    record_process_completion(running_entry, termination_reason, cleanup_evidence)
   end
 
   defp record_forced_process_completion(
          running_entry,
          _termination_reason,
-         {_classification, failure, failure_observation}
+         {_classification, failure, failure_observation},
+         cleanup_evidence
        ) do
-    quarantine_forced_terminal_cleanup_failure(running_entry, failure, failure_observation)
+    quarantine_forced_terminal_cleanup_failure(running_entry, failure, failure_observation, cleanup_evidence)
   end
 
   defp classify_forced_terminal_cleanup(:ok, _running_entry, _issue_id, _state), do: :ok
@@ -766,11 +760,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp quarantine_forced_terminal_cleanup_failure(
          %{issue: %Issue{} = issue} = running_entry,
          failure,
-         failure_observation
+         failure_observation,
+         cleanup_evidence
        ) do
     attrs = %{
       quarantine_reason: Map.fetch!(failure, :retry_reason),
       failure_observation: failure_observation,
+      cleanup_evidence: cleanup_evidence,
       session_id: running_entry_session_id(running_entry)
     }
 
@@ -783,7 +779,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp quarantine_forced_terminal_cleanup_failure(
          _running_entry,
          _failure,
-         _failure_observation
+         _failure_observation,
+         _cleanup_evidence
        ),
        do: :quarantined
 
@@ -944,9 +941,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp settle_cancelled_role_run(issue_id, running_entry, reason)
        when is_binary(issue_id) and is_map(running_entry) do
     with :ok <- terminate_registered_task(running_entry),
-         :ok <- cleanup_terminal_owned_runtime(running_entry, true),
-         {:ok, ownership} <- release_cancelled_owned_state(running_entry),
-         :ok <- verify_cancelled_owned_state(ownership) do
+         {:ok, evidence} <- cancelled_terminal_cleanup(running_entry),
+         {:ok, _ownership} <- release_cancelled_owned_state(running_entry, evidence) do
       Logger.info("Role-run cancellation cleanup verified issue_id=#{issue_id} owned_pids=[] live_after=0")
     else
       {:error, cleanup_reason} ->
@@ -964,6 +960,19 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
+  defp cancelled_terminal_cleanup(running_entry) do
+    case cleanup_terminal_owned_runtime(running_entry, true) do
+      {:ok, %{live_after: 0} = evidence} ->
+        {:ok, evidence}
+
+      {:ok, evidence} ->
+        {:error, {:owned_session_processes_remain, evidence}}
+
+      {{:error, cleanup_reason}, _evidence} ->
+        {:error, cleanup_reason}
+    end
+  end
+
   defp terminate_registered_task(%{pid: pid}) when is_pid(pid) do
     :ok = terminate_task(pid)
 
@@ -974,6 +983,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp terminate_registered_task(_running_entry), do: :ok
 
+  # Marker-step failures stay typed: a mismatched or missing ownership
+  # identity means settlement can neither signal nor write evidence for the
+  # run it believes it owns — genuine inability, not the self-inflicted
+  # post-teardown re-read EMB-1259 removed from the session step.
   defp cleanup_owned_marker_processes(%{issue: %Issue{} = issue, process_ownership: ownership})
        when is_map(ownership) do
     case ProcessOwnership.terminate_owned_processes(issue, ownership_identity(ownership)) do
@@ -985,9 +998,15 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp cleanup_owned_marker_processes(_running_entry), do: {:error, :ownership_missing}
 
+  # Terminal settlement self-produces its process evidence: the owned PID
+  # set is captured BEFORE teardown destroys the records that identify it,
+  # and liveness is verified against that snapshot AFTER teardown. The
+  # settlement never re-derives its evidence from mutable global state a
+  # completed teardown may already have removed (EMB-1259).
   defp cleanup_terminal_owned_runtime(running_entry, require_ownership \\ false)
        when is_map(running_entry) do
-    session_result = cleanup_owned_session(running_entry)
+    snapshot = capture_settlement_snapshot(running_entry)
+    session_result = teardown_owned_session(running_entry)
 
     marker_result =
       if require_ownership or is_map(Map.get(running_entry, :process_ownership)) do
@@ -996,16 +1015,82 @@ defmodule SymphonyElixir.Orchestrator do
         :ok
       end
 
-    combine_terminal_cleanup_results(session_result, marker_result)
+    liveness = ProcessOwnership.settlement_liveness(snapshot)
+    outcome = combine_terminal_cleanup_results(session_result, marker_result)
+
+    evidence = %{
+      owned_pids: snapshot.owned_pids,
+      live_after: liveness.live_after,
+      verified: outcome == :ok and liveness.live_after == 0,
+      captured_at: snapshot.captured_at
+    }
+
+    log_terminal_cleanup_evidence(running_entry, outcome, evidence, liveness)
+    {outcome, evidence}
+  end
+
+  defp capture_settlement_snapshot(running_entry) when is_map(running_entry) do
+    issue =
+      case Map.get(running_entry, :issue) do
+        %Issue{} = issue -> issue
+        _ -> nil
+      end
+
+    extra_pids =
+      [Map.get(running_entry, :codex_app_server_pid)]
+      |> Enum.filter(&is_integer/1)
+
+    ProcessOwnership.settlement_snapshot(issue, Map.get(running_entry, :process_ownership), extra_pids)
+  end
+
+  defp teardown_owned_session(%{owned_session_ref: ownership_ref}) when is_map(ownership_ref) do
+    case AgentRuntime.cleanup_owned_session(ownership_ref) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to clean up run-owned runtime during terminal settlement: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp teardown_owned_session(_running_entry), do: :ok
+
+  defp log_terminal_cleanup_evidence(running_entry, :ok, %{live_after: 0} = evidence, _liveness) do
+    Logger.info(
+      "Run-owned runtime cleanup verified " <>
+        "issue_id=#{settlement_issue_id(running_entry)} " <>
+        "session_name=#{settlement_session_name(running_entry)} " <>
+        "captured_owned_pids=#{length(evidence.owned_pids)} " <>
+        "owned_pids=[] live_after=0"
+    )
+  end
+
+  defp log_terminal_cleanup_evidence(running_entry, _outcome, evidence, liveness) do
+    Logger.warning(
+      "Run-owned runtime cleanup unverified " <>
+        "issue_id=#{settlement_issue_id(running_entry)} " <>
+        "session_name=#{settlement_session_name(running_entry)} " <>
+        "captured_owned_pids=#{length(evidence.owned_pids)} " <>
+        "owned_pids=#{inspect(liveness.live_pids)} live_after=#{evidence.live_after}"
+    )
+  end
+
+  defp settlement_issue_id(running_entry) do
+    case Map.get(running_entry, :issue) do
+      %Issue{id: issue_id} when is_binary(issue_id) -> issue_id
+      _ -> Map.get(running_entry, :identifier, "unknown")
+    end
+  end
+
+  defp settlement_session_name(running_entry) do
+    case Map.get(running_entry, :owned_session_ref) do
+      %{session_name: session_name} when is_binary(session_name) -> session_name
+      _ -> "none"
+    end
   end
 
   defp combine_terminal_cleanup_results(:ok, :ok), do: :ok
-
-  defp combine_terminal_cleanup_results(
-         {:error, {:owned_session_processes_remain, _pids}},
-         :ok
-       ),
-       do: :ok
 
   defp combine_terminal_cleanup_results({:error, session_reason}, :ok),
     do: {:error, {:owned_session_cleanup_failed, session_reason}}
@@ -1026,24 +1111,14 @@ defmodule SymphonyElixir.Orchestrator do
     Logger.error("Role-run terminal cleanup failed issue_id=#{issue_id} cleanup_reason=#{inspect(reason)}")
   end
 
-  defp release_cancelled_owned_state(%{issue: %Issue{} = issue} = running_entry) do
-    case release_owned_state(issue, running_entry) do
+  defp release_cancelled_owned_state(%{issue: %Issue{} = issue} = running_entry, evidence) do
+    case release_owned_state(issue, running_entry, %{cleanup_evidence: evidence}) do
       {:error, :enoent} -> {:error, :ownership_missing}
       result -> result
     end
   end
 
-  defp release_cancelled_owned_state(_running_entry), do: {:error, :ownership_missing}
-
-  defp verify_cancelled_owned_state(%{
-         state: "cleaned",
-         cleanup_status: "cleaned",
-         ownership_env_pids: []
-       }),
-       do: :ok
-
-  defp verify_cancelled_owned_state(ownership),
-    do: {:error, {:ownership_cleanup_unverified, ownership}}
+  defp release_cancelled_owned_state(_running_entry, _evidence), do: {:error, :ownership_missing}
 
   defp recover_stale_owned_sessions do
     case ProcessOwnership.recover_stale_owned_sessions(&AgentRuntime.cleanup_owned_session/1) do
@@ -1054,69 +1129,6 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info("Recovered #{count} stale run-owned runtime session(s) from a previous role generation")
         :ok
     end
-  end
-
-  defp cleanup_owned_session(%{owned_session_ref: ownership_ref} = running_entry)
-       when is_map(ownership_ref) do
-    case AgentRuntime.cleanup_owned_session(ownership_ref) do
-      :ok ->
-        verify_owned_process_cleanup(ownership_ref, Map.get(running_entry, :issue))
-
-      {:error, reason} ->
-        Logger.warning("Failed to clean up run-owned runtime before task termination: #{inspect(reason)}")
-        {:error, reason}
-    end
-  end
-
-  defp cleanup_owned_session(_running_entry), do: :ok
-
-  defp verify_owned_process_cleanup(
-         %{issue_id: issue_id} = ownership_ref,
-         %Issue{} = issue
-       )
-       when is_binary(issue_id) do
-    expected_role = ProcessOwnership.current_role()
-    expected_workspace_path = expected_workspace_path(issue)
-
-    case ProcessOwnership.status_for_issue(issue) do
-      %{
-        issue_id: ^issue_id,
-        role: ^expected_role,
-        workspace_path: ^expected_workspace_path,
-        ownership_env_pids: []
-      } ->
-        Logger.info(
-          "Run-owned runtime cleanup verified " <>
-            "issue_id=#{issue_id} " <>
-            "session_name=#{Map.get(ownership_ref, :session_name, "unknown")} " <>
-            "owned_pids=[] live_after=0"
-        )
-
-        :ok
-
-      %{
-        issue_id: ^issue_id,
-        role: ^expected_role,
-        workspace_path: ^expected_workspace_path,
-        ownership_env_pids: pids
-      }
-      when is_list(pids) ->
-        {:error, {:owned_session_processes_remain, pids}}
-
-      _status ->
-        {:error, :owned_session_process_evidence_unavailable}
-    end
-  end
-
-  defp verify_owned_process_cleanup(ownership_ref, _issue) do
-    Logger.info(
-      "Run-owned runtime cleanup completed " <>
-        "issue_id=unknown " <>
-        "session_name=#{Map.get(ownership_ref, :session_name, "unknown")} " <>
-        "owned_pid_evidence=unavailable"
-    )
-
-    :ok
   end
 
   defp cleanup_task_exit_reason(reason, :ok), do: reason
@@ -2268,8 +2280,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_process_ownership(running_entry, _issue_id), do: running_entry
 
-  defp record_process_completion(%{issue: %Issue{} = issue} = running_entry, :normal) do
-    attrs = process_ownership_attrs(running_entry)
+  defp record_process_completion(%{issue: %Issue{} = issue} = running_entry, :normal, cleanup_evidence) do
+    attrs =
+      running_entry
+      |> process_ownership_attrs()
+      |> Map.put(:cleanup_evidence, cleanup_evidence)
 
     cond do
       !blank_worker_host?(Map.get(running_entry, :worker_host)) ->
@@ -2283,7 +2298,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         :quarantined
 
-      ProcessOwnership.owned_process_live?(issue, attrs) ->
+      settlement_processes_remain?(cleanup_evidence) ->
         _ =
           update_owned_state(
             issue,
@@ -2295,16 +2310,19 @@ defmodule SymphonyElixir.Orchestrator do
         :quarantined
 
       true ->
-        _ = release_completed_owned_state(issue, running_entry)
+        _ = release_completed_owned_state(issue, running_entry, %{cleanup_evidence: cleanup_evidence})
         :cleaned
     end
   end
 
-  defp record_process_completion(%{issue: %Issue{} = issue} = running_entry, reason) do
-    attrs = process_ownership_attrs(running_entry)
+  defp record_process_completion(%{issue: %Issue{} = issue} = running_entry, reason, cleanup_evidence) do
+    attrs =
+      running_entry
+      |> process_ownership_attrs()
+      |> Map.put(:cleanup_evidence, cleanup_evidence)
 
     if !blank_worker_host?(Map.get(running_entry, :worker_host)) or
-         ProcessOwnership.owned_process_live?(issue, attrs) do
+         settlement_processes_remain?(cleanup_evidence) do
       _ =
         update_owned_state(
           issue,
@@ -2315,12 +2333,12 @@ defmodule SymphonyElixir.Orchestrator do
 
       :quarantined
     else
-      _ = release_owned_state(issue, running_entry)
+      _ = release_owned_state(issue, running_entry, %{cleanup_evidence: cleanup_evidence})
       :cleaned
     end
   end
 
-  defp record_process_completion(_running_entry, _reason), do: :none
+  defp settlement_processes_remain?(%{live_after: live_after}), do: live_after > 0
 
   defp retry_lease_state(:quarantined), do: "quarantined"
   defp retry_lease_state(_process_completion_status), do: "retrying"
@@ -2351,13 +2369,13 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp release_owned_state(%Issue{} = issue, context) when is_map(context) do
+  defp release_owned_state(%Issue{} = issue, context, extra_attrs) when is_map(context) do
     ownership = Map.get(context, :process_ownership) || ProcessOwnership.status_for_issue(issue)
 
     case ownership do
       %{holder: holder} ->
         if holder == ProcessOwnership.holder_id(),
-          do: ProcessOwnership.release(issue, ownership_identity(ownership)),
+          do: ProcessOwnership.release(issue, ownership_identity(ownership), extra_attrs),
           else: {:error, :ownership_mismatch}
 
       _ ->
@@ -2365,13 +2383,13 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp release_completed_owned_state(%Issue{} = issue, context) when is_map(context) do
+  defp release_completed_owned_state(%Issue{} = issue, context, extra_attrs) when is_map(context) do
     ownership = Map.get(context, :process_ownership) || ProcessOwnership.status_for_issue(issue)
 
     case ownership do
       %{holder: holder} ->
         if holder == ProcessOwnership.holder_id(),
-          do: ProcessOwnership.release_completed(issue, ownership_identity(ownership)),
+          do: ProcessOwnership.release_completed(issue, ownership_identity(ownership), extra_attrs),
           else: {:error, :ownership_mismatch}
 
       _ ->

@@ -140,19 +140,132 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   @doc "Releases ownership only for the matching holder and run."
   @spec release(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
-  def release(%Issue{} = issue, expected) when is_map(expected) do
-    verify_and_update(issue, expected, %{state: "cleaned", cleanup_status: "cleaned"})
+  @spec release(Issue.t(), map(), map()) :: {:ok, map()} | {:error, term()}
+  def release(%Issue{} = issue, expected, extra_attrs \\ %{}) when is_map(expected) and is_map(extra_attrs) do
+    verify_and_update(
+      issue,
+      expected,
+      Map.merge(extra_attrs, %{state: "cleaned", cleanup_status: "cleaned"})
+    )
   end
 
   @doc "Releases successful ownership and clears prior same-checkpoint failure recurrence state."
   @spec release_completed(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
-  def release_completed(%Issue{} = issue, expected) when is_map(expected) do
-    verify_and_update(issue, expected, %{
-      state: "cleaned",
-      cleanup_status: "cleaned",
-      failure_observation: :clear
-    })
+  @spec release_completed(Issue.t(), map(), map()) :: {:ok, map()} | {:error, term()}
+  def release_completed(%Issue{} = issue, expected, extra_attrs \\ %{})
+      when is_map(expected) and is_map(extra_attrs) do
+    verify_and_update(
+      issue,
+      expected,
+      Map.merge(extra_attrs, %{
+        state: "cleaned",
+        cleanup_status: "cleaned",
+        failure_observation: :clear
+      })
+    )
   end
+
+  @doc """
+  Captures the owned PID set for one role run BEFORE terminal teardown
+  destroys the records that identify it.
+
+  The snapshot is settlement's own evidence source: the exact ownership
+  record's recorded process tree plus a single live scan for processes still
+  carrying the run's complete ownership environment. Terminal settlement
+  verifies liveness against this snapshot after teardown instead of
+  re-deriving evidence from state teardown may already have removed.
+  """
+  @spec settlement_snapshot(Issue.t() | nil, map() | nil, [pos_integer()]) ::
+          %{owned_pids: [pos_integer()], criteria: [{String.t(), String.t()}], captured_at: String.t()}
+  def settlement_snapshot(issue, ownership, extra_pids \\ []) do
+    ownership = if is_map(ownership), do: ownership, else: %{}
+    record_status = settlement_record_status(issue, ownership)
+
+    criteria =
+      case ownership_env_criteria(record_status) do
+        [] -> ownership_env_criteria(ownership)
+        criteria -> criteria
+      end
+
+    env_pids =
+      if ownership_env_criteria_scoped?(criteria) do
+        matching_processes(criteria)
+      else
+        []
+      end
+
+    owned_pids =
+      (status_process_pids(record_status) ++ status_process_pids(ownership) ++ env_pids ++ extra_pids)
+      |> Enum.map(&pid_value/1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    %{
+      owned_pids: owned_pids,
+      criteria: criteria,
+      captured_at: DateTime.utc_now() |> DateTime.to_iso8601()
+    }
+  rescue
+    error ->
+      Logger.warning("Failed to capture settlement snapshot: #{Exception.message(error)}")
+
+      %{owned_pids: [], criteria: [], captured_at: DateTime.utc_now() |> DateTime.to_iso8601()}
+  end
+
+  @doc """
+  Verifies post-teardown liveness against a pre-teardown settlement snapshot.
+
+  One batched process-table read decides snapshot-pid liveness; one bounded
+  ownership-environment sweep still catches late-detached descendants. No
+  per-PID signalling or probing is performed here.
+  """
+  @spec settlement_liveness(%{
+          required(:owned_pids) => [pos_integer()],
+          required(:criteria) => [{String.t(), String.t()}],
+          optional(atom()) => term()
+        }) :: %{live_after: non_neg_integer(), live_pids: [pos_integer()]}
+  def settlement_liveness(%{owned_pids: owned_pids, criteria: criteria}) do
+    live_table = process_table() |> MapSet.new(fn {pid, _ppid, _pgid} -> pid end)
+    live_snapshot_pids = Enum.filter(owned_pids, &MapSet.member?(live_table, &1))
+
+    env_survivors =
+      if ownership_env_criteria_scoped?(criteria) do
+        matching_processes(criteria)
+      else
+        []
+      end
+
+    live_pids = Enum.uniq(live_snapshot_pids ++ env_survivors)
+    %{live_after: length(live_pids), live_pids: live_pids}
+  rescue
+    error ->
+      Logger.warning("Failed to verify settlement liveness: #{Exception.message(error)}")
+      %{live_after: 0, live_pids: []}
+  end
+
+  defp settlement_record_status(%Issue{} = issue, ownership) do
+    identity = %{
+      role: value_for(ownership, :role),
+      run_id: value_for(ownership, :run_id),
+      holder: value_for(ownership, :holder),
+      workspace_path: value_for(ownership, :workspace_path)
+    }
+
+    case verify(issue, identity) do
+      {:ok, status} -> status
+      {:error, _reason} -> ownership
+    end
+  end
+
+  defp settlement_record_status(_issue, ownership), do: ownership
+
+  defp status_process_pids(status) when is_map(status) do
+    pid_list_value(value_for(status, :process_tree_pids)) ++
+      pid_list_value(value_for(status, :app_server_pid)) ++
+      pid_list_value(value_for(status, :worker_pid))
+  end
+
+  defp status_process_pids(_status), do: []
 
   @spec ownership_env(Issue.t() | nil, map()) :: [{String.t(), String.t()}]
   def ownership_env(issue, attrs) when is_map(attrs) do
@@ -365,6 +478,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       "ownership_env" => Map.new(ownership_env(issue, attrs)),
       "state" => state,
       "cleanup_status" => state,
+      "cleanup_evidence" => settlement_evidence_record(attrs.cleanup_evidence),
       "quarantine_reason" => attrs.quarantine_reason,
       "failure_observation" =>
         if(Map.get(attrs, :failure_observation) == :clear,
@@ -598,6 +712,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       workspace_path: prefer_update(updates.workspace_path, string_value(record["workspace_path"])),
       session_id: prefer_update(updates.session_id, string_value(record["session_id"])),
       quarantine_reason: prefer_update(updates.quarantine_reason, string_value(record["quarantine_reason"])),
+      cleanup_evidence: prefer_update(updates.cleanup_evidence, settlement_evidence_value(record)),
       failure_observation:
         merge_failure_observation(
           updates.failure_observation,
@@ -712,6 +827,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       workspace_path: attr_string(attrs, :workspace_path),
       session_id: attr_string(attrs, :session_id),
       quarantine_reason: attr_string(attrs, :quarantine_reason),
+      cleanup_evidence: settlement_evidence_value(attrs),
       failure_observation: failure_observation_value(attrs),
       worker_pid: attr_pid(attrs, :worker_pid),
       app_server_pid: attr_pid(attrs, :app_server_pid),
@@ -1046,8 +1162,59 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       owned_session_ref: owned_session_ref_value(record),
       updated_at: record["updated_at"],
       quarantine_reason: record["quarantine_reason"],
+      cleanup_evidence: settlement_evidence_value(record),
       failure_observation: failure_observation_value(record),
       live?: local_process_live?(record)
+    }
+  end
+
+  defp settlement_evidence_value(attrs) when is_map(attrs) do
+    case value_for(attrs, :cleanup_evidence) do
+      %{} = evidence ->
+        owned_pids = pid_list_value(value_for(evidence, :owned_pids))
+        live_after = value_for(evidence, :live_after)
+        verified = boolean_value_for(evidence, :verified)
+        captured_at = string_value(value_for(evidence, :captured_at))
+
+        if is_integer(live_after) and live_after >= 0 and is_boolean(verified) do
+          %{
+            owned_pids: owned_pids,
+            live_after: live_after,
+            verified: verified,
+            captured_at: captured_at
+          }
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp settlement_evidence_value(_attrs), do: nil
+
+  # `value_for/2` folds legitimate `false` into the string-key fallback, so
+  # boolean evidence fields need explicit key resolution.
+  defp boolean_value_for(map, key) when is_map(map) and is_atom(key) do
+    case Map.fetch(map, key) do
+      {:ok, value} ->
+        value
+
+      :error ->
+        case Map.fetch(map, Atom.to_string(key)) do
+          {:ok, value} -> value
+          :error -> nil
+        end
+    end
+  end
+
+  defp settlement_evidence_record(nil), do: nil
+
+  defp settlement_evidence_record(%{} = evidence) do
+    %{
+      "owned_pids" => evidence.owned_pids,
+      "live_after" => evidence.live_after,
+      "verified" => evidence.verified,
+      "captured_at" => evidence.captured_at
     }
   end
 
