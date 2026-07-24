@@ -114,11 +114,14 @@ defmodule SymphonyElixir.HerdrTransportRealSmokeTest do
     assert String.trim(File.read!(Path.join(ack_dir, "wrapper.ack"))) == token
     assert String.trim(File.read!(Path.join(ack_dir, "projection.ack"))) == token
 
-    # Herdr 0.7.5 really injected the kind-specific unattended flag; the
-    # wrapper records the exact observed flag as token-local diagnostic
-    # evidence before stripping it.
-    assert String.trim(File.read!(Path.join(ack_dir, "injected-flag"))) ==
-             "--dangerously-skip-permissions"
+    # Herdr 0.7.5 injects the kind-specific unattended flag on some hosts but
+    # not others. When present, the wrapper records and strips exactly the
+    # pinned value; the byte-exact argv assertion above proves both paths hand
+    # the provider only its native arguments.
+    case File.read(Path.join(ack_dir, "injected-flag")) do
+      {:ok, flag} -> assert String.trim(flag) == "--dangerously-skip-permissions"
+      {:error, :enoent} -> :ok
+    end
 
     # Status detection holds after the full exec chain: the stub renders a
     # prompt-less foreground loop, which Herdr 0.7.5 classifies as idle.

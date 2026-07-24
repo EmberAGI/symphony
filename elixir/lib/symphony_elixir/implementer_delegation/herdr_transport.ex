@@ -1036,9 +1036,10 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     """
   end
 
-  # Herdr 0.7.5 prepends one kind-specific unattended-mode flag to the typed
-  # AGENT_ARGs (probe-verified). The wrapper strips exactly that flag before
-  # requiring the exact sentinel invocation.
+  # Herdr 0.7.5 may prepend one kind-specific unattended-mode flag to the typed
+  # AGENT_ARGs (observed on macOS and absent on Linux). The wrapper strips
+  # exactly that flag when present before requiring the exact sentinel
+  # invocation.
   defp strip_herdr_injected_flag(provider_command) do
     case herdr_injected_launch_flag(provider_command) do
       nil ->

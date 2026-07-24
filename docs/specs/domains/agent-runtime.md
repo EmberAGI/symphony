@@ -474,9 +474,10 @@ Herdr validates the live name, provider kind, target pane, and interactive
 readiness before returning. Herdr resolves the kind at the pane shell with
 exec-style `PATH` lookup: pane shells reset to a login `PATH` (session `--env`
 does not survive into panes), only `pane run` exports persist there, and Herdr
-prepends one kind-specific unattended-mode flag to the typed agent arguments
-(`--dangerously-skip-permissions` for `claude`, `--yolo` for `codex`;
-probe-verified against Herdr 0.7.5). Before every `agent start` — orchestrator
+may prepend one kind-specific unattended-mode flag to the typed agent
+arguments (`--dangerously-skip-permissions` for `claude`, `--yolo` for
+`codex`; observed on macOS and absent on Linux with Herdr 0.7.5). Before every
+`agent start` — orchestrator
 and worker alike — the launching side therefore prepares the target pane with a
 `pane run` export placing the session `orchestrator-bin` first on the pane
 `PATH`, then performs an acknowledged preflight in the same pane: a
@@ -494,10 +495,11 @@ cross-satisfy launch state. The pane-shell command receives only the fixed
 path; reusable profile instructions and other potentially large or quote-rich
 provider arguments never cross the pane shell as typed argv. The runtime-owned
 provider wrapper fails closed for any invocation other than the exact sentinel
-plus one projection path (after stripping exactly the known Herdr-injected
-unattended flag, whose exact observed value is recorded as a token-local
-diagnostic marker in the launch acknowledgement directory — evidence only,
-not authentication): there is no default-provider fall-through. It validates the
+plus one projection path (after optionally stripping exactly the known
+Herdr-injected unattended flag, whose exact observed value is recorded when
+present as a token-local diagnostic marker in the launch acknowledgement
+directory — evidence only, not authentication): there is no default-provider
+fall-through. It validates the
 projection with canonical resolution — symlinks rejected, canonicalized path
 contained under the session `launch-projections` directory, regular file,
 caller-owned, mode 0500 — writes a per-launch `wrapper.ack` containing the
