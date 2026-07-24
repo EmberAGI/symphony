@@ -75,6 +75,20 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     def stop_session(_session, %{stop_result: stop_result}), do: stop_result
     def stop_session(_session, _context), do: :ok
 
+    def owned_session_ref(session, context) do
+      %{
+        cleanup_module: __MODULE__,
+        owner: Map.get(context, :test_pid),
+        issue_id: Map.get(context, :issue_id),
+        session_name: session.name
+      }
+    end
+
+    def cleanup_owned_session(%{owner: owner, session_name: session_name}) do
+      if is_pid(owner), do: send(owner, {:owned_session_cleanup_called, session_name})
+      :ok
+    end
+
     def worker_assignments(_session, %{assignments: assignments}), do: {:ok, assignments}
     def worker_assignments(_session, _context), do: {:ok, []}
   end
@@ -176,6 +190,50 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     assert_receive {:worker_outcome_turn_started, first_prompt}
     refute first_prompt =~ "previous Codex turn completed normally"
     refute_receive {:worker_outcome_turn_started, _continuation_prompt}, 100
+  end
+
+  test "the orchestrator acknowledges the Implementer cleanup capability before the first prompt" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-owned-session-ack-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    File.mkdir_p!(workspace_root)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    issue = issue("owned-session-ack")
+    test_pid = self()
+
+    {:ok, pid} =
+      Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+        AgentRunner.run(issue, test_pid,
+          run_id: "run-owned-session-ack",
+          role: "implementer",
+          delegation_transport: WorkerOutcomeTransport,
+          delegation_transport_context: %{
+            assignments: [],
+            issue_id: issue.id,
+            test_pid: test_pid
+          }
+        )
+      end)
+
+    monitor_ref = Process.monitor(pid)
+
+    assert_receive {:owned_session_runtime_info, issue_id, ownership_ref, ack_recipient, ack_ref},
+                   1_000
+
+    assert issue_id == issue.id
+    assert ownership_ref.issue_id == issue.id
+    assert ownership_ref.session_name =~ "octo-emb-hotfix"
+    refute_receive {:worker_outcome_turn_started, _prompt}, 100
+
+    send(ack_recipient, {:owned_session_runtime_info_ack, ack_ref})
+    assert_receive {:worker_outcome_turn_started, _prompt}, 1_000
+    assert_receive {:DOWN, ^monitor_ref, :process, ^pid, :normal}, 2_000
   end
 
   test "a failed owned-session cleanup exits with a typed failure, not :normal" do
