@@ -278,7 +278,7 @@ defmodule SymphonyElixir.WorkAdmissionTest do
       marker_path,
       Jason.encode!(%{
         "version" => 1,
-        "status" => "closed",
+        "status" => "open",
         "target_generation" => "generation-bootstrap"
       })
     )
@@ -293,7 +293,7 @@ defmodule SymphonyElixir.WorkAdmissionTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
     on_exit(fn -> stop_orchestrator!(pid) end)
 
-    assert %{work_admission: %{status: "closed", target_generation: "generation-bootstrap"}} =
+    assert %{work_admission: %{status: "open", target_generation: "generation-bootstrap"}} =
              Orchestrator.snapshot(orchestrator_name, 1_000)
   end
 
