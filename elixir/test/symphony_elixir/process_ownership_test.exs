@@ -282,6 +282,38 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
              ])
   end
 
+  test "home-relative workspace roots export an absolute readable ownership path", %{
+    issue: issue
+  } do
+    home_relative_root =
+      "~/.symphony-elixir-process-ownership-#{System.unique_integer([:positive])}"
+
+    on_exit(fn ->
+      File.rm_rf(Path.expand(home_relative_root))
+    end)
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      workspace_root: home_relative_root
+    )
+
+    attrs = ownership_attrs("home-relative-run", "home-relative-holder")
+    env = ProcessOwnership.ownership_env(issue, attrs) |> Map.new()
+    ownership_path = env["SYMPHONY_ROLE_OWNERSHIP_PATH"]
+
+    assert Path.type(ownership_path) == :absolute
+
+    assert String.starts_with?(
+             ownership_path,
+             Path.join(Path.expand(home_relative_root), ".symphony/process-ownership")
+           )
+
+    assert {:ok, %{run_id: "home-relative-run"}} =
+             ProcessOwnership.acquire(issue, attrs)
+
+    assert File.regular?(ownership_path)
+  end
+
   test "same workspace basename in different paths has distinct ownership scope", %{issue: issue} do
     first =
       ProcessOwnership.ownership_env(
