@@ -180,6 +180,8 @@ defmodule SymphonyElixir.Orchestrator do
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
+        cleanup_result = cleanup_owned_session(running_entry)
+        reason = cleanup_task_exit_reason(reason, cleanup_result)
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
         process_completion_status = record_process_completion(running_entry, reason)
@@ -280,6 +282,8 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, state}
 
       running_entry ->
+        ownership_ref = Map.put_new(ownership_ref, :issue_id, issue_id)
+
         updated_running_entry =
           running_entry
           |> Map.put(:owned_session_ref, ownership_ref)
@@ -744,18 +748,64 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp cleanup_owned_session(%{owned_session_ref: ownership_ref}) when is_map(ownership_ref) do
+  defp cleanup_owned_session(%{owned_session_ref: ownership_ref} = running_entry)
+       when is_map(ownership_ref) do
     case AgentRuntime.cleanup_owned_session(ownership_ref) do
       :ok ->
-        :ok
+        verify_owned_process_cleanup(ownership_ref, Map.get(running_entry, :issue))
 
       {:error, reason} ->
         Logger.warning("Failed to clean up run-owned runtime before task termination: #{inspect(reason)}")
-        :ok
+        {:error, reason}
     end
   end
 
   defp cleanup_owned_session(_running_entry), do: :ok
+
+  defp verify_owned_process_cleanup(
+         %{issue_id: issue_id} = ownership_ref,
+         %Issue{} = issue
+       )
+       when is_binary(issue_id) do
+    pids =
+      case ProcessOwnership.status_for_issue(issue) do
+        %{ownership_env_pids: ownership_env_pids} when is_list(ownership_env_pids) ->
+          ownership_env_pids
+
+        _ ->
+          []
+      end
+
+    if pids == [] do
+      Logger.info(
+        "Run-owned runtime cleanup verified " <>
+          "issue_id=#{issue_id} " <>
+          "session_name=#{Map.get(ownership_ref, :session_name, "unknown")} " <>
+          "owned_pids=[] live_after=0"
+      )
+
+      :ok
+    else
+      {:error, {:owned_session_processes_remain, pids}}
+    end
+  end
+
+  defp verify_owned_process_cleanup(ownership_ref, _issue) do
+    Logger.info(
+      "Run-owned runtime cleanup completed " <>
+        "issue_id=unknown " <>
+        "session_name=#{Map.get(ownership_ref, :session_name, "unknown")} " <>
+        "owned_pid_evidence=unavailable"
+    )
+
+    :ok
+  end
+
+  defp cleanup_task_exit_reason(reason, :ok), do: reason
+
+  defp cleanup_task_exit_reason(_reason, {:error, cleanup_reason}) do
+    {:agent_runtime_failed, {:owned_session_cleanup_failed, cleanup_reason}}
+  end
 
   defp choose_issues(issues, state) do
     active_states = active_state_set()

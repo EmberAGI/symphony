@@ -97,6 +97,10 @@ defmodule SymphonyElixir.ImplementerWorkerAssignmentTest do
            ] = turn.worker_assignments
   end
 
+  test "a direct-work turn with no assignment bypasses worker correlation cleanly" do
+    assert {:ok, %{worker_assignments: []}} = run_turn_with([])
+  end
+
   test "a worker result stamped with another assignment id is a typed mismatch, never an ok turn" do
     assignments = [
       %{

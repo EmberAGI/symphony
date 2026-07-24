@@ -3,6 +3,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
   alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation, SkillExecutionContract}
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Runtime.ProcessOwnership
   alias SymphonyElixir.TestSupport.HerdrReplayFixture
 
   defmodule RecordingTransport do
@@ -497,7 +498,21 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
              "/tmp/octo-emb-1141-runtime-seam/orchestrator-bin:"
            )
 
-    assert Map.delete(orchestrator_spec.env, "PATH") == %{
+    ownership_keys = [
+      "SYMPHONY_ROLE_HOLDER",
+      "SYMPHONY_ROLE_ISSUE_ID",
+      "SYMPHONY_ROLE_ISSUE_IDENTIFIER",
+      "SYMPHONY_ROLE_OWNERSHIP_PATH",
+      "SYMPHONY_ROLE_WORKSPACE_PATH"
+    ]
+
+    assert orchestrator_spec.env["SYMPHONY_ROLE_ISSUE_ID"] == "issue-1141"
+    assert orchestrator_spec.env["SYMPHONY_ROLE_ISSUE_IDENTIFIER"] == "EMB-1141"
+    assert orchestrator_spec.env["SYMPHONY_ROLE_WORKSPACE_PATH"] == "/tmp/selected-workspace"
+    assert orchestrator_spec.env["SYMPHONY_ROLE_HOLDER"] == ProcessOwnership.holder_id()
+    assert orchestrator_spec.env["SYMPHONY_ROLE_OWNERSHIP_PATH"] =~ "process-ownership"
+
+    assert orchestrator_spec.env |> Map.delete("PATH") |> Map.drop(ownership_keys) == %{
              "OCTO_HERDR_WORKER_LAUNCHER" => "/tmp/octo-emb-1141-runtime-seam/launch-worker",
              "SYMPHONY_SKILL_EXECUTION_CONTRACTS" => encoded_contract,
              "SYMPHONY_EXPECTED_BRANCH" => "agent/emb-1141-exercise-the-public-runtime-seam",
@@ -657,10 +672,23 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert projections =~ executable
     refute projections =~ "#{inspect(Path.join(orchestration_root, ".agents/skills"))}=\"read\""
 
+    worker_events = Path.join(session.herdr_session.runtime_root, "worker-events")
+
+    File.write!(
+      Path.join(worker_events, "assignment.test"),
+      "OCTO_MSG/1 kind=assignment assignment=default-herdr-assignment deliverable=bounded\n"
+    )
+
+    File.write!(
+      Path.join(worker_events, "result.test"),
+      "OCTO_MSG/1 kind=result assignment=default-herdr-assignment status=completed\n"
+    )
+
     assert {:ok, {next_session, turn}} =
              AgentRuntime.run_turn(session, "Complete the public native turn.", issue(), [])
 
     assert turn.response == HerdrReplayFixture.stdout!("agent-read-recent")
+    assert [%{assignment_id: "default-herdr-assignment", status: :completed}] = turn.worker_assignments
     assert :ok = AgentRuntime.stop_session(next_session)
   end
 

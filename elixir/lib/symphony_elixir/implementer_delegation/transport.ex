@@ -45,5 +45,9 @@ defmodule SymphonyElixir.ImplementerDelegation.Transport do
   @callback get_agent(session_ref(), agent_ref(), non_neg_integer(), context()) ::
               {:ok, agent_ref()} | {:error, term()}
   @callback read_agent(session_ref(), agent_ref(), map(), context()) :: {:ok, map()} | {:error, term()}
+  @callback worker_assignments(session_ref(), context()) ::
+              {:ok, [map()]} | {:error, term()}
   @callback stop_session(session_ref(), context()) :: :ok | {:error, term()}
+
+  @optional_callbacks worker_assignments: 2
 end

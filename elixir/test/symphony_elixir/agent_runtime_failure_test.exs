@@ -280,30 +280,26 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     end
   end
 
-  test "escalates the third consecutive identical no-progress observation without a wall-clock cap" do
+  test "suppresses the first equivalent redispatch at the same durable checkpoint" do
     reason = {:empty_turn_completed, %{message: "Codex completed without agent output token=secret"}}
 
     {observation, {:retryable, first}} = AgentRuntime.record_failure_observation(nil, reason, @context)
     assert observation.count == 1
     assert first.retryable?
 
-    {observation, {:retryable, second}} = AgentRuntime.record_failure_observation(observation, reason, @context)
-    assert observation.count == 2
-    assert second.retryable?
-
-    assert {observation, {:irrecoverable, third}} =
+    assert {observation, {:irrecoverable, repeated}} =
              AgentRuntime.record_failure_observation(observation, reason, @context)
 
-    assert observation.count == 3
-    assert third.family == :repeated_identical_no_progress_failure
-    assert third.retryable? == false
-    assert third.fingerprint.issue_id == @context.issue_id
-    assert third.fingerprint.workspace_path == @context.workspace_path
-    assert third.fingerprint.role == @context.role
-    assert third.fingerprint.runtime_provider == @context.provider
-    assert third.fingerprint.family == :repeated_identical_no_progress_failure
-    refute third.summary =~ "secret"
-    refute third.summary =~ "token="
+    assert observation.count == 2
+    assert repeated.family == :repeated_identical_no_progress_failure
+    assert repeated.retryable? == false
+    assert repeated.fingerprint.issue_id == @context.issue_id
+    assert repeated.fingerprint.workspace_path == @context.workspace_path
+    assert repeated.fingerprint.role == @context.role
+    assert repeated.fingerprint.runtime_provider == @context.provider
+    assert repeated.fingerprint.family == :repeated_identical_no_progress_failure
+    refute repeated.summary =~ "secret"
+    refute repeated.summary =~ "token="
   end
 
   test "ordinary retry dispatch run ids do not reset identical no-progress observations" do
@@ -312,37 +308,35 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     {observation, {:retryable, _first}} =
       AgentRuntime.record_failure_observation(nil, reason, Map.put(@context, :run_id, "run-a"))
 
-    {observation, {:retryable, _second}} =
-      AgentRuntime.record_failure_observation(observation, reason, Map.put(@context, :run_id, "run-b"))
-
-    assert observation.count == 2
-
     assert {_observation, {:irrecoverable, failure}} =
-             AgentRuntime.record_failure_observation(observation, reason, Map.put(@context, :run_id, "run-c"))
+             AgentRuntime.record_failure_observation(
+               observation,
+               reason,
+               Map.put(@context, :run_id, "run-b")
+             )
 
     assert failure.family == :repeated_identical_no_progress_failure
   end
 
-  test "resets no-progress observations for transient failures and different fingerprints" do
+  test "changed failures reset while identical transient failures are also suppressed" do
     reason = {:empty_turn_completed, %{message: "same no progress"}}
 
     {observation, {:retryable, _first}} = AgentRuntime.record_failure_observation(nil, reason, @context)
-    {observation, {:retryable, _second}} = AgentRuntime.record_failure_observation(observation, reason, @context)
 
     {observation, {:retryable, transient}} =
       AgentRuntime.record_failure_observation(observation, {:rate_limited, %{message: "retry later"}}, @context)
 
-    assert observation.count == 0
+    assert observation.count == 1
     assert transient.retryable?
 
-    {observation, {:retryable, _first_after_reset}} =
-      AgentRuntime.record_failure_observation(observation, reason, @context)
+    assert {_observation, {:irrecoverable, repeated_transient}} =
+             AgentRuntime.record_failure_observation(
+               observation,
+               {:rate_limited, %{message: "retry later"}},
+               @context
+             )
 
-    assert observation.count == 1
-
-    different = {:empty_turn_completed, %{message: "different no progress"}}
-    {observation, {:retryable, _different}} = AgentRuntime.record_failure_observation(observation, different, @context)
-    assert observation.count == 1
+    assert repeated_transient.family == :repeated_identical_no_progress_failure
   end
 
   test "the same durable checkpoint and typed failure cannot authorize an equivalent redispatch for any role" do

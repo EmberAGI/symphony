@@ -962,7 +962,12 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert {_native_response, 0} =
              System.cmd(
                restricted_herdr,
-               ["agent", "prompt", "implementer_orchestrator", "worker result"],
+               [
+                 "agent",
+                 "prompt",
+                 "implementer_orchestrator",
+                 "OCTO_MSG/1 kind=result assignment=assignment-1 status=completed"
+               ],
                env: [{"HERDR_FAKE_LOG", context.log}, {"XDG_CONFIG_HOME", session.runtime_root}]
              )
 
@@ -971,9 +976,26 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert {_native_response, 0} =
              System.cmd(
                orchestrator_herdr,
-               ["agent", "prompt", "implementer_worker", "orchestrator advice"],
+               [
+                 "agent",
+                 "prompt",
+                 "implementer_worker",
+                 "OCTO_MSG/1 kind=assignment assignment=assignment-1 deliverable=bounded"
+               ],
                env: [{"HERDR_FAKE_LOG", context.log}, {"XDG_CONFIG_HOME", session.runtime_root}]
              )
+
+    assert {:ok,
+            [
+              %{
+                assignment_id: "assignment-1",
+                status: :completed,
+                result: %{
+                  assignment_id: "assignment-1",
+                  status: "completed"
+                }
+              }
+            ]} = HerdrTransport.worker_assignments(session, adapter_context)
 
     assert {_native_response, 0} =
              System.cmd(
@@ -1049,8 +1071,12 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert commands =~
              "--session octo-emb-1141-run-7 agent wait implementer_orchestrator --until idle --until done --until blocked --timeout 3000"
 
-    assert commands =~ "agent prompt implementer_orchestrator worker result"
-    assert commands =~ "agent prompt implementer_worker orchestrator advice"
+    assert commands =~
+             "agent prompt implementer_orchestrator OCTO_MSG/1 kind=result assignment=assignment-1 status=completed"
+
+    assert commands =~
+             "agent prompt implementer_worker OCTO_MSG/1 kind=assignment assignment=assignment-1 deliverable=bounded"
+
     assert_pane_runs_only_prepare_launch(commands)
     refute commands =~ "pane send-text"
     assert commands =~ "--session octo-emb-1141-run-7 server stop\n"

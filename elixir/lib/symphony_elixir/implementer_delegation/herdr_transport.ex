@@ -19,6 +19,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @required_protocol 17
   @launch_projection_sentinel "--symphony-launch-projection"
   @default_launch_handshake_timeout_ms 5_000
+  @worker_assignment_prefix "OCTO_MSG/1 kind=assignment "
+  @worker_result_prefix "OCTO_MSG/1 kind=result "
   @launch_stage_failures [
     :herdr_pane_preparation_failed,
     :herdr_wrapper_resolution_failed,
@@ -121,7 +123,13 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       when is_binary(runtime_root) and is_map(context) do
     case materialize_worker_launcher(session, worker, context) do
       {:ok, worker_launcher, orchestrator_bin} ->
-        {:ok, session |> Map.put(:worker_launcher, worker_launcher) |> Map.put(:orchestrator_bin, orchestrator_bin)}
+        prepared =
+          session
+          |> Map.put(:worker_launcher, worker_launcher)
+          |> Map.put(:orchestrator_bin, orchestrator_bin)
+
+        File.mkdir_p!(worker_events_root(runtime_root))
+        prestart_worker(prepared, worker, context)
 
       {:error, reason} ->
         {:error, reason}
@@ -129,6 +137,34 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   def prepare_worker(_session, _worker, _context), do: {:error, :invalid_herdr_worker_session}
+
+  defp prestart_worker(
+         prepared,
+         %{name: name, cwd: cwd, argv: argv} = worker,
+         context
+       )
+       when is_binary(name) and name != "" and is_binary(cwd) and is_list(argv) and
+              argv != [] do
+    with {:ok, worker_pane_id} <- create_worker_pane(prepared, context),
+         {:ok, worker_agent} <-
+           start_agent(
+             Map.put(prepared, :pane_id, worker_pane_id),
+             worker,
+             context
+           ) do
+      {:ok,
+       prepared
+       |> Map.put(:worker, worker_agent)
+       |> Map.put(:worker_pane_id, worker_pane_id)}
+    else
+      {:error, reason} -> {:error, {:implementer_worker_launch_failed, reason}}
+    end
+  end
+
+  # Existing direct Adapter callers use prepare_worker/3 only to materialize
+  # and inspect the compatibility launcher. Runtime contracts always include
+  # the full name/cwd/argv shape and therefore take the deterministic prestart.
+  defp prestart_worker(prepared, _worker, _context), do: {:ok, prepared}
 
   @impl true
   def start_agent(
@@ -490,6 +526,27 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   def read_agent(_session, _agent, _opts, _context), do: {:error, :invalid_herdr_agent_read}
+
+  @impl true
+  def worker_assignments(%{runtime_root: runtime_root} = session, context)
+      when is_binary(runtime_root) and is_map(context) do
+    worker = Map.get(session, :worker, %{name: "implementer_worker"})
+
+    with {:ok, assignment_messages} <-
+           read_worker_messages(runtime_root, "assignment.*", @worker_assignment_prefix),
+         {:ok, result_messages} <-
+           read_worker_messages(runtime_root, "result.*", @worker_result_prefix) do
+      assignments =
+        assignment_messages
+        |> Enum.map(&message_fields/1)
+        |> Enum.filter(&(is_binary(Map.get(&1, "assignment")) and Map.get(&1, "assignment") != ""))
+
+      results = Enum.map(result_messages, &message_fields/1)
+      {:ok, correlate_worker_assignments(assignments, results, session, worker, context)}
+    end
+  end
+
+  def worker_assignments(_session, _context), do: {:ok, []}
 
   @impl true
   def stop_session(%{name: name, env: env, server_task: server_task, runtime_root: runtime_root}, context) do
@@ -936,8 +993,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       fi
       """
 
-      restricted_body = role_herdr_body(real_herdr, :worker)
-      orchestrator_body = role_herdr_body(real_herdr, :orchestrator)
+      restricted_body = role_herdr_body(real_herdr, :worker, runtime_root)
+      orchestrator_body = role_herdr_body(real_herdr, :orchestrator, runtime_root)
 
       provider_body = provider_wrapper_body(runtime_root, provider_command, inherited_path, worker_env)
 
@@ -1364,7 +1421,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     |> Enum.map_join(fn {key, value} -> "export #{key}=#{shell_escape(value)}\n" end)
   end
 
-  defp role_herdr_body(real_herdr, role) do
+  defp role_herdr_body(real_herdr, role, runtime_root) do
     authorization =
       case role do
         :worker ->
@@ -1389,6 +1446,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     #{authorization}
     if [ "${1:-}" = "agent" ] && [ "${2:-}" = "prompt" ] && [ "$#" -ge 4 ]; then
       agent_name=$3
+      message=$4
       recovery_attempt=0
       while :; do
         if [ "$recovery_attempt" -eq 0 ]; then
@@ -1403,6 +1461,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         set -e
 
         if [ "$status" -eq 0 ]; then
+          #{worker_message_recording(role, runtime_root)}
           printf '%s' "$output"
           exit 0
         fi
@@ -1424,6 +1483,157 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     exec #{shell_escape(real_herdr)} "$@"
     """
   end
+
+  defp worker_message_recording(:orchestrator, runtime_root) do
+    worker_events = worker_events_root(runtime_root)
+
+    """
+    case "$agent_name:$message" in
+      implementer_worker:'#{@worker_assignment_prefix}'*)
+        event_file=$(mktemp #{shell_escape(Path.join(worker_events, "assignment.XXXXXX"))})
+        printf '%s\\n' "$message" > "$event_file"
+        ;;
+    esac
+    """
+  end
+
+  defp worker_message_recording(:worker, runtime_root) do
+    worker_events = worker_events_root(runtime_root)
+
+    """
+    case "$agent_name:$message" in
+      implementer_orchestrator:'#{@worker_result_prefix}'*)
+        event_file=$(mktemp #{shell_escape(Path.join(worker_events, "result.XXXXXX"))})
+        printf '%s\\n' "$message" > "$event_file"
+        ;;
+    esac
+    """
+  end
+
+  defp create_worker_pane(
+         %{name: session_name, env: env, pane_id: root_pane_id},
+         context
+       )
+       when is_binary(root_pane_id) do
+    with {:ok, output} <-
+           command(
+             context,
+             [
+               "--session",
+               session_name,
+               "pane",
+               "split",
+               root_pane_id,
+               "--direction",
+               "right",
+               "--no-focus"
+             ],
+             env
+           ),
+         {:ok, payload} <- Jason.decode(output),
+         pane_id when is_binary(pane_id) <-
+           get_in(payload, ["result", "pane", "pane_id"]) do
+      {:ok, pane_id}
+    else
+      {:error, reason} -> {:error, {:herdr_worker_pane_create_failed, reason}}
+      _ -> {:error, :invalid_herdr_worker_pane_response}
+    end
+  end
+
+  defp read_worker_messages(runtime_root, pattern, prefix) do
+    messages =
+      runtime_root
+      |> worker_events_root()
+      |> Path.join(pattern)
+      |> Path.wildcard()
+      |> Enum.sort()
+      |> Enum.reduce_while([], &read_worker_message(&1, prefix, &2))
+
+    case messages do
+      {:error, reason} -> {:error, reason}
+      messages when is_list(messages) -> {:ok, Enum.reverse(messages)}
+    end
+  end
+
+  defp read_worker_message(path, prefix, messages) do
+    case File.read(path) do
+      {:ok, message} ->
+        continue_worker_message(path, prefix, String.trim(message), messages)
+
+      {:error, reason} ->
+        {:halt, {:error, {:worker_message_read_failed, reason}}}
+    end
+  end
+
+  defp continue_worker_message(path, prefix, message, messages) do
+    if String.starts_with?(message, prefix),
+      do: {:cont, [message | messages]},
+      else: {:halt, {:error, {:invalid_worker_message, Path.basename(path)}}}
+  end
+
+  defp message_fields(message) do
+    message
+    |> String.split(~r/\s+/, trim: true)
+    |> Enum.drop(2)
+    |> Enum.reduce(%{}, fn field, fields ->
+      case String.split(field, "=", parts: 2) do
+        [key, value] -> Map.put(fields, key, value)
+        _ -> fields
+      end
+    end)
+  end
+
+  defp correlate_worker_assignments(assignments, results, session, worker, context) do
+    Enum.map(assignments, fn assignment ->
+      assignment_id = Map.fetch!(assignment, "assignment")
+
+      result =
+        Enum.find(results, &(Map.get(&1, "assignment") == assignment_id)) ||
+          List.first(results)
+
+      worker_assignment_status(
+        assignment_id,
+        result,
+        session,
+        worker,
+        context
+      )
+    end)
+  end
+
+  defp worker_assignment_status(assignment_id, %{} = result, _session, _worker, _context) do
+    %{
+      assignment_id: assignment_id,
+      status: result_status(result),
+      result: %{
+        assignment_id: Map.get(result, "assignment"),
+        status: Map.get(result, "status"),
+        message: Map.get(result, "message")
+      }
+    }
+  end
+
+  defp worker_assignment_status(assignment_id, nil, session, worker, context) do
+    case get_agent(session, worker, @default_poll_interval_ms * 20, context) do
+      {:ok, %{agent_status: status}} when status in ["working", "unknown"] ->
+        %{assignment_id: assignment_id, status: :timed_out}
+
+      {:ok, _worker} ->
+        %{assignment_id: assignment_id, status: :launched}
+
+      {:error, {:herdr_agent_closed, _name} = reason} ->
+        %{assignment_id: assignment_id, status: :died, reason: reason}
+
+      {:error, reason} ->
+        %{assignment_id: assignment_id, status: :died, reason: reason}
+    end
+  end
+
+  defp result_status(%{"status" => "completed"}), do: :completed
+  defp result_status(%{"status" => "failed"}), do: :failed
+  defp result_status(_result), do: :failed
+
+  defp worker_events_root(runtime_root), do: Path.join(runtime_root, "worker-events")
 
   defp shell_escape(value) do
     "'" <> String.replace(to_string(value), "'", "'\\''") <> "'"

@@ -316,7 +316,8 @@ defmodule SymphonyElixir.CoreTest do
                state
              )
 
-    assert updated_state.running[issue_id].owned_session_ref == ownership_ref
+    assert updated_state.running[issue_id].owned_session_ref ==
+             Map.put(ownership_ref, :issue_id, issue_id)
   end
 
   test "process ownership persists only the narrow Herdr cleanup identity" do
@@ -1637,7 +1638,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "agent runner stops continuing once agent.max_turns is reached" do
+  test "agent runner records a typed failure once agent.max_turns is reached" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -1727,7 +1728,13 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, role: "reviewer", issue_state_fetcher: state_fetcher)
+      assert catch_exit(
+               AgentRunner.run(issue, nil,
+                 role: "reviewer",
+                 issue_state_fetcher: state_fetcher
+               )
+             ) ==
+               {:agent_runtime_failed, {:max_turns_exhausted, %{issue_id: "issue-max-turns", turn: 2, max_turns: 2}}}
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1
