@@ -348,6 +348,12 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
+             "work_admission" => %{
+               "status" => "open",
+               "target_generation" => "generation-http",
+               "drained" => false
+             },
+             "execution_generation" => "generation-http",
              "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1},
              "running" => [
                %{
@@ -878,6 +884,12 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   defp static_snapshot do
     %{
+      work_admission: %{
+        status: "open",
+        target_generation: "generation-http",
+        drained: false
+      },
+      execution_generation: "generation-http",
       running: [
         %{
           issue_id: "issue-http",
