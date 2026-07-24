@@ -95,6 +95,16 @@ reconstruct it. This contract implements the state-driven direction recorded
 by Octo ADR 0022 without adding a database, message bus, transition outbox, task
 dossier, or expanded run log.
 
+**Work admission**: The Orchestrator-owned `open` or `closed` state that
+serializes deployment drain requests with normal and retry dispatch. It is
+distinct from role-run ownership: admission decides whether any later role run
+may start, while ownership fences one already admitted run.
+
+**Execution generation**: The bounded, non-secret identifier for the complete
+tracked wrapper/Symphony/Herdr inputs from which one role process is executing.
+It is opaque to Symphony and is compared for exact equality when work
+admission opens.
+
 ## Rules and invariants
 
 - Codex remains the default and reference runtime.
@@ -283,6 +293,43 @@ dossier, or expanded run log.
   combinations, unsupported efforts, and empty reusable instructions fail
   closed during startup validation. The runtime has no parallel built-in
   production matrix.
+- The Orchestrator Module owns work admission. Its `close` and `open` calls,
+  normal poll dispatch, and retry dispatch execute through the same GenServer
+  mailbox. A successful close acknowledgement therefore occurs after any
+  earlier selected dispatch has become visible in `running`, or before any
+  later dispatch can start.
+- Closed admission blocks normal and retry dispatch but does not stop
+  reconciliation or already-running work. Only a retry whose matching timer
+  actually fires while closed becomes held; unexpired retry timers keep their
+  original `due_at_ms` deadline. On a later open in the same process, held
+  retries are re-armed for `max(due_at_ms - now, 0)` while still-pending timers
+  are left untouched.
+- Opening admission requires the target generation to equal the process
+  execution generation and the current admission target. A missing or invalid
+  execution generation cannot open admission.
+- Before scheduling its first poll, the Orchestrator loads the shared durable
+  marker at
+  `SYMPHONY_ORCHESTRATION_ROOT/.runtime/symphony/work-admission.json`, unless
+  the wrapper supplies the same path through the
+  `SYMPHONY_WORK_ADMISSION_PATH` bootstrap value. When marker integration is
+  configured, a missing, unreadable, malformed, or unsupported marker, or an
+  `open` marker for a different execution generation, starts closed before
+  the first poll. A missing marker defaults its target to the valid process
+  execution generation so the verified bootstrap can explicitly open it.
+  Standalone Symphony without marker integration preserves open behavior.
+- On Orchestrator initialization, runner tasks surviving an earlier
+  Orchestrator process continue under the shared TaskSupervisor; admission
+  state does not terminate already-running work. `drained` is true only when
+  both the Orchestrator running map and the shared TaskSupervisor child set are
+  empty; TaskSupervisor inspection errors or exits report `drained: false`.
+  The restarted Orchestrator does not reconstruct the earlier process's
+  in-memory scheduler entries; surviving children remain drain observations,
+  not adopted `running` entries.
+- The marker is a small atomically replaced JSON record containing only schema
+  version, `open`/`closed` status, and target generation. It is neither a
+  transition outbox nor a run log, dossier, lock service, or new shared storage
+  service. The Orchestrator exclusively writes it; the wrapper never creates,
+  edits, or deletes it.
 
 ## Interfaces/contracts
 
@@ -400,6 +447,51 @@ metadata to diagnose duplicate-prevention decisions: session age versus
 accumulated issue-pass age, ownership state, retry or replacement reason, run/session
 identity, worker host, workspace path, app-server PID when available, and
 process cleanup/quarantine status.
+
+### Work admission
+
+The wrapper supplies the current execution generation through the
+`SYMPHONY_EXECUTION_GENERATION` bootstrap value. Symphony accepts only a
+non-empty generation of at most 128 ASCII letters, digits, `.`, `_`, `:`, or
+`-`; invalid process values report as `unknown`, and invalid control requests
+are rejected.
+
+The loopback HTTP Adapter exposes:
+
+- `POST /api/v1/work-admission/close` with
+  `{"generation":"<target>"}`. Success returns
+  `{"status":"closed","target_generation":"<target>","drained":<boolean>}`
+  only after the Orchestrator has serialized the close against dispatch and
+  atomically persisted the marker.
+- `POST /api/v1/work-admission/open` with the same request shape. Success
+  requires request generation, current admission target, and the valid running
+  process execution generation to match exactly, atomically persists `open`
+  before changing the in-memory state, and returns the same bounded shape with
+  `status: "open"`. A mismatch returns HTTP 409 and remains closed.
+- `GET /api/v1/state` includes
+  `work_admission:
+  {"status":"open"|"closed","target_generation":"<generation>","drained":<boolean>}`
+  and
+  `execution_generation: "<bounded-generation>"`. It does not expose the
+  marker path, parse failures, request payloads, or other runtime values.
+
+Both mutation routes reject non-loopback callers even if endpoint host
+configuration is later widened.
+
+Marker schema:
+
+```json
+{
+  "version": 1,
+  "status": "closed",
+  "target_generation": "wrapper-generation"
+}
+```
+
+The local Orchestrator Interface also exposes equivalent
+`close_work_admission(server, generation)` and
+`open_work_admission(server, generation)` calls. The HTTP controller is an
+Adapter over those calls and does not own admission state or dispatch policy.
 
 Provider-specific requirements:
 
@@ -925,6 +1017,16 @@ until those test modules pass under `make all`.
   irrecoverable.
 - A provider-native payload contains secret-bearing fields adjacent to useful
   classification evidence.
+- A deployment closes admission after a poll selected work but before that
+  dispatch was published. The close acknowledgement waits behind that poll, so
+  the run is visible before drain proceeds.
+- A retry timer fires while admission is closed. The retry remains held and
+  cannot start a worker.
+- A process restarts with a closed marker, an unreadable marker path, malformed
+  JSON, an unsupported marker schema, or an open marker targeting another
+  generation. It starts closed before the first poll.
+- A close persisted a future deployment generation, but an old process receives
+  `open` for that future generation. Exact generation comparison rejects it.
 
 ## Constraints
 
@@ -971,6 +1073,9 @@ until those test modules pass under `make all`.
 - For EMB-1199, copy Octo skill packages into Symphony, make Symphony the
   editable skill authority, preload every configured skill body, or grant an
   orchestration checkout as a general-purpose provider workspace.
+- For EMB-1251, add a transition outbox, new run log, task dossier, provider
+  rotation, distributed lock, compatibility lifecycle, or separate network
+  service.
 
 ## Open questions about system behavior
 
@@ -1023,6 +1128,15 @@ slices without weakening the skills/tools release gate.
   evals, and wrapper pin promotion. ADR 0001 is amended rather than adding a
   new ADR because this is a completion of its existing skills/tools release
   gate.
+- EMB-1251: Work admission is an Orchestrator Interface because dispatch
+  serialization is the invariant home. The Octo wrapper owns complete
+  generation construction, closing all role processes, bounded drain,
+  materialization/restart verification, and opening the verified target.
+  This specification is the authority for the new Symphony admission
+  interface. Octo ADR 0016 retains its existing wrapper ownership and is not
+  expanded into a complete-generation-cutover decision here. The marker is an
+  implementation detail of that interface, not a new cross-system authority or
+  service, so no new Symphony ADR is required.
 
 ## References to source issues
 
@@ -1032,3 +1146,4 @@ slices without weakening the skills/tools release gate.
 - [EMB-1127: Generalize irrecoverable runtime failure escalation](https://linear.app/emberai/issue/EMB-1127/generalize-irrecoverable-runtime-failure-escalation)
 - [EMB-1178: Handle unattended Codex MCP elicitation without lease stalls](https://linear.app/emberai/issue/EMB-1178/handle-unattended-codex-mcp-elicitation-without-lease-stalls)
 - [EMB-1199: Expose registered skill runtime paths to every managed role](https://linear.app/emberai/issue/EMB-1199/expose-registered-skill-runtime-paths-to-every-managed-role)
+- [EMB-1251: Fence Symphony work admission during atomic Octo cutovers](https://linear.app/emberai/issue/EMB-1251/fence-symphony-work-admission-during-atomic-octo-cutovers)

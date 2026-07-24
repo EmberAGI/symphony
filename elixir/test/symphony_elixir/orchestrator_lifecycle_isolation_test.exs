@@ -49,7 +49,7 @@ defmodule SymphonyElixir.OrchestratorLifecycleIsolationTest do
 
     # The runner task lives under the app TaskSupervisor and is only
     # monitored by the orchestrator, so it must be released explicitly.
-    Process.exit(runner_pid, :kill)
+    assert :ok = Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, runner_pid)
 
     drain_tracker_messages()
 

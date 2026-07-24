@@ -13,6 +13,13 @@ defmodule SymphonyElixirWeb.Presenter do
       %{} = snapshot ->
         %{
           generated_at: generated_at,
+          work_admission:
+            Map.get(snapshot, :work_admission, %{
+              status: "closed",
+              target_generation: "unknown",
+              drained: false
+            }),
+          execution_generation: Map.get(snapshot, :execution_generation, "unknown"),
           counts: %{
             running: length(snapshot.running),
             retrying: length(snapshot.retrying),

@@ -26,6 +26,8 @@ defmodule SymphonyElixir.Orchestrator do
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
   @process_ownership_refresh_interval_ms 30_000
+  @work_admission_marker_version 1
+  @max_generation_length 128
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
@@ -47,6 +49,8 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :execution_generation,
+      :work_admission_marker_path,
       :last_poll_started_at,
       :last_poll_completed_at,
       :last_poll_result,
@@ -58,6 +62,7 @@ defmodule SymphonyElixir.Orchestrator do
       blocked_failures: %{},
       codex_totals: nil,
       codex_rate_limits: nil,
+      work_admission: %{status: "open", target_generation: nil},
       latest_dispatch_summary: %{
         result: "not_checked",
         candidate_count: 0,
@@ -77,9 +82,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
+    execution_generation = execution_generation(opts)
+    marker_path = work_admission_marker_path(opts)
+    work_admission = load_work_admission(marker_path, execution_generation)
 
     state = %State{
       poll_interval_ms: config.polling.interval_ms,
@@ -88,6 +96,9 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
+      execution_generation: execution_generation,
+      work_admission_marker_path: marker_path,
+      work_admission: work_admission,
       last_poll_started_at: nil,
       last_poll_completed_at: nil,
       last_poll_result: "not_checked",
@@ -306,6 +317,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:codex_worker_update, _issue_id, _update}, state), do: {:noreply, state}
 
+  def handle_info(
+        {:retry_issue, issue_id, retry_token},
+        %State{work_admission: %{status: "closed"}} = state
+      ) do
+    notify_dashboard()
+    {:noreply, hold_fired_retry_attempt(state, issue_id, retry_token)}
+  end
+
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
     result =
       case pop_retry_attempt_state(state, issue_id, retry_token) do
@@ -349,47 +368,51 @@ defmodule SymphonyElixir.Orchestrator do
     state = reconcile_running_issues(state)
     state = reconcile_orphaned_claims(state)
 
-    with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues() do
-      choose_issues(issues, state)
+    if work_admission_open?(state) do
+      with :ok <- Config.validate!(),
+           {:ok, issues} <- Tracker.fetch_candidate_issues() do
+        choose_issues(issues, state)
+      else
+        {:error, :missing_linear_api_token} ->
+          Logger.error("Linear API token missing in WORKFLOW.md")
+          record_dispatch_summary(state, candidate_fetch_failure_summary(:missing_linear_api_token))
+
+        {:error, :missing_linear_project_slug} ->
+          Logger.error("Linear project slug missing in WORKFLOW.md")
+          record_dispatch_summary(state, candidate_fetch_failure_summary(:missing_linear_project_slug))
+
+        {:error, :missing_tracker_kind} ->
+          Logger.error("Tracker kind missing in WORKFLOW.md")
+
+          record_dispatch_summary(state, candidate_fetch_failure_summary(:missing_tracker_kind))
+
+        {:error, {:unsupported_tracker_kind, kind}} ->
+          Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
+
+          record_dispatch_summary(state, candidate_fetch_failure_summary(:unsupported_tracker_kind))
+
+        {:error, {:invalid_workflow_config, message}} ->
+          Logger.error("Invalid WORKFLOW.md config: #{message}")
+          record_dispatch_summary(state, candidate_fetch_failure_summary(:invalid_workflow_config))
+
+        {:error, {:missing_workflow_file, path, reason}} ->
+          Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
+          record_dispatch_summary(state, candidate_fetch_failure_summary(:missing_workflow_file))
+
+        {:error, :workflow_front_matter_not_a_map} ->
+          Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
+          record_dispatch_summary(state, candidate_fetch_failure_summary(:workflow_front_matter_not_a_map))
+
+        {:error, {:workflow_parse_error, reason}} ->
+          Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
+          record_dispatch_summary(state, candidate_fetch_failure_summary(:workflow_parse_error))
+
+        {:error, reason} ->
+          Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
+          record_dispatch_summary(state, candidate_fetch_failure_summary(:tracker_candidate_fetch_failure))
+      end
     else
-      {:error, :missing_linear_api_token} ->
-        Logger.error("Linear API token missing in WORKFLOW.md")
-        record_dispatch_summary(state, candidate_fetch_failure_summary(:missing_linear_api_token))
-
-      {:error, :missing_linear_project_slug} ->
-        Logger.error("Linear project slug missing in WORKFLOW.md")
-        record_dispatch_summary(state, candidate_fetch_failure_summary(:missing_linear_project_slug))
-
-      {:error, :missing_tracker_kind} ->
-        Logger.error("Tracker kind missing in WORKFLOW.md")
-
-        record_dispatch_summary(state, candidate_fetch_failure_summary(:missing_tracker_kind))
-
-      {:error, {:unsupported_tracker_kind, kind}} ->
-        Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
-
-        record_dispatch_summary(state, candidate_fetch_failure_summary(:unsupported_tracker_kind))
-
-      {:error, {:invalid_workflow_config, message}} ->
-        Logger.error("Invalid WORKFLOW.md config: #{message}")
-        record_dispatch_summary(state, candidate_fetch_failure_summary(:invalid_workflow_config))
-
-      {:error, {:missing_workflow_file, path, reason}} ->
-        Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
-        record_dispatch_summary(state, candidate_fetch_failure_summary(:missing_workflow_file))
-
-      {:error, :workflow_front_matter_not_a_map} ->
-        Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
-        record_dispatch_summary(state, candidate_fetch_failure_summary(:workflow_front_matter_not_a_map))
-
-      {:error, {:workflow_parse_error, reason}} ->
-        Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
-        record_dispatch_summary(state, candidate_fetch_failure_summary(:workflow_parse_error))
-
-      {:error, reason} ->
-        Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
-        record_dispatch_summary(state, candidate_fetch_failure_summary(:tracker_candidate_fetch_failure))
+      record_dispatch_summary(state, empty_dispatch_summary("admission_closed"))
     end
   end
 
@@ -1202,6 +1225,26 @@ defmodule SymphonyElixir.Orchestrator do
         :missing
     end
   end
+
+  # A closed admission only holds a retry after its own timer has fired.  Other
+  # queued retries keep their original timer and deadline while admission is
+  # closed, so reopening cannot turn an unexpired backoff into immediate work.
+  defp hold_fired_retry_attempt(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
+    case Map.get(state.retry_attempts, issue_id) do
+      %{retry_token: ^retry_token} = retry ->
+        held_retry =
+          retry
+          |> Map.put(:timer_ref, nil)
+          |> Map.put(:held_by_admission, true)
+
+        %{state | retry_attempts: Map.put(state.retry_attempts, issue_id, held_retry)}
+
+      _ ->
+        state
+    end
+  end
+
+  defp hold_fired_retry_attempt(%State{} = state, _issue_id, _retry_token), do: state
 
   defp handle_missing_retry_attempt(%State{} = state, issue_id) when is_binary(issue_id) do
     cond do
@@ -2029,6 +2072,46 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
+  @doc "Closes work admission for a target deployment generation."
+  @spec close_work_admission(String.t()) ::
+          {:ok, map()} | {:error, :invalid_generation | :marker_unavailable | :unavailable}
+  def close_work_admission(target_generation) do
+    close_work_admission(__MODULE__, target_generation)
+  end
+
+  @spec close_work_admission(GenServer.server(), String.t()) ::
+          {:ok, map()} | {:error, :invalid_generation | :marker_unavailable | :unavailable}
+  def close_work_admission(server, target_generation) do
+    work_admission_call(server, {:close_work_admission, target_generation})
+  end
+
+  @doc "Opens work admission when the target equals this process execution generation."
+  @spec open_work_admission(String.t()) ::
+          {:ok, map()}
+          | {:error,
+             :execution_generation_mismatch
+             | :execution_generation_unavailable
+             | :work_admission_generation_mismatch
+             | :invalid_generation
+             | :marker_unavailable
+             | :unavailable}
+  def open_work_admission(target_generation) do
+    open_work_admission(__MODULE__, target_generation)
+  end
+
+  @spec open_work_admission(GenServer.server(), String.t()) ::
+          {:ok, map()}
+          | {:error,
+             :execution_generation_mismatch
+             | :execution_generation_unavailable
+             | :work_admission_generation_mismatch
+             | :invalid_generation
+             | :marker_unavailable
+             | :unavailable}
+  def open_work_admission(server, target_generation) do
+    work_admission_call(server, {:open_work_admission, target_generation})
+  end
+
   @spec request_refresh() :: map() | :unavailable
   def request_refresh do
     request_refresh(__MODULE__)
@@ -2061,6 +2144,62 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
+  def handle_call({:close_work_admission, target_generation}, _from, %State{} = state) do
+    case validate_generation(target_generation) do
+      :ok ->
+        admission = %{status: "closed", target_generation: target_generation}
+        closed_state = %{state | work_admission: admission}
+
+        case persist_work_admission(state.work_admission_marker_path, admission) do
+          :ok ->
+            notify_dashboard()
+            {:reply, {:ok, work_admission_payload(closed_state)}, closed_state}
+
+          {:error, reason} ->
+            Logger.error("Failed to persist closed work admission marker: #{inspect(reason)}")
+            notify_dashboard()
+            {:reply, {:error, :marker_unavailable}, closed_state}
+        end
+
+      {:error, :invalid_generation} ->
+        {:reply, {:error, :invalid_generation}, state}
+    end
+  end
+
+  def handle_call({:open_work_admission, target_generation}, _from, %State{} = state) do
+    cond do
+      state.execution_generation == "unknown" ->
+        {:reply, {:error, :execution_generation_unavailable}, state}
+
+      validate_generation(target_generation) != :ok ->
+        {:reply, {:error, :invalid_generation}, state}
+
+      state.execution_generation != target_generation ->
+        {:reply, {:error, :execution_generation_mismatch}, state}
+
+      state.work_admission.target_generation != target_generation ->
+        {:reply, {:error, :work_admission_generation_mismatch}, state}
+
+      true ->
+        admission = %{status: "open", target_generation: target_generation}
+
+        case persist_work_admission(state.work_admission_marker_path, admission) do
+          :ok ->
+            opened_state =
+              state
+              |> Map.put(:work_admission, admission)
+              |> rearm_held_retry_timers()
+
+            notify_dashboard()
+            {:reply, {:ok, work_admission_payload(opened_state)}, opened_state}
+
+          {:error, reason} ->
+            Logger.error("Failed to persist open work admission marker: #{inspect(reason)}")
+            {:reply, {:error, :marker_unavailable}, state}
+        end
+    end
+  end
+
   def handle_call(:snapshot, _from, state) do
     state = refresh_runtime_config(state)
     now = DateTime.utc_now()
@@ -2125,6 +2264,8 @@ defmodule SymphonyElixir.Orchestrator do
 
     {:reply,
      %{
+       work_admission: work_admission_payload(state),
+       execution_generation: state.execution_generation,
        running: running,
        retrying: retrying,
        blocked: blocked,
@@ -2786,4 +2927,211 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp integer_like(_value), do: nil
+
+  defp work_admission_open?(%State{work_admission: %{status: "open"}}), do: true
+  defp work_admission_open?(_state), do: false
+
+  defp active_runner_count do
+    case active_runner_pids() do
+      {:ok, runner_pids} -> {:ok, length(runner_pids)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp work_admission_payload(%State{} = state) do
+    %{
+      status: state.work_admission.status,
+      target_generation: state.work_admission.target_generation,
+      drained: map_size(state.running) == 0 and active_runner_count() == {:ok, 0}
+    }
+  end
+
+  defp active_runner_pids do
+    case Process.whereis(SymphonyElixir.TaskSupervisor) do
+      pid when is_pid(pid) -> {:ok, Task.Supervisor.children(SymphonyElixir.TaskSupervisor)}
+      _ -> {:error, :task_supervisor_unavailable}
+    end
+  rescue
+    error -> {:error, {:inspection_failed, error}}
+  catch
+    :exit, reason -> {:error, {:inspection_exited, reason}}
+  end
+
+  defp execution_generation(opts) do
+    value =
+      Keyword.get(opts, :execution_generation) ||
+        System.get_env("SYMPHONY_EXECUTION_GENERATION") ||
+        "unknown"
+
+    if validate_generation(value) == :ok, do: value, else: "unknown"
+  end
+
+  defp work_admission_marker_path(opts) do
+    Keyword.get(opts, :work_admission_marker_path) ||
+      Application.get_env(:symphony_elixir, :work_admission_marker_path) ||
+      non_blank_env("SYMPHONY_WORK_ADMISSION_PATH") ||
+      default_work_admission_marker_path()
+  end
+
+  defp default_work_admission_marker_path do
+    case non_blank_env("SYMPHONY_ORCHESTRATION_ROOT") do
+      nil -> nil
+      root -> Path.join([root, ".runtime", "symphony", "work-admission.json"])
+    end
+  end
+
+  defp non_blank_env(name) do
+    case System.get_env(name) do
+      value when is_binary(value) ->
+        case String.trim(value) do
+          "" -> nil
+          value -> value
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp load_work_admission(nil, execution_generation) do
+    %{status: "open", target_generation: execution_generation}
+  end
+
+  defp load_work_admission(marker_path, execution_generation) when is_binary(marker_path) do
+    default_target = if execution_generation == "unknown", do: nil, else: execution_generation
+
+    case read_work_admission_marker(marker_path) do
+      {:ok, marker} ->
+        apply_marker_generation(marker, execution_generation)
+
+      {:error, :enoent} ->
+        %{status: "closed", target_generation: default_target}
+
+      {:error, :malformed} ->
+        Logger.error("Work admission marker is malformed; starting closed")
+        %{status: "closed", target_generation: default_target}
+
+      {:error, reason} ->
+        Logger.error("Work admission marker is unreadable; starting closed reason=#{inspect(reason)}")
+        %{status: "closed", target_generation: default_target}
+    end
+  end
+
+  defp load_work_admission(_marker_path, _execution_generation) do
+    %{status: "closed", target_generation: nil}
+  end
+
+  defp read_work_admission_marker(marker_path) when is_binary(marker_path) do
+    case File.read(marker_path) do
+      {:ok, body} -> decode_work_admission(body)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp decode_work_admission(body) when is_binary(body) do
+    with {:ok,
+          %{
+            "version" => @work_admission_marker_version,
+            "status" => status,
+            "target_generation" => target_generation
+          } = marker} <- Jason.decode(body),
+         true <- map_size(marker) == 3,
+         true <- status in ["open", "closed"],
+         :ok <- validate_generation(target_generation) do
+      {:ok, %{status: status, target_generation: target_generation}}
+    else
+      _reason -> {:error, :malformed}
+    end
+  end
+
+  defp apply_marker_generation(
+         %{status: "open"} = marker,
+         "unknown"
+       ) do
+    Logger.error("Open work admission marker has no valid execution generation; starting closed")
+    %{marker | status: "closed"}
+  end
+
+  defp apply_marker_generation(
+         %{status: "open", target_generation: marker_generation} = marker,
+         execution_generation
+       )
+       when marker_generation != execution_generation do
+    Logger.error("Open work admission marker targets a different execution generation; starting closed")
+    %{marker | status: "closed"}
+  end
+
+  defp apply_marker_generation(marker, _execution_generation), do: marker
+
+  defp persist_work_admission(nil, _admission), do: {:error, :marker_path_missing}
+
+  defp persist_work_admission(marker_path, admission)
+       when is_binary(marker_path) and is_map(admission) do
+    directory = Path.dirname(marker_path)
+
+    temporary_path =
+      marker_path <>
+        ".tmp-" <>
+        System.pid() <>
+        "-" <>
+        Integer.to_string(System.unique_integer([:positive, :monotonic]))
+
+    body =
+      Jason.encode!(%{
+        "version" => @work_admission_marker_version,
+        "status" => admission.status,
+        "target_generation" => admission.target_generation
+      })
+
+    with :ok <- File.mkdir_p(directory),
+         :ok <- File.write(temporary_path, body <> "\n", [:exclusive, :sync]),
+         :ok <- File.rename(temporary_path, marker_path) do
+      :ok
+    else
+      {:error, reason} ->
+        _ = File.rm(temporary_path)
+        {:error, reason}
+    end
+  end
+
+  defp persist_work_admission(_marker_path, _admission), do: {:error, :invalid_marker_path}
+
+  defp validate_generation(value) when is_binary(value) do
+    if value != "unknown" and
+         byte_size(value) in 1..@max_generation_length and
+         Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._:-]*\z/, value) do
+      :ok
+    else
+      {:error, :invalid_generation}
+    end
+  end
+
+  defp validate_generation(_value), do: {:error, :invalid_generation}
+
+  defp work_admission_call(server, message) do
+    GenServer.call(server, message)
+  catch
+    :exit, _reason -> {:error, :unavailable}
+  end
+
+  defp rearm_held_retry_timers(%State{} = state) do
+    retry_attempts =
+      Enum.into(state.retry_attempts, %{}, fn {issue_id, retry} ->
+        if Map.get(retry, :held_by_admission, false) do
+          retry_token = make_ref()
+          delay_ms = max(Map.get(retry, :due_at_ms, System.monotonic_time(:millisecond)) - System.monotonic_time(:millisecond), 0)
+          timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
+
+          {issue_id,
+           retry
+           |> Map.put(:retry_token, retry_token)
+           |> Map.put(:timer_ref, timer_ref)
+           |> Map.delete(:held_by_admission)}
+        else
+          {issue_id, retry}
+        end
+      end)
+
+    %{state | retry_attempts: retry_attempts}
+  end
 end
