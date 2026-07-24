@@ -89,6 +89,16 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     verify_and_update(issue, expected, %{state: "cleaned", cleanup_status: "cleaned"})
   end
 
+  @doc "Releases successful ownership and clears prior same-checkpoint failure recurrence state."
+  @spec release_completed(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
+  def release_completed(%Issue{} = issue, expected) when is_map(expected) do
+    verify_and_update(issue, expected, %{
+      state: "cleaned",
+      cleanup_status: "cleaned",
+      failure_observation: :clear
+    })
+  end
+
   @spec ownership_env(Issue.t() | nil, map()) :: [{String.t(), String.t()}]
   def ownership_env(issue, attrs) when is_map(attrs) do
     normalized_attrs = normalize_attrs(attrs)
@@ -203,6 +213,13 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   end
 
   defp replace_stale_record(path, record, %Issue{} = issue, attrs) do
+    attrs =
+      if Map.get(attrs, :failure_observation) do
+        attrs
+      else
+        Map.put(attrs, :failure_observation, failure_observation_value(record))
+      end
+
     with {:ok, observed_body} <- Jason.encode(record),
          digest <- :crypto.hash(:sha256, observed_body) |> Base.encode16(case: :lower),
          archive_path <- path <> ".stale-" <> binary_part(digest, 0, 16),
@@ -294,6 +311,11 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       "state" => state,
       "cleanup_status" => state,
       "quarantine_reason" => attrs.quarantine_reason,
+      "failure_observation" =>
+        if(Map.get(attrs, :failure_observation) == :clear,
+          do: nil,
+          else: Map.get(attrs, :failure_observation)
+        ),
       "updated_at" => now
     }
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
@@ -521,6 +543,11 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       workspace_path: prefer_update(updates.workspace_path, string_value(record["workspace_path"])),
       session_id: prefer_update(updates.session_id, string_value(record["session_id"])),
       quarantine_reason: prefer_update(updates.quarantine_reason, string_value(record["quarantine_reason"])),
+      failure_observation:
+        merge_failure_observation(
+          updates.failure_observation,
+          failure_observation_value(record)
+        ),
       worker_pid: prefer_update(updates.worker_pid, pid_value(record["worker_pid"])),
       app_server_pid: prefer_update(updates.app_server_pid, pid_value(record["app_server_pid"])),
       app_server_pgid: prefer_update(updates.app_server_pgid, pid_value(record["app_server_pgid"])),
@@ -531,6 +558,9 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   defp prefer_update(nil, existing), do: existing
   defp prefer_update(value, _existing), do: value
+  defp merge_failure_observation(:clear, _existing), do: nil
+  defp merge_failure_observation(nil, existing), do: existing
+  defp merge_failure_observation(observation, _existing), do: observation
   defp prefer_pid_list([], existing), do: pid_list_value(existing)
   defp prefer_pid_list(values, _existing), do: values
 
@@ -627,6 +657,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       workspace_path: attr_string(attrs, :workspace_path),
       session_id: attr_string(attrs, :session_id),
       quarantine_reason: attr_string(attrs, :quarantine_reason),
+      failure_observation: failure_observation_value(attrs),
       worker_pid: attr_pid(attrs, :worker_pid),
       app_server_pid: attr_pid(attrs, :app_server_pid),
       app_server_pgid: attr_pid(attrs, :app_server_pgid),
@@ -648,6 +679,66 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     |> value_for(key)
     |> pid_list_value()
   end
+
+  defp failure_observation_value(attrs) when is_map(attrs) do
+    case value_for(attrs, :failure_observation) do
+      :clear ->
+        :clear
+
+      %{} = observation ->
+        fingerprint = value_for(observation, :fingerprint)
+        reset_marker = value_for(observation, :reset_marker)
+        count = value_for(observation, :count)
+
+        if is_map(fingerprint) and is_map(reset_marker) and is_integer(count) and count > 0 do
+          %{
+            fingerprint: normalize_failure_fingerprint(fingerprint),
+            count: count,
+            reset_marker: normalize_failure_reset_marker(reset_marker)
+          }
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp failure_observation_value(_attrs), do: nil
+
+  defp normalize_failure_fingerprint(fingerprint) do
+    %{
+      issue_id: value_for(fingerprint, :issue_id),
+      workspace_path: value_for(fingerprint, :workspace_path),
+      role: value_for(fingerprint, :role),
+      runtime_provider: controlled_atom_value(value_for(fingerprint, :runtime_provider)),
+      family: controlled_atom_value(value_for(fingerprint, :family)),
+      subtype: value_for(fingerprint, :subtype),
+      summary: value_for(fingerprint, :summary)
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp normalize_failure_reset_marker(reset_marker) do
+    %{
+      execution_generation: value_for(reset_marker, :execution_generation),
+      retry_epoch: value_for(reset_marker, :retry_epoch),
+      input_fingerprint: value_for(reset_marker, :input_fingerprint),
+      operator_repair_id: value_for(reset_marker, :operator_repair_id)
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp controlled_atom_value(value) when is_atom(value), do: value
+
+  defp controlled_atom_value(value) when is_binary(value) do
+    String.to_existing_atom(value)
+  rescue
+    ArgumentError -> value
+  end
+
+  defp controlled_atom_value(value), do: value
 
   defp value_for(attrs, key) when is_atom(key), do: attrs[key] || attrs[Atom.to_string(key)]
 
@@ -900,6 +991,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       owned_session_ref: owned_session_ref_value(record),
       updated_at: record["updated_at"],
       quarantine_reason: record["quarantine_reason"],
+      failure_observation: failure_observation_value(record),
       live?: local_process_live?(record)
     }
   end

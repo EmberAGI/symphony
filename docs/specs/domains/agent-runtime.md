@@ -89,7 +89,8 @@ still be resolved by continuation or bounded no-progress recovery.
 fences one Symphony role run for an issue/workspace/role scope. Its
 `Runtime.ProcessOwnership` record contains stable issue, role, holder, run,
 workspace, host, state, cleanup, quarantine, and timestamp fields plus bounded
-process/session cleanup metadata. The exact record path is passed to provider
+process/session cleanup metadata and the optional bounded failure observation
+`{fingerprint, count, reset_marker}`. The exact record path is passed to provider
 processes as `SYMPHONY_ROLE_OWNERSHIP_PATH`; consumers read that path and do not
 reconstruct it. This contract implements the state-driven direction recorded
 by Octo ADR 0022 without adding a database, message bus, transition outbox, task
@@ -184,8 +185,15 @@ admission opens.
   Reset conditions include an intervening successful progress/completion event,
   a different failure fingerprint, an intentionally reset retry epoch, a
   material issue/branch/workspace input change, or an operator-recorded repair
-  action after the prior failure. A replacement role-run identifier by itself
-  is not checkpoint progress.
+  action after the prior failure. A different verified execution generation is
+  also a reset because it identifies changed deployed runtime conditions. A
+  replacement role-run identifier by itself is not checkpoint progress.
+- The same scoped `Runtime.ProcessOwnership` claim durably carries the bounded
+  failure observation while a failed run is released or retried. A role-service
+  restart reloads that observation before classifying the next equivalent
+  failure. Only successful progress/completion or another observable reset
+  condition clears or replaces it; an ordinary failed-run claim release does
+  not. This is claim metadata, not a new storage or runtime authority.
 - Worker death, worker launch failure, missing or mismatched worker result,
   timeout, `agent.max_turns` exhaustion, and post-turn routing failure are typed
   failed runs. They must never use the normal task-completion branch. A

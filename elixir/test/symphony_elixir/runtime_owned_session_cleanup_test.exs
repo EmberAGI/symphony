@@ -9,6 +9,7 @@ defmodule SymphonyElixir.RuntimeOwnedSessionCleanupTest do
   """
 
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Runtime.ProcessOwnership
 
   defmodule ProcessCleanup do
     def cleanup_owned_session(%{
@@ -68,19 +69,30 @@ defmodule SymphonyElixir.RuntimeOwnedSessionCleanupTest do
       process_pid = spawn(fn -> Process.sleep(:infinity) end)
       monitor_ref = make_ref()
 
+      issue = %Issue{
+        id: issue_id,
+        identifier: "EMB-CLEANUP-#{label}",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert {:ok, process_ownership} =
+               ProcessOwnership.acquire(issue, %{
+                 role: ProcessOwnership.current_role(),
+                 run_id: "run-cleanup-#{label}",
+                 holder: ProcessOwnership.holder_id()
+               })
+
       state = %Orchestrator.State{
         running: %{
           issue_id => %{
             pid: process_pid,
             ref: monitor_ref,
-            identifier: "EMB-CLEANUP",
-            issue: %Issue{
-              id: issue_id,
-              identifier: "EMB-CLEANUP",
-              state: "In Progress",
-              labels: []
-            },
+            identifier: issue.identifier,
+            issue: issue,
             run_id: "run-cleanup-#{label}",
+            workspace_path: process_ownership.workspace_path,
+            process_ownership: process_ownership,
             owned_session_ref: %{
               cleanup_module: ProcessCleanup,
               owner: self(),
@@ -120,6 +132,36 @@ defmodule SymphonyElixir.RuntimeOwnedSessionCleanupTest do
 
       assert is_integer(owned_process_id)
       refute Process.alive?(process_pid)
+    end
+  end
+
+  test "missing or malformed scoped ownership evidence cannot verify cleanup" do
+    for {label, prepare} <- [
+          {"missing", fn _issue -> :ok end},
+          {"malformed",
+           fn issue ->
+             path = ProcessOwnership.registry_path(issue)
+             File.mkdir_p!(Path.dirname(path))
+             File.write!(path, "{}\n")
+           end}
+        ] do
+      issue = %Issue{
+        id: "issue-cleanup-unavailable-#{label}",
+        identifier: "EMB-CLEANUP-UNAVAILABLE-#{label}",
+        state: "In Progress",
+        labels: []
+      }
+
+      prepare.(issue)
+
+      assert {:error, :owned_session_process_evidence_unavailable} =
+               Orchestrator.verify_owned_process_cleanup_for_test(
+                 %{
+                   issue_id: issue.id,
+                   session_name: "octo-cleanup-#{label}"
+                 },
+                 issue
+               )
     end
   end
 end

@@ -981,8 +981,8 @@ defmodule SymphonyElixir.AgentRuntime do
 
   defp reset_marker(context) do
     %{
+      execution_generation: context_string(context, :execution_generation),
       retry_epoch: context_string(context, :retry_epoch),
-      process_ownership_run_id: context_string(context, :process_ownership_run_id),
       input_fingerprint: context_string(context, :input_fingerprint),
       operator_repair_id: context_string(context, :operator_repair_id)
     }

@@ -83,7 +83,11 @@ defmodule SymphonyElixir.ImplementerWorkerAssignmentTest do
       %{
         assignment_id: "assign-correlated-1",
         status: :completed,
-        result: %{assignment_id: "assign-correlated-1", summary: "bounded deliverable finished"}
+        result: %{
+          assignment_id: "assign-correlated-1",
+          status: "completed",
+          summary: "bounded deliverable finished"
+        }
       }
     ]
 
@@ -92,7 +96,11 @@ defmodule SymphonyElixir.ImplementerWorkerAssignmentTest do
     assert [
              %{
                assignment_id: "assign-correlated-1",
-               result: %{assignment_id: "assign-correlated-1", summary: "bounded deliverable finished"}
+               result: %{
+                 assignment_id: "assign-correlated-1",
+                 status: "completed",
+                 summary: "bounded deliverable finished"
+               }
              }
            ] = turn.worker_assignments
   end
@@ -106,12 +114,33 @@ defmodule SymphonyElixir.ImplementerWorkerAssignmentTest do
       %{
         assignment_id: "assign-expected",
         status: :completed,
-        result: %{assignment_id: "assign-other", summary: "result from a different launch"}
+        result: %{
+          assignment_id: "assign-other",
+          status: "completed",
+          summary: "result from a different launch"
+        }
       }
     ]
 
     assert {:error, {:implementer_worker_result_mismatch, %{assignment_id: "assign-expected", observed_assignment_id: "assign-other"}}} =
              run_turn_with(assignments)
+  end
+
+  test "a matching result id without completed result status is a typed failure" do
+    assignments = [
+      %{
+        assignment_id: "assign-failed-result",
+        status: :completed,
+        result: %{assignment_id: "assign-failed-result", status: "failed"}
+      }
+    ]
+
+    assert {:error,
+            {:implementer_worker_result_failed,
+             %{
+               assignment_id: "assign-failed-result",
+               result: %{assignment_id: "assign-failed-result", status: "failed"}
+             }}} = run_turn_with(assignments)
   end
 
   test "a worker that never launched is a typed launch failure, never an ok turn" do

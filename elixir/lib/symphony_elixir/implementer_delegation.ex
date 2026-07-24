@@ -242,10 +242,18 @@ defmodule SymphonyElixir.ImplementerDelegation do
   defp worker_assignment_result(%{
          assignment_id: assignment_id,
          status: :completed,
-         result: %{assignment_id: assignment_id}
+         result: %{assignment_id: assignment_id, status: "completed"}
        })
        when is_binary(assignment_id) and assignment_id != "",
        do: :ok
+
+  defp worker_assignment_result(%{
+         assignment_id: assignment_id,
+         status: :completed,
+         result: %{assignment_id: assignment_id} = result
+       }) do
+    {:error, {:implementer_worker_result_failed, %{assignment_id: assignment_id, result: result}}}
+  end
 
   defp worker_assignment_result(%{
          assignment_id: assignment_id,
