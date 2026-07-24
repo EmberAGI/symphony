@@ -180,6 +180,8 @@ defmodule SymphonyElixir.Orchestrator do
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
+        cleanup_result = cleanup_owned_session(running_entry)
+        reason = cleanup_task_exit_reason(reason, cleanup_result)
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
         process_completion_status = record_process_completion(running_entry, reason)
@@ -237,6 +239,7 @@ defmodule SymphonyElixir.Orchestrator do
                 attempt: Map.get(running_entry, :retry_attempt) || 1,
                 started_at: Map.get(running_entry, :started_at),
                 retry_reason: "agent exited: #{exit_reason}",
+                failure_observation: failure_observation,
                 lease_state: retry_lease_state(process_completion_status)
               })
           end
@@ -280,6 +283,8 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, state}
 
       running_entry ->
+        ownership_ref = Map.put_new(ownership_ref, :issue_id, issue_id)
+
         updated_running_entry =
           running_entry
           |> Map.put(:owned_session_ref, ownership_ref)
@@ -470,6 +475,20 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_retry_issue_for_test(%State{} = state, issue_id, attempt, metadata)
       when is_binary(issue_id) and is_integer(attempt) and is_map(metadata) do
     handle_retry_issue(state, issue_id, attempt, metadata)
+  end
+
+  @doc false
+  @spec classify_task_exit_for_test(term(), map(), String.t(), term()) :: term()
+  def classify_task_exit_for_test(reason, running_entry, issue_id, %State{} = state)
+      when is_map(running_entry) and is_binary(issue_id) do
+    classify_task_exit(reason, running_entry, issue_id, state)
+  end
+
+  @doc false
+  @spec verify_owned_process_cleanup_for_test(map(), Issue.t()) :: :ok | {:error, term()}
+  def verify_owned_process_cleanup_for_test(ownership_ref, %Issue{} = issue)
+      when is_map(ownership_ref) do
+    verify_owned_process_cleanup(ownership_ref, issue)
   end
 
   @doc false
@@ -744,18 +763,74 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp cleanup_owned_session(%{owned_session_ref: ownership_ref}) when is_map(ownership_ref) do
+  defp cleanup_owned_session(%{owned_session_ref: ownership_ref} = running_entry)
+       when is_map(ownership_ref) do
     case AgentRuntime.cleanup_owned_session(ownership_ref) do
       :ok ->
-        :ok
+        verify_owned_process_cleanup(ownership_ref, Map.get(running_entry, :issue))
 
       {:error, reason} ->
         Logger.warning("Failed to clean up run-owned runtime before task termination: #{inspect(reason)}")
-        :ok
+        {:error, reason}
     end
   end
 
   defp cleanup_owned_session(_running_entry), do: :ok
+
+  defp verify_owned_process_cleanup(
+         %{issue_id: issue_id} = ownership_ref,
+         %Issue{} = issue
+       )
+       when is_binary(issue_id) do
+    expected_role = ProcessOwnership.current_role()
+    expected_workspace_path = expected_workspace_path(issue)
+
+    case ProcessOwnership.status_for_issue(issue) do
+      %{
+        issue_id: ^issue_id,
+        role: ^expected_role,
+        workspace_path: ^expected_workspace_path,
+        ownership_env_pids: []
+      } ->
+        Logger.info(
+          "Run-owned runtime cleanup verified " <>
+            "issue_id=#{issue_id} " <>
+            "session_name=#{Map.get(ownership_ref, :session_name, "unknown")} " <>
+            "owned_pids=[] live_after=0"
+        )
+
+        :ok
+
+      %{
+        issue_id: ^issue_id,
+        role: ^expected_role,
+        workspace_path: ^expected_workspace_path,
+        ownership_env_pids: pids
+      }
+      when is_list(pids) ->
+        {:error, {:owned_session_processes_remain, pids}}
+
+      _status ->
+        {:error, :owned_session_process_evidence_unavailable}
+    end
+  end
+
+  defp verify_owned_process_cleanup(ownership_ref, _issue) do
+    Logger.info(
+      "Run-owned runtime cleanup completed " <>
+        "issue_id=unknown " <>
+        "session_name=#{Map.get(ownership_ref, :session_name, "unknown")} " <>
+        "owned_pid_evidence=unavailable"
+    )
+
+    :ok
+  end
+
+  defp cleanup_task_exit_reason(reason, :ok), do: reason
+
+  defp cleanup_task_exit_reason(_reason, {:error, cleanup_reason}) do
+    {:agent_runtime_failed, {:owned_session_cleanup_failed, cleanup_reason}}
+  end
 
   defp choose_issues(issues, state) do
     active_states = active_state_set()
@@ -1179,6 +1254,7 @@ defmodule SymphonyElixir.Orchestrator do
         run_id: retry_context.run_id,
         process_ownership: retry_context.process_ownership,
         retry_reason: metadata[:retry_reason] || retry_context.error,
+        failure_observation: metadata[:failure_observation],
         recovery_reason: metadata[:recovery_reason],
         lease_state: metadata[:lease_state] || "retrying"
       })
@@ -1400,8 +1476,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp classify_task_exit(:normal, _running_entry, _issue_id, _state), do: :normal
 
   defp classify_task_exit(reason, running_entry, issue_id, %State{} = state) do
-    previous_observation = Map.get(state.failure_observations, issue_id)
-    context = runtime_failure_context(issue_id, running_entry)
+    previous_observation =
+      Map.get(state.failure_observations, issue_id) ||
+        get_in(running_entry, [:process_ownership, :failure_observation])
+
+    context = runtime_failure_context(issue_id, running_entry, state.execution_generation)
 
     {failure_observation, classification} =
       AgentRuntime.record_failure_observation(previous_observation, reason, context)
@@ -1412,12 +1491,13 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp runtime_failure_context(issue_id, running_entry) do
+  defp runtime_failure_context(issue_id, running_entry, execution_generation) do
     issue = Map.get(running_entry, :issue)
     workspace_path = Map.get(running_entry, :workspace_path)
 
     %{
       issue_id: issue_id,
+      execution_generation: execution_generation,
       workspace_path: workspace_path,
       role: ProcessOwnership.current_role(),
       provider: AgentRuntime.provider(),
@@ -1714,7 +1794,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp update_retry_process_ownership(_issue_id, %Issue{} = issue, _attempt, _delay_ms, metadata) do
     state = metadata[:lease_state] || "retrying"
-    attrs = %{workspace_path: metadata[:workspace_path]}
+
+    attrs = %{
+      workspace_path: metadata[:workspace_path],
+      failure_observation: metadata[:failure_observation]
+    }
 
     attrs =
       if state == "quarantined",
@@ -1903,7 +1987,7 @@ defmodule SymphonyElixir.Orchestrator do
         :quarantined
 
       true ->
-        _ = release_owned_state(issue, running_entry)
+        _ = release_completed_owned_state(issue, running_entry)
         :cleaned
     end
   end
@@ -1966,6 +2050,20 @@ defmodule SymphonyElixir.Orchestrator do
       %{holder: holder} ->
         if holder == ProcessOwnership.holder_id(),
           do: ProcessOwnership.release(issue, ownership_identity(ownership)),
+          else: {:error, :ownership_mismatch}
+
+      _ ->
+        {:error, :ownership_missing}
+    end
+  end
+
+  defp release_completed_owned_state(%Issue{} = issue, context) when is_map(context) do
+    ownership = Map.get(context, :process_ownership) || ProcessOwnership.status_for_issue(issue)
+
+    case ownership do
+      %{holder: holder} ->
+        if holder == ProcessOwnership.holder_id(),
+          do: ProcessOwnership.release_completed(issue, ownership_identity(ownership)),
           else: {:error, :ownership_mismatch}
 
       _ ->

@@ -15,6 +15,7 @@ defmodule SymphonyElixir.AgentRuntime do
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
   alias SymphonyElixir.{Config, ImplementationEffort, ImplementerDelegation, SkillExecutionContract, Workspace}
   alias SymphonyElixir.ImplementerDelegation.HerdrTransport
+  alias SymphonyElixir.Runtime.ProcessOwnership
 
   @type provider :: :codex | :claude_code
   @type failure_family ::
@@ -163,12 +164,29 @@ defmodule SymphonyElixir.AgentRuntime do
 
     case runtime_adapter.run_turn(session, prompt, issue, opts) do
       {:ok, turn_result} ->
-        {:ok, {advance_session(session, turn_result), turn_result}}
+        case validate_turn_result(turn_result) do
+          :ok -> {:ok, {advance_session(session, turn_result), turn_result}}
+          {:error, reason} -> {:error, reason}
+        end
 
       {:error, reason} ->
         {:error, reason}
     end
   end
+
+  defp validate_turn_result(%{result: result}) when not is_nil(result) and result != "", do: :ok
+  defp validate_turn_result(%{response: response}) when is_binary(response) and response != "", do: :ok
+
+  defp validate_turn_result(turn_result) when is_map(turn_result) do
+    {:error,
+     {:missing_turn_result,
+      %{
+        available_fields: turn_result |> Map.keys() |> Enum.sort(),
+        session_id: Map.get(turn_result, :session_id)
+      }}}
+  end
+
+  defp validate_turn_result(_turn_result), do: {:error, {:missing_turn_result, %{available_fields: []}}}
 
   @doc "Stop the runtime session with the configured adapter."
   @spec stop_session(map()) :: :ok | {:error, term()}
@@ -219,7 +237,14 @@ defmodule SymphonyElixir.AgentRuntime do
         contract,
         issue_identifier: issue_identifier,
         run_id: run_id,
-        orchestrator_env: implementer_run_environment(issue, role, run_id, contract),
+        orchestrator_env:
+          implementer_run_environment(
+            issue,
+            role,
+            run_id,
+            workspace,
+            contract
+          ),
         skill_execution_contracts: Keyword.get(opts, :skill_execution_contracts, []),
         transport: transport,
         transport_context: transport_context
@@ -238,9 +263,19 @@ defmodule SymphonyElixir.AgentRuntime do
   defp validate_local_herdr_worker(nil), do: :ok
   defp validate_local_herdr_worker(worker_host), do: {:error, {:herdr_remote_worker_not_implemented, worker_host}}
 
-  defp implementer_run_environment(issue, role, run_id, contract) do
+  defp implementer_run_environment(issue, role, run_id, workspace, contract) do
+    ownership_env =
+      ProcessOwnership.ownership_env(issue, %{
+        role: role,
+        run_id: run_id,
+        holder: ProcessOwnership.holder_id(),
+        workspace_path: workspace
+      })
+      |> Map.new()
+
     issue
     |> Workspace.issue_environment()
+    |> Map.merge(ownership_env)
     |> Map.merge(%{
       "SYMPHONY_ROLE_NAME" => role,
       "SYMPHONY_ROLE_RUN_ID" => run_id
@@ -906,25 +941,20 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   defp record_retryable_failure_observation(previous_observation, reason, failure, context) do
-    cond do
-      transient_failure?(reason) ->
-        {reset_observation(context), {:retryable, failure}}
+    repeated_failure =
+      irrecoverable_decision(
+        :repeated_identical_no_progress_failure,
+        no_progress_details(reason),
+        context
+      )
 
-      no_progress_failure?(reason) ->
-        no_progress_failure =
-          irrecoverable_decision(:repeated_identical_no_progress_failure, no_progress_details(reason), context)
+    count = next_observation_count(previous_observation, repeated_failure, context)
+    observation = observation_for(repeated_failure, context, count)
 
-        count = next_observation_count(previous_observation, no_progress_failure, context)
-        observation = observation_for(no_progress_failure, context, count)
-
-        if count >= 3 do
-          {observation, {:irrecoverable, no_progress_failure}}
-        else
-          {observation, {:retryable, failure}}
-        end
-
-      true ->
-        {observation_for(failure, context, 1), {:retryable, failure}}
+    if count >= 2 do
+      {observation, {:irrecoverable, repeated_failure}}
+    else
+      {observation, {:retryable, failure}}
     end
   end
 
@@ -949,14 +979,10 @@ defmodule SymphonyElixir.AgentRuntime do
     }
   end
 
-  defp reset_observation(context) do
-    %{fingerprint: nil, count: 0, reset_marker: reset_marker(context)}
-  end
-
   defp reset_marker(context) do
     %{
+      execution_generation: context_string(context, :execution_generation),
       retry_epoch: context_string(context, :retry_epoch),
-      process_ownership_run_id: context_string(context, :process_ownership_run_id),
       input_fingerprint: context_string(context, :input_fingerprint),
       operator_repair_id: context_string(context, :operator_repair_id)
     }
@@ -1090,19 +1116,15 @@ defmodule SymphonyElixir.AgentRuntime do
     |> then(fn summary -> Enum.any?(@transient_markers, &String.contains?(summary, &1)) end)
   end
 
-  defp no_progress_failure?({:empty_turn_completed, _details}), do: true
-  defp no_progress_failure?({:turn_input_required, _details}), do: true
-  defp no_progress_failure?({:approval_required, _details}), do: true
-  defp no_progress_failure?(:empty_turn_completed), do: true
-  defp no_progress_failure?(:turn_input_required), do: true
-  defp no_progress_failure?(:approval_required), do: true
-  defp no_progress_failure?(_reason), do: false
-
   defp no_progress_details({subtype, details}) when is_atom(subtype) and is_map(details) do
     Map.put(details, :subtype, Atom.to_string(subtype))
   end
 
   defp no_progress_details(subtype) when is_atom(subtype), do: %{subtype: Atom.to_string(subtype)}
+
+  defp no_progress_details(reason) do
+    %{subtype: "runtime_failure", summary: detail_summary(reason)}
+  end
 
   defp observed_failure_reason({:agent_runtime_failed, reason}), do: reason
   defp observed_failure_reason(reason), do: reason

@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.ProcessOwnershipTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.Runtime.ProcessOwnership
+  alias SymphonyElixir.{Orchestrator, Runtime.ProcessOwnership}
 
   setup do
     previous_role = System.get_env("SYMPHONY_ROLE")
@@ -115,6 +115,103 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
 
     assert {:ok, %{state: "cleaned"}} =
              ProcessOwnership.release(issue, %{holder: "owned-holder", run_id: "owned-run"})
+  end
+
+  test "failed-run release and role restart preserve same-checkpoint retry suppression", %{issue: issue} do
+    holder = "#{ProcessOwnership.current_host()}:999999:implementer"
+    attrs = ownership_attrs("failed-run", holder)
+    assert {:ok, ownership} = ProcessOwnership.acquire(issue, attrs)
+
+    running_entry = %{
+      issue: issue,
+      workspace_path: ownership.workspace_path,
+      run_id: "failed-run",
+      process_ownership: ownership
+    }
+
+    reason = {:max_turns_exhausted, %{turn: 3, max_turns: 3}}
+
+    assert {:retryable, _failure, observation} =
+             Orchestrator.classify_task_exit_for_test(
+               reason,
+               running_entry,
+               issue.id,
+               %Orchestrator.State{execution_generation: "generation-a"}
+             )
+
+    identity = %{holder: holder, run_id: "failed-run", workspace_path: ownership.workspace_path}
+
+    assert {:ok, %{state: "retrying", failure_observation: ^observation}} =
+             ProcessOwnership.verify_and_update(
+               issue,
+               identity,
+               %{state: "retrying", failure_observation: observation}
+             )
+
+    assert {:ok, %{state: "cleaned", failure_observation: ^observation}} =
+             ProcessOwnership.release(issue, identity)
+
+    replacement_attrs =
+      ownership_attrs("replacement-run", ProcessOwnership.holder_id())
+
+    assert {:ok, %{failure_observation: persisted_observation}} =
+             ProcessOwnership.acquire(issue, replacement_attrs)
+
+    assert persisted_observation == observation
+
+    restarted_entry = %{
+      running_entry
+      | run_id: "replacement-run",
+        process_ownership: ProcessOwnership.status_for_issue(issue)
+    }
+
+    assert {:irrecoverable, repeated, _observation} =
+             Orchestrator.classify_task_exit_for_test(
+               reason,
+               restarted_entry,
+               issue.id,
+               %Orchestrator.State{execution_generation: "generation-a"}
+             )
+
+    assert repeated.family == :repeated_identical_no_progress_failure
+
+    assert {:retryable, _failure, changed_observation} =
+             Orchestrator.classify_task_exit_for_test(
+               reason,
+               restarted_entry,
+               issue.id,
+               %Orchestrator.State{execution_generation: "generation-b"}
+             )
+
+    assert changed_observation.count == 1
+    assert changed_observation.reset_marker.execution_generation == "generation-b"
+  end
+
+  test "successful completion release clears prior failure recurrence state", %{issue: issue} do
+    attrs = ownership_attrs("successful-run", "successful-holder")
+    assert {:ok, ownership} = ProcessOwnership.acquire(issue, attrs)
+
+    observation = %{
+      fingerprint: %{family: :repeated_identical_no_progress_failure},
+      count: 1,
+      reset_marker: %{input_fingerprint: "checkpoint-a"}
+    }
+
+    identity = %{
+      holder: ownership.holder,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path
+    }
+
+    assert {:ok, %{failure_observation: ^observation}} =
+             ProcessOwnership.verify_and_update(
+               issue,
+               identity,
+               %{state: "retrying", failure_observation: observation}
+             )
+
+    assert {:ok, %{state: "cleaned", failure_observation: nil}} =
+             ProcessOwnership.release_completed(issue, identity)
   end
 
   test "verify-update cannot rewrite holder, run, role, or workspace scope", %{issue: issue} do

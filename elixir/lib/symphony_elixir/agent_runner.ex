@@ -63,8 +63,16 @@ defmodule SymphonyElixir.AgentRunner do
           with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
             run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
           end
-        after
-          Workspace.run_after_run_hook(workspace, issue, worker_host)
+        else
+          result ->
+            case Workspace.run_after_run_hook(workspace, issue, worker_host) do
+              :ok -> result
+              {:error, reason} -> {:error, {:post_turn_routing_failed, reason}}
+            end
+        catch
+          kind, reason ->
+            _ = Workspace.run_after_run_hook(workspace, issue, worker_host)
+            :erlang.raise(kind, reason, __STACKTRACE__)
         end
 
       {:error, reason} ->
@@ -128,16 +136,28 @@ defmodule SymphonyElixir.AgentRunner do
           Logger.error(
             "Preserving delegated runtime session for #{issue_context(issue)}: work-preservation checkpoint failed, destructive shutdown is blocked; recover via the owned session reference"
           )
-        else
-          AgentRuntime.stop_session(session)
-        end
 
-        result
+          result
+        else
+          stop_session_result(session, result)
+        end
       catch
         kind, reason ->
-          AgentRuntime.stop_session(session)
-          :erlang.raise(kind, reason, __STACKTRACE__)
+          case AgentRuntime.stop_session(session) do
+            :ok ->
+              :erlang.raise(kind, reason, __STACKTRACE__)
+
+            {:error, cleanup_reason} ->
+              exit({:agent_runtime_failed, {:owned_session_cleanup_failed, cleanup_reason}})
+          end
       end
+    end
+  end
+
+  defp stop_session_result(session, result) do
+    case AgentRuntime.stop_session(session) do
+      :ok -> result
+      {:error, reason} -> {:error, {:owned_session_cleanup_failed, reason}}
     end
   end
 
@@ -199,9 +219,15 @@ defmodule SymphonyElixir.AgentRunner do
           )
 
         {:continue, refreshed_issue} ->
-          Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+          Logger.error("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; recording a typed failed run")
 
-          :ok
+          {:error,
+           {:max_turns_exhausted,
+            %{
+              issue_id: refreshed_issue.id,
+              turn: turn_number,
+              max_turns: max_turns
+            }}}
 
         {:done, _refreshed_issue} ->
           :ok

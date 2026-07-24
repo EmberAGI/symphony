@@ -1,0 +1,244 @@
+defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
+  use SymphonyElixir.TestSupport
+
+  @moduledoc """
+  RED: a failed role run must never look like a normal run.
+
+  The Orchestrator's monitored-task seam has exactly one success signal — the
+  runner task exiting `:normal`. Everything that reaches
+  `handle_info({:DOWN, ref, :process, pid, :normal}, state)` is recorded as a
+  completed agent run and scheduled only for an active-state continuation
+  check; no failure observation, no retry error, no escalation.
+
+  These tests drive `AgentRunner.run/3` through the same supervised task the
+  Orchestrator dispatches and assert the exit reason for five failure kinds:
+
+    * worker launch failure,
+    * worker death / missing worker result,
+    * worker result timeout,
+    * `agent.max_turns` exhaustion with the issue still active, and
+    * post-turn routing failure (issue-state routing refresh, and the
+      post-turn routing hook).
+
+  Each must exit with a typed failure reason. Any `:normal` exit here is the
+  production symptom: a failed run reported as a completed one.
+  """
+
+  alias SymphonyElixir.Linear.Issue
+
+  # A delegated session whose orchestrator turn always settles successfully.
+  # The only variable is what the session reports about its worker
+  # assignments, so a `:normal` exit below means the run's worker outcome was
+  # never consulted.
+  defmodule WorkerOutcomeTransport do
+    def default_server_snapshot(_context),
+      do: {:ok, %{status: "running", version: "0.7.5", protocol: 17, socket: "/tmp/default.sock"}}
+
+    def start_session(spec, _context) do
+      {:ok,
+       %{
+         name: spec.name,
+         socket: "/tmp/#{spec.name}/herdr.sock",
+         runtime_root: "/tmp/#{spec.name}",
+         workspace: spec.workspace
+       }}
+    end
+
+    def prepare_worker(session, _spec, _context) do
+      {:ok,
+       session
+       |> Map.put(:worker_launcher, "/tmp/#{session.name}/launch-worker")
+       |> Map.put(:orchestrator_bin, "/tmp/#{session.name}/orchestrator-bin")}
+    end
+
+    def start_agent(_session, spec, _context),
+      do: {:ok, %{name: spec.name, pane_id: "w1:p1", agent_status: "idle"}}
+
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok,
+       %{
+         phase: :completed,
+         agent: %{name: agent.name, agent_status: "idle", agent_session: %{value: "sess"}}
+       }}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context),
+      do: {:ok, %{name: agent.name, agent_status: "idle"}}
+
+    def read_agent(_session, _agent, _opts, _context),
+      do: {:ok, %{text: "orchestrator turn finished"}}
+
+    def stop_session(_session, %{stop_result: stop_result}), do: stop_result
+    def stop_session(_session, _context), do: :ok
+
+    def worker_assignments(_session, %{assignments: assignments}), do: {:ok, assignments}
+    def worker_assignments(_session, _context), do: {:ok, []}
+  end
+
+  setup do
+    previous_role = System.get_env("SYMPHONY_ROLE")
+    previous_orchestrator = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    previous_worker = System.get_env("OCTO_RUNTIME_WORKER_PROVIDER")
+    System.put_env("SYMPHONY_ROLE", "implementer")
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
+    System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", "codex")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_ROLE", previous_role)
+      restore_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_orchestrator)
+      restore_env("OCTO_RUNTIME_WORKER_PROVIDER", previous_worker)
+    end)
+
+    :ok
+  end
+
+  test "a worker launch failure exits the monitored runner task with a typed failure" do
+    reason =
+      run_reason("launch-failed",
+        assignments: [
+          %{
+            assignment_id: "assign-launch-failed",
+            status: :launch_failed,
+            reason: {:worker_launch_failed, :wrapper_acknowledgement_missing}
+          }
+        ]
+      )
+
+    assert_typed_failed_run(reason)
+  end
+
+  test "a dead worker with no result exits the monitored runner task with a typed failure" do
+    reason =
+      run_reason("worker-died",
+        assignments: [
+          %{
+            assignment_id: "assign-died",
+            status: :died,
+            reason: {:herdr_agent_closed, "implementer_worker"}
+          }
+        ]
+      )
+
+    assert_typed_failed_run(reason)
+  end
+
+  test "a worker result that never arrived exits the monitored runner task with a typed failure" do
+    reason =
+      run_reason("worker-timeout",
+        assignments: [%{assignment_id: "assign-timed-out", status: :timed_out}]
+      )
+
+    assert_typed_failed_run(reason)
+  end
+
+  test "max-turn exhaustion with the issue still active exits with a typed failure, not :normal" do
+    reason =
+      run_reason("max-turns",
+        max_turns: 1,
+        issue_state_fetcher: fn [issue_id] -> {:ok, [%{issue("max-turns") | id: issue_id}]} end
+      )
+
+    assert_typed_failed_run(reason)
+  end
+
+  test "a post-turn issue routing refresh failure exits with a typed failure, not :normal" do
+    reason =
+      run_reason("routing-refresh",
+        max_turns: 2,
+        issue_state_fetcher: fn [_issue_id] -> {:error, :tracker_unavailable} end
+      )
+
+    assert_typed_failed_run(reason)
+  end
+
+  test "a post-turn routing hook failure exits with a typed failure, not :normal" do
+    reason = run_reason("routing-hook", hook_after_run: "exit 3")
+
+    assert_typed_failed_run(reason)
+  end
+
+  test "a failed owned-session cleanup exits with a typed failure, not :normal" do
+    reason =
+      run_reason("cleanup-failed",
+        stop_result: {:error, {:herdr_owned_processes_remain, [41_001]}}
+      )
+
+    assert_typed_failed_run(reason)
+  end
+
+  # The Orchestrator has exactly one success signal at its monitored-task
+  # seam. A `:normal` exit is recorded as a completed agent run, so a failed
+  # run must never produce one, and the reason must be a typed runtime
+  # failure the retry/escalation classifier can read.
+  defp assert_typed_failed_run(reason) do
+    refute reason == :normal,
+           "failed run exited :normal; the Orchestrator records that as a completed agent run"
+
+    assert match?({:agent_runtime_failed, _}, reason) or
+             match?({:irrecoverable_runtime_failed, _}, reason) or
+             match?({:provider_auth_failed, _}, reason),
+           "expected a typed runtime failure exit, got: #{inspect(reason)}"
+  end
+
+  defp run_reason(label, opts) do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-failed-run-typing-#{label}-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    File.mkdir_p!(workspace_root)
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      [workspace_root: workspace_root] ++ Keyword.take(opts, [:hook_after_run])
+    )
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    runner_opts =
+      [
+        run_id: "run-#{label}",
+        role: "implementer",
+        delegation_transport: WorkerOutcomeTransport,
+        delegation_transport_context: %{
+          assignments: Keyword.get(opts, :assignments, []),
+          stop_result: Keyword.get(opts, :stop_result, :ok)
+        }
+      ] ++ Keyword.take(opts, [:max_turns, :issue_state_fetcher])
+
+    issue = issue(label)
+
+    {reason, _log} =
+      with_log(fn ->
+        {:ok, pid} =
+          Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+            AgentRunner.run(issue, nil, runner_opts)
+          end)
+
+        ref = Process.monitor(pid)
+
+        receive do
+          {:DOWN, ^ref, :process, ^pid, reason} -> reason
+        after
+          15_000 -> flunk("runner task for #{label} did not finish")
+        end
+      end)
+
+    reason
+  end
+
+  defp issue(label) do
+    %Issue{
+      id: "issue-failed-run-#{label}",
+      identifier: "EMB-HOTFIX",
+      title: "Typed failed runs",
+      description: "A failed run must never look normal",
+      state: "In Progress",
+      branch_name: "octo/emb-hotfix-typed-failed-runs",
+      url: "https://example.org/issues/EMB-HOTFIX",
+      labels: ["implementation-effort:moderate"]
+    }
+  end
+end

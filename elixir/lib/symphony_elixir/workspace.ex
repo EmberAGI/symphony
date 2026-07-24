@@ -224,7 +224,8 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  @spec run_after_run_hook(Path.t(), map() | String.t() | nil, worker_host()) :: :ok
+  @spec run_after_run_hook(Path.t(), map() | String.t() | nil, worker_host()) ::
+          :ok | {:error, term()}
   def run_after_run_hook(workspace, issue_or_identifier, worker_host \\ nil) when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)
     hooks = Config.settings!().hooks
@@ -235,7 +236,6 @@ defmodule SymphonyElixir.Workspace do
 
       command ->
         run_hook(command, workspace, issue_context, "after_run", worker_host)
-        |> ignore_hook_failure()
     end
   end
 

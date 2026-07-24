@@ -8,6 +8,8 @@ defmodule SymphonyElixir.ImplementerDelegation do
   server. Herdr command mechanics remain behind the transport seam.
   """
 
+  require Logger
+
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
   alias SymphonyElixir.ImplementationEffort
@@ -163,22 +165,36 @@ defmodule SymphonyElixir.ImplementerDelegation do
              transport_context
            ),
          response = Map.get(read, :text, ""),
-         :ok <- terminal_turn_status(contract_provider(Map.get(session, :contract, %{}), :orchestrator), response) do
+         :ok <- terminal_turn_status(contract_provider(Map.get(session, :contract, %{}), :orchestrator), response),
+         {:ok, worker_assignments} <-
+           worker_assignments(transport, herdr_session, transport_context),
+         :ok <- validate_worker_assignments(worker_assignments) do
       session_id = agent_session_id(completed)
+      worker_evidence = bounded_worker_evidence(worker_assignments)
+
+      if worker_evidence != [] do
+        Logger.info(
+          "Implementer worker result correlated " <>
+            "herdr_session=#{Map.get(herdr_session, :name)} " <>
+            "worker_assignments=#{inspect(worker_evidence)}"
+        )
+      end
 
       emit_message(on_message, :turn_completed, %{
         provider: contract_provider(Map.get(session, :contract, %{}), :orchestrator),
         herdr_session: Map.get(herdr_session, :name),
         agent: Map.get(orchestrator, :name),
         agent_status: Map.get(completed, :agent_status),
-        session_id: session_id
+        session_id: session_id,
+        worker_assignments: worker_evidence
       })
 
       {:ok,
        %{
          session_id: session_id,
          agent_status: Map.get(completed, :agent_status),
-         response: response
+         response: response,
+         worker_assignments: worker_assignments
        }}
     end
   end
@@ -202,6 +218,104 @@ defmodule SymphonyElixir.ImplementerDelegation do
         other
     end
   end
+
+  defp worker_assignments(transport, herdr_session, transport_context) do
+    if function_exported?(transport, :worker_assignments, 2),
+      do: transport.worker_assignments(herdr_session, transport_context),
+      else: {:ok, :unsupported}
+  end
+
+  defp validate_worker_assignments(:unsupported), do: :ok
+
+  defp validate_worker_assignments(assignments) when is_list(assignments) do
+    Enum.reduce_while(assignments, :ok, fn assignment, :ok ->
+      case worker_assignment_result(assignment) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp validate_worker_assignments(_assignments),
+    do: {:error, {:implementer_worker_result_missing, %{assignment_id: nil}}}
+
+  defp worker_assignment_result(%{
+         assignment_id: assignment_id,
+         status: :completed,
+         result: %{assignment_id: assignment_id, status: "completed"}
+       })
+       when is_binary(assignment_id) and assignment_id != "",
+       do: :ok
+
+  defp worker_assignment_result(%{
+         assignment_id: assignment_id,
+         status: :completed,
+         result: %{assignment_id: assignment_id} = result
+       }) do
+    {:error, {:implementer_worker_result_failed, %{assignment_id: assignment_id, result: result}}}
+  end
+
+  defp worker_assignment_result(%{
+         assignment_id: assignment_id,
+         status: :completed,
+         result: %{assignment_id: observed_assignment_id}
+       }) do
+    {:error,
+     {:implementer_worker_result_mismatch,
+      %{
+        assignment_id: assignment_id,
+        observed_assignment_id: observed_assignment_id
+      }}}
+  end
+
+  defp worker_assignment_result(%{
+         assignment_id: assignment_id,
+         status: :failed,
+         result: result
+       }) do
+    {:error, {:implementer_worker_result_failed, %{assignment_id: assignment_id, result: result}}}
+  end
+
+  defp worker_assignment_result(%{
+         assignment_id: assignment_id,
+         status: :launch_failed,
+         reason: reason
+       }) do
+    {:error, {:implementer_worker_launch_failed, %{assignment_id: assignment_id, reason: reason}}}
+  end
+
+  defp worker_assignment_result(%{
+         assignment_id: assignment_id,
+         status: :died,
+         reason: reason
+       }) do
+    {:error, {:implementer_worker_died, %{assignment_id: assignment_id, reason: reason}}}
+  end
+
+  defp worker_assignment_result(%{assignment_id: assignment_id, status: :timed_out}) do
+    {:error, {:implementer_worker_timed_out, %{assignment_id: assignment_id}}}
+  end
+
+  defp worker_assignment_result(%{assignment_id: assignment_id}) do
+    {:error, {:implementer_worker_result_missing, %{assignment_id: assignment_id}}}
+  end
+
+  defp worker_assignment_result(_assignment) do
+    {:error, {:implementer_worker_result_missing, %{assignment_id: nil}}}
+  end
+
+  defp bounded_worker_evidence(assignments) when is_list(assignments) do
+    Enum.map(assignments, fn assignment ->
+      %{
+        assignment_id: Map.get(assignment, :assignment_id),
+        status: Map.get(assignment, :status),
+        result_assignment_id: get_in(assignment, [:result, :assignment_id]),
+        result_status: get_in(assignment, [:result, :status])
+      }
+    end)
+  end
+
+  defp bounded_worker_evidence(:unsupported), do: []
 
   @spec stop_session(session()) :: :ok | {:error, term()}
   def stop_session(%{

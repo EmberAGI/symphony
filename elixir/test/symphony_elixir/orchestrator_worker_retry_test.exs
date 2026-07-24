@@ -6,6 +6,14 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
   test "abnormal worker exit writes compact run-scoped retry evidence" do
     previous_run_log_root = Application.get_env(:symphony_elixir, :run_log_root)
 
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-worker-retry-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
     run_log_root =
       Path.join(
         System.tmp_dir!(),
@@ -22,6 +30,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     on_exit(fn ->
       restore_app_env(:run_log_root, previous_run_log_root)
       File.rm_rf(run_log_root)
+      File.rm_rf(workspace_root)
 
       stop_orchestrator!(pid)
     end)

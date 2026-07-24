@@ -89,7 +89,8 @@ still be resolved by continuation or bounded no-progress recovery.
 fences one Symphony role run for an issue/workspace/role scope. Its
 `Runtime.ProcessOwnership` record contains stable issue, role, holder, run,
 workspace, host, state, cleanup, quarantine, and timestamp fields plus bounded
-process/session cleanup metadata. The exact record path is passed to provider
+process/session cleanup metadata and the optional bounded failure observation
+`{fingerprint, count, reset_marker}`. The exact record path is passed to provider
 processes as `SYMPHONY_ROLE_OWNERSHIP_PATH`; consumers read that path and do not
 reconstruct it. This contract implements the state-driven direction recorded
 by Octo ADR 0022 without adding a database, message bus, transition outbox, task
@@ -172,23 +173,31 @@ admission opens.
   instead of scheduling or consuming an ordinary role retry. The classification
   must be preserved across adapter, workspace hook, runner, orchestrator,
   tracker, log, status API, and dashboard surfaces.
-- Persistent no-progress classification must use a bounded fingerprint that
+- Failed-run retry suppression must use a bounded fingerprint that
   includes at least issue id, workspace path, role, runtime provider, failure
   family, normalized provider/runtime subtype when known, and redacted stable
-  error summary. Persistent classification is satisfied as soon as the same
-  fingerprint appears in three consecutive failed observations for the same
-  issue/workspace/role without an intervening reset condition. Escalation fires
-  immediately when the third matching observation is recorded, regardless of
-  elapsed wall-clock time between matching observations; a two-minute rapid-loop
-  expectation may be used as a feedback SLO, but not as an eligibility cap.
+  error summary. The first failed observation may authorize one bounded retry.
+  If the same fingerprint recurs at the same durable checkpoint without an
+  intervening reset condition, equivalent redispatch is suppressed immediately;
+  elapsed wall-clock time, process liveness, turns, and token use are activity,
+  not checkpoint progress. This applies to every configured top-level role and
+  to transient as well as deterministic retryable families.
   Reset conditions include an intervening successful progress/completion event,
-  a different failure fingerprint or excluded transient class, a new role-run
-  ownership generation or intentionally reset retry epoch, a material issue/branch/workspace
-  input change, or an operator-recorded repair action after the prior failure.
-  Explicit transient, network, service unavailable, rate-limit, timeout,
-  capacity, and operator-interrupted classes are excluded from this persistent
-  irrecoverable path unless a later issue records a narrower family-specific
-  policy.
+  a different failure fingerprint, an intentionally reset retry epoch, a
+  material issue/branch/workspace input change, or an operator-recorded repair
+  action after the prior failure. A different verified execution generation is
+  also a reset because it identifies changed deployed runtime conditions. A
+  replacement role-run identifier by itself is not checkpoint progress.
+- The same scoped `Runtime.ProcessOwnership` claim durably carries the bounded
+  failure observation while a failed run is released or retried. A role-service
+  restart reloads that observation before classifying the next equivalent
+  failure. Only successful progress/completion or another observable reset
+  condition clears or replaces it; an ordinary failed-run claim release does
+  not. This is claim metadata, not a new storage or runtime authority.
+- Worker death, worker launch failure, missing or mismatched worker result,
+  timeout, `agent.max_turns` exhaustion, and post-turn routing failure are typed
+  failed runs. They must never use the normal task-completion branch. A
+  successful runtime turn must contain a non-empty provider result or response.
 - Every irrecoverable classification must clear or avoid ordinary retry
   scheduling, update the verified same-scope process ownership to a blocked
   state with redacted recovery evidence, apply or preserve the tracker issue's
@@ -540,9 +549,12 @@ matrix. Invalid or ambiguous Codex labels fail closed. Claude keeps its
 documented invalid-label fallback, now to the universally moderate default.
 
 For Implementer, Symphony resolves one exact orchestrator/worker contract and
-starts a new isolated named Herdr 0.7.5/protocol 17 session containing the
-orchestrator and workers with their independently resolved participant provider
-bindings. Runtime-owned launchers outside
+starts a new isolated named Herdr 0.7.5/protocol 17 session containing one
+deterministically prestarted `implementer_worker` and the orchestrator, with
+their independently resolved participant provider bindings. The compatibility
+worker launcher remains available for an orchestrator profile that explicitly
+needs it, but the production lifecycle does not depend on model-elective worker
+startup. Runtime-owned launchers outside
 the selected repository apply exact model, effort, and reusable profile instructions. Codex
 receives the Markdown body as `developer_instructions`; Claude receives it with
 `--append-system-prompt`. The role `WORKFLOW.md` continues to own issue
@@ -657,7 +669,7 @@ resolution through its bounded indeterminate-read retries. A status
 string outside the five-state enum is a typed protocol/version error, never
 coerced to `unknown`; command failures remain a distinct error class.
 
-Symphony submits initial turns, worker results, and consultation responses
+Symphony submits initial turns, assignments, worker results, and consultation responses
 through the same verified `agent prompt` operation. Prompt submissions settle
 on the upstream default settle set (`idle`, `done`, `blocked`) plus `working`
 so a started turn and a turn that finishes before observation are both
@@ -675,6 +687,20 @@ Only an observed state change succeeds; exhausting the recovery bound preserves
 the typed prompt-stall failure. This provider-neutral recovery applies to
 orchestrator turns and both generated inter-agent prompt projections for Codex
 and Claude.
+
+The orchestrator's machine-readable assignment message is
+`OCTO_MSG/1 kind=assignment assignment=<token>` followed by bounded
+assignment-specific fields. A worker result is
+`OCTO_MSG/1 kind=result assignment=<token> status=completed|failed`.
+The run-owned transport projection records only those messages as ephemeral
+per-session evidence beneath the existing isolated runtime root. The records
+are not runtime authority, are never Linear comments, and are removed with the
+runtime root. At turn completion, the Transport Interface reports bounded
+assignment entries containing `assignment_id`, lifecycle `status`, and a
+result with the observed `assignment_id`; the Implementer runtime accepts only
+an exact correlation. Launch failure, worker death, an idle/done worker without
+a result, a still-working worker after the orchestrator settles, a mismatched
+token, and `status=failed` remain distinct typed failed-run outcomes.
 
 After submission, turn lifecycle observation is a bounded, idempotent
 supervision state machine (EMB-1244 Stage 2), not a single budget-length
@@ -718,7 +744,14 @@ history, and shutdown reason. A checkpoint failure is itself typed and
 blocks destructive shutdown absent an explicit emergency policy: the runner
 must not stop the delegated session on a typed preservation failure and must
 leave the owned-session reference recoverable. A successful checkpoint
-permits bounded shutdown. Supervised typed outcomes feed the shared runtime
+permits bounded shutdown. The runner and monitored-task boundary both consume
+the same idempotent owned-session cleanup capability so success, failure,
+cancellation, timeout, and abrupt task exit converge on bounded teardown.
+Successful cleanup removes the private runtime root, including ephemeral worker
+message evidence, and emits a bounded existing-log/status summary keyed by
+issue, run-owned Herdr session, exact owned PID evidence when available, and
+`live_after=0`. Cleanup failure replaces normal completion with a typed failed
+run and cannot authorize redispatch. Supervised typed outcomes feed the shared runtime
 failure families: a blocked agent — whether surfaced by supervision or as the
 bare typed blocked outcome of a prompt or wait — classifies as
 `human_input_required`, a
@@ -1009,13 +1042,11 @@ until those test modules pass under `make all`.
 - A runtime hook or adapter reports a missing required configuration value,
   missing CLI/tool, permission denial, invalid workspace protocol, unsupported
   app-server contract, or malformed provider event schema.
-- The same redacted no-progress failure fingerprint repeats in three
-  consecutive failed observations, including rapid loops within two minutes and
-  delayed repeats caused by retry backoff, while reset conditions and
-  transient/network/rate-limit failure classes are absent.
-- Applying the `Human Escalation` label, moving the tracker issue, or writing
-  the operator note fails after the runtime has already classified a failure as
-  irrecoverable.
+- The same redacted failure fingerprint recurs at the same durable checkpoint
+  after its one bounded retry, including a transient/network/rate-limit class.
+- Applying the `Human Escalation` label or moving the tracker issue fails after
+  the runtime has already classified a failure as irrecoverable; no runtime
+  comment is required or authoritative.
 - A provider-native payload contains secret-bearing fields adjacent to useful
   classification evidence.
 - A deployment closes admission after a poll selected work but before that
