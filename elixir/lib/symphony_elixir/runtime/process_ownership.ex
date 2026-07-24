@@ -109,8 +109,8 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
          criteria <- ownership_env_criteria(ownership),
          true <- ownership_env_criteria_scoped?(criteria),
          term_pids <- signal_matching_processes(criteria, "TERM"),
-         term_survivors <- await_matching_processes(criteria, @owned_process_exit_attempts),
-         kill_pids <- signal_matching_processes(criteria, "KILL", term_survivors),
+         _term_survivors <- await_matching_processes(criteria, @owned_process_exit_attempts),
+         kill_pids <- signal_matching_processes(criteria, "KILL"),
          [] <- await_matching_processes(criteria, @owned_process_exit_attempts) do
       {:ok, %{term_pids: term_pids, kill_pids: kill_pids, live_after: 0}}
     else

@@ -282,7 +282,7 @@ defmodule SymphonyElixir.CoreTest do
 
       refute Map.has_key?(updated_state.running, issue_id)
       refute MapSet.member?(updated_state.claimed, issue_id)
-      assert_receive {:owned_session_cleanup, "octo-mt-556-run-1", true}
+      assert_receive {:owned_session_cleanup, "octo-mt-556-run-1", false}
       refute Process.alive?(agent_pid)
       refute File.exists?(workspace)
     after

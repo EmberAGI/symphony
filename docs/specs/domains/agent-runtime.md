@@ -761,12 +761,16 @@ runner cleans the session instead of proceeding. Registered orchestrator
 shutdown stops only its exact tracked task/session entries, consumes the
 acknowledged capability, verifies `live_after=0`, and settles the matching
 process-ownership record; missing or unwriteable settlement evidence is logged
-as a cleanup failure rather than left silently active. If an issue-owned hook
-or provider descendant survives task/session stop, cleanup rechecks each PID's
-complete ownership environment before signaling it, permits one bounded TERM
-grace period, and sends KILL only to exact-marker survivors. A different
-issue, role, run, or unmarked process is never eligible, and ownership release
-waits until the exact-marker live set is empty.
+as a cleanup failure rather than left silently active. The same terminal
+cleanup boundary runs after normal or abnormal task exit and after forced
+stall, timeout, state, routing, or shutdown cancellation for every role. If an
+issue-owned hook or provider descendant survives task/session stop, cleanup
+rechecks each PID's complete ownership environment before signaling it,
+permits one bounded TERM grace period, and sends KILL only to exact-marker
+survivors. A different issue, role, run, or unmarked process is never eligible,
+and ownership release waits until the exact-marker live set is empty. Cleanup
+failure replaces normal completion with a typed runtime failure and is logged
+before retry or terminal classification.
 Successful cleanup removes the private runtime root, including ephemeral worker
 message evidence, and emits a bounded existing-log/status summary keyed by
 issue, run-owned Herdr session, exact owned PID evidence when available, and

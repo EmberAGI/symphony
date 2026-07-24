@@ -245,7 +245,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
         end)
 
       refute Process.alive?(worker_pid)
-      assert state.retry_attempts[issue_id].lease_state == "retrying"
+      assert state.retry_attempts[issue_id].process_ownership.state == "retrying"
       assert_eventually(fn -> !os_process_alive?(owned_shell_pid) end)
 
       assert %{state: "retrying", ownership_env_pids: []} =
@@ -258,8 +258,14 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
   test "stalled cleanup failure replaces timeout retry evidence and suppresses dispatch" do
     previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
     previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
-    issue_id = "issue-stall-marker-cleanup-failure"
-    issue = %Issue{id: issue_id, identifier: "MT-STALL-CLEANUP-FAIL", state: "In Progress"}
+    unique = System.unique_integer([:positive])
+    issue_id = "issue-stall-marker-cleanup-failure-#{unique}"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-STALL-CLEANUP-FAIL-#{unique}",
+      state: "In Progress"
+    }
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -290,6 +296,13 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
       stop_orchestrator!(orchestrator_pid)
+
+      _ =
+        ProcessOwnership.release(issue, %{
+          holder: ownership.holder,
+          run_id: ownership.run_id,
+          workspace_path: ownership.workspace_path
+        })
     end)
 
     stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
@@ -325,14 +338,15 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     refute Process.alive?(worker_pid)
 
     assert %{fingerprint: fingerprint} = state.failure_observations[issue_id]
-    assert is_binary(fingerprint)
+    assert is_map(fingerprint)
 
     if retry = state.retry_attempts[issue_id] do
       assert retry.error =~ "owned_process_cleanup_failed"
       assert retry.process_ownership.failure_observation.fingerprint == fingerprint
       assert retry.process_ownership.state == "quarantined"
     else
-      assert state.blocked_failures[issue_id].family == :persistent_no_progress
+      assert state.blocked_failures[issue_id].family ==
+               :repeated_identical_no_progress_failure
     end
   end
 
@@ -389,7 +403,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
                  state
                )
 
-      assert updated.retry_attempts[issue_id].lease_state == "retrying"
+      assert updated.retry_attempts[issue_id].process_ownership.state == "retrying"
       assert_eventually(fn -> !os_process_alive?(owned_shell_pid) end)
 
       assert %{state: "retrying", ownership_env_pids: []} =

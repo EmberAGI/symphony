@@ -189,7 +189,8 @@ defmodule SymphonyElixir.Orchestrator do
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
-        cleanup_result = cleanup_owned_session(running_entry)
+        cleanup_result = cleanup_terminal_owned_runtime(running_entry)
+        log_terminal_cleanup_failure(issue_id, cleanup_result)
         reason = cleanup_task_exit_reason(reason, cleanup_result)
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
@@ -667,43 +668,133 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace, release_issue \\ nil) do
+    {state, _termination_outcome} =
+      terminate_running_issue_with_result(state, issue_id, cleanup_workspace, release_issue)
+
+    state
+  end
+
+  defp terminate_running_issue_with_result(
+         %State{} = state,
+         issue_id,
+         cleanup_workspace,
+         release_issue \\ nil
+       ) do
     case Map.get(state.running, issue_id) do
       nil ->
-        release_issue_claim(state, issue_id, release_issue)
+        {release_issue_claim(state, issue_id, release_issue), :ok}
 
-      %{pid: pid, ref: ref} = running_entry ->
-        state = record_session_completion_totals(state, running_entry)
-        worker_host = Map.get(running_entry, :worker_host)
-        issue_or_identifier = Map.get(running_entry, :issue) || Map.get(running_entry, :identifier)
-
-        if cleanup_workspace do
-          cleanup_issue_workspace(issue_or_identifier, worker_host)
-        end
-
-        cleanup_owned_session(running_entry)
-
-        if is_pid(pid) do
-          terminate_task(pid)
-        end
-
-        record_process_completion(running_entry, :terminated)
-
-        if is_reference(ref) do
-          Process.demonitor(ref, [:flush])
-        end
-
-        RoleTurnRecovery.clear_turn(issue_id)
-
-        %{
-          state
-          | running: Map.delete(state.running, issue_id),
-            claimed: MapSet.delete(state.claimed, issue_id),
-            retry_attempts: Map.delete(state.retry_attempts, issue_id)
-        }
+      %{pid: _pid, ref: _ref} = running_entry ->
+        terminate_running_entry(state, issue_id, cleanup_workspace, running_entry)
 
       _ ->
-        release_issue_claim(state, issue_id, release_issue)
+        {release_issue_claim(state, issue_id, release_issue), :ok}
     end
+  end
+
+  defp terminate_running_entry(state, issue_id, cleanup_workspace, %{pid: pid, ref: ref} = running_entry) do
+    state = record_session_completion_totals(state, running_entry)
+    worker_host = Map.get(running_entry, :worker_host)
+    issue_or_identifier = Map.get(running_entry, :issue) || Map.get(running_entry, :identifier)
+
+    if cleanup_workspace do
+      cleanup_issue_workspace(issue_or_identifier, worker_host)
+    end
+
+    if is_pid(pid) do
+      terminate_task(pid)
+    end
+
+    cleanup_result = cleanup_terminal_owned_runtime(running_entry)
+    termination_reason = cleanup_task_exit_reason(:terminated, cleanup_result)
+    log_terminal_cleanup_failure(issue_id, cleanup_result)
+
+    termination_outcome =
+      classify_forced_terminal_cleanup(cleanup_result, running_entry, issue_id, state)
+
+    record_forced_process_completion(running_entry, termination_reason, termination_outcome)
+
+    if is_reference(ref) do
+      Process.demonitor(ref, [:flush])
+    end
+
+    RoleTurnRecovery.clear_turn(issue_id)
+
+    state =
+      %{
+        state
+        | running: Map.delete(state.running, issue_id),
+          claimed: MapSet.delete(state.claimed, issue_id),
+          retry_attempts: Map.delete(state.retry_attempts, issue_id)
+      }
+      |> maybe_record_forced_cleanup_observation(issue_id, termination_outcome)
+
+    {state, termination_outcome}
+  end
+
+  defp record_forced_process_completion(running_entry, termination_reason, :ok) do
+    record_process_completion(running_entry, termination_reason)
+  end
+
+  defp record_forced_process_completion(
+         running_entry,
+         _termination_reason,
+         {_classification, failure, failure_observation}
+       ) do
+    quarantine_forced_terminal_cleanup_failure(running_entry, failure, failure_observation)
+  end
+
+  defp classify_forced_terminal_cleanup(:ok, _running_entry, _issue_id, _state), do: :ok
+
+  defp classify_forced_terminal_cleanup(
+         {:error, _cleanup_reason} = cleanup_result,
+         running_entry,
+         issue_id,
+         state
+       ) do
+    case classify_task_exit(
+           cleanup_task_exit_reason(:terminated, cleanup_result),
+           running_entry,
+           issue_id,
+           state
+         ) do
+      {:retryable, failure, observation} -> {:retryable, failure, observation}
+      {:irrecoverable, failure, observation} -> {:irrecoverable, failure, observation}
+    end
+  end
+
+  defp quarantine_forced_terminal_cleanup_failure(
+         %{issue: %Issue{} = issue} = running_entry,
+         failure,
+         failure_observation
+       ) do
+    attrs = %{
+      quarantine_reason: Map.fetch!(failure, :retry_reason),
+      failure_observation: failure_observation,
+      session_id: running_entry_session_id(running_entry)
+    }
+
+    case update_owned_state(issue, running_entry, "quarantined", attrs) do
+      nil -> :quarantined
+      _ownership -> :quarantined
+    end
+  end
+
+  defp quarantine_forced_terminal_cleanup_failure(
+         _running_entry,
+         _failure,
+         _failure_observation
+       ),
+       do: :quarantined
+
+  defp maybe_record_forced_cleanup_observation(state, _issue_id, :ok), do: state
+
+  defp maybe_record_forced_cleanup_observation(
+         state,
+         issue_id,
+         {_classification, _failure, observation}
+       ) do
+    put_failure_observation(state, issue_id, observation)
   end
 
   defp reconcile_stalled_running_issues(%State{} = state) do
@@ -737,21 +828,86 @@ defmodule SymphonyElixir.Orchestrator do
 
       next_attempt = next_retry_attempt_from_running(running_entry)
 
-      state = terminate_running_issue(state, issue_id, false)
+      {state, termination_outcome} =
+        terminate_running_issue_with_result(state, issue_id, false)
+
       process_ownership = retry_process_ownership_status(running_entry)
 
-      schedule_issue_retry(state, issue_id, next_attempt, %{
-        identifier: identifier,
-        error: "stalled for #{elapsed_ms}ms without codex activity",
-        issue: Map.get(running_entry, :issue),
-        run_id: Map.get(running_entry, :run_id),
-        retry_reason: "stalled for #{elapsed_ms}ms without codex activity",
-        lease_state: retry_lease_state_from_process_ownership(process_ownership),
-        process_ownership: process_ownership
-      })
+      schedule_stalled_issue_after_termination(
+        state,
+        issue_id,
+        running_entry,
+        identifier,
+        elapsed_ms,
+        next_attempt,
+        process_ownership,
+        termination_outcome
+      )
     else
       state
     end
+  end
+
+  defp schedule_stalled_issue_after_termination(
+         state,
+         issue_id,
+         running_entry,
+         identifier,
+         elapsed_ms,
+         next_attempt,
+         process_ownership,
+         :ok
+       ) do
+    retry_reason = "stalled for #{elapsed_ms}ms without codex activity"
+
+    schedule_issue_retry(state, issue_id, next_attempt, %{
+      identifier: identifier,
+      error: retry_reason,
+      issue: Map.get(running_entry, :issue),
+      run_id: Map.get(running_entry, :run_id),
+      retry_reason: retry_reason,
+      lease_state: retry_lease_state_from_process_ownership(process_ownership),
+      process_ownership: process_ownership
+    })
+  end
+
+  defp schedule_stalled_issue_after_termination(
+         state,
+         issue_id,
+         running_entry,
+         identifier,
+         _elapsed_ms,
+         next_attempt,
+         process_ownership,
+         {:retryable, failure, failure_observation}
+       ) do
+    retry_reason = Map.fetch!(failure, :retry_reason)
+
+    schedule_issue_retry(state, issue_id, next_attempt, %{
+      identifier: identifier,
+      error: retry_reason,
+      issue: Map.get(running_entry, :issue),
+      run_id: Map.get(running_entry, :run_id),
+      retry_reason: retry_reason,
+      failure_observation: failure_observation,
+      lease_state: "quarantined",
+      process_ownership: process_ownership
+    })
+  end
+
+  defp schedule_stalled_issue_after_termination(
+         state,
+         issue_id,
+         running_entry,
+         _identifier,
+         _elapsed_ms,
+         _next_attempt,
+         _process_ownership,
+         {:irrecoverable, failure, failure_observation}
+       ) do
+    state
+    |> put_failure_observation(issue_id, failure_observation)
+    |> block_irrecoverable_runtime_failure(issue_id, running_entry, failure)
   end
 
   defp stall_elapsed_ms(running_entry, now) do
@@ -788,8 +944,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp settle_cancelled_role_run(issue_id, running_entry, reason)
        when is_binary(issue_id) and is_map(running_entry) do
     with :ok <- terminate_registered_task(running_entry),
-         :ok <- cleanup_owned_session(running_entry),
-         :ok <- cleanup_owned_marker_processes(running_entry),
+         :ok <- cleanup_terminal_owned_runtime(running_entry, true),
          {:ok, ownership} <- release_cancelled_owned_state(running_entry),
          :ok <- verify_cancelled_owned_state(ownership) do
       Logger.info("Role-run cancellation cleanup verified issue_id=#{issue_id} owned_pids=[] live_after=0")
@@ -829,6 +984,47 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp cleanup_owned_marker_processes(_running_entry), do: {:error, :ownership_missing}
+
+  defp cleanup_terminal_owned_runtime(running_entry, require_ownership \\ false)
+       when is_map(running_entry) do
+    session_result = cleanup_owned_session(running_entry)
+
+    marker_result =
+      if require_ownership or is_map(Map.get(running_entry, :process_ownership)) do
+        cleanup_owned_marker_processes(running_entry)
+      else
+        :ok
+      end
+
+    combine_terminal_cleanup_results(session_result, marker_result)
+  end
+
+  defp combine_terminal_cleanup_results(:ok, :ok), do: :ok
+
+  defp combine_terminal_cleanup_results(
+         {:error, {:owned_session_processes_remain, _pids}},
+         :ok
+       ),
+       do: :ok
+
+  defp combine_terminal_cleanup_results({:error, session_reason}, :ok),
+    do: {:error, {:owned_session_cleanup_failed, session_reason}}
+
+  defp combine_terminal_cleanup_results(:ok, {:error, marker_reason}),
+    do: {:error, {:owned_process_cleanup_failed, marker_reason}}
+
+  defp combine_terminal_cleanup_results(
+         {:error, session_reason},
+         {:error, marker_reason}
+       ) do
+    {:error, {:terminal_cleanup_failed, %{owned_session: session_reason, owned_processes: marker_reason}}}
+  end
+
+  defp log_terminal_cleanup_failure(_issue_id, :ok), do: :ok
+
+  defp log_terminal_cleanup_failure(issue_id, {:error, reason}) do
+    Logger.error("Role-run terminal cleanup failed issue_id=#{issue_id} cleanup_reason=#{inspect(reason)}")
+  end
 
   defp release_cancelled_owned_state(%{issue: %Issue{} = issue} = running_entry) do
     case release_owned_state(issue, running_entry) do
@@ -924,6 +1120,20 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp cleanup_task_exit_reason(reason, :ok), do: reason
+
+  defp cleanup_task_exit_reason(
+         _original_reason,
+         {:error, {:owned_process_cleanup_failed, _cleanup_reason} = failure}
+       ) do
+    {:agent_runtime_failed, failure}
+  end
+
+  defp cleanup_task_exit_reason(
+         _reason,
+         {:error, {:terminal_cleanup_failed, _reasons} = failure}
+       ) do
+    {:agent_runtime_failed, failure}
+  end
 
   defp cleanup_task_exit_reason(_reason, {:error, cleanup_reason}) do
     {:agent_runtime_failed, {:owned_session_cleanup_failed, cleanup_reason}}
@@ -2731,8 +2941,6 @@ defmodule SymphonyElixir.Orchestrator do
 
     %{state | codex_totals: codex_totals}
   end
-
-  defp record_session_completion_totals(state, _running_entry), do: state
 
   # Keeps the last-known-good runtime values when WORKFLOW.md is transiently
   # invalid (an operator or test rewriting the file between validations).
