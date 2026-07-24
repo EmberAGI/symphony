@@ -5,6 +5,9 @@
 # them explicitly.
 System.delete_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
 System.delete_env("OCTO_RUNTIME_WORKER_PROVIDER")
+System.delete_env("SYMPHONY_ORCHESTRATION_ROOT")
+System.delete_env("SYMPHONY_WORK_ADMISSION_PATH")
+System.delete_env("SYMPHONY_EXECUTION_GENERATION")
 
 # Non-live gate boot seal (EMB-1180): `mix test` (via the `test --no-start`
 # alias in mix.exs) no longer auto-starts :symphony_elixir before this file
