@@ -42,6 +42,7 @@ boot_workflow_root =
 
 File.mkdir_p!(boot_workflow_root)
 boot_workflow_file = Path.join(boot_workflow_root, "WORKFLOW.md")
+boot_role_turn_recovery_dir = Path.join(boot_workflow_root, "role-turn-recovery")
 
 # The app-boot Orchestrator captures its poll interval from this boot
 # workflow at init and keeps it for its whole life. A production-like 30s
@@ -56,6 +57,11 @@ SymphonyElixir.TestSupport.write_workflow_file!(boot_workflow_file,
 )
 
 Application.put_env(:symphony_elixir, :workflow_file_path, boot_workflow_file)
+Application.put_env(
+  :symphony_elixir,
+  :role_turn_recovery_dir,
+  boot_role_turn_recovery_dir
+)
 
 boot_delegation_transport = Application.get_env(:symphony_elixir, :delegation_transport_module)
 
@@ -63,7 +69,8 @@ boot_delegation_transport = Application.get_env(:symphony_elixir, :delegation_tr
   supervisor_already_alive_before_boot?: supervisor_already_alive_before_boot?,
   linear_client_module_installed_before_boot: Application.get_env(:symphony_elixir, :linear_client_module),
   delegation_transport_module_installed_before_boot: boot_delegation_transport,
-  boot_workflow_file_path: boot_workflow_file
+  boot_workflow_file_path: boot_workflow_file,
+  boot_role_turn_recovery_dir: boot_role_turn_recovery_dir
 })
 
 SymphonyElixir.TestSupport.LinearTrafficSentinel.install!()
