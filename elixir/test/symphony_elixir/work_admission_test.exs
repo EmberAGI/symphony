@@ -14,6 +14,13 @@ defmodule SymphonyElixir.WorkAdmissionTest do
 
     File.mkdir_p!(test_root)
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    previous_recovery_dir = Application.get_env(:symphony_elixir, :role_turn_recovery_dir)
+
+    Application.put_env(
+      :symphony_elixir,
+      :role_turn_recovery_dir,
+      Path.join(test_root, "role-turn-recovery")
+    )
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -23,6 +30,7 @@ defmodule SymphonyElixir.WorkAdmissionTest do
     )
 
     on_exit(fn ->
+      restore_application_env!(:role_turn_recovery_dir, previous_recovery_dir)
       File.rm_rf(test_root)
     end)
 
@@ -698,5 +706,12 @@ defmodule SymphonyElixir.WorkAdmissionTest do
         value -> System.put_env(name, value)
       end
     end)
+  end
+
+  defp restore_application_env!(name, value) do
+    case value do
+      nil -> Application.delete_env(:symphony_elixir, name)
+      value -> Application.put_env(:symphony_elixir, name, value)
+    end
   end
 end
