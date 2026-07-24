@@ -57,6 +57,7 @@ SymphonyElixir.TestSupport.write_workflow_file!(boot_workflow_file,
 )
 
 Application.put_env(:symphony_elixir, :workflow_file_path, boot_workflow_file)
+
 Application.put_env(
   :symphony_elixir,
   :role_turn_recovery_dir,
