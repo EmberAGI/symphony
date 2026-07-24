@@ -395,9 +395,10 @@ Fields:
     agent.
   - Failure aborts the current attempt.
 - `after_run` (multiline shell script string, OPTIONAL)
-  - Runs after each agent attempt (success, failure, timeout, or cancellation) once the workspace
-    exists.
-  - Failure is logged but ignored.
+  - Runs after each provider turn, before tracker refresh can authorize a continuation turn, and
+    after an attempt-level failure, timeout, or cancellation once the workspace exists.
+  - Failure is a typed failure of the current run. A failed post-turn hook cannot be recorded as
+    normal completion or authorize a continuation prompt.
 - `before_remove` (multiline shell script string, OPTIONAL)
   - Runs before workspace deletion if the directory exists.
   - Failure is logged but ignored; cleanup still proceeds.
@@ -902,7 +903,8 @@ Failure semantics:
 
 - `after_create` failure or timeout is fatal to workspace creation.
 - `before_run` failure or timeout is fatal to the current run attempt.
-- `after_run` failure or timeout is logged and ignored.
+- `after_run` failure or timeout is fatal to the current run attempt. After a provider turn, its
+  result is evaluated before tracker refresh and before any continuation prompt.
 - `before_remove` failure or timeout is logged and ignored.
 
 ### 9.5 Safety Invariants
@@ -1853,8 +1855,17 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
 
   session = app_server.start_session(workspace=workspace.path)
   if session failed:
-    run_hook_best_effort("after_run", workspace.path)
+    run_hook("after_run", workspace.path)
     fail_worker("agent session startup error")
+
+  cleanup_capability = app_server.owned_session_ref(session)
+  if cleanup_capability exists:
+    publish cleanup_capability to the registered orchestrator
+    wait for bounded registration acknowledgement
+    if acknowledgement failed:
+      app_server.stop_session(session)
+      run_hook("after_run", workspace.path)
+      fail_worker("typed owned-session registration error")
 
   max_turns = config.agent.max_turns
   turn_number = 1
@@ -1863,7 +1874,7 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
     prompt = build_turn_prompt(workflow_template, issue, attempt, turn_number, max_turns)
     if prompt failed:
       app_server.stop_session(session)
-      run_hook_best_effort("after_run", workspace.path)
+      run_hook("after_run", workspace.path)
       fail_worker("prompt error")
 
     turn_result = app_server.run_turn(
@@ -1873,15 +1884,18 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
       on_message=(msg) -> send(orchestrator_channel, {codex_update, issue.id, msg})
     )
 
+    post_turn_result = run_hook("after_run", workspace.path)
+    if post_turn_result failed:
+      app_server.stop_session(session)
+      fail_worker("typed post-turn routing error")
+
     if turn_result failed:
       app_server.stop_session(session)
-      run_hook_best_effort("after_run", workspace.path)
       fail_worker("agent turn error")
 
     refreshed_issue = tracker.fetch_issue_states_by_ids([issue.id])
     if refreshed_issue failed:
       app_server.stop_session(session)
-      run_hook_best_effort("after_run", workspace.path)
       fail_worker("issue state refresh error")
 
     issue = refreshed_issue[0] or issue
@@ -1895,7 +1909,6 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
     turn_number = turn_number + 1
 
   app_server.stop_session(session)
-  run_hook_best_effort("after_run", workspace.path)
 
   exit_normal()
 ```
@@ -2006,7 +2019,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - OPTIONAL workspace population/synchronization errors are surfaced
 - `after_create` hook runs only on new workspace creation
 - `before_run` hook runs before each attempt and failure/timeouts abort the current attempt
-- `after_run` hook runs after each attempt and failure/timeouts are logged and ignored
+- `after_run` hook runs after each provider turn before tracker refresh or continuation; failure or
+  timeout is a typed failed run and cannot authorize a continuation prompt
 - `before_remove` hook runs on cleanup and failures/timeouts are ignored
 - Workspace path sanitization and root containment invariants are enforced before agent launch
 - Agent launch uses the per-issue workspace path as cwd and rejects out-of-root paths

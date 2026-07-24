@@ -7,6 +7,7 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.{AgentRuntime, Config, Linear.Issue, PromptBuilder, Runtime.ProcessOwnership, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
+  @owned_session_registration_timeout_ms 5_000
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
@@ -59,25 +60,52 @@ defmodule SymphonyElixir.AgentRunner do
       {:ok, workspace} ->
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
 
-        try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
-          end
-        else
+        case process_ownership_environment(issue, opts) do
+          {:ok, ownership_env} ->
+            run_with_workspace_hooks(
+              workspace,
+              issue,
+              codex_update_recipient,
+              opts,
+              worker_host,
+              ownership_env
+            )
+
           result ->
-            case Workspace.run_after_run_hook(workspace, issue, worker_host) do
-              :ok -> result
-              {:error, reason} -> {:error, {:post_turn_routing_failed, reason}}
-            end
-        catch
-          kind, reason ->
-            _ = Workspace.run_after_run_hook(workspace, issue, worker_host)
-            :erlang.raise(kind, reason, __STACKTRACE__)
+            finish_with_after_run_hook(result, workspace, issue, worker_host, [])
         end
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp run_with_workspace_hooks(
+         workspace,
+         issue,
+         codex_update_recipient,
+         opts,
+         worker_host,
+         ownership_env
+       ) do
+    case Workspace.run_before_run_hook(workspace, issue, worker_host, ownership_env) do
+      :ok ->
+        opts = Keyword.put(opts, :process_ownership_env, ownership_env)
+        run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, ownership_env)
+
+      result ->
+        finish_with_after_run_hook(
+          result,
+          workspace,
+          issue,
+          worker_host,
+          ownership_env
+        )
+    end
+  catch
+    kind, reason ->
+      _ = Workspace.run_after_run_hook(workspace, issue, worker_host, ownership_env)
+      :erlang.raise(kind, reason, __STACKTRACE__)
   end
 
   defp codex_message_handler(recipient, issue) do
@@ -110,7 +138,14 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
-  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+  defp run_codex_turns(
+         workspace,
+         issue,
+         codex_update_recipient,
+         opts,
+         worker_host,
+         ownership_env
+       ) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
@@ -121,36 +156,70 @@ defmodule SymphonyElixir.AgentRunner do
         run_id: Keyword.get(opts, :run_id)
       ]
       |> put_optional(:role, Keyword.get(opts, :role))
+      |> put_optional(:process_ownership_env, Keyword.get(opts, :process_ownership_env))
       |> put_optional(:delegation_transport, Keyword.get(opts, :delegation_transport))
       |> put_optional(:delegation_transport_context, Keyword.get(opts, :delegation_transport_context))
 
-    with {:ok, session} <-
-           AgentRuntime.start_session(workspace, session_opts) do
-      send_owned_session_runtime_info(codex_update_recipient, issue, session)
+    case AgentRuntime.start_session(workspace, session_opts) do
+      {:ok, session} ->
+        case send_owned_session_runtime_info(
+               codex_update_recipient,
+               issue,
+               session,
+               registration_ack_required?(opts)
+             ) do
+          :ok ->
+            try do
+              result =
+                do_run_codex_turns(session, issue, 1, %{
+                  workspace: workspace,
+                  codex_update_recipient: codex_update_recipient,
+                  opts: opts,
+                  issue_state_fetcher: issue_state_fetcher,
+                  max_turns: max_turns,
+                  worker_host: worker_host,
+                  ownership_env: ownership_env
+                })
 
-      try do
-        result =
-          do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+              if destructive_stop_blocked?(result) do
+                Logger.error(
+                  "Preserving delegated runtime session for #{issue_context(issue)}: work-preservation checkpoint failed, destructive shutdown is blocked; recover via the owned session reference"
+                )
 
-        if destructive_stop_blocked?(result) do
-          Logger.error(
-            "Preserving delegated runtime session for #{issue_context(issue)}: work-preservation checkpoint failed, destructive shutdown is blocked; recover via the owned session reference"
-          )
+                result
+              else
+                stop_session_result(session, result)
+              end
+            catch
+              kind, reason ->
+                case AgentRuntime.stop_session(session) do
+                  :ok ->
+                    :erlang.raise(kind, reason, __STACKTRACE__)
 
-          result
-        else
-          stop_session_result(session, result)
+                  {:error, cleanup_reason} ->
+                    exit({:agent_runtime_failed, {:owned_session_cleanup_failed, cleanup_reason}})
+                end
+            end
+
+          {:error, reason} ->
+            session
+            |> stop_session_result({:error, reason})
+            |> finish_with_after_run_hook(
+              workspace,
+              issue,
+              worker_host,
+              ownership_env
+            )
         end
-      catch
-        kind, reason ->
-          case AgentRuntime.stop_session(session) do
-            :ok ->
-              :erlang.raise(kind, reason, __STACKTRACE__)
 
-            {:error, cleanup_reason} ->
-              exit({:agent_runtime_failed, {:owned_session_cleanup_failed, cleanup_reason}})
-          end
-      end
+      result ->
+        finish_with_after_run_hook(
+          result,
+          workspace,
+          issue,
+          worker_host,
+          ownership_env
+        )
     end
   end
 
@@ -174,7 +243,31 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp checkpoint_blocked?(_reason), do: false
 
-  defp send_owned_session_runtime_info(recipient, %Issue{id: issue_id}, session)
+  defp send_owned_session_runtime_info(recipient, %Issue{id: issue_id}, session, true)
+       when is_binary(issue_id) and is_pid(recipient) do
+    case AgentRuntime.owned_session_ref(session) do
+      ownership_ref when is_map(ownership_ref) ->
+        ack_ref = make_ref()
+
+        send(
+          recipient,
+          {:owned_session_runtime_info, issue_id, ownership_ref, self(), ack_ref}
+        )
+
+        receive do
+          {:owned_session_runtime_info_ack, ^ack_ref} ->
+            :ok
+        after
+          @owned_session_registration_timeout_ms ->
+            {:error, {:owned_session_registration_failed, :ack_timeout}}
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp send_owned_session_runtime_info(recipient, %Issue{id: issue_id}, session, false)
        when is_binary(issue_id) and is_pid(recipient) do
     case AgentRuntime.owned_session_ref(session) do
       ownership_ref when is_map(ownership_ref) ->
@@ -186,55 +279,116 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp send_owned_session_runtime_info(_recipient, _issue, _session), do: :ok
+  defp send_owned_session_runtime_info(_recipient, _issue, _session, _ack_required), do: :ok
+
+  defp registration_ack_required?(opts), do: is_map(Keyword.get(opts, :process_ownership))
 
   defp put_optional(opts, _key, nil), do: opts
   defp put_optional(opts, key, value), do: Keyword.put(opts, key, value)
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+  defp do_run_codex_turns(
+         app_session,
+         issue,
+         turn_number,
+         %{
+           workspace: workspace,
+           codex_update_recipient: codex_update_recipient,
+           opts: opts,
+           issue_state_fetcher: issue_state_fetcher,
+           max_turns: max_turns,
+           worker_host: worker_host,
+           ownership_env: ownership_env
+         } = turn_context
+       ) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
-    with {:ok, {next_session, turn_session}} <-
-           AgentRuntime.run_turn(
-             app_session,
-             prompt,
-             issue,
-             on_message: codex_message_handler(codex_update_recipient, issue)
-           ) do
-      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
+    turn_result =
+      AgentRuntime.run_turn(
+        app_session,
+        prompt,
+        issue,
+        on_message: codex_message_handler(codex_update_recipient, issue)
+      )
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
-        {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+    case finish_with_after_run_hook(
+           turn_result,
+           workspace,
+           issue,
+           worker_host,
+           ownership_env
+         ) do
+      {:ok, {next_session, turn_session}} ->
+        Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-          do_run_codex_turns(
-            next_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns
-          )
+        case continue_with_issue?(issue, issue_state_fetcher) do
+          {:continue, refreshed_issue} when turn_number < max_turns ->
+            Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
-        {:continue, refreshed_issue} ->
-          Logger.error("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; recording a typed failed run")
+            do_run_codex_turns(
+              next_session,
+              refreshed_issue,
+              turn_number + 1,
+              turn_context
+            )
 
-          {:error,
-           {:max_turns_exhausted,
-            %{
-              issue_id: refreshed_issue.id,
-              turn: turn_number,
-              max_turns: max_turns
-            }}}
+          {:continue, refreshed_issue} ->
+            Logger.error("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; recording a typed failed run")
 
-        {:done, _refreshed_issue} ->
-          :ok
+            {:error,
+             {:max_turns_exhausted,
+              %{
+                issue_id: refreshed_issue.id,
+                turn: turn_number,
+                max_turns: max_turns
+              }}}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
+          {:done, _refreshed_issue} ->
+            :ok
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      result ->
+        result
+    end
+  end
+
+  defp finish_with_after_run_hook(
+         result,
+         workspace,
+         issue,
+         worker_host,
+         ownership_env
+       ) do
+    case Workspace.run_after_run_hook(
+           workspace,
+           issue,
+           worker_host,
+           ownership_env
+         ) do
+      :ok -> result
+      {:error, reason} -> {:error, {:post_turn_routing_failed, reason}}
+    end
+  end
+
+  defp process_ownership_environment(issue, opts) do
+    case Keyword.get(opts, :process_ownership) do
+      ownership when is_map(ownership) ->
+        expected = %{
+          role: Map.get(ownership, :role),
+          run_id: Map.get(ownership, :run_id),
+          holder: Map.get(ownership, :holder),
+          workspace_path: Map.get(ownership, :workspace_path)
+        }
+
+        case ProcessOwnership.verify(issue, expected) do
+          {:ok, verified} -> {:ok, ProcessOwnership.ownership_env(issue, verified)}
+          {:error, reason} -> {:error, {:process_ownership_publication_failed, reason}}
+        end
+
+      _ ->
+        {:ok, []}
     end
   end
 

@@ -209,9 +209,15 @@ defmodule SymphonyElixir.Workspace do
     :ok
   end
 
-  @spec run_before_run_hook(Path.t(), map() | String.t() | nil, worker_host()) ::
+  @spec run_before_run_hook(
+          Path.t(),
+          map() | String.t() | nil,
+          worker_host(),
+          [{String.t(), String.t()}]
+        ) ::
           :ok | {:error, term()}
-  def run_before_run_hook(workspace, issue_or_identifier, worker_host \\ nil) when is_binary(workspace) do
+  def run_before_run_hook(workspace, issue_or_identifier, worker_host \\ nil, extra_env \\ [])
+      when is_binary(workspace) and is_list(extra_env) do
     issue_context = issue_context(issue_or_identifier)
     hooks = Config.settings!().hooks
 
@@ -220,13 +226,19 @@ defmodule SymphonyElixir.Workspace do
         :ok
 
       command ->
-        run_hook(command, workspace, issue_context, "before_run", worker_host)
+        run_hook(command, workspace, issue_context, "before_run", worker_host, extra_env)
     end
   end
 
-  @spec run_after_run_hook(Path.t(), map() | String.t() | nil, worker_host()) ::
+  @spec run_after_run_hook(
+          Path.t(),
+          map() | String.t() | nil,
+          worker_host(),
+          [{String.t(), String.t()}]
+        ) ::
           :ok | {:error, term()}
-  def run_after_run_hook(workspace, issue_or_identifier, worker_host \\ nil) when is_binary(workspace) do
+  def run_after_run_hook(workspace, issue_or_identifier, worker_host \\ nil, extra_env \\ [])
+      when is_binary(workspace) and is_list(extra_env) do
     issue_context = issue_context(issue_or_identifier)
     hooks = Config.settings!().hooks
 
@@ -235,7 +247,7 @@ defmodule SymphonyElixir.Workspace do
         :ok
 
       command ->
-        run_hook(command, workspace, issue_context, "after_run", worker_host)
+        run_hook(command, workspace, issue_context, "after_run", worker_host, extra_env)
     end
   end
 
@@ -359,7 +371,9 @@ defmodule SymphonyElixir.Workspace do
   defp ignore_hook_failure(:ok), do: :ok
   defp ignore_hook_failure({:error, _reason}), do: :ok
 
-  defp run_hook(command, workspace, issue_context, hook_name, nil) do
+  defp run_hook(command, workspace, issue_context, hook_name, worker_host, extra_env \\ [])
+
+  defp run_hook(command, workspace, issue_context, hook_name, nil, extra_env) do
     timeout_ms = Config.settings!().hooks.timeout_ms
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local")
@@ -369,7 +383,7 @@ defmodule SymphonyElixir.Workspace do
         System.cmd("sh", ["-lc", command],
           cd: workspace,
           stderr_to_stdout: true,
-          env: hook_env(issue_context)
+          env: hook_env(issue_context, extra_env)
         )
       end)
 
@@ -386,14 +400,15 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp run_hook(command, workspace, issue_context, hook_name, worker_host) when is_binary(worker_host) do
+  defp run_hook(command, workspace, issue_context, hook_name, worker_host, extra_env)
+       when is_binary(worker_host) do
     timeout_ms = Config.settings!().hooks.timeout_ms
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host}")
 
     script =
       [
-        hook_env_exports(issue_context),
+        hook_env_exports(issue_context, extra_env),
         "cd #{shell_escape(workspace)}",
         command
       ]
@@ -598,7 +613,7 @@ defmodule SymphonyElixir.Workspace do
     }
   end
 
-  defp hook_env(issue_context) do
+  defp hook_env(issue_context, extra_env \\ []) do
     base_env = [
       {"SYMPHONY_ISSUE_ID", issue_context.issue_id},
       {"SYMPHONY_ISSUE_IDENTIFIER", issue_context.issue_identifier},
@@ -614,11 +629,14 @@ defmodule SymphonyElixir.Workspace do
     base_env
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Enum.map(fn {key, value} -> {key, env_value(value)} end)
+    |> Map.new()
+    |> Map.merge(Map.new(extra_env))
+    |> Map.to_list()
   end
 
-  defp hook_env_exports(issue_context) do
+  defp hook_env_exports(issue_context, extra_env) do
     issue_context
-    |> hook_env()
+    |> hook_env(extra_env)
     |> Enum.map_join("\n", fn {key, value} -> "export #{key}=#{shell_escape(value)}" end)
   end
 

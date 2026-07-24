@@ -70,6 +70,28 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       {:error, error}
   end
 
+  @doc """
+  Reads the exact ownership scope and verifies its immutable identity without
+  taking the mutation lock.
+  """
+  @spec verify(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
+  def verify(%Issue{} = issue, expected) when is_map(expected) do
+    expected = scope_attrs(issue, normalize_attrs(expected))
+    path = scoped_registry_path(issue, expected)
+
+    with :ok <- validate_identity(expected),
+         {:ok, record} <- read_exact_record(path),
+         :ok <- verify_owner(record, expected),
+         :ok <- validate_identity_updates(record, expected) do
+      {:ok, normalize_status(record)}
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to verify process ownership for issue_id=#{issue.id}: #{Exception.message(error)}")
+
+      {:error, error}
+  end
+
   defp update_locked(path, issue, expected, attrs) do
     with {:ok, record} <- read_exact_record(path),
          :ok <- verify_owner(record, expected),

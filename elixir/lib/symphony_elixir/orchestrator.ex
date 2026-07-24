@@ -115,6 +115,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
+  def terminate(reason, %State{} = state) do
+    Enum.each(state.running, fn {issue_id, running_entry} ->
+      settle_cancelled_role_run(issue_id, running_entry, reason)
+    end)
+
+    :ok
+  end
+
+  @impl true
   def handle_info({:tick, tick_token}, %{tick_token: tick_token} = state)
       when is_reference(tick_token) do
     state = refresh_runtime_config(state)
@@ -271,27 +280,30 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_info(
+        {:owned_session_runtime_info, issue_id, ownership_ref, ack_recipient, ack_ref},
+        %{running: running} = state
+      )
+      when is_binary(issue_id) and is_map(ownership_ref) and is_pid(ack_recipient) and
+             is_reference(ack_ref) do
+    case record_owned_session_runtime_info(running, state, issue_id, ownership_ref) do
+      {:registered, state} ->
+        send(ack_recipient, {:owned_session_runtime_info_ack, ack_ref})
+        {:noreply, state}
+
+      {:missing, state} ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info(
         {:owned_session_runtime_info, issue_id, ownership_ref},
         %{running: running} = state
       )
       when is_binary(issue_id) and is_map(ownership_ref) do
-    case Map.get(running, issue_id) do
-      nil ->
-        # The issue can leave the active state between session startup and this
-        # message. Clean the now-unclaimed capability immediately.
-        _ = AgentRuntime.cleanup_owned_session(ownership_ref)
-        {:noreply, state}
+    {_registration, state} =
+      record_owned_session_runtime_info(running, state, issue_id, ownership_ref)
 
-      running_entry ->
-        ownership_ref = Map.put_new(ownership_ref, :issue_id, issue_id)
-
-        updated_running_entry =
-          running_entry
-          |> Map.put(:owned_session_ref, ownership_ref)
-          |> record_process_ownership(issue_id)
-
-        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
-    end
+    {:noreply, state}
   end
 
   def handle_info(
@@ -346,6 +358,26 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
+  end
+
+  defp record_owned_session_runtime_info(running, state, issue_id, ownership_ref) do
+    case Map.get(running, issue_id) do
+      nil ->
+        # The issue can leave the active state between session startup and this
+        # message. Clean the now-unclaimed capability immediately.
+        _ = AgentRuntime.cleanup_owned_session(ownership_ref)
+        {:missing, state}
+
+      running_entry ->
+        ownership_ref = Map.put_new(ownership_ref, :issue_id, issue_id)
+
+        updated_running_entry =
+          running_entry
+          |> Map.put(:owned_session_ref, ownership_ref)
+          |> record_process_ownership(issue_id)
+
+        {:registered, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+    end
   end
 
   # Config.settings!/0 raise sites inside the dispatch path (state-set reads,
@@ -747,10 +779,63 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, :not_found} ->
         Process.exit(pid, :shutdown)
+        :ok
     end
   end
 
   defp terminate_task(_pid), do: :ok
+
+  defp settle_cancelled_role_run(issue_id, running_entry, reason)
+       when is_binary(issue_id) and is_map(running_entry) do
+    with :ok <- terminate_registered_task(running_entry),
+         :ok <- cleanup_owned_session(running_entry),
+         {:ok, ownership} <- release_cancelled_owned_state(running_entry),
+         :ok <- verify_cancelled_owned_state(ownership) do
+      Logger.info("Role-run cancellation cleanup verified issue_id=#{issue_id} owned_pids=[] live_after=0")
+    else
+      {:error, cleanup_reason} ->
+        Logger.error(
+          "Role-run cancellation cleanup failed issue_id=#{issue_id} " <>
+            "stop_reason=#{inspect(reason)} cleanup_reason=#{inspect(cleanup_reason)}"
+        )
+    end
+  end
+
+  defp settle_cancelled_role_run(issue_id, _running_entry, reason) do
+    Logger.error(
+      "Role-run cancellation cleanup failed issue_id=#{inspect(issue_id)} " <>
+        "stop_reason=#{inspect(reason)} cleanup_reason=:invalid_running_entry"
+    )
+  end
+
+  defp terminate_registered_task(%{pid: pid}) when is_pid(pid) do
+    :ok = terminate_task(pid)
+
+    if Process.alive?(pid),
+      do: {:error, {:registered_task_still_live, pid}},
+      else: :ok
+  end
+
+  defp terminate_registered_task(_running_entry), do: :ok
+
+  defp release_cancelled_owned_state(%{issue: %Issue{} = issue} = running_entry) do
+    case release_owned_state(issue, running_entry) do
+      {:error, :enoent} -> {:error, :ownership_missing}
+      result -> result
+    end
+  end
+
+  defp release_cancelled_owned_state(_running_entry), do: {:error, :ownership_missing}
+
+  defp verify_cancelled_owned_state(%{
+         state: "cleaned",
+         cleanup_status: "cleaned",
+         ownership_env_pids: []
+       }),
+       do: :ok
+
+  defp verify_cancelled_owned_state(ownership),
+    do: {:error, {:ownership_cleanup_unverified, ownership}}
 
   defp recover_stale_owned_sessions do
     case ProcessOwnership.recover_stale_owned_sessions(&AgentRuntime.cleanup_owned_session/1) do
@@ -1136,7 +1221,8 @@ defmodule SymphonyElixir.Orchestrator do
            AgentRunner.run(issue, recipient,
              attempt: attempt,
              worker_host: worker_host,
-             run_id: process_ownership.run_id
+             run_id: process_ownership.run_id,
+             process_ownership: process_ownership
            )
          end) do
       {:ok, pid} ->

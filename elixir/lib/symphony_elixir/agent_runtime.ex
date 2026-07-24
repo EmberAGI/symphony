@@ -243,7 +243,8 @@ defmodule SymphonyElixir.AgentRuntime do
             role,
             run_id,
             workspace,
-            contract
+            contract,
+            Keyword.get(opts, :process_ownership_env)
           ),
         skill_execution_contracts: Keyword.get(opts, :skill_execution_contracts, []),
         transport: transport,
@@ -263,14 +264,27 @@ defmodule SymphonyElixir.AgentRuntime do
   defp validate_local_herdr_worker(nil), do: :ok
   defp validate_local_herdr_worker(worker_host), do: {:error, {:herdr_remote_worker_not_implemented, worker_host}}
 
-  defp implementer_run_environment(issue, role, run_id, workspace, contract) do
+  defp implementer_run_environment(
+         issue,
+         role,
+         run_id,
+         workspace,
+         contract,
+         process_ownership_env
+       ) do
     ownership_env =
-      ProcessOwnership.ownership_env(issue, %{
-        role: role,
-        run_id: run_id,
-        holder: ProcessOwnership.holder_id(),
-        workspace_path: workspace
-      })
+      case process_ownership_env do
+        env when is_list(env) ->
+          env
+
+        _ ->
+          ProcessOwnership.ownership_env(issue, %{
+            role: role,
+            run_id: run_id,
+            holder: ProcessOwnership.holder_id(),
+            workspace_path: workspace
+          })
+      end
       |> Map.new()
 
     issue

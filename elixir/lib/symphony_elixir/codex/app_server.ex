@@ -322,11 +322,17 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp ownership_env(issue, role, workspace, opts) do
-    ProcessOwnership.ownership_env(issue, %{
-      role: role,
-      run_id: Keyword.get(opts, :run_id),
-      workspace_path: workspace
-    })
+    case Keyword.get(opts, :process_ownership_env) do
+      env when is_list(env) ->
+        env
+
+      _ ->
+        ProcessOwnership.ownership_env(issue, %{
+          role: role,
+          run_id: Keyword.get(opts, :run_id),
+          workspace_path: workspace
+        })
+    end
   end
 
   defp port_metadata(port, worker_host) when is_port(port) do

@@ -25,6 +25,7 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
   """
 
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Runtime.ProcessOwnership
 
   # A delegated session whose orchestrator turn always settles successfully.
   # The only variable is what the session reports about its worker
@@ -207,11 +208,19 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     issue = issue("owned-session-ack")
     test_pid = self()
 
+    assert {:ok, process_ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: "run-owned-session-ack",
+               holder: ProcessOwnership.holder_id()
+             })
+
     {:ok, pid} =
       Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
         AgentRunner.run(issue, test_pid,
           run_id: "run-owned-session-ack",
           role: "implementer",
+          process_ownership: process_ownership,
           delegation_transport: WorkerOutcomeTransport,
           delegation_transport_context: %{
             assignments: [],
