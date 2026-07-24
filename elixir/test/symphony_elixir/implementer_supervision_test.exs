@@ -178,13 +178,42 @@ defmodule SymphonyElixir.ImplementerSupervisionTest do
     end
 
     def get_agent(_session, agent, _timeout_ms, _context), do: {:error, {:herdr_agent_closed, agent.name}}
+
+    def read_agent(_session, _agent, _opts, _context), do: {:error, :pane_gone}
   end
 
-  test "a closed agent remains a typed closed-agent failure without retry" do
+  test "a closed agent stays typed without retry, and its failed checkpoint blocks destruction" do
     session = supervised_session(ClosedAgentTransport)
 
-    assert {:error, {:herdr_agent_closed, "implementer_orchestrator"}} =
+    assert {:error, {:herdr_agent_closed, "implementer_orchestrator", evidence}} =
              ImplementerDelegation.run_turn(session, "Do bounded work.", %{}, supervision_opts())
+
+    assert {:error, {:implementer_checkpoint_failed, failure}} = evidence.checkpoint
+    assert failure.destructive_shutdown_blocked == true
+    assert failure.shutdown_reason == :agent_closed
+  end
+
+  defmodule ProtocolViolationTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      {:ok, %{name: agent.name, agent_status: "rebooting", agent_session: nil}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "pane before violation"}}
+  end
+
+  test "an out-of-enum status halts typed with observable evidence checkpointed first" do
+    session = supervised_session(ProtocolViolationTransport)
+
+    assert {:error, {:unexpected_herdr_agent_status, "rebooting", evidence}} =
+             ImplementerDelegation.run_turn(session, "Do bounded work.", %{}, supervision_opts())
+
+    assert {:ok, checkpoint} = evidence.checkpoint
+    assert checkpoint.pane_tail == "pane before violation"
+    assert checkpoint.shutdown_reason == :status_protocol_violation
   end
 
   defmodule ProgressingWorkingTransport do

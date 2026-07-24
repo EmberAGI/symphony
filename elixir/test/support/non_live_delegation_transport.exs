@@ -32,6 +32,9 @@ defmodule SymphonyElixir.TestSupport.NonLiveDelegationTransport do
   def await_agent(_session, _agent, _statuses, _timeout_ms, _context), do: sealed(:await_agent)
 
   @impl true
+  def get_agent(_session, _agent, _timeout_ms, _context), do: sealed(:get_agent)
+
+  @impl true
   def read_agent(_session, _agent, _opts, _context), do: sealed(:read_agent)
 
   @impl true

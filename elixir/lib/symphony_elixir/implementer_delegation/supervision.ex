@@ -130,9 +130,7 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
       else: state
   end
 
-  @doc "Record one bounded stale-working recovery attempt in the pure state."
-  @spec record_recovery(state(), term(), integer()) :: state()
-  def record_recovery(state, attempt_result, now_ms) do
+  defp record_recovery(state, attempt_result, now_ms) do
     %{
       state
       | recovery_attempts: state.recovery_attempts + 1,
@@ -301,17 +299,19 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
       }}}
   end
 
-  defp halt(_config, _state, {:closed, reason}), do: {:error, reason}
-  defp halt(_config, _state, {:protocol, reason}), do: {:error, reason}
+  defp halt(config, state, {:closed, {:herdr_agent_closed, agent_name}}) do
+    {:error, {:herdr_agent_closed, agent_name, %{checkpoint: checkpoint(config, state, :agent_closed)}}}
+  end
 
-  @doc """
-  Best-effort durable checkpoint of the observable turn state.
+  defp halt(config, state, {:protocol, {:unexpected_herdr_agent_status, status}}) do
+    saved = checkpoint(config, state, :status_protocol_violation)
+    {:error, {:unexpected_herdr_agent_status, status, %{checkpoint: saved}}}
+  end
 
-  Failure is typed and marks destructive shutdown as blocked; callers must not
-  destroy the pane/session while `destructive_shutdown_blocked` is set.
-  """
-  @spec checkpoint(config(), state(), term()) :: {:ok, map()} | {:error, term()}
-  def checkpoint(config, state, shutdown_reason) do
+  # Best-effort durable checkpoint of the observable turn state. Failure is
+  # typed and marks destructive shutdown as blocked; callers must not destroy
+  # the pane/session while `destructive_shutdown_blocked` is set.
+  defp checkpoint(config, state, shutdown_reason) do
     case config.transport.read_agent(
            config.session,
            config.orchestrator,

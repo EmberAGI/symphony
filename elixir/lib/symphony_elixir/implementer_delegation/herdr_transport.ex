@@ -315,27 +315,29 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       when is_binary(agent_name) and agent_name != "" and is_integer(timeout_ms) and timeout_ms > 0 do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
 
-    case command_in_port(context, ["--session", session_name, "agent", "get", agent_name], env, deadline) do
-      {:ok, output} ->
-        with {:ok, observed} <- decode_agent_response(output),
-             {:ok, _status} <- classify_agent_status(observed.agent_status) do
-          {:ok, preserve_provider(observed, agent)}
-        end
-
-      {:error, :command_timeout} ->
-        {:error, {:herdr_agent_get_timeout, agent_name}}
-
-      {:error, {:incompatible_herdr_runtime, _details} = reason} ->
-        {:error, reason}
-
-      {:error, reason} ->
-        get_error(reason, agent_name)
-    end
+    context
+    |> command_in_port(["--session", session_name, "agent", "get", agent_name], env, deadline)
+    |> get_agent_result(agent, agent_name)
   end
 
   def get_agent(_session, _agent, _timeout_ms, _context), do: {:error, :invalid_herdr_agent_get}
 
-  defp get_error(reason, agent_name) do
+  defp get_agent_result({:ok, output}, agent, _agent_name) do
+    # Decode then classify: an out-of-enum status from a get read stays a
+    # typed protocol/version error, never coerced to unknown.
+    with {:ok, observed} <- decode_agent_response(output),
+         {:ok, _status} <- classify_agent_status(observed.agent_status) do
+      {:ok, preserve_provider(observed, agent)}
+    end
+  end
+
+  defp get_agent_result({:error, :command_timeout}, _agent, agent_name),
+    do: {:error, {:herdr_agent_get_timeout, agent_name}}
+
+  defp get_agent_result({:error, {:incompatible_herdr_runtime, _details} = reason}, _agent, _agent_name),
+    do: {:error, reason}
+
+  defp get_agent_result({:error, reason}, _agent, agent_name) do
     case cli_error_code(reason) do
       code when code in ["agent_not_running", "agent_not_found", "agent_name_not_found"] ->
         {:error, {:herdr_agent_closed, agent_name}}
