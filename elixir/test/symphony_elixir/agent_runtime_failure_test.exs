@@ -344,4 +344,43 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     {observation, {:retryable, _different}} = AgentRuntime.record_failure_observation(observation, different, @context)
     assert observation.count == 1
   end
+
+  test "the same durable checkpoint and typed failure cannot authorize an equivalent redispatch for any role" do
+    reason = {:max_turns_exhausted, %{turn: 3, max_turns: 3}}
+
+    for role <- ["backlog-processor", "implementer", "reviewer", "qa", "landing"] do
+      context =
+        @context
+        |> Map.put(:role, role)
+        |> Map.put(:input_fingerprint, "checkpoint-a")
+
+      {observation, {:retryable, first}} =
+        AgentRuntime.record_failure_observation(nil, reason, context)
+
+      assert first.retryable?
+
+      assert {_observation, {:irrecoverable, repeated}} =
+               AgentRuntime.record_failure_observation(observation, reason, context)
+
+      assert repeated.family == :repeated_identical_no_progress_failure
+      assert repeated.retryable? == false
+      assert repeated.fingerprint.role == role
+    end
+  end
+
+  test "a changed durable checkpoint permits one new bounded attempt" do
+    reason = {:max_turns_exhausted, %{turn: 3, max_turns: 3}}
+    first_context = Map.put(@context, :input_fingerprint, "checkpoint-a")
+    changed_context = Map.put(@context, :input_fingerprint, "checkpoint-b")
+
+    {observation, {:retryable, _first}} =
+      AgentRuntime.record_failure_observation(nil, reason, first_context)
+
+    assert {changed_observation, {:retryable, changed}} =
+             AgentRuntime.record_failure_observation(observation, reason, changed_context)
+
+    assert changed.retryable?
+    assert changed_observation.count == 1
+    assert changed_observation.reset_marker.input_fingerprint == "checkpoint-b"
+  end
 end
