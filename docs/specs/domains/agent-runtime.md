@@ -578,8 +578,49 @@ submission with a follow-up submit input at most twice.
 Only an observed state change succeeds; exhausting the recovery bound preserves
 the typed prompt-stall failure. This provider-neutral recovery applies to
 orchestrator turns and both generated inter-agent prompt projections for Codex
-and Claude. Subsequent bounded lifecycle observation uses server-owned `agent
-wait`, never client-side sleep/poll loops.
+and Claude.
+
+After submission, turn lifecycle observation is a bounded, idempotent
+supervision state machine (EMB-1244 Stage 2), not a single budget-length
+server wait. The transport reads the typed agent status (`agent get`) on a
+bounded cadence: a 30-second observation interval, a 5-second per-read
+timeout, and 0 ms jitter (deterministic cadence; no randomization surface). A
+`blocked` status must therefore surface within one observation interval plus
+one read timeout. All five Herdr 0.7.5 statuses (`idle`, `working`,
+`blocked`, `done`, `unknown`) are first-class typed observations; an
+out-of-enum status is a typed protocol error, never coerced to `unknown` and
+never retried.
+
+Progress is distinct from status: `working` can persist without progress, so
+the supervisor consumes an observable progress cursor (recent agent output)
+alongside each working read. Wall-clock time is never the sole stuck signal.
+The supervision transitions are: an observed `working` with progress
+continues; `blocked` is preserved and surfaced as a typed blocked outcome —
+the runtime never auto-answers a permission or question prompt absent an
+authorized policy, and bypass-permissions launches do not exempt blocked
+handling; `unknown` statuses and status-read failures (including per-read
+command timeouts) get bounded retries (default four consecutive
+indeterminate reads) before a typed escalation carrying independent pane
+evidence; stale working (no cursor movement past the stale threshold,
+default fifteen minutes) gets bounded recovery through the server-owned
+terminal wait (at most two attempts) before a typed stalled escalation; the
+hard turn budget triggers checkpoint-and-preserve, then shutdown. A read
+that observes `idle`/`done` with an unchanged agent revision inside the
+prompt-transition settle window is transitional, not completion.
+
+Work preservation is scoped to the technically observable. Before any halt
+that can precede a destructive shutdown, the supervisor records a
+best-effort checkpoint in the turn's typed outcome: pane tail, Herdr session
+name and runtime root, workspace identity, agent name/pane, agent resume
+reference when observed, last typed status, progress cursor, recovery
+history, and shutdown reason. A checkpoint failure is itself typed and
+blocks destructive shutdown absent an explicit emergency policy: the runner
+must not stop the delegated session on a typed preservation failure and must
+leave the owned-session reference recoverable. A successful checkpoint
+permits bounded shutdown. This supervision layer is observation only: it
+emits typed outcomes and never grows lifecycle arbitration, teardown, or
+quarantine verdict semantics, which EMB-1217 owns over what this layer
+emits.
 
 Completed terminal output is consumed from native `agent read` text; Symphony
 does not expect a JSON response envelope from that command.

@@ -288,6 +288,158 @@ defmodule SymphonyElixir.ImplementerSupervisionTest do
     assert count_received(:recovery_probe) == 2
   end
 
+  defmodule CheckpointFailsTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      {:ok, %{name: agent.name, agent_status: "working", agent_session: nil}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:error, :pane_unreadable}
+  end
+
+  test "a hard-budget checkpoint failure is typed and blocks destructive shutdown" do
+    session = supervised_session(CheckpointFailsTransport)
+
+    assert {:error, {:implementer_checkpoint_failed, failure}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Do bounded work.",
+               %{},
+               supervision_opts(turn_timeout_ms: 30, heartbeat_interval_ms: 5)
+             )
+
+    assert failure.destructive_shutdown_blocked == true
+    assert failure.shutdown_reason == :hard_budget_exhausted
+    assert failure.reason == :pane_unreadable
+  end
+
+  defmodule PromptTransitionTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", revision: 7, agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      reads = Process.get({__MODULE__, :reads}, 0) + 1
+      Process.put({__MODULE__, :reads}, reads)
+
+      if reads < 3 do
+        {:ok, %{name: agent.name, agent_status: "idle", revision: 7, agent_session: nil}}
+      else
+        {:ok, %{name: agent.name, agent_status: "done", revision: 8, agent_session: %{value: "post-transition"}}}
+      end
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "TRANSITION_COMPLETE"}}
+  end
+
+  test "an unrevised idle read during the prompt transition window is not treated as completion" do
+    Process.delete({PromptTransitionTransport, :reads})
+    session = supervised_session(PromptTransitionTransport)
+
+    assert {:ok, %{agent_status: "done", session_id: "post-transition"}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Do bounded work.",
+               %{},
+               supervision_opts(settle_window_ms: 10_000)
+             )
+
+    assert Process.get({PromptTransitionTransport, :reads}) == 3
+  end
+
+  defmodule ConcurrentReadsTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      Process.sleep(5)
+      reads = :counters.add(counter(), 1, 1) || :counters.get(counter(), 1)
+      _ = reads
+      status = if :counters.get(counter(), 1) < 4, do: "working", else: "done"
+      {:ok, %{name: agent.name, agent_status: status, agent_session: %{value: "concurrent"}}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "CONCURRENT_OK"}}
+
+    def counter do
+      case :persistent_term.get({__MODULE__, :counter}, nil) do
+        nil ->
+          counter = :counters.new(1, [:atomics])
+          :persistent_term.put({__MODULE__, :counter}, counter)
+          counter
+
+        counter ->
+          counter
+      end
+    end
+  end
+
+  test "supervised status reads tolerate concurrent status commands against the same agent" do
+    :persistent_term.erase({ConcurrentReadsTransport, :counter})
+    session = supervised_session(ConcurrentReadsTransport)
+
+    turn =
+      Task.async(fn ->
+        ImplementerDelegation.run_turn(session, "Do bounded work.", %{}, supervision_opts())
+      end)
+
+    concurrent_reads =
+      for _index <- 1..4 do
+        Task.async(fn ->
+          ConcurrentReadsTransport.get_agent(session.herdr_session, session.orchestrator, 250, %{})
+        end)
+      end
+
+    assert {:ok, %{response: "CONCURRENT_OK", agent_status: "done"}} = Task.await(turn, 5_000)
+
+    for read <- Task.await_many(concurrent_reads, 5_000) do
+      assert {:ok, %{agent_status: status}} = read
+      assert status in ["working", "done"]
+    end
+  end
+
+  describe "pure supervision step" do
+    alias SymphonyElixir.ImplementerDelegation.Supervision
+
+    test "step/3 is idempotent: identical state, observation, and clock yield identical results" do
+      state = Supervision.new(%{hard_budget_ms: 1_000, max_indeterminate_reads: 3}, 0)
+      observation = {:ok, %{agent_status: "unknown"}}
+
+      assert Supervision.step(state, observation, 10) == Supervision.step(state, observation, 10)
+
+      {_directive, next} = Supervision.step(state, observation, 10)
+      assert Supervision.step(next, observation, 20) == Supervision.step(next, observation, 20)
+    end
+
+    test "indeterminate reads halt exactly at the configured bound" do
+      state = Supervision.new(%{hard_budget_ms: 1_000, max_indeterminate_reads: 2}, 0)
+
+      {directive_one, state} = Supervision.step(state, {:ok, %{agent_status: "unknown"}}, 1)
+      assert directive_one == :continue
+
+      {directive_two, _state} = Supervision.step(state, {:ok, %{agent_status: "unknown"}}, 2)
+      assert directive_two == {:halt, :persistent_unknown}
+    end
+
+    test "the hard budget halts regardless of the observation" do
+      state = Supervision.new(%{hard_budget_ms: 100}, 0)
+
+      assert {{:halt, :hard_budget_exhausted}, _state} =
+               Supervision.step(state, {:ok, %{agent_status: "done"}}, 100)
+    end
+
+    test "an out-of-enum status is a typed protocol halt, never coerced or retried" do
+      state = Supervision.new(%{hard_budget_ms: 1_000}, 0)
+
+      assert {{:halt, {:protocol, {:unexpected_herdr_agent_status, "rebooting"}}}, _state} =
+               Supervision.step(state, {:ok, %{agent_status: "rebooting"}}, 1)
+    end
+  end
+
   defp supervised_session(transport) do
     %{
       transport: transport,
