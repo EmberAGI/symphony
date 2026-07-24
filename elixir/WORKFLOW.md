@@ -43,6 +43,13 @@ codex:
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspaceWrite
+# Deployment work admission is process bootstrap, not workflow YAML:
+# - SYMPHONY_EXECUTION_GENERATION identifies the complete tracked runtime generation.
+# - SYMPHONY_WORK_ADMISSION_PATH selects the durable marker; when omitted,
+#   SYMPHONY_ORCHESTRATION_ROOT defaults it to
+#   .runtime/symphony/work-admission.json beneath that root.
+# Configured missing, unreadable, malformed, unsupported, or generation-mismatched
+# markers start closed before the first poll. The Orchestrator alone writes them.
 # Runtime selection. Codex is the default and reference runtime; set the
 # provider to claude_code to run role turns through the first-party Claude Code
 # shim (claude-app-server) instead. Codex-backed workflows are unchanged when

@@ -38,6 +38,11 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
+The Elixir implementation also exposes a loopback-only, generation-fenced
+work-admission Interface for deployment drains. See
+[Atomic cutover bootstrap](elixir/README.md#atomic-cutover-bootstrap) for the
+bootstrap values, marker behavior, and close/open sequence.
+
 ---
 
 ## License
