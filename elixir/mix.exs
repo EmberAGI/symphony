@@ -35,7 +35,8 @@ defmodule SymphonyElixir.MixProject do
         "test/support/agent_profile_fixture.exs",
         "test/support/non_live_linear_client.exs",
         "test/support/non_live_delegation_transport.exs",
-        "test/support/linear_traffic_sentinel.exs"
+        "test/support/linear_traffic_sentinel.exs",
+        "test/support/fake_herdr.exs"
       ],
       dialyzer: [
         plt_add_apps: [:mix]

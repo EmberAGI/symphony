@@ -471,15 +471,54 @@ selected product checkout and resolves its returned root pane rather than
 predicting topology identifiers. It starts each participant through strict
 `agent start <name> --kind <kind> --pane <id> --timeout <ms> -- <native args>`;
 Herdr validates the live name, provider kind, target pane, and interactive
-readiness before returning. The native arguments are materialized in an
-executable launch-projection file under the isolated session runtime root.
-The pane-shell command receives only a fixed projection sentinel and the short,
-quote-trivial projection path; reusable profile instructions and other
-potentially large or quote-rich provider arguments never cross the pane shell
-as typed argv. The runtime-owned provider wrapper validates that the projection
-is executable and remains inside the named session root, then expands it after
-the pane-shell seam so Codex receives `developer_instructions` and Claude
-receives `--append-system-prompt` unchanged from their provider contracts.
+readiness before returning. Herdr resolves the kind at the pane shell with
+exec-style `PATH` lookup: pane shells reset to a login `PATH` (session `--env`
+does not survive into panes), only `pane run` exports persist there, and Herdr
+prepends one kind-specific unattended-mode flag to the typed agent arguments
+(`--dangerously-skip-permissions` for `claude`, `--yolo` for `codex`;
+probe-verified against Herdr 0.7.5). Before every `agent start` — orchestrator
+and worker alike — the launching side therefore prepares the target pane with a
+`pane run` export placing the session `orchestrator-bin` first on the pane
+`PATH`, then performs an acknowledged preflight in the same pane: a
+non-interactive `sh -c 'command -v <kind>'` (immune to interactive shell
+function shadowing, mirroring Herdr's exec resolution) must resolve to exactly
+the session provider wrapper, byte for byte, or the launch fails closed before
+`agent start` is issued. `pane run` is permitted solely for this launch
+preparation and preflight; prompts and raw input never travel through it.
+
+The native arguments are materialized in an executable launch-projection file
+under the isolated session runtime root, named by a per-launch token (a stable
+digest plus a fresh launch nonce), so concurrent launches can never share or
+cross-satisfy launch state. The pane-shell command receives only the fixed
+`--symphony-launch-projection` sentinel and the short, quote-trivial projection
+path; reusable profile instructions and other potentially large or quote-rich
+provider arguments never cross the pane shell as typed argv. The runtime-owned
+provider wrapper fails closed for any invocation other than the exact sentinel
+plus one projection path (after stripping exactly the known Herdr-injected
+unattended flag, whose exact observed value is recorded as a token-local
+diagnostic marker in the launch acknowledgement directory — evidence only,
+not authentication): there is no default-provider fall-through. It validates the
+projection with canonical resolution — symlinks rejected, canonicalized path
+contained under the session `launch-projections` directory, regular file,
+caller-owned, mode 0500 — writes a per-launch `wrapper.ack` containing the
+launch token, and only then execs the projection. The projection writes its own
+`projection.ack` with the same token before exec-ing the provider, so Codex
+receives `developer_instructions` and Claude receives `--append-system-prompt`
+unchanged from their provider contracts. The transport mirrors the projection
+validation before launching and requires both acknowledgements, with exact
+token content, within a five-second startup-acknowledgement window inside the
+shared budget. Launch failures are distinct typed stages, never collapsed:
+pane preparation, wrapper resolution, wrapper acknowledgement, projection
+acknowledgement (including malformed or cross-launch content), and provider
+start. The acknowledgements are intra-runtime liveness evidence that the
+launch chain actually executed — not an authentication mechanism. The
+generated worker launcher applies the same pane preparation, preflight,
+sentinel launch, and token-bound acknowledgement contract, minting a fresh
+launch token (and token-named projection copy) on every invocation so
+concurrent worker launches cannot share or clear each other's launch state;
+its shell exit codes are stage-specific diagnostics surfaced to the
+orchestrator's pane, while typed launch outcomes remain the transport's
+Elixir results.
 Orchestrator and worker startup share a 120-second cold-start budget. Before
 Claude profile instructions are written to the projection, CRLF and CR
 normalize to LF, LF becomes the Unicode line separator U+2028, and each tab
@@ -533,9 +572,11 @@ Native `agent_prompt_stalled` remains a typed prompt-stall failure after bounded
 recovery is exhausted. A prompt or wait whose named live agent has closed is a
 typed closed-agent failure. Native timeouts remain bounded status-timeout
 results and protocol mismatch remains a machine-readable incompatible-runtime
-failure. Symphony does not retain the 0.7.4 `pane run`, manual confirmation,
-revision acknowledgement, top-level wait, provider-specific multiline
-handling, translation, dual-version, or compatibility machinery.
+failure. Symphony does not retain the 0.7.4 `pane run` prompt-submission,
+manual confirmation, revision acknowledgement, top-level wait,
+provider-specific multiline handling, translation, dual-version, or
+compatibility machinery; `pane run` survives only as the launch PATH
+preparation and preflight primitive described above.
 
 Inter-agent messaging uses the same `agent prompt` command for Codex and Claude.
 The runtime-owned orchestrator and restricted worker projections add the same

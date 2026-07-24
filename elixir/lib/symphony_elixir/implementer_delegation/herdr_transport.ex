@@ -17,6 +17,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @prompt_recovery_attempts 2
   @required_version "0.7.5"
   @required_protocol 17
+  @launch_projection_sentinel "--symphony-launch-projection"
+  @default_launch_handshake_timeout_ms 5_000
+  @launch_stage_failures [
+    :herdr_pane_preparation_failed,
+    :herdr_wrapper_resolution_failed,
+    :herdr_wrapper_ack_failed,
+    :herdr_projection_ack_failed,
+    :herdr_projection_validation_failed,
+    :herdr_provider_start_failed
+  ]
 
   @impl true
   def default_server_snapshot(context) when is_map(context) do
@@ -127,7 +137,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     orchestrator_path = orchestrator_bin <> ":" <> inherited_provider_path(env, orchestrator_bin)
 
     with {:ok, kind, native_args} <- native_agent_launch(spec, argv),
-         {:ok, projected_args} <-
+         :ok <- ensure_provider_wrapper(runtime_root, hd(argv), env, context),
+         {:ok, launch_token, projection_path} <-
            materialize_launch_projection(
              runtime_root,
              name,
@@ -135,8 +146,10 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
              hd(argv),
              native_args,
              %{"PATH" => orchestrator_path},
-             env
+             %{"PATH" => inherited_provider_path(env, orchestrator_bin)}
            ),
+         :ok <- validate_launch_projection(runtime_root, projection_path),
+         :ok <- prepare_launch_pane(context, session_name, env, pane_id, kind, orchestrator_bin, runtime_root),
          args =
            [
              "--session",
@@ -150,13 +163,17 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
              pane_id,
              "--timeout",
              to_string(timeout_ms),
-             "--"
-           ] ++ projected_args,
-         {:ok, output} <- command(context, args, env),
+             "--",
+             @launch_projection_sentinel,
+             projection_path
+           ],
+         {:ok, output} <- start_agent_command(context, args, env, runtime_root, launch_token),
+         :ok <- await_launch_acks(runtime_root, launch_token, context),
          {:ok, payload} <- Jason.decode(output),
          agent when is_map(agent) <- get_in(payload, ["result", "agent"]) do
       {:ok, agent |> atomize_known_agent_fields() |> Map.put(:provider, Map.get(spec, :provider))}
     else
+      {:error, {stage, _details} = reason} when stage in @launch_stage_failures -> {:error, reason}
       {:error, reason} -> {:error, {:herdr_agent_start_failed, reason}}
       _ -> {:error, :invalid_herdr_agent_start_response}
     end
@@ -714,7 +731,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     worker_env = Map.get(worker, :env, %{})
 
     with {:ok, kind, native_args} <- native_agent_launch(worker, argv),
-         {:ok, projected_args} <-
+         {:ok, worker_token, worker_projection_path} <-
            materialize_launch_projection(
              runtime_root,
              "implementer_worker",
@@ -726,12 +743,23 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
                "PATH",
                worker_bin <> ":" <> inherited_provider_path(session_env, orchestrator_bin)
              ),
-             session_env
+             %{"PATH" => inherited_provider_path(session_env, orchestrator_bin)}
            ) do
       provider_command = hd(argv)
       provider_wrapper = Path.join(orchestrator_bin, provider_command)
       inherited_path = inherited_provider_path(session_env, orchestrator_bin)
       timeout_ms = Map.get(context, :agent_start_timeout_ms, @default_agent_start_timeout_ms)
+
+      worker_wrapper = Path.join(orchestrator_bin, kind)
+      projection_dir = Path.join(runtime_root, "launch-projections")
+      preflight_dir = Path.join(runtime_root, "pane-preflight")
+      launch_acks = Path.join(runtime_root, "launch-acks")
+
+      # 50 ms poll cadence over the fixed startup ack deadline (5 s default;
+      # test contexts may shorten it through the same override).
+      handshake_attempts = max(div(launch_handshake_timeout_ms(context), 50), 1)
+
+      pane_export_command = ~s(export PATH=#{shell_escape(orchestrator_bin)}:"$PATH")
 
       launcher_body = """
       #!/bin/sh
@@ -747,66 +775,63 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       marker=$(mktemp #{shell_escape(Path.join(worker_panes, "pending.XXXXXX"))})
       printf '%s\n' "$2" > "$marker"
       trap 'rm -f "$marker"' EXIT HUP INT TERM
-      #{shell_escape(orchestrator_herdr)} --session #{shell_escape(session_name)} agent start "$1" --kind #{shell_escape(kind)} --pane "$2" --timeout #{timeout_ms} -- #{Enum.map_join(projected_args, " ", &shell_escape/1)}
+      mkdir -p #{shell_escape(preflight_dir)} #{shell_escape(launch_acks)}
+      staging=$(mktemp #{shell_escape(Path.join(projection_dir, "staging.XXXXXX"))})
+      launch_token=#{shell_escape(worker_token)}-"${staging##*.}"
+      launch_projection=#{shell_escape(projection_dir)}/"$launch_token".sh
+      cat #{shell_escape(worker_projection_path)} > "$staging"
+      chmod 500 "$staging"
+      mv -f "$staging" "$launch_projection"
+      preflight_file=#{shell_escape(preflight_dir)}/"$launch_token"
+      ack_dir=#{shell_escape(launch_acks)}/"$launch_token"
+      #{shell_escape(orchestrator_herdr)} --session #{shell_escape(session_name)} pane run "$2" #{shell_escape(pane_export_command)} || {
+        printf '%s\n' 'worker pane preparation failed' >&2
+        exit 65
+      }
+      #{shell_escape(orchestrator_herdr)} --session #{shell_escape(session_name)} pane run "$2" "sh -c 'command -v #{kind}' > \\"$preflight_file.tmp\\" 2>&1 && mv -f \\"$preflight_file.tmp\\" \\"$preflight_file\\"" || {
+        printf '%s\n' 'worker wrapper resolution failed' >&2
+        exit 66
+      }
+      attempt=0
+      while [ ! -f "$preflight_file" ] && [ "$attempt" -lt #{handshake_attempts} ]; do
+        sleep 0.05
+        attempt=$((attempt + 1))
+      done
+      resolved=$(cat "$preflight_file" 2>/dev/null || printf '%s' '')
+      if [ "$resolved" != #{shell_escape(worker_wrapper)} ]; then
+        printf '%s\n' "worker wrapper resolution failed: ${resolved:-unresolved}" >&2
+        exit 66
+      fi
+      #{shell_escape(orchestrator_herdr)} --session #{shell_escape(session_name)} agent start "$1" --kind #{shell_escape(kind)} --pane "$2" --timeout #{timeout_ms} -- #{@launch_projection_sentinel} "$launch_projection"
+      attempt=0
+      while { [ ! -f "$ack_dir/wrapper.ack" ] || [ ! -f "$ack_dir/projection.ack" ]; } && [ "$attempt" -lt #{handshake_attempts} ]; do
+        sleep 0.05
+        attempt=$((attempt + 1))
+      done
+      wrapper_ack=$(cat "$ack_dir/wrapper.ack" 2>/dev/null || printf '%s' '')
+      if [ "$wrapper_ack" != "$launch_token" ]; then
+        printf '%s\n' "worker launch wrapper acknowledgement missing or malformed: ${wrapper_ack:-absent}" >&2
+        exit 67
+      fi
+      projection_ack=$(cat "$ack_dir/projection.ack" 2>/dev/null || printf '%s' '')
+      if [ "$projection_ack" != "$launch_token" ]; then
+        printf '%s\n' "worker launch projection acknowledgement missing or malformed: ${projection_ack:-absent}" >&2
+        exit 68
+      fi
       """
 
       restricted_body = role_herdr_body(real_herdr, :worker)
       orchestrator_body = role_herdr_body(real_herdr, :orchestrator)
 
-      provider_body = """
-      #!/bin/sh
-      set -eu
-      provider_executable=$(PATH=#{shell_escape(inherited_path)} command -v #{shell_escape(provider_command)}) || {
-        printf '%s\n' 'required worker provider executable is unavailable' >&2
-        exit 127
-      }
-      worker_projection=false
-      for marker in #{shell_escape(worker_panes)}/pending.*; do
-        [ -f "$marker" ] || continue
-        IFS= read -r expected_pane < "$marker" || continue
-        [ "$expected_pane" = "${HERDR_PANE_ID:-}" ] || continue
-        claimed_marker="${marker}.claimed.$$"
-        if mv "$marker" "$claimed_marker" 2>/dev/null; then
-          rm -f "$claimed_marker"
-          worker_projection=true
-          break
-        fi
-      done
-      if [ "$worker_projection" = true ]; then
-        export PATH=#{shell_escape(worker_bin)}:#{shell_escape(inherited_path)}
-        #{launcher_env_exports(worker_env)}
-      else
-        export PATH=#{shell_escape(orchestrator_bin)}:#{shell_escape(inherited_path)}
-      fi
-      if [ "${1:-}" = "--symphony-launch-projection" ] && [ "$#" -eq 2 ]; then
-        case "$2" in
-          #{shell_escape(Path.join(runtime_root, "launch-projections"))}/*)
-            [ -x "$2" ] || {
-              printf '%s\n' 'launch projection is unavailable' >&2
-              exit 64
-            }
-            exec "$2" "$provider_executable"
-            ;;
-          *)
-            printf '%s\n' 'launch projection is outside the session runtime root' >&2
-            exit 64
-            ;;
-        esac
-      fi
-      exec "$provider_executable" "$@"
-      """
+      provider_body = provider_wrapper_body(runtime_root, provider_command, inherited_path, worker_env)
 
       with :ok <- File.mkdir_p(worker_bin),
            :ok <- File.mkdir_p(worker_panes),
            :ok <- File.mkdir_p(orchestrator_bin),
-           :ok <- File.write(restricted_herdr, restricted_body),
-           :ok <- File.chmod(restricted_herdr, 0o500),
-           :ok <- File.write(orchestrator_herdr, orchestrator_body),
-           :ok <- File.chmod(orchestrator_herdr, 0o500),
-           :ok <- File.write(provider_wrapper, provider_body),
-           :ok <- File.chmod(provider_wrapper, 0o500),
-           :ok <- File.write(path, launcher_body),
-           :ok <- File.chmod(path, 0o500) do
+           :ok <- write_executable(restricted_herdr, restricted_body),
+           :ok <- write_executable(orchestrator_herdr, orchestrator_body),
+           :ok <- write_executable(provider_wrapper, provider_body),
+           :ok <- write_executable(path, launcher_body) do
         {:ok, path, orchestrator_bin}
       else
         {:error, reason} ->
@@ -818,6 +843,283 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp materialize_worker_launcher(_session, _worker, _context),
     do: {:error, :invalid_worker_launcher_spec}
+
+  defp provider_wrapper_body(runtime_root, provider_command, inherited_path, worker_env) do
+    worker_bin = Path.join(runtime_root, "worker-bin")
+    worker_panes = Path.join(runtime_root, "worker-panes")
+    orchestrator_bin = Path.join(runtime_root, "orchestrator-bin")
+
+    """
+    #!/bin/sh
+    set -eu
+    provider_executable=$(PATH=#{shell_escape(inherited_path)} command -v #{shell_escape(provider_command)}) || {
+      printf '%s\n' 'required worker provider executable is unavailable' >&2
+      exit 127
+    }
+    worker_projection=false
+    for marker in #{shell_escape(worker_panes)}/pending.*; do
+      [ -f "$marker" ] || continue
+      IFS= read -r expected_pane < "$marker" || continue
+      [ "$expected_pane" = "${HERDR_PANE_ID:-}" ] || continue
+      claimed_marker="${marker}.claimed.$$"
+      if mv "$marker" "$claimed_marker" 2>/dev/null; then
+        rm -f "$claimed_marker"
+        worker_projection=true
+        break
+      fi
+    done
+    if [ "$worker_projection" = true ]; then
+      export PATH=#{shell_escape(worker_bin)}:#{shell_escape(inherited_path)}
+      #{launcher_env_exports(worker_env)}
+    else
+      export PATH=#{shell_escape(orchestrator_bin)}:#{shell_escape(inherited_path)}
+    fi
+    #{strip_herdr_injected_flag(provider_command)}if [ "${1:-}" != "#{@launch_projection_sentinel}" ]; then
+      printf '%s\n' 'provider wrapper only accepts the launch projection sentinel' >&2
+      exit 64
+    fi
+    if [ "$#" -ne 2 ]; then
+      printf '%s\n' 'launch projection sentinel requires exactly one projection path' >&2
+      exit 64
+    fi
+    projection="$2"
+    launch_token=$(basename -- "$projection")
+    launch_token="${launch_token%.sh}"
+    ack_dir=#{shell_escape(Path.join(runtime_root, "launch-acks"))}/"$launch_token"
+    mkdir -p "$ack_dir"
+    if [ -n "${observed_injected_flag:-}" ]; then
+      printf '%s\n' "$observed_injected_flag" > "$ack_dir/injected-flag.tmp"
+      mv -f "$ack_dir/injected-flag.tmp" "$ack_dir/injected-flag"
+    fi
+    reject() {
+      printf '%s\n' "$1" >&2
+      printf '%s\n' "$1" > "$ack_dir/wrapper.reject"
+      exit 64
+    }
+    if [ -L "$projection" ]; then
+      reject 'launch projection must not be a symlink'
+    fi
+    projection_dir=$(CDPATH= cd -- "$(dirname -- "$projection")" 2>/dev/null && pwd -P) || reject 'launch projection directory is unresolvable'
+    launch_dir=$(CDPATH= cd -- #{shell_escape(Path.join(runtime_root, "launch-projections"))} 2>/dev/null && pwd -P) || reject 'launch projection directory is unresolvable'
+    canonical_projection="$projection_dir/$(basename -- "$projection")"
+    case "$canonical_projection" in
+      "$launch_dir"/*) ;;
+      *)
+        reject 'launch projection is outside the session runtime root'
+        ;;
+    esac
+    if [ ! -f "$canonical_projection" ] || [ -L "$canonical_projection" ]; then
+      reject 'launch projection is not a regular file'
+    fi
+    projection_stat=$(stat -c '%u %a' "$canonical_projection" 2>/dev/null || stat -f '%u %Lp' "$canonical_projection" 2>/dev/null) || reject 'launch projection metadata is unreadable'
+    if [ "$projection_stat" != "$(id -u) 500" ]; then
+      reject 'launch projection ownership or mode is invalid'
+    fi
+    printf '%s\n' "$launch_token" > "$ack_dir/wrapper.ack"
+    exec "$canonical_projection" "$provider_executable"
+    """
+  end
+
+  # Herdr 0.7.5 prepends one kind-specific unattended-mode flag to the typed
+  # AGENT_ARGs (probe-verified). The wrapper strips exactly that flag before
+  # requiring the exact sentinel invocation.
+  defp strip_herdr_injected_flag(provider_command) do
+    case herdr_injected_launch_flag(provider_command) do
+      nil ->
+        ""
+
+      flag ->
+        """
+        if [ "${1:-}" = #{shell_escape(flag)} ]; then
+          observed_injected_flag="$1"
+          shift
+        fi
+        """
+    end
+  end
+
+  defp herdr_injected_launch_flag("claude"), do: "--dangerously-skip-permissions"
+  defp herdr_injected_launch_flag("codex"), do: "--yolo"
+  defp herdr_injected_launch_flag(_provider_command), do: nil
+
+  defp ensure_provider_wrapper(runtime_root, provider_command, session_env, _context) do
+    orchestrator_bin = Path.join(runtime_root, "orchestrator-bin")
+    provider_wrapper = Path.join(orchestrator_bin, provider_command)
+
+    if File.exists?(provider_wrapper) or File.lstat(provider_wrapper) != {:error, :enoent} do
+      case validate_launch_artifact(runtime_root, orchestrator_bin, provider_wrapper) do
+        :ok -> :ok
+        {:error, details} -> {:error, {:herdr_wrapper_resolution_failed, details}}
+      end
+    else
+      inherited_path = inherited_provider_path(session_env, orchestrator_bin)
+      body = provider_wrapper_body(runtime_root, provider_command, inherited_path, %{})
+
+      with :ok <- File.mkdir_p(orchestrator_bin),
+           :ok <- write_executable(provider_wrapper, body) do
+        :ok
+      else
+        {:error, reason} ->
+          {:error, {:herdr_wrapper_resolution_failed, %{reason: {:materialization_failed, reason}}}}
+      end
+    end
+  end
+
+  # Transport-side mirror of the wrapper's launch-artifact validation:
+  # canonicalized containment (symlink escapes rejected), regular
+  # non-symlink file, owned by the runtime-root owner, mode 0500.
+  defp validate_launch_artifact(runtime_root, expected_dir, path) do
+    with {:ok, canonical_path} <- canonicalize_path(path),
+         {:ok, canonical_dir} <- canonicalize_path(expected_dir),
+         :ok <- validate_artifact_containment(canonical_path, canonical_dir),
+         {:ok, %File.Stat{type: :regular, mode: mode, uid: uid}} <- artifact_lstat(path),
+         {:ok, %File.Stat{uid: root_uid}} <- artifact_lstat(runtime_root) do
+      cond do
+        Bitwise.band(mode, 0o7777) != 0o500 -> {:error, %{path: path, reason: :invalid_mode}}
+        uid != root_uid -> {:error, %{path: path, reason: :invalid_owner}}
+        true -> :ok
+      end
+    else
+      {:ok, %File.Stat{type: type}} -> {:error, %{path: path, reason: {:not_a_regular_file, type}}}
+      {:error, %{} = details} -> {:error, details}
+    end
+  end
+
+  defp validate_launch_projection(runtime_root, projection_path) do
+    case validate_launch_artifact(runtime_root, Path.join(runtime_root, "launch-projections"), projection_path) do
+      :ok -> :ok
+      {:error, details} -> {:error, {:herdr_projection_validation_failed, details}}
+    end
+  end
+
+  defp artifact_lstat(path) do
+    case File.lstat(path) do
+      {:ok, stat} -> {:ok, stat}
+      {:error, reason} -> {:error, %{path: path, reason: {:unreadable, reason}}}
+    end
+  end
+
+  defp validate_artifact_containment(canonical_path, canonical_dir) do
+    if String.starts_with?(canonical_path, canonical_dir <> "/"),
+      do: :ok,
+      else: {:error, %{path: canonical_path, reason: :outside_session_runtime_root}}
+  end
+
+  defp canonicalize_path(path) do
+    script = ~S|CDPATH= cd -- "$(dirname -- "$1")" && printf '%s/%s' "$(pwd -P)" "$(basename -- "$1")"|
+
+    case System.cmd("/bin/sh", ["-c", script, "sh", path], stderr_to_stdout: true) do
+      {canonical, 0} -> {:ok, canonical}
+      {_output, _status} -> {:error, %{path: path, reason: :uncanonicalizable}}
+    end
+  end
+
+  # Atomic temp+chmod+rename: a concurrent preflight or launch never observes
+  # a remove/write gap or a not-yet-0500 artifact.
+  defp write_executable(path, body) do
+    staging = path <> ".staging." <> launch_nonce()
+
+    with :ok <- File.write(staging, body),
+         :ok <- File.chmod(staging, 0o500) do
+      File.rename(staging, path)
+    end
+  end
+
+  defp prepare_launch_pane(context, session_name, env, pane_id, kind, orchestrator_bin, runtime_root) do
+    preflight_dir = Path.join(runtime_root, "pane-preflight")
+    File.mkdir_p!(preflight_dir)
+    preflight_file = Path.join(preflight_dir, launch_nonce())
+    export_command = ~s(export PATH=#{shell_escape(orchestrator_bin)}:"$PATH")
+
+    resolve_command =
+      "sh -c #{shell_escape("command -v " <> shell_escape(kind))} > #{shell_escape(preflight_file <> ".tmp")} 2>&1 && " <>
+        "mv -f #{shell_escape(preflight_file <> ".tmp")} #{shell_escape(preflight_file)}"
+
+    with :ok <- pane_run(context, session_name, env, pane_id, export_command, :herdr_pane_preparation_failed),
+         :ok <- pane_run(context, session_name, env, pane_id, resolve_command, :herdr_wrapper_resolution_failed) do
+      verify_wrapper_resolution(preflight_file, Path.join(orchestrator_bin, kind), context)
+    end
+  end
+
+  defp start_agent_command(context, args, env, runtime_root, launch_token) do
+    deadline = System.monotonic_time(:millisecond) + launch_handshake_timeout_ms(context)
+    start_agent_command(context, args, env, runtime_root, launch_token, deadline)
+  end
+
+  defp start_agent_command(context, args, env, runtime_root, launch_token, deadline) do
+    case command(context, args, env) do
+      {:ok, output} ->
+        {:ok, output}
+
+      {:error, {:incompatible_herdr_runtime, _details} = reason} ->
+        {:error, reason}
+
+      {:error, reason} ->
+        # The pane shell can still be settling from the preparation commands
+        # when start is issued; retry the transient busy state within the
+        # startup window only.
+        if cli_error_code(reason) == "agent_pane_busy" and
+             System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(100)
+          start_agent_command(context, args, env, runtime_root, launch_token, deadline)
+        else
+          {:error, provider_start_failure(runtime_root, launch_token, reason)}
+        end
+    end
+  end
+
+  # A wrapper-side projection rejection (for example a projection tampered
+  # after the transport precheck) leaves a token-bound reject marker; surface
+  # it as the projection-validation stage rather than a generic start failure.
+  defp provider_start_failure(runtime_root, launch_token, reason) do
+    case File.read(Path.join([runtime_root, "launch-acks", launch_token, "wrapper.reject"])) do
+      {:ok, message} ->
+        {:herdr_projection_validation_failed, %{stage: :wrapper, reason: String.trim(message)}}
+
+      {:error, _read_error} ->
+        {:herdr_provider_start_failed, reason}
+    end
+  end
+
+  defp pane_run(context, session_name, env, pane_id, pane_command, failure_stage) do
+    case command(context, ["--session", session_name, "pane", "run", pane_id, pane_command], env) do
+      {:ok, _output} -> :ok
+      {:error, reason} -> {:error, {failure_stage, reason}}
+    end
+  end
+
+  defp verify_wrapper_resolution(preflight_file, expected_wrapper, context) do
+    deadline = System.monotonic_time(:millisecond) + launch_handshake_timeout_ms(context)
+    await_wrapper_resolution(preflight_file, expected_wrapper, deadline)
+  end
+
+  defp await_wrapper_resolution(preflight_file, expected_wrapper, deadline) do
+    case File.read(preflight_file) do
+      {:ok, resolved} ->
+        resolved = String.trim(resolved)
+
+        if resolved == expected_wrapper do
+          :ok
+        else
+          {:error, {:herdr_wrapper_resolution_failed, %{expected: expected_wrapper, resolved: resolved}}}
+        end
+
+      {:error, _reason} ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          {:error, {:herdr_wrapper_resolution_failed, %{expected: expected_wrapper, resolved: nil}}}
+        else
+          Process.sleep(25)
+          await_wrapper_resolution(preflight_file, expected_wrapper, deadline)
+        end
+    end
+  end
+
+  defp launch_nonce do
+    :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+  end
+
+  defp launch_handshake_timeout_ms(context),
+    do: Map.get(context, :launch_handshake_timeout_ms, @default_launch_handshake_timeout_ms)
 
   defp materialize_launch_projection(
          runtime_root,
@@ -838,21 +1140,26 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       |> Base.encode16(case: :lower)
       |> binary_part(0, 16)
 
-    path = Path.join(projection_dir, digest <> ".sh")
+    token = digest <> "-" <> launch_nonce()
+    path = Path.join(projection_dir, token <> ".sh")
 
     case resolve_provider_executable(provider_command, session_env) do
       provider_executable when is_binary(provider_executable) ->
         body = """
         #!/bin/sh
         set -eu
+        self_token=$(basename -- "$0")
+        self_token="${self_token%.sh}"
+        ack_dir=#{shell_escape(Path.join(runtime_root, "launch-acks"))}/"$self_token"
+        mkdir -p "$ack_dir"
+        printf '%s\\n' "$self_token" > "$ack_dir/projection.ack"
         #{launcher_env_exports(extra_env)}
         exec #{shell_escape(provider_executable)} #{Enum.map_join(native_args, " ", &shell_escape/1)}
         """
 
         with :ok <- File.mkdir_p(projection_dir),
-             :ok <- File.write(path, body),
-             :ok <- File.chmod(path, 0o500) do
-          {:ok, [path]}
+             :ok <- write_executable(path, body) do
+          {:ok, token, path}
         else
           {:error, reason} -> {:error, {:launch_projection_materialization_failed, reason}}
         end
@@ -864,6 +1171,50 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp materialize_launch_projection(_root, _agent, _kind, _provider, _args, _extra, _session),
     do: {:error, :invalid_launch_projection}
+
+  defp await_launch_acks(runtime_root, token, context) do
+    ack_dir = Path.join([runtime_root, "launch-acks", token])
+    reject_path = Path.join(ack_dir, "wrapper.reject")
+    deadline = System.monotonic_time(:millisecond) + launch_handshake_timeout_ms(context)
+
+    with :ok <- await_ack(Path.join(ack_dir, "wrapper.ack"), reject_path, token, deadline, :herdr_wrapper_ack_failed) do
+      await_ack(Path.join(ack_dir, "projection.ack"), reject_path, token, deadline, :herdr_projection_ack_failed)
+    end
+  end
+
+  defp await_ack(path, reject_path, token, deadline, failure_stage) do
+    # A wrapper-side rejection can land after Herdr already reported start
+    # success; surface it as the projection-validation stage rather than an
+    # acknowledgement timeout.
+    case File.read(reject_path) do
+      {:ok, message} ->
+        {:error, {:herdr_projection_validation_failed, %{stage: :wrapper, reason: String.trim(message)}}}
+
+      {:error, _reason} ->
+        await_ack_content(path, reject_path, token, deadline, failure_stage)
+    end
+  end
+
+  defp await_ack_content(path, reject_path, token, deadline, failure_stage) do
+    case File.read(path) do
+      {:ok, content} ->
+        observed = String.trim(content)
+
+        if observed == token do
+          :ok
+        else
+          {:error, {failure_stage, %{expected: token, observed: observed}}}
+        end
+
+      {:error, _reason} ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          {:error, {failure_stage, %{expected: token, observed: nil}}}
+        else
+          Process.sleep(25)
+          await_ack(path, reject_path, token, deadline, failure_stage)
+        end
+    end
+  end
 
   defp resolve_provider_executable(provider_command, session_env) do
     search_path =
