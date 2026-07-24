@@ -187,6 +187,107 @@ defmodule SymphonyElixir.ImplementerSupervisionTest do
              ImplementerDelegation.run_turn(session, "Do bounded work.", %{}, supervision_opts())
   end
 
+  defmodule ProgressingWorkingTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      reads = Process.get({__MODULE__, :reads}, 0) + 1
+      Process.put({__MODULE__, :reads}, reads)
+      status = if reads < 6, do: "working", else: "done"
+      {:ok, %{name: agent.name, agent_status: status, agent_session: nil}}
+    end
+
+    def await_agent(_session, _agent, _statuses, _timeout_ms, %{owner: owner}) do
+      send(owner, :recovery_probe)
+      {:error, {:herdr_agent_status_timeout, "implementer_orchestrator", ["idle", "done", "blocked"]}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context) do
+      {:ok, %{text: "output line #{Process.get({__MODULE__, :reads}, 0)}"}}
+    end
+  end
+
+  test "an observably progressing working agent is never treated as stale by wall-clock alone" do
+    Process.delete({ProgressingWorkingTransport, :reads})
+    session = supervised_session(ProgressingWorkingTransport)
+
+    assert {:ok, %{agent_status: "done"}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Do bounded work.",
+               %{},
+               supervision_opts(stale_working_ms: 25, heartbeat_interval_ms: 5)
+             )
+
+    refute_received :recovery_probe
+  end
+
+  defmodule StaleThenRecoveredTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      {:ok, %{name: agent.name, agent_status: "working", agent_session: nil}}
+    end
+
+    def await_agent(_session, agent, ["idle", "done", "blocked"], timeout_ms, %{owner: owner}) do
+      send(owner, {:recovery_probe, timeout_ms})
+      {:ok, %{name: agent.name, agent_status: "done", agent_session: %{value: "recovered-after-stall"}}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "frozen pane"}}
+  end
+
+  test "a stale working agent gets bounded recovery and can still complete" do
+    session = supervised_session(StaleThenRecoveredTransport)
+
+    assert {:ok, %{agent_status: "done", session_id: "recovered-after-stall"}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Do bounded work.",
+               %{},
+               supervision_opts(stale_working_ms: 5, heartbeat_interval_ms: 2)
+             )
+
+    assert_receive {:recovery_probe, 250}
+  end
+
+  defmodule NeverRecoversTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      {:ok, %{name: agent.name, agent_status: "working", agent_session: nil}}
+    end
+
+    def await_agent(_session, agent, _statuses, _timeout_ms, %{owner: owner}) do
+      send(owner, :recovery_probe)
+      {:error, {:herdr_agent_status_timeout, agent.name, ["idle", "done", "blocked"]}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "frozen pane"}}
+  end
+
+  test "failed stale-working recovery exhausts its bound into a typed stalled escalation" do
+    session = supervised_session(NeverRecoversTransport)
+
+    assert {:error, {:implementer_agent_stalled, evidence}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Do bounded work.",
+               %{},
+               supervision_opts(stale_working_ms: 5, heartbeat_interval_ms: 2, max_recovery_attempts: 2)
+             )
+
+    assert [%{result: {:failed, _}}, %{result: {:failed, _}}] = evidence.recovery_history
+    assert {:ok, %{shutdown_reason: :stale_working, pane_tail: "frozen pane"}} = evidence.checkpoint
+    assert count_received(:recovery_probe) == 2
+  end
+
   defp supervised_session(transport) do
     %{
       transport: transport,
