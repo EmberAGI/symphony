@@ -50,7 +50,7 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
 
       log =
         capture_log(fn ->
-          assert catch_exit(AgentRunner.run(issue, nil, run_id: "run-before-run-auth")) ==
+          assert catch_exit(run_agent_with_ownership(issue, nil, run_id: "run-before-run-auth")) ==
                    {:provider_auth_failed,
                     %{
                       provider: :claude_code,
@@ -99,7 +99,7 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
 
       log =
         capture_log(fn ->
-          assert catch_exit(AgentRunner.run(issue, nil, run_id: "run-before-run-ordinary")) ==
+          assert catch_exit(run_agent_with_ownership(issue, nil, run_id: "run-before-run-ordinary")) ==
                    {:agent_runtime_failed, {:workspace_hook_failed, "before_run", 19, "ordinary setup failure token=ordinary-hook-secret\n"}}
         end)
 
@@ -148,7 +148,13 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
       log =
         capture_log(fn ->
           assert {:irrecoverable_runtime_failed, failure} =
-                   catch_exit(AgentRunner.run(issue, nil, run_id: "run-before-run-missing-tool"))
+                   catch_exit(
+                     run_agent_with_ownership(
+                       issue,
+                       nil,
+                       run_id: "run-before-run-missing-tool"
+                     )
+                   )
 
           assert failure.family == :missing_required_tool_or_cli
           assert failure.retryable? == false
@@ -197,7 +203,13 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
       }
 
       capture_log(fn ->
-        assert catch_exit(AgentRunner.run(issue, nil, run_id: "run-non-live-delegation-seal")) ==
+        assert catch_exit(
+                 run_agent_with_ownership(
+                   issue,
+                   nil,
+                   run_id: "run-non-live-delegation-seal"
+                 )
+               ) ==
                  {:agent_runtime_failed, {:non_live_delegation_transport, :default_server_snapshot}}
       end)
     after

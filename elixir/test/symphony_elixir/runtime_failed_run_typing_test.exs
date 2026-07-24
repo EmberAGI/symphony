@@ -320,10 +320,29 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
 
     on_exit(fn -> File.rm_rf(test_root) end)
 
+    issue = issue(label)
+
+    assert {:ok, process_ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: "run-#{label}",
+               holder: ProcessOwnership.holder_id()
+             })
+
+    on_exit(fn ->
+      _ =
+        ProcessOwnership.release(issue, %{
+          holder: process_ownership.holder,
+          run_id: process_ownership.run_id,
+          workspace_path: process_ownership.workspace_path
+        })
+    end)
+
     runner_opts =
       [
         run_id: "run-#{label}",
         role: "implementer",
+        process_ownership: process_ownership,
         delegation_transport: WorkerOutcomeTransport,
         delegation_transport_context: %{
           assignments: Keyword.get(opts, :assignments, []),
@@ -331,8 +350,6 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
           test_pid: Keyword.get(opts, :test_pid)
         }
       ] ++ Keyword.take(opts, [:max_turns, :issue_state_fetcher])
-
-    issue = issue(label)
 
     {reason, _log} =
       with_log(fn ->

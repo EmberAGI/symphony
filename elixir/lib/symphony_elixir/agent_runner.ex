@@ -72,7 +72,7 @@ defmodule SymphonyElixir.AgentRunner do
             )
 
           result ->
-            finish_with_after_run_hook(result, workspace, issue, worker_host, [])
+            result
         end
 
       {:error, reason} ->
@@ -388,7 +388,7 @@ defmodule SymphonyElixir.AgentRunner do
         end
 
       _ ->
-        {:ok, []}
+        {:error, {:process_ownership_publication_failed, :ownership_missing}}
     end
   end
 

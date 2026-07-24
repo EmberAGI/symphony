@@ -464,7 +464,7 @@ defmodule SymphonyElixir.LiveE2ETest do
         prompt: live_prompt(project["slugId"])
       )
 
-      assert :ok = AgentRunner.run(issue, self(), max_turns: 3)
+      assert :ok = run_agent_with_ownership(issue, self(), max_turns: 3)
 
       runtime_info = receive_runtime_info!(issue.id)
 

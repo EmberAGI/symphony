@@ -771,6 +771,11 @@ survivors. A different issue, role, run, or unmarked process is never eligible,
 and ownership release waits until the exact-marker live set is empty. Cleanup
 failure replaces normal completion with a typed runtime failure and is logged
 before retry or terminal classification.
+If the acquired ownership record is missing, malformed, or does not match the
+run capability before hook dispatch, the attempt returns the typed
+`process_ownership_publication_failed` result directly. Neither `before_run`,
+`after_run`, nor the provider prompt may execute because no owned role session
+started.
 Successful cleanup removes the private runtime root, including ephemeral worker
 message evidence, and emits a bounded existing-log/status summary keyed by
 issue, run-owned Herdr session, exact owned PID evidence when available, and
