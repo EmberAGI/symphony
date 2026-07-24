@@ -54,7 +54,11 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     def start_agent(_session, spec, _context),
       do: {:ok, %{name: spec.name, pane_id: "w1:p1", agent_status: "idle"}}
 
-    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+    def begin_turn(_session, agent, prompt, _timeout_ms, context) do
+      if test_pid = Map.get(context, :test_pid) do
+        send(test_pid, {:worker_outcome_turn_started, prompt})
+      end
+
       {:ok,
        %{
          phase: :completed,
@@ -157,6 +161,23 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     assert_typed_failed_run(reason)
   end
 
+  test "a post-turn routing hook failure stops before normal continuation" do
+    reason =
+      run_reason("routing-hook-no-continuation",
+        hook_after_run: "exit 3",
+        max_turns: 2,
+        test_pid: self(),
+        issue_state_fetcher: fn [issue_id] ->
+          {:ok, [%{issue("routing-hook-no-continuation") | id: issue_id}]}
+        end
+      )
+
+    assert_typed_failed_run(reason)
+    assert_receive {:worker_outcome_turn_started, first_prompt}
+    refute first_prompt =~ "previous Codex turn completed normally"
+    refute_receive {:worker_outcome_turn_started, _continuation_prompt}, 100
+  end
+
   test "a failed owned-session cleanup exits with a typed failure, not :normal" do
     reason =
       run_reason("cleanup-failed",
@@ -204,7 +225,8 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
         delegation_transport: WorkerOutcomeTransport,
         delegation_transport_context: %{
           assignments: Keyword.get(opts, :assignments, []),
-          stop_result: Keyword.get(opts, :stop_result, :ok)
+          stop_result: Keyword.get(opts, :stop_result, :ok),
+          test_pid: Keyword.get(opts, :test_pid)
         }
       ] ++ Keyword.take(opts, [:max_turns, :issue_state_fetcher])
 
