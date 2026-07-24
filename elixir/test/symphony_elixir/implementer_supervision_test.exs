@@ -431,6 +431,44 @@ defmodule SymphonyElixir.ImplementerSupervisionTest do
     end
   end
 
+  defmodule DefaultSettleTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", revision: 4, agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      reads = Process.get({__MODULE__, :reads}, 0) + 1
+      Process.put({__MODULE__, :reads}, reads)
+
+      if reads < 3 do
+        {:ok, %{name: agent.name, agent_status: "idle", revision: 4, agent_session: nil}}
+      else
+        {:ok, %{name: agent.name, agent_status: "done", revision: 5, agent_session: %{value: "default-settled"}}}
+      end
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "DEFAULT_SETTLE_COMPLETE"}}
+  end
+
+  test "the production default settle window treats same-revision idle as transitional" do
+    Process.delete({DefaultSettleTransport, :reads})
+    session = supervised_session(DefaultSettleTransport)
+
+    # No settle_window_ms option: the default run_turn behavior must already
+    # cover Herdr's 5000 ms prompt-effect window.
+    assert {:ok, %{agent_status: "done", session_id: "default-settled"}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Do bounded work.",
+               %{},
+               turn_timeout_ms: 5_000,
+               heartbeat_interval_ms: 1,
+               status_read_timeout_ms: 250
+             )
+
+    assert Process.get({DefaultSettleTransport, :reads}) == 3
+  end
+
   describe "pure supervision step" do
     alias SymphonyElixir.ImplementerDelegation.Supervision
 

@@ -56,8 +56,13 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     pane_secret = "PANE TRANSCRIPT token=pane-secret"
     good_checkpoint = {:ok, %{pane_tail: pane_secret, shutdown_reason: :blocked}}
 
-    failed_checkpoint =
-      {:error, {:implementer_checkpoint_failed, %{reason: :pane_unreadable, shutdown_reason: :stale_working, destructive_shutdown_blocked: true}}}
+    failed_checkpoint_details = %{
+      reason: :pane_unreadable,
+      shutdown_reason: :stale_working,
+      destructive_shutdown_blocked: true
+    }
+
+    failed_checkpoint = {:error, {:implementer_checkpoint_failed, failed_checkpoint_details}}
 
     # Blocked → the existing human_input_required family, never ordinary retry.
     assert {:irrecoverable, blocked} =
@@ -72,12 +77,19 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     refute blocked.summary =~ "PANE TRANSCRIPT"
     refute blocked.retry_reason =~ "pane-secret"
 
+    # A bare blocked prompt/wait outcome from the transport is the same
+    # human-decision family: it must never re-enter ordinary retry.
+    assert {:irrecoverable, bare_blocked} =
+             AgentRuntime.classify_failure({:herdr_agent_blocked, "implementer_orchestrator"}, @context)
+
+    assert bare_blocked.family == :human_input_required
+    assert bare_blocked.retryable? == false
+
     # Direct checkpoint failure → irrecoverable, ordinary retry prevented.
-    assert {:irrecoverable, direct} =
-             AgentRuntime.classify_failure(
-               {:implementer_checkpoint_failed, %{reason: :pane_unreadable, shutdown_reason: :hard_budget_exhausted, destructive_shutdown_blocked: true}},
-               @context
-             )
+    direct_checkpoint_failure =
+      {:implementer_checkpoint_failed, %{failed_checkpoint_details | shutdown_reason: :hard_budget_exhausted}}
+
+    assert {:irrecoverable, direct} = AgentRuntime.classify_failure(direct_checkpoint_failure, @context)
 
     assert direct.family == :invalid_workspace_or_runtime_protocol
     assert direct.retryable? == false

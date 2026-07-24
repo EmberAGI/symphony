@@ -827,6 +827,16 @@ defmodule SymphonyElixir.AgentRuntime do
      }}
   end
 
+  defp real_irrecoverable_runtime_reason({:herdr_agent_blocked, agent_name}) when is_binary(agent_name) do
+    {:human_input_required,
+     %{
+       provider: :implementer_delegation,
+       source: "herdr_transport",
+       mode: "blocked_agent",
+       purpose: "delegated Implementer prompt or wait settled blocked awaiting a human decision"
+     }}
+  end
+
   defp real_irrecoverable_runtime_reason({:implementer_checkpoint_failed, details}) when is_map(details) do
     {:invalid_workspace_or_runtime_protocol,
      %{

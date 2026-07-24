@@ -148,7 +148,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
                     max_indeterminate_reads: Keyword.get(opts, :max_indeterminate_reads, 4),
                     stale_working_ms: Keyword.get(opts, :stale_working_ms, 900_000),
                     max_recovery_attempts: Keyword.get(opts, :max_recovery_attempts, 2),
-                    settle_window_ms: Keyword.get(opts, :settle_window_ms, 0),
+                    settle_window_ms: Keyword.get(opts, :settle_window_ms, Supervision.default_settle_window_ms()),
                     on_message: on_message,
                     contract: Map.get(session, :contract, %{})
                   },

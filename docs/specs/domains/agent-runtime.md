@@ -556,8 +556,9 @@ as first-class outcomes. `working` starts a turn; `idle` and `done` complete
 one. `blocked` (a recognized approval/question UI) settles a prompt or wait but
 is never success: it is the typed blocked outcome, surfaced within one bounded
 observation interval. `unknown` never proves completion or turn start; it is
-surfaced immediately as the typed unknown outcome, and transient-versus-
-persistent unknown resolution belongs to the later supervision stage. A status
+surfaced immediately as the typed unknown outcome, and the Stage 2
+supervision machine below owns transient-versus-persistent unknown
+resolution through its bounded indeterminate-read retries. A status
 string outside the five-state enum is a typed protocol/version error, never
 coerced to `unknown`; command failures remain a distinct error class.
 
@@ -606,7 +607,9 @@ default fifteen minutes) gets bounded recovery through the server-owned
 terminal wait (at most two attempts) before a typed stalled escalation; the
 hard turn budget triggers checkpoint-and-preserve, then shutdown. A read
 that observes `idle`/`done` with an unchanged agent revision inside the
-prompt-transition settle window is transitional, not completion.
+prompt-transition settle window (default 5000 ms, matching Herdr's
+prompt-effect window) is transitional, not completion; this is read-only
+revision observation, not 0.7.4 revision-acknowledgement choreography.
 
 Work preservation is scoped to the technically observable. Before any halt
 that can precede a destructive shutdown, the supervisor records a
@@ -618,7 +621,9 @@ blocks destructive shutdown absent an explicit emergency policy: the runner
 must not stop the delegated session on a typed preservation failure and must
 leave the owned-session reference recoverable. A successful checkpoint
 permits bounded shutdown. Supervised typed outcomes feed the shared runtime
-failure families: a blocked agent classifies as `human_input_required`, a
+failure families: a blocked agent — whether surfaced by supervision or as the
+bare typed blocked outcome of a prompt or wait — classifies as
+`human_input_required`, a
 work-preservation checkpoint failure (direct or embedded in a supervised
 outcome) and an out-of-enum protocol status classify as
 `invalid_workspace_or_runtime_protocol` — all irrecoverable, never ordinary
@@ -638,10 +643,13 @@ recovery is exhausted. A prompt or wait whose named live agent has closed is a
 typed closed-agent failure. Native timeouts remain bounded status-timeout
 results and protocol mismatch remains a machine-readable incompatible-runtime
 failure. Symphony does not retain the 0.7.4 `pane run` prompt-submission,
-manual confirmation, revision acknowledgement, top-level wait,
+manual confirmation, revision-acknowledgement choreography, top-level wait,
 provider-specific multiline handling, translation, dual-version, or
 compatibility machinery; `pane run` survives only as the launch PATH
-preparation and preflight primitive described above.
+preparation and preflight primitive described above, and read-only
+observation of the reported agent `revision` (for example the
+prompt-transition settle guard) is not acknowledgement choreography and
+remains permitted.
 
 Inter-agent messaging uses the same `agent prompt` command for Codex and Claude.
 The runtime-owned orchestrator and restricted worker projections add the same

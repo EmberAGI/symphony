@@ -32,6 +32,13 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
   @spec default_status_read_timeout_ms() :: pos_integer()
   def default_status_read_timeout_ms, do: @default_status_read_timeout_ms
 
+  # Herdr 0.7.5's prompt-effect window: a same-revision idle/done read inside
+  # this window after submission is transitional, not completion.
+  @default_settle_window_ms 5_000
+
+  @spec default_settle_window_ms() :: pos_integer()
+  def default_settle_window_ms, do: @default_settle_window_ms
+
   @doc "Build the initial pure supervision state from bounds and the current monotonic time."
   @spec new(map(), integer()) :: state()
   def new(bounds, now_ms) when is_map(bounds) and is_integer(now_ms) do
