@@ -541,7 +541,8 @@ documented invalid-label fallback, now to the universally moderate default.
 
 For Implementer, Symphony resolves one exact orchestrator/worker contract and
 starts a new isolated named Herdr 0.7.5/protocol 17 session containing the
-selected provider's orchestrator and workers. Runtime-owned launchers outside
+orchestrator and workers with their independently resolved participant provider
+bindings. Runtime-owned launchers outside
 the selected repository apply exact model, effort, and reusable profile instructions. Codex
 receives the Markdown body as `developer_instructions`; Claude receives it with
 `--append-system-prompt`. The role `WORKFLOW.md` continues to own issue
