@@ -255,6 +255,87 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     end
   end
 
+  test "stalled cleanup failure replaces timeout retry evidence and suppresses dispatch" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    issue_id = "issue-stall-marker-cleanup-failure"
+    issue = %Issue{id: issue_id, identifier: "MT-STALL-CLEANUP-FAIL", state: "In Progress"}
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      codex_stall_timeout_ms: 1_000
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :StalledMarkerCleanupFailureOrchestrator)
+    {:ok, orchestrator_pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    assert {:ok, ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: "run-stall-cleanup-failure",
+               holder: ProcessOwnership.holder_id()
+             })
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      stop_orchestrator!(orchestrator_pid)
+    end)
+
+    stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
+    initial_state = :sys.get_state(orchestrator_pid)
+    stale_ownership = %{ownership | run_id: "wrong-run"}
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      run_id: ownership.run_id,
+      process_ownership: stale_ownership,
+      last_codex_timestamp: stale_activity_at,
+      started_at: stale_activity_at
+    }
+
+    :sys.replace_state(orchestrator_pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(orchestrator_pid, :tick)
+
+    state =
+      wait_for_orchestrator_state(orchestrator_pid, fn state ->
+        not Map.has_key?(state.running, issue_id) and
+          (Map.has_key?(state.retry_attempts, issue_id) or
+             Map.has_key?(state.blocked_failures, issue_id))
+      end)
+
+    refute Process.alive?(worker_pid)
+
+    assert %{fingerprint: fingerprint} = state.failure_observations[issue_id]
+    assert is_binary(fingerprint)
+
+    if retry = state.retry_attempts[issue_id] do
+      assert retry.error =~ "owned_process_cleanup_failed"
+      assert retry.process_ownership.failure_observation.fingerprint == fingerprint
+      assert retry.process_ownership.state == "quarantined"
+    else
+      assert state.blocked_failures[issue_id].family == :persistent_no_progress
+    end
+  end
+
   test "abnormal DOWN cleanup removes exact-marker descendants before classification" do
     if File.dir?("/proc") do
       issue_id = "issue-down-owned-marker"
@@ -316,6 +397,54 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     else
       assert true
     end
+  end
+
+  test "marker cleanup failure replaces normal DOWN with a typed failed run" do
+    issue_id = "issue-down-marker-cleanup-failure"
+    issue = %Issue{id: issue_id, identifier: "MT-DOWN-CLEANUP-FAIL", state: "In Progress"}
+
+    assert {:ok, ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: "run-down-cleanup-failure",
+               holder: ProcessOwnership.holder_id()
+             })
+
+    stale_ownership = %{ownership | run_id: "wrong-run"}
+    ref = make_ref()
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: issue,
+          run_id: ownership.run_id,
+          process_ownership: stale_ownership,
+          retry_attempt: 1,
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    log =
+      capture_log(fn ->
+        assert {:noreply, updated} =
+                 Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+        refute MapSet.member?(updated.completed, issue_id)
+
+        assert Map.has_key?(updated.retry_attempts, issue_id) or
+                 Map.has_key?(updated.blocked_failures, issue_id)
+      end)
+
+    assert log =~ "Role-run terminal cleanup failed issue_id=#{issue_id}"
+    assert log =~ "owned_process_cleanup_failed"
+    refute log =~ "Agent task completed for issue_id=#{issue_id}"
   end
 
   test "stalled worker restart surfaces quarantined live process ownership on retry status" do
