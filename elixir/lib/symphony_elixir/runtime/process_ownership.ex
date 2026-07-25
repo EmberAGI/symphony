@@ -1577,6 +1577,27 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   # those pids are env-rechecked before signalling; without one the initial
   # TERM pass discovers candidates from a checked table read that stays typed
   # on failure (EMB-1259 66-F1).
+  #
+  # ACCEPTED GAP — the KILL pass can only ever cover pids discovered and
+  # env-matched during the TERM pass. An owned process that becomes
+  # discoverable only AFTER that snapshot (forked late by a surviving
+  # descendant, or whose ownership environment was not yet readable when the
+  # snapshot was taken) is never reached by THIS settlement's KILL. The
+  # narrowing is deliberate: it bounds teardown to one host-wide scan instead
+  # of re-scanning every process's environment per pass, which is what keeps
+  # settlement bounded. The residue is not dropped — it is left to the
+  # ownership record's own liveness evidence (which still reports it live) and
+  # to later reconciliation of orphaned claims. A settlement that still
+  # observes live owned processes fails typed, so this gap can never be
+  # laundered into a forged clean settlement.
+  #
+  # `process_env_matches?/2` widens the gap off Linux: it reads
+  # /proc/<pid>/environ, so on a host without /proc the read fails, the matcher
+  # is false for EVERY pid, and the whole env-scoped sweep is inert — teardown
+  # signals nothing and the narrowing is trivially total. Containment there
+  # rests entirely on liveness evidence and reconciliation, and any test
+  # asserting owned-pid set CONTENT on such a host is asserting a tautology.
+  # See docs/specs/domains/agent-runtime.md, "Rules and invariants".
   defp signal_matching_processes(criteria, signal, candidates \\ nil)
        when is_list(criteria) and signal in ["TERM", "KILL"] do
     candidates_result =
