@@ -559,7 +559,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
          observed_worker_assignments(
            assignments,
            results,
-           delivered_worker_messages(worker_events),
+           channel_records(worker_events),
            session,
            worker,
            context
@@ -1469,6 +1469,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     #!/bin/sh
     set -eu
     #{authorization}
+    #{worker_event_recorder(runtime_root)}
     if [ "${1:-}" = "agent" ] && [ "${2:-}" = "prompt" ] && [ "$#" -ge 4 ]; then
       agent_name=$3
       message=$4
@@ -1509,37 +1510,52 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     """
   end
 
-  # Every delivery to the worker is recorded, not only the ones shaped as an
-  # `OCTO_MSG/1 kind=assignment`. A delegation whose assignment record is
-  # missing is then still observable as a delegation that happened, so it
-  # cannot be read back as a run that never used its worker.
-  defp worker_message_recording(:orchestrator, runtime_root) do
+  # Sequence-numbered so the read side recovers delivery order from a lexical
+  # sort. Each role writes its own prefixes, and one agent's prompts are
+  # serial, so the count-then-create step needs no cross-process locking.
+  defp worker_event_recorder(runtime_root) do
     worker_events = worker_events_root(runtime_root)
 
     """
+    record_worker_event() {
+      _prefix=$1
+      _seq=$( (set -- #{shell_escape(worker_events)}/"$_prefix".*; if [ -e "$1" ]; then printf '%s' "$#"; else printf '0'; fi) )
+      _file=$(mktemp #{shell_escape(worker_events)}/"$_prefix"."$(printf '%06d' "$((_seq + 1))")".XXXXXX)
+      printf '%s\\n' "$2" > "$_file"
+    }
+    """
+  end
+
+  # The channel itself is the record. Every prompt the orchestrator sends to
+  # the worker is a delivery and every prompt the worker sends back is a reply,
+  # whether or not either side used the `OCTO_MSG` envelope. The envelope stays
+  # the richer record — it carries the agent's own assignment id and status —
+  # but the evidence contract no longer depends on an agent remembering it.
+  defp worker_message_recording(:orchestrator, _runtime_root) do
+    """
     case "$agent_name" in
       implementer_worker)
-        delivery_file=$(mktemp #{shell_escape(Path.join(worker_events, "delivery.XXXXXX"))})
-        printf '%s\\n' "$message" > "$delivery_file"
+        record_worker_event delivery "$message"
         ;;
     esac
     case "$agent_name:$message" in
       implementer_worker:'#{@worker_assignment_prefix}'*)
-        event_file=$(mktemp #{shell_escape(Path.join(worker_events, "assignment.XXXXXX"))})
-        printf '%s\\n' "$message" > "$event_file"
+        record_worker_event assignment "$message"
         ;;
     esac
     """
   end
 
-  defp worker_message_recording(:worker, runtime_root) do
-    worker_events = worker_events_root(runtime_root)
-
+  defp worker_message_recording(:worker, _runtime_root) do
     """
+    case "$agent_name" in
+      implementer_orchestrator)
+        record_worker_event reply "$message"
+        ;;
+    esac
     case "$agent_name:$message" in
       implementer_orchestrator:'#{@worker_result_prefix}'*)
-        event_file=$(mktemp #{shell_escape(Path.join(worker_events, "result.XXXXXX"))})
-        printf '%s\\n' "$message" > "$event_file"
+        record_worker_event result "$message"
         ;;
     esac
     """
@@ -1618,30 +1634,59 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     end)
   end
 
-  defp delivered_worker_messages(worker_events) do
-    worker_events
-    |> Path.join("delivery.*")
-    |> Path.wildcard()
-    |> length()
+  defp channel_records(worker_events) do
+    %{
+      deliveries: sequenced_worker_events(worker_events, "delivery.*"),
+      replies: sequenced_worker_events(worker_events, "reply.*")
+    }
   end
 
-  # A delivery to the worker that produced neither a recorded assignment nor a
-  # recorded result is a delegation Symphony cannot describe. It is reported as
-  # an observation the caller must type, never folded back into "no worker
-  # assignments".
-  defp observed_worker_assignments(assignments, results, delivered, session, worker, context) do
+  defp sequenced_worker_events(worker_events, pattern) do
+    worker_events
+    |> Path.join(pattern)
+    |> Path.wildcard()
+    |> Enum.sort()
+    |> Enum.map(&Path.basename/1)
+  end
+
+  # The `OCTO_MSG` envelope is preferred where an agent used it, because it
+  # carries the agent's own assignment id and status. Where it was not used the
+  # channel still proves the delegation, so a delivered assignment is never
+  # read back as a run that had no worker.
+  defp observed_worker_assignments(assignments, results, channel, session, worker, context) do
     correlated = correlate_worker_assignments(assignments, results, session, worker, context)
 
     case correlated ++ unrecorded_assignment_results(assignments, results) do
-      [] -> undelivered_or_unrecorded(delivered)
-      observed -> observed
+      [] -> channel_worker_assignments(channel, session, worker, context)
+      observed -> Enum.map(observed, &Map.put(&1, :evidence, :envelope))
     end
   end
 
-  defp undelivered_or_unrecorded(0), do: []
+  defp channel_worker_assignments(%{deliveries: deliveries, replies: replies}, session, worker, context) do
+    deliveries
+    |> Enum.with_index()
+    |> Enum.map(fn {delivery, index} ->
+      assignment_id = channel_assignment_id(session, delivery)
 
-  defp undelivered_or_unrecorded(delivered),
-    do: [%{assignment_id: nil, status: :delegation_unrecorded, delivered: delivered}]
+      case Enum.at(replies, index) do
+        nil ->
+          assignment_id
+          |> worker_assignment_status(nil, session, worker, context)
+          |> Map.put(:evidence, :channel)
+
+        _reply ->
+          %{
+            assignment_id: assignment_id,
+            status: :completed,
+            evidence: :channel,
+            result: %{assignment_id: assignment_id, status: "returned"}
+          }
+      end
+    end)
+  end
+
+  defp channel_assignment_id(session, delivery),
+    do: "#{Map.get(session, :name)}/#{delivery}"
 
   defp unrecorded_assignment_results(assignments, results) do
     assigned = MapSet.new(assignments, &Map.get(&1, "assignment"))

@@ -127,8 +127,8 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     session = start_implementer_session(context, "evidence-unrecorded")
 
     # Exactly what the EMB-1282 orchestrator did: it delegated bounded work to
-    # the prestarted worker through its own Herdr authority. The delegation is
-    # real; only its `OCTO_MSG/1 kind=assignment` record is absent.
+    # the prestarted worker through its own Herdr authority. Here the worker
+    # never answers, so there is a delegation and no result to correlate.
     assert :ok =
              orchestrator_prompt(
                session,
@@ -141,7 +141,9 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
 
     refute log =~ @correlation_event
 
-    assert {:error, {:implementer_worker_delegation_unrecorded, %{delivered: 1}}} = result
+    assert {:error, {:implementer_worker_result_missing, %{assignment_id: assignment_id}}} = result
+    assert assignment_id =~ session.name
+    assert assignment_id =~ "delivery."
 
     stop(session)
   end
@@ -177,7 +179,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
                assignment_id: assignment_id,
                status: :completed,
                evidence: :channel,
-               result: %{assignment_id: assignment_id, status: "completed"}
+               result: %{assignment_id: assignment_id, status: "returned"}
              }
            ] = turn.worker_assignments
 
