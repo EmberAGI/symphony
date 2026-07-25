@@ -689,8 +689,6 @@ defmodule SymphonyElixir.Workspace do
     [{"SYMPHONY_ISSUE_IDENTIFIER", issue_identifier}]
   end
 
-  defp workspace_removal_env(_issue_context), do: []
-
   defp hook_env_exports(env) do
     Enum.map_join(env, "\n", fn {key, value} -> "export #{key}=#{shell_escape(value)}" end)
   end
