@@ -147,8 +147,18 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
     assert %{owned_pids: owned_pids, live_after: 0, verified: true, evidence_status: :captured} =
              status.cleanup_evidence
 
-    assert owned_pids == [],
-           "a physically clean cancellation owns no surviving pid, got #{inspect(owned_pids)}"
+    # `live_after: 0` above is the platform-stable proof that nothing this run
+    # owned survived teardown: liveness is decided by the `ps`-based
+    # process-table read, which works on every supported host. `owned_pids` is
+    # the PRE-teardown capture, so on a run whose `hook_before_run` owned real
+    # processes it is never empty. Asserting it empty read the snapshot as if
+    # it were the survivor set, and held only where the `/proc` ownership sweep
+    # that populates it is inert — exactly the tautology this file warns about
+    # for evidence-content assertions.
+    if File.dir?("/proc") do
+      refute owned_pids == [],
+             "the capture must record the hook processes this run owned before teardown"
+    end
   end
 
   # Terminal settlement must RELEASE the ownership record, not merely stop
@@ -260,7 +270,13 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
     assert %{owned_pids: owned_pids, live_after: 0, verified: true, evidence_status: :captured} =
              status.cleanup_evidence
 
-    assert owned_pids == [], "no owned pid survived the stall termination, got #{inspect(owned_pids)}"
+    # As above: `live_after: 0` proves nothing survived the stall termination.
+    # This run's `hook_before_run` owned real processes, so its pre-teardown
+    # capture is non-empty wherever the ownership sweep actually runs.
+    if File.dir?("/proc") do
+      refute owned_pids == [],
+             "the capture must record the hook processes this run owned before teardown"
+    end
   end
 
   test "genuine survivors still settle typed: quarantine keeps live_after evidence" do
