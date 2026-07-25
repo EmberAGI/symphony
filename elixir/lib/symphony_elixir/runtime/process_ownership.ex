@@ -1416,13 +1416,30 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     # record had ~300 dead pids). The app-server anchor is always retained;
     # terminal settlement captures its own evidence pre-teardown (EMB-1259), so
     # dropping dead pids here never changes cleanup_evidence semantics.
-    table = process_table()
+    #
+    # Pruning is an optimisation over a SUCCESSFUL observation, so it reads the
+    # table through the TYPED reader. A failed read is never evidence of an
+    # empty table (see `checked_process_table/0`); pruning against one would
+    # silently empty the recorded pid set and discard the very evidence a
+    # settlement needs. On an unusable read the recorded pids are therefore
+    # retained unpruned, alongside the always-retained app-server anchor.
+    case checked_process_table() do
+      {:ok, table} -> pruned_process_tree_pids(app_server_pid, existing_pids, table)
+      {:error, _unavailable} -> normalize_tree_pids([app_server_pid] ++ existing_pids)
+    end
+  end
+
+  defp pruned_process_tree_pids(app_server_pid, existing_pids, table) do
     live = live_pid_set(table)
     anchor = pid_value(app_server_pid)
 
     live_existing = Enum.filter(existing_pids, fn pid -> MapSet.member?(live, pid_value(pid)) end)
 
-    ([app_server_pid] ++ live_existing ++ descendants_from_process_table(table, anchor))
+    normalize_tree_pids([app_server_pid] ++ live_existing ++ descendants_from_process_table(table, anchor))
+  end
+
+  defp normalize_tree_pids(pids) do
+    pids
     |> Enum.map(&pid_value/1)
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
