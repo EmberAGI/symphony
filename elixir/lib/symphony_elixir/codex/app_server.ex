@@ -58,9 +58,11 @@ defmodule SymphonyElixir.Codex.AppServer do
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, launch} <- launch_config(issue, role),
          {:ok, command} <- project_skill_permissions(launch.command, skill_projection),
+         bootstrap_env = issue_bootstrap_env(opts),
          ownership_env = ownership_env(issue, role, expanded_workspace, opts),
          projection_env = Map.to_list(skill_projection.environment),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, command, projection_env ++ ownership_env) do
+         {:ok, port} <-
+           start_port(expanded_workspace, worker_host, command, bootstrap_env ++ projection_env ++ ownership_env) do
       metadata = port_metadata(port, worker_host) |> Map.merge(launch.metadata)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
@@ -319,6 +321,18 @@ defmodule SymphonyElixir.Codex.AppServer do
       exec
     ]
     |> Enum.join(" && ")
+  end
+
+  # `AgentRuntime.start_session/2` projects the declared role bootstrap inputs
+  # once, before it selects a session path, and threads the result here; a role
+  # turn that cannot be supplied one never reaches this adapter. Direct adapter
+  # invocation (adapter-protocol exercises) carries no role bootstrap and
+  # projects none.
+  defp issue_bootstrap_env(opts) do
+    case Keyword.get(opts, :issue_bootstrap_env) do
+      env when is_map(env) -> Map.to_list(env)
+      _ -> []
+    end
   end
 
   defp ownership_env(issue, role, workspace, opts) do

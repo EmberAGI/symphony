@@ -8,15 +8,31 @@ defmodule SymphonyElixir.Workspace do
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
 
+  # Per-turn bootstrap inputs the role workflows declare as required. Every
+  # role fails closed when one is absent rather than inferring repository or
+  # branch metadata, so a nil here is a missing input, not an empty variable:
+  # the projection names it and fails at this boundary instead of handing the
+  # role an unset variable three layers later, inside the turn.
+  @required_bootstrap_env [
+    {"SYMPHONY_ISSUE_REPOSITORY", :repository},
+    {"SYMPHONY_EXPECTED_BRANCH", :expected_branch}
+  ]
+
   @type worker_host :: String.t() | nil
 
-  @doc "Return the non-secret issue context exported to workspace hooks and delegated runtimes."
-  @spec issue_environment(map() | String.t() | nil) :: %{String.t() => String.t()}
+  @doc """
+  Return the non-secret issue context exported to workspace hooks and role
+  runtimes.
+
+  This is the single bootstrap projection every role turn goes through. It
+  fails typed when a required bootstrap input cannot be supplied.
+  """
+  @spec issue_environment(map() | String.t() | nil) ::
+          {:ok, %{String.t() => String.t()}} | {:error, {:missing_required_bootstrap_input, map()}}
   def issue_environment(issue_or_identifier) do
-    issue_or_identifier
-    |> issue_context()
-    |> hook_env()
-    |> Map.new()
+    with {:ok, env} <- issue_or_identifier |> issue_context() |> hook_env() do
+      {:ok, Map.new(env)}
+    end
   end
 
   @spec create_for_issue(map() | String.t() | nil, worker_host()) ::
@@ -315,12 +331,15 @@ defmodule SymphonyElixir.Workspace do
             :ok
 
           command ->
-            run_hook(
+            removal_context = %{issue_id: nil, issue_identifier: Path.basename(workspace)}
+
+            run_hook_with_env(
               command,
               workspace,
-              %{issue_id: nil, issue_identifier: Path.basename(workspace)},
+              removal_context,
               "before_remove",
-              nil
+              nil,
+              workspace_removal_env(removal_context)
             )
             |> ignore_hook_failure()
         end
@@ -371,9 +390,13 @@ defmodule SymphonyElixir.Workspace do
   defp ignore_hook_failure(:ok), do: :ok
   defp ignore_hook_failure({:error, _reason}), do: :ok
 
-  defp run_hook(command, workspace, issue_context, hook_name, worker_host, extra_env \\ [])
+  defp run_hook(command, workspace, issue_context, hook_name, worker_host, extra_env \\ []) do
+    with {:ok, env} <- hook_env(issue_context, extra_env) do
+      run_hook_with_env(command, workspace, issue_context, hook_name, worker_host, env)
+    end
+  end
 
-  defp run_hook(command, workspace, issue_context, hook_name, nil, extra_env) do
+  defp run_hook_with_env(command, workspace, issue_context, hook_name, nil, env) do
     timeout_ms = Config.settings!().hooks.timeout_ms
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local")
@@ -383,7 +406,7 @@ defmodule SymphonyElixir.Workspace do
         System.cmd("sh", ["-lc", command],
           cd: workspace,
           stderr_to_stdout: true,
-          env: hook_env(issue_context, extra_env)
+          env: env
         )
       end)
 
@@ -400,7 +423,7 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp run_hook(command, workspace, issue_context, hook_name, worker_host, extra_env)
+  defp run_hook_with_env(command, workspace, issue_context, hook_name, worker_host, env)
        when is_binary(worker_host) do
     timeout_ms = Config.settings!().hooks.timeout_ms
 
@@ -408,7 +431,7 @@ defmodule SymphonyElixir.Workspace do
 
     script =
       [
-        hook_env_exports(issue_context, extra_env),
+        hook_env_exports(env),
         "cd #{shell_escape(workspace)}",
         command
       ]
@@ -614,30 +637,62 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp hook_env(issue_context, extra_env \\ []) do
-    base_env = [
+    optional_env = [
       {"SYMPHONY_ISSUE_ID", issue_context.issue_id},
       {"SYMPHONY_ISSUE_IDENTIFIER", issue_context.issue_identifier},
       {"SYMPHONY_ISSUE_TITLE", Map.get(issue_context, :issue_title)},
       {"SYMPHONY_ISSUE_STATE", Map.get(issue_context, :issue_state)},
       {"SYMPHONY_ISSUE_BRANCH_NAME", Map.get(issue_context, :issue_branch_name)},
       {"SYMPHONY_ISSUE_URL", Map.get(issue_context, :issue_url)},
-      {"SYMPHONY_ISSUE_REPOSITORY", Map.get(issue_context, :repository)},
-      {"SYMPHONY_ISSUE_REPOSITORY_SOURCE", Map.get(issue_context, :repository_source)},
-      {"SYMPHONY_EXPECTED_BRANCH", Map.get(issue_context, :expected_branch)}
+      {"SYMPHONY_ISSUE_REPOSITORY_SOURCE", Map.get(issue_context, :repository_source)}
     ]
 
-    base_env
-    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
-    |> Enum.map(fn {key, value} -> {key, env_value(value)} end)
-    |> Map.new()
-    |> Map.merge(Map.new(extra_env))
-    |> Map.to_list()
+    with {:ok, required_env} <- required_bootstrap_env(issue_context) do
+      {:ok,
+       optional_env
+       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+       |> Kernel.++(required_env)
+       |> Enum.map(fn {key, value} -> {key, env_value(value)} end)
+       |> Map.new()
+       |> Map.merge(Map.new(extra_env))
+       |> Map.to_list()}
+    end
   end
 
-  defp hook_env_exports(issue_context, extra_env) do
-    issue_context
-    |> hook_env(extra_env)
-    |> Enum.map_join("\n", fn {key, value} -> "export #{key}=#{shell_escape(value)}" end)
+  # A required bootstrap input is never dropped: it is projected with its
+  # value, or the projection fails naming the variable that could not be
+  # supplied and the issue it was projected for.
+  defp required_bootstrap_env(issue_context) do
+    Enum.reduce_while(@required_bootstrap_env, {:ok, []}, fn {key, field}, {:ok, acc} ->
+      case Map.get(issue_context, field) do
+        value when is_binary(value) and value != "" ->
+          {:cont, {:ok, [{key, value} | acc]}}
+
+        _value ->
+          {:halt,
+           {:error,
+            {:missing_required_bootstrap_input,
+             %{
+               name: key,
+               field: field,
+               issue_id: issue_context.issue_id,
+               issue_identifier: issue_context.issue_identifier
+             }}}}
+      end
+    end)
+  end
+
+  # Workspace removal is not a role turn: it carries no issue bootstrap and
+  # projects none. Only the identifier the workspace path already encodes is
+  # exported, exactly as before.
+  defp workspace_removal_env(%{issue_identifier: issue_identifier}) when is_binary(issue_identifier) do
+    [{"SYMPHONY_ISSUE_IDENTIFIER", issue_identifier}]
+  end
+
+  defp workspace_removal_env(_issue_context), do: []
+
+  defp hook_env_exports(env) do
+    Enum.map_join(env, "\n", fn {key, value} -> "export #{key}=#{shell_escape(value)}" end)
   end
 
   defp issue_value(issue, key), do: Map.get(issue, key) || Map.get(issue, to_string(key))

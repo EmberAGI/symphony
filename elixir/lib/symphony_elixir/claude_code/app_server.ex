@@ -102,6 +102,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, launch} <- launch_config(issue, role) do
+      bootstrap_env = issue_bootstrap_env(opts)
       ownership_env = ownership_env(issue, role, expanded_workspace, opts)
       provider_auth_env = local_provider_auth_env(worker_host)
 
@@ -113,7 +114,11 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
          worker_host: worker_host,
          launch:
            launch
-           |> Map.put(:env, launch.env ++ Map.to_list(skill_projection.environment) ++ provider_auth_env ++ ownership_env)
+           |> Map.put(
+             :env,
+             launch.env ++
+               bootstrap_env ++ Map.to_list(skill_projection.environment) ++ provider_auth_env ++ ownership_env
+           )
            |> Map.put(:skill_args, skill_projection.args),
          claude_session_id: nil
        }}
@@ -395,6 +400,18 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
       exec
     ]
     |> Enum.join(" && ")
+  end
+
+  # `AgentRuntime.start_session/2` projects the declared role bootstrap inputs
+  # once, before it selects a session path, and threads the result here; a role
+  # turn that cannot be supplied one never reaches this adapter. Direct adapter
+  # invocation (adapter-protocol exercises) carries no role bootstrap and
+  # projects none.
+  defp issue_bootstrap_env(opts) do
+    case Keyword.get(opts, :issue_bootstrap_env) do
+      env when is_map(env) -> Map.to_list(env)
+      _ -> []
+    end
   end
 
   defp ownership_env(issue, role, workspace, opts) do

@@ -74,8 +74,9 @@ defmodule SymphonyElixir.RoleBootstrapEnvironmentTest do
 
       case "$count" in
         1) printf '%s\\n' '{"id":1,"result":{}}' ;;
-        2) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1270"}}}' ;;
-        3)
+        2) ;;
+        3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1270"}}}' ;;
+        4)
           printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1270"}}}'
           printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"BOOTSTRAP_OK"}}'
           printf '%s\\n' '{"method":"turn/completed"}'
