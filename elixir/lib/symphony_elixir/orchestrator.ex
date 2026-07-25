@@ -2374,13 +2374,35 @@ defmodule SymphonyElixir.Orchestrator do
       |> Map.keys()
       |> MapSet.new()
       |> MapSet.union(MapSet.new(Map.keys(state.retry_attempts)))
+      |> MapSet.union(settling_issue_ids(state))
 
     state.claimed
     |> MapSet.difference(active_claims)
     |> Enum.reduce(state, fn issue_id, state_acc ->
-      Logger.warning("Claimed issue is neither running nor retrying; releasing leaked claim issue_id=#{issue_id}")
+      Logger.warning("Claimed issue is neither running, retrying nor settling; releasing leaked claim issue_id=#{issue_id}")
+
       release_issue_claim(state_acc, issue_id)
     end)
+  end
+
+  # An issue whose terminal settlement is in flight has been popped out of
+  # `state.running` but is emphatically NOT free: its predecessor run is still
+  # tearing down. Reading claims from running ∪ retry_attempts alone made such
+  # an issue look orphaned, released its claim, and made it re-dispatchable
+  # mid-teardown — the canary contract's "no equivalent redispatch" violated.
+  #
+  # Settlement contexts are read defensively: a context without a usable issue
+  # id contributes nothing rather than crashing the reconciliation pass that
+  # every poll cycle depends on. Nothing here reads `:snapshot`, which is
+  # populated asynchronously and may still be nil.
+  defp settling_issue_ids(%State{} = state) do
+    state.settlements
+    |> Map.values()
+    |> Enum.flat_map(fn
+      %{issue_id: issue_id} when is_binary(issue_id) -> [issue_id]
+      _settlement -> []
+    end)
+    |> MapSet.new()
   end
 
   defp release_issue_claim(%State{} = state, issue_id, issue \\ nil) do
