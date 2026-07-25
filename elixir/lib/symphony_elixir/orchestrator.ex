@@ -35,7 +35,17 @@ defmodule SymphonyElixir.Orchestrator do
   # Ownership states that mean settlement already reached its terminal write.
   # A record in one of these has LEFT active on its own observed evidence, so
   # the settlement deadline must never overwrite it with a fabricated failure.
-  @settled_ownership_states ~w(cleaned released)
+  #
+  # `quarantined` belongs here UNCONDITIONALLY, not only when its evidence shows
+  # a physically clean runtime. The question this list answers is "did the
+  # settlement already land a terminal typed write?", not "is the runtime
+  # clean?". A quarantine carrying evidence marked unavailable is still a true
+  # statement about what the settlement could observe; replacing it with a
+  # fabricated `terminal_settlement_timed_out` reason would destroy true
+  # evidence and substitute a claim that may be false (EMB-1260 67-SF4b,
+  # preserving the 67-F1 property). A settled record still hands off to the
+  # ordinary retry lease, so nothing is left unreconciled.
+  @settled_ownership_states ~w(cleaned released quarantined)
   @work_admission_marker_version 1
   @max_generation_length 128
   @settlement_evidence_unavailable_reason "settlement_evidence_unavailable: terminal cleanup evidence could not be captured"
