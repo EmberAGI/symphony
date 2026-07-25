@@ -400,11 +400,11 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
       }
 
-      assert {:noreply, updated} =
-               Orchestrator.handle_info(
-                 {:DOWN, ref, :process, self(), {:shutdown, :owned_marker_failure}},
-                 state
-               )
+      # Terminal settlement is off the serial path (EMB-1260): the DOWN
+      # handler dispatches it and finalizes on the settlement-result message.
+      # Drive that message through handle_info so the direct-call test observes
+      # the same finalized state a live loop would, with assertions unchanged.
+      updated = drive_down_settlement(state, ref, {:shutdown, :owned_marker_failure})
 
       assert updated.retry_attempts[issue_id].process_ownership.state == "retrying"
       assert_eventually(fn -> !os_process_alive?(owned_shell_pid) end)

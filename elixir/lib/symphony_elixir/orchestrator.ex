@@ -32,6 +32,10 @@ defmodule SymphonyElixir.Orchestrator do
   # silently active because teardown hung (EMB-1260). Generous default,
   # overridable for tests via app env.
   @default_terminal_settlement_timeout_ms 60_000
+  # Ownership states that mean settlement already reached its terminal write.
+  # A record in one of these has LEFT active on its own observed evidence, so
+  # the settlement deadline must never overwrite it with a fabricated failure.
+  @settled_ownership_states ~w(cleaned released)
   @work_admission_marker_version 1
   @max_generation_length 128
   @settlement_evidence_unavailable_reason "settlement_evidence_unavailable: terminal cleanup evidence could not be captured"
@@ -1110,42 +1114,109 @@ defmodule SymphonyElixir.Orchestrator do
 
         kill_settlement_task(settlement)
 
-        Logger.error(
-          "Terminal settlement timed out issue_id=#{issue_id} " <>
-            "session_id=#{running_entry_session_id(running_entry)} elapsed_ms=#{elapsed_ms}; " <>
-            "quarantining ownership record typed and scheduling retry"
-        )
+        # The settlement task may have landed its terminal record write in the
+        # microseconds before this deadline message reached the mailbox head. The
+        # quarantine write below verifies IDENTITY, not state, so without this
+        # one cheap read it would overwrite a completed settlement's real outcome
+        # with a fabricated timeout failure.
+        case settled_settlement_record(running_entry) do
+          {:settled, record_state} ->
+            settle_late_terminal_settlement(state, issue_id, running_entry, record_state, elapsed_ms)
 
-        quarantine_reason = "terminal_settlement_timed_out elapsed_ms=#{elapsed_ms}"
-
-        # ONE cheap write, no scans: quarantine the record typed using the held
-        # ownership identity so it leaves active instead of hanging forever. The
-        # pre-teardown snapshot captured on dispatch is preserved as unverified
-        # cleanup_evidence (settlement never got to confirm liveness).
-        _ =
-          update_owned_state(
-            Map.get(running_entry, :issue),
-            running_entry,
-            "quarantined",
-            %{
-              quarantine_reason: quarantine_reason,
-              session_id: running_entry_session_id(running_entry),
-              cleanup_evidence: timed_out_settlement_evidence(settlement)
-            }
-          )
-
-        finalize_timed_out_settlement(state, issue_id, running_entry, quarantine_reason, elapsed_ms)
+          :unsettled ->
+            quarantine_timed_out_settlement(state, issue_id, running_entry, settlement, elapsed_ms)
+        end
     end
   end
 
-  # A timed-out settlement is a typed retryable failure: schedule a retry
-  # carrying the typed observation so the existing fingerprint machinery sees an
-  # identical repeat rather than treating it as fresh work.
-  defp finalize_timed_out_settlement(%State{} = state, issue_id, running_entry, quarantine_reason, _elapsed_ms) do
-    maybe_notify_agent_failed(running_entry, quarantine_reason)
+  # The record is still active/retrying at the deadline: settle it typed.
+  defp quarantine_timed_out_settlement(%State{} = state, issue_id, running_entry, settlement, elapsed_ms) do
+    Logger.error(
+      "Terminal settlement timed out issue_id=#{issue_id} " <>
+        "session_id=#{running_entry_session_id(running_entry)} elapsed_ms=#{elapsed_ms}; " <>
+        "quarantining ownership record typed and scheduling retry"
+    )
+
+    quarantine_reason = "terminal_settlement_timed_out elapsed_ms=#{elapsed_ms}"
+
+    # ONE cheap write, no scans: quarantine the record typed using the held
+    # ownership identity so it leaves active instead of hanging forever. The
+    # pre-teardown snapshot captured on dispatch is preserved as unverified
+    # cleanup_evidence (settlement never got to confirm liveness).
+    _ =
+      update_owned_state(
+        Map.get(running_entry, :issue),
+        running_entry,
+        "quarantined",
+        %{
+          quarantine_reason: quarantine_reason,
+          session_id: running_entry_session_id(running_entry),
+          cleanup_evidence: timed_out_settlement_evidence(settlement)
+        }
+      )
+
+    finalize_settlement_deadline(
+      state,
+      issue_id,
+      running_entry,
+      {:terminal_settlement_timed_out, quarantine_reason},
+      "quarantined"
+    )
+  end
+
+  # The settlement task already wrote its terminal outcome — the record LEFT
+  # active on its own observed evidence. A completed settlement is never
+  # replaced by a fabricated failure: skip the quarantine write entirely and
+  # finalize the issue lifecycle on a plain retry lease whose error says the
+  # settlement landed late. (The task is killed either way; its
+  # {:settlement_result, ...} may still race the kill and arrive afterwards,
+  # where finalize_terminal_settlement/3 no-ops on the now-unknown token.)
+  defp settle_late_terminal_settlement(%State{} = state, issue_id, running_entry, record_state, elapsed_ms) do
+    Logger.warning(
+      "Terminal settlement completed at its deadline issue_id=#{issue_id} " <>
+        "session_id=#{running_entry_session_id(running_entry)} elapsed_ms=#{elapsed_ms} " <>
+        "record_state=#{record_state}; keeping the settled record and scheduling retry"
+    )
+
+    late_reason = "terminal_settlement_completed_late elapsed_ms=#{elapsed_ms} record_state=#{record_state}"
+
+    finalize_settlement_deadline(
+      state,
+      issue_id,
+      running_entry,
+      {:terminal_settlement_completed_late, late_reason},
+      "retrying"
+    )
+  end
+
+  # Reads the CURRENT state of the record this settlement owns through the held
+  # ownership identity: one exact-scope read, no process scans. A read that
+  # cannot confirm a settled record fails closed to :unsettled, keeping the
+  # existing typed-quarantine behaviour.
+  defp settled_settlement_record(running_entry) when is_map(running_entry) do
+    with %Issue{} = issue <- Map.get(running_entry, :issue),
+         ownership when is_map(ownership) <- Map.get(running_entry, :process_ownership),
+         {:ok, %{state: record_state}} when record_state in @settled_ownership_states <-
+           ProcessOwnership.verify(issue, ownership_identity(ownership)) do
+      {:settled, record_state}
+    else
+      _ -> :unsettled
+    end
+  end
+
+  defp settled_settlement_record(_running_entry), do: :unsettled
+
+  # A settlement that reached its deadline is a typed retryable failure either
+  # way: schedule a retry carrying the typed observation so the existing
+  # fingerprint machinery sees an identical repeat rather than treating it as
+  # fresh work. The lease reflects what the record actually shows — quarantined
+  # for a genuinely unsettled record, a plain retry lease for one the settlement
+  # already completed.
+  defp finalize_settlement_deadline(%State{} = state, issue_id, running_entry, {_tag, reason_text} = typed_reason, lease_state) do
+    maybe_notify_agent_failed(running_entry, reason_text)
     RoleTurnRecovery.clear_turn(issue_id)
 
-    reason = {:agent_runtime_failed, {:terminal_settlement_timed_out, quarantine_reason}}
+    reason = {:agent_runtime_failed, typed_reason}
     next_attempt = next_retry_attempt_from_running(running_entry)
 
     state =
@@ -1160,7 +1231,7 @@ defmodule SymphonyElixir.Orchestrator do
           |> put_failure_observation(issue_id, failure_observation)
           |> schedule_issue_retry(issue_id, next_attempt, %{
             identifier: Map.get(running_entry, :identifier, issue_id),
-            error: quarantine_reason,
+            error: reason_text,
             worker_host: Map.get(running_entry, :worker_host),
             workspace_path: Map.get(running_entry, :workspace_path),
             issue: Map.get(running_entry, :issue),
@@ -1168,7 +1239,7 @@ defmodule SymphonyElixir.Orchestrator do
             process_ownership: retry_process_ownership_status(running_entry),
             retry_reason: Map.fetch!(failure, :retry_reason),
             failure_observation: failure_observation,
-            lease_state: "quarantined"
+            lease_state: lease_state
           })
       end
 

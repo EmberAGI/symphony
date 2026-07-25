@@ -239,7 +239,137 @@ defmodule SymphonyElixir.OrchestratorServiceabilityTest do
   end
 
   # ---------------------------------------------------------------------------
-  # Contract 4: BOUNDED, BATCHED TEARDOWN / LIVENESS
+  # Contract 4: A SETTLED RECORD IS NEVER CLOBBERED BY ITS OWN DEADLINE
+  #
+  # The settlement task can land its terminal record write microseconds before
+  # the deadline fires, and the mailbox can still process {:settlement_timeout,
+  # token} first. The timeout write is identity-checked, not state-checked, so
+  # without a current-state read it overwrites a COMPLETED clean settlement with
+  # a fabricated typed timeout quarantine — inventing a failure that never
+  # happened and destroying the settlement's own observed evidence.
+  # ---------------------------------------------------------------------------
+  test "a settlement completing at the deadline is never overwritten by a fabricated timeout failure" do
+    issue_id = "issue-emb-1260-late-settlement"
+    issue = %Issue{id: issue_id, identifier: "MT-1260LATE", state: "In Progress"}
+
+    test_root = unique_test_root("serviceability-late-settlement")
+    workspace_root = Path.join(test_root, "workspaces")
+    File.mkdir_p!(workspace_root)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert {:ok, ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: "run-emb-1260-late-settlement",
+               holder: ProcessOwnership.holder_id()
+             })
+
+    running_entry = %{
+      pid: nil,
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      run_id: ownership.run_id,
+      process_ownership: ownership,
+      retry_attempt: 1,
+      started_at: DateTime.utc_now()
+    }
+
+    # Stand-in for the in-flight settlement task. The deadline path must still
+    # kill it; keeping it live proves the kill does not depend on the record
+    # still being unsettled.
+    task_pid = spawn(fn -> Process.sleep(:infinity) end)
+    on_exit(fn -> if Process.alive?(task_pid), do: Process.exit(task_pid, :kill) end)
+
+    token = make_ref()
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new([issue_id]),
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      settlements: %{
+        token => %{
+          issue_id: issue_id,
+          running_entry: running_entry,
+          reason: :normal,
+          snapshot: {:ok, %{owned_pids: [4_242], criteria: [], captured_at: iso8601_now()}},
+          started_at_ms: System.monotonic_time(:millisecond) - 400,
+          task_pid: task_pid,
+          timer_ref: nil
+        }
+      }
+    }
+
+    # The task wins the race by microseconds: its terminal record write lands
+    # (release -> "cleaned", carrying the evidence settlement actually observed)
+    # BEFORE the already-queued deadline message is processed.
+    settled_evidence = %{owned_pids: [], live_after: 0, verified: true, captured_at: iso8601_now()}
+
+    assert {:ok, _released} =
+             ProcessOwnership.release(
+               issue,
+               %{
+                 holder: ownership.holder,
+                 run_id: ownership.run_id,
+                 workspace_path: ownership.workspace_path
+               },
+               %{cleanup_evidence: settled_evidence}
+             )
+
+    assert %{state: "cleaned"} = ProcessOwnership.status_for_issue(issue)
+
+    assert {:noreply, updated} = Orchestrator.handle_info({:settlement_timeout, token}, state)
+
+    status = ProcessOwnership.status_for_issue(issue)
+
+    refute status.state == "quarantined",
+           "the deadline clobbered an already-settled record into a fabricated quarantine"
+
+    refute (status.quarantine_reason || "") =~ "terminal_settlement_timed_out",
+           "a settlement that completed was recorded as timed out: " <>
+             inspect(status.quarantine_reason)
+
+    # The settled record hands off to the ordinary retry lease, exactly as a
+    # settlement whose result arrived on time does — not to a typed quarantine.
+    assert status.state == "retrying",
+           "expected the settled record to carry the ordinary retry lease, got " <>
+             inspect(status.state)
+
+    assert %{verified: true, live_after: 0} = status.cleanup_evidence,
+           "the completed settlement's own evidence was replaced by unverified timeout evidence"
+
+    # The issue lifecycle still finalizes: a retry is scheduled, but on a plain
+    # retry lease whose error says the settlement landed late — not a quarantine.
+    retry = updated.retry_attempts[issue_id]
+
+    assert is_map(retry), "the deadline must still finalize the issue lifecycle"
+
+    assert retry.error =~ "terminal_settlement_completed_late",
+           "the retry must record late completion, not a fabricated timeout: " <>
+             inspect(retry.error)
+
+    refute match?(%{state: "quarantined"}, retry.process_ownership),
+           "a completed settlement must not force a quarantined retry lease"
+
+    # The in-flight task is still killed, and the token is settled: a
+    # {:settlement_result, ...} that raced the kill is a no-op, not a second
+    # finalization.
+    assert_eventually_value(fn -> if !Process.alive?(task_pid), do: :dead end)
+    refute Map.has_key?(updated.settlements, token)
+
+    assert {:noreply, ^updated} =
+             Orchestrator.handle_info({:settlement_result, token, %{}}, updated)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Contract 5: BOUNDED, BATCHED TEARDOWN / LIVENESS
   # ---------------------------------------------------------------------------
   test "status_for_issue over a large stale pid set completes fast without per-pid fork fan-out" do
     issue = %Issue{
@@ -397,6 +527,8 @@ defmodule SymphonyElixir.OrchestratorServiceabilityTest do
       "symphony-elixir-#{label}-#{System.unique_integer([:positive])}"
     )
   end
+
+  defp iso8601_now, do: DateTime.utc_now() |> DateTime.to_iso8601()
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
   defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
