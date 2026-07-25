@@ -146,6 +146,51 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
+  test "a delegation the worker answered is correlated from the channel itself, with no envelope", context do
+    session = start_implementer_session(context, "evidence-structural")
+
+    # Neither side uses the `OCTO_MSG` envelope. The delegation is still fully
+    # observable: the orchestrator's only authority over the worker is its own
+    # Herdr shim, and the worker's only way back is the same channel.
+    assert :ok =
+             orchestrator_prompt(
+               session,
+               context,
+               "implementer_worker",
+               "EMB1282-EVIDENCE-7F3A: produce the bounded deliverable"
+             )
+
+    assert :ok =
+             worker_prompt(
+               session,
+               context,
+               "implementer_orchestrator",
+               "bounded deliverable finished; artifact written"
+             )
+
+    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+
+    assert {:ok, {_next_session, turn}} = result
+
+    assert [
+             %{
+               assignment_id: assignment_id,
+               status: :completed,
+               evidence: :channel,
+               result: %{assignment_id: assignment_id, status: "completed"}
+             }
+           ] = turn.worker_assignments
+
+    assert is_binary(assignment_id) and assignment_id != ""
+
+    assert log =~ @correlation_event
+    assert log =~ "herdr_session=#{session.name}"
+    assert log =~ assignment_id
+    assert log =~ "evidence: :channel"
+
+    stop(session)
+  end
+
   test "a recorded worker result whose assignment record is missing is typed, not discarded", context do
     session = start_implementer_session(context, "evidence-orphan-result")
 
@@ -189,7 +234,9 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
 
     assert {:ok, {_next_session, turn}} = result
-    assert [%{assignment_id: "EMB1282-EVIDENCE-7F3A", status: :completed}] = turn.worker_assignments
+
+    assert [%{assignment_id: "EMB1282-EVIDENCE-7F3A", status: :completed, evidence: :envelope}] =
+             turn.worker_assignments
 
     assert log =~ @correlation_event
     assert log =~ "herdr_session=#{session.name}"
