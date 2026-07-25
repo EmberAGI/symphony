@@ -28,6 +28,7 @@ defmodule SymphonyElixir.Orchestrator do
   @process_ownership_refresh_interval_ms 30_000
   @work_admission_marker_version 1
   @max_generation_length 128
+  @settlement_evidence_unavailable_reason "settlement_evidence_unavailable: terminal cleanup evidence could not be captured"
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
@@ -1003,6 +1004,10 @@ defmodule SymphonyElixir.Orchestrator do
   # and liveness is verified against that snapshot AFTER teardown. The
   # settlement never re-derives its evidence from mutable global state a
   # completed teardown may already have removed (EMB-1259).
+  #
+  # Physical teardown runs on every path, including one whose capture
+  # failed: evidence that cannot be produced is a typed settlement failure,
+  # never a reason to skip the cleanup it is evidence for.
   defp cleanup_terminal_owned_runtime(running_entry, require_ownership \\ false)
        when is_map(running_entry) do
     snapshot = capture_settlement_snapshot(running_entry)
@@ -1015,19 +1020,63 @@ defmodule SymphonyElixir.Orchestrator do
         :ok
       end
 
-    liveness = ProcessOwnership.settlement_liveness(snapshot)
-    outcome = combine_terminal_cleanup_results(session_result, marker_result)
-
-    evidence = %{
-      owned_pids: snapshot.owned_pids,
-      live_after: liveness.live_after,
-      verified: outcome == :ok and liveness.live_after == 0,
-      captured_at: snapshot.captured_at
-    }
+    cleanup_result = combine_terminal_cleanup_results(session_result, marker_result)
+    {outcome, evidence, liveness} = settle_terminal_evidence(snapshot, cleanup_result)
 
     log_terminal_cleanup_evidence(running_entry, outcome, evidence, liveness)
     {outcome, evidence}
   end
+
+  # Capture-machinery failure settles TYPED. A settlement that observed
+  # nothing because its evidence machinery broke must never write the
+  # `verified: true, owned_pids: [], live_after: 0` marker a physically
+  # clean run writes — that marker would forge a cleanup verification the
+  # settlement never performed.
+  defp settle_terminal_evidence({:ok, snapshot}, cleanup_result) do
+    case ProcessOwnership.settlement_liveness(snapshot) do
+      {:ok, liveness} ->
+        evidence = %{
+          owned_pids: snapshot.owned_pids,
+          live_after: liveness.live_after,
+          verified: cleanup_result == :ok and liveness.live_after == 0,
+          captured_at: snapshot.captured_at,
+          evidence_status: :captured
+        }
+
+        {cleanup_result, evidence, liveness}
+
+      {:error, reason} ->
+        unavailable_settlement_evidence(cleanup_result, :liveness, reason, snapshot.owned_pids, snapshot.captured_at)
+    end
+  end
+
+  defp settle_terminal_evidence({:error, reason}, cleanup_result) do
+    unavailable_settlement_evidence(
+      cleanup_result,
+      :capture,
+      reason,
+      [],
+      DateTime.utc_now() |> DateTime.to_iso8601()
+    )
+  end
+
+  defp unavailable_settlement_evidence(cleanup_result, step, reason, owned_pids, captured_at) do
+    evidence = %{
+      owned_pids: owned_pids,
+      live_after: 0,
+      verified: false,
+      captured_at: captured_at,
+      evidence_status: :unavailable
+    }
+
+    {settlement_evidence_failure(cleanup_result, step, reason), evidence, %{live_after: 0, live_pids: []}}
+  end
+
+  defp settlement_evidence_failure(:ok, step, reason),
+    do: {:error, {:settlement_evidence_unavailable, %{step: step, reason: reason}}}
+
+  defp settlement_evidence_failure({:error, cleanup_reason}, step, reason),
+    do: {:error, {:settlement_evidence_unavailable, %{step: step, reason: reason, cleanup: cleanup_reason}}}
 
   defp capture_settlement_snapshot(running_entry) when is_map(running_entry) do
     issue =
@@ -1055,6 +1104,16 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp teardown_owned_session(_running_entry), do: :ok
+
+  defp log_terminal_cleanup_evidence(running_entry, _outcome, %{evidence_status: :unavailable} = evidence, _liveness) do
+    Logger.error(
+      "Run-owned runtime cleanup evidence unavailable " <>
+        "issue_id=#{settlement_issue_id(running_entry)} " <>
+        "session_name=#{settlement_session_name(running_entry)} " <>
+        "captured_owned_pids=#{length(evidence.owned_pids)} " <>
+        "cleanup_reason=settlement_evidence_unavailable"
+    )
+  end
 
   defp log_terminal_cleanup_evidence(running_entry, :ok, %{live_after: 0} = evidence, _liveness) do
     Logger.info(
@@ -1143,6 +1202,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp cleanup_task_exit_reason(
          _reason,
          {:error, {:terminal_cleanup_failed, _reasons} = failure}
+       ) do
+    {:agent_runtime_failed, failure}
+  end
+
+  defp cleanup_task_exit_reason(
+         _reason,
+         {:error, {:settlement_evidence_unavailable, _details} = failure}
        ) do
     {:agent_runtime_failed, failure}
   end
@@ -2309,6 +2375,17 @@ defmodule SymphonyElixir.Orchestrator do
 
         :quarantined
 
+      settlement_evidence_unavailable?(cleanup_evidence) ->
+        _ =
+          update_owned_state(
+            issue,
+            running_entry,
+            "quarantined",
+            Map.put(attrs, :quarantine_reason, @settlement_evidence_unavailable_reason)
+          )
+
+        :quarantined
+
       true ->
         _ = release_completed_owned_state(issue, running_entry, %{cleanup_evidence: cleanup_evidence})
         :cleaned
@@ -2321,24 +2398,43 @@ defmodule SymphonyElixir.Orchestrator do
       |> process_ownership_attrs()
       |> Map.put(:cleanup_evidence, cleanup_evidence)
 
-    if !blank_worker_host?(Map.get(running_entry, :worker_host)) or
-         settlement_processes_remain?(cleanup_evidence) do
-      _ =
-        update_owned_state(
-          issue,
-          running_entry,
-          "quarantined",
-          Map.put(attrs, :quarantine_reason, "agent exited before app-server process cleaned: #{inspect(reason)}")
-        )
+    cond do
+      !blank_worker_host?(Map.get(running_entry, :worker_host)) or
+          settlement_processes_remain?(cleanup_evidence) ->
+        _ =
+          update_owned_state(
+            issue,
+            running_entry,
+            "quarantined",
+            Map.put(attrs, :quarantine_reason, "agent exited before app-server process cleaned: #{inspect(reason)}")
+          )
 
-      :quarantined
-    else
-      _ = release_owned_state(issue, running_entry, %{cleanup_evidence: cleanup_evidence})
-      :cleaned
+        :quarantined
+
+      # A run whose settlement could not capture its evidence is never
+      # released: an unobserved run is quarantined for an operator, not
+      # recorded as verified clean.
+      settlement_evidence_unavailable?(cleanup_evidence) ->
+        _ =
+          update_owned_state(
+            issue,
+            running_entry,
+            "quarantined",
+            Map.put(attrs, :quarantine_reason, "#{@settlement_evidence_unavailable_reason}: #{inspect(reason)}")
+          )
+
+        :quarantined
+
+      true ->
+        _ = release_owned_state(issue, running_entry, %{cleanup_evidence: cleanup_evidence})
+        :cleaned
     end
   end
 
   defp settlement_processes_remain?(%{live_after: live_after}), do: live_after > 0
+
+  defp settlement_evidence_unavailable?(%{evidence_status: :unavailable}), do: true
+  defp settlement_evidence_unavailable?(_cleanup_evidence), do: false
 
   defp retry_lease_state(:quarantined), do: "quarantined"
   defp retry_lease_state(_process_completion_status), do: "retrying"

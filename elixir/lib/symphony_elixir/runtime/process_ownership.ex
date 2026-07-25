@@ -100,6 +100,8 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   Every PID is rechecked immediately before signaling. TERM receives a bounded
   grace period; exact-marker survivors receive KILL and a second bounded wait.
+  A process-table read that fails is never read as "nothing is live": the
+  termination then fails typed as `:settlement_evidence_unavailable`.
   """
   @spec terminate_owned_processes(Issue.t(), map()) ::
           {:ok, %{term_pids: [pos_integer()], kill_pids: [pos_integer()], live_after: 0}}
@@ -108,14 +110,14 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     with {:ok, ownership} <- verify(issue, expected),
          criteria <- ownership_env_criteria(ownership),
          true <- ownership_env_criteria_scoped?(criteria),
-         term_pids <- signal_matching_processes(criteria, "TERM"),
-         _term_survivors <- await_matching_processes(criteria, @owned_process_exit_attempts),
-         kill_pids <- signal_matching_processes(criteria, "KILL"),
-         [] <- await_matching_processes(criteria, @owned_process_exit_attempts) do
+         {:ok, term_pids} <- signal_matching_processes(criteria, "TERM"),
+         {:ok, _term_survivors} <- await_matching_processes(criteria, @owned_process_exit_attempts),
+         {:ok, kill_pids} <- signal_matching_processes(criteria, "KILL"),
+         {:ok, []} <- await_matching_processes(criteria, @owned_process_exit_attempts) do
       {:ok, %{term_pids: term_pids, kill_pids: kill_pids, live_after: 0}}
     else
       false -> {:error, :unscoped_ownership_environment}
-      live_pids when is_list(live_pids) -> {:error, {:owned_processes_remain, live_pids}}
+      {:ok, live_pids} when is_list(live_pids) -> {:error, {:owned_processes_remain, live_pids}}
       {:error, reason} -> {:error, reason}
     end
   rescue
@@ -174,9 +176,15 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   carrying the run's complete ownership environment. Terminal settlement
   verifies liveness against this snapshot after teardown instead of
   re-deriving evidence from state teardown may already have removed.
+
+  Capture is evidence, so it fails typed. A capture whose machinery failed
+  (process-table read failure, or an exception anywhere in the capture path)
+  returns `{:error, :settlement_evidence_unavailable}` and never an empty
+  snapshot a caller could mistake for "the run owned nothing".
   """
   @spec settlement_snapshot(Issue.t() | nil, map() | nil, [pos_integer()]) ::
-          %{owned_pids: [pos_integer()], criteria: [{String.t(), String.t()}], captured_at: String.t()}
+          {:ok, %{owned_pids: [pos_integer()], criteria: [{String.t(), String.t()}], captured_at: String.t()}}
+          | {:error, :settlement_evidence_unavailable}
   def settlement_snapshot(issue, ownership, extra_pids \\ []) do
     ownership = if is_map(ownership), do: ownership, else: %{}
     record_status = settlement_record_status(issue, ownership)
@@ -187,29 +195,30 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
         criteria -> criteria
       end
 
-    env_pids =
-      if ownership_env_criteria_scoped?(criteria) do
-        matching_processes(criteria)
-      else
-        []
-      end
+    case scoped_matching_processes(criteria) do
+      {:ok, env_pids} ->
+        owned_pids =
+          (status_process_pids(record_status) ++ status_process_pids(ownership) ++ env_pids ++ extra_pids)
+          |> Enum.map(&pid_value/1)
+          |> Enum.reject(&is_nil/1)
+          |> Enum.uniq()
 
-    owned_pids =
-      (status_process_pids(record_status) ++ status_process_pids(ownership) ++ env_pids ++ extra_pids)
-      |> Enum.map(&pid_value/1)
-      |> Enum.reject(&is_nil/1)
-      |> Enum.uniq()
+        {:ok,
+         %{
+           owned_pids: owned_pids,
+           criteria: criteria,
+           captured_at: DateTime.utc_now() |> DateTime.to_iso8601()
+         }}
 
-    %{
-      owned_pids: owned_pids,
-      criteria: criteria,
-      captured_at: DateTime.utc_now() |> DateTime.to_iso8601()
-    }
+      {:error, reason} ->
+        Logger.warning("Failed to capture settlement snapshot: #{inspect(reason)}")
+        {:error, :settlement_evidence_unavailable}
+    end
   rescue
     error ->
       Logger.warning("Failed to capture settlement snapshot: #{Exception.message(error)}")
 
-      %{owned_pids: [], criteria: [], captured_at: DateTime.utc_now() |> DateTime.to_iso8601()}
+      {:error, :settlement_evidence_unavailable}
   end
 
   @doc """
@@ -218,29 +227,35 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   One batched process-table read decides snapshot-pid liveness; one bounded
   ownership-environment sweep still catches late-detached descendants. No
   per-PID signalling or probing is performed here.
+
+  Liveness is evidence, so it fails typed: a verification whose machinery
+  failed returns `{:error, :settlement_evidence_unavailable}` rather than the
+  `live_after: 0` a caller would read as proof that nothing survived.
   """
   @spec settlement_liveness(%{
           required(:owned_pids) => [pos_integer()],
           required(:criteria) => [{String.t(), String.t()}],
           optional(atom()) => term()
-        }) :: %{live_after: non_neg_integer(), live_pids: [pos_integer()]}
+        }) ::
+          {:ok, %{live_after: non_neg_integer(), live_pids: [pos_integer()]}}
+          | {:error, :settlement_evidence_unavailable}
   def settlement_liveness(%{owned_pids: owned_pids, criteria: criteria}) do
-    live_table = process_table() |> MapSet.new(fn {pid, _ppid, _pgid} -> pid end)
-    live_snapshot_pids = Enum.filter(owned_pids, &MapSet.member?(live_table, &1))
+    with {:ok, processes} <- checked_process_table(),
+         {:ok, env_survivors} <- scoped_matching_processes(criteria) do
+      live_table = MapSet.new(processes, fn {pid, _ppid, _pgid} -> pid end)
+      live_snapshot_pids = Enum.filter(owned_pids, &MapSet.member?(live_table, &1))
+      live_pids = Enum.uniq(live_snapshot_pids ++ env_survivors)
 
-    env_survivors =
-      if ownership_env_criteria_scoped?(criteria) do
-        matching_processes(criteria)
-      else
-        []
-      end
-
-    live_pids = Enum.uniq(live_snapshot_pids ++ env_survivors)
-    %{live_after: length(live_pids), live_pids: live_pids}
+      {:ok, %{live_after: length(live_pids), live_pids: live_pids}}
+    else
+      {:error, reason} ->
+        Logger.warning("Failed to verify settlement liveness: #{inspect(reason)}")
+        {:error, :settlement_evidence_unavailable}
+    end
   rescue
     error ->
       Logger.warning("Failed to verify settlement liveness: #{Exception.message(error)}")
-      %{live_after: 0, live_pids: []}
+      {:error, :settlement_evidence_unavailable}
   end
 
   defp settlement_record_status(%Issue{} = issue, ownership) do
@@ -1181,7 +1196,8 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
             owned_pids: owned_pids,
             live_after: live_after,
             verified: verified,
-            captured_at: captured_at
+            captured_at: captured_at,
+            evidence_status: settlement_evidence_status(evidence)
           }
         end
 
@@ -1191,6 +1207,20 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   end
 
   defp settlement_evidence_value(_attrs), do: nil
+
+  # Evidence a settlement could not capture stays marked as such: only an
+  # explicit `captured` status (or evidence written before the status
+  # existed) reads back as captured, so an unrecognized value can never
+  # upgrade unverifiable evidence into a settled observation. `live_after`
+  # carries no meaning for `:unavailable` evidence — nothing was observed.
+  defp settlement_evidence_status(evidence) when is_map(evidence) do
+    case value_for(evidence, :evidence_status) do
+      nil -> :captured
+      :captured -> :captured
+      "captured" -> :captured
+      _unavailable -> :unavailable
+    end
+  end
 
   # `value_for/2` folds legitimate `false` into the string-key fallback, so
   # boolean evidence fields need explicit key resolution.
@@ -1214,7 +1244,8 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       "owned_pids" => evidence.owned_pids,
       "live_after" => evidence.live_after,
       "verified" => evidence.verified,
-      "captured_at" => evidence.captured_at
+      "captured_at" => evidence.captured_at,
+      "evidence_status" => evidence |> settlement_evidence_status() |> Atom.to_string()
     }
   end
 
@@ -1391,19 +1422,51 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   end
 
   defp matching_processes(criteria) when is_list(criteria) do
-    process_table()
-    |> Enum.map(fn {pid, _ppid, _pgid} -> pid end)
-    |> Enum.filter(&process_env_matches?(&1, criteria))
+    case checked_matching_processes(criteria) do
+      {:ok, pids} -> pids
+      {:error, _reason} -> []
+    end
   end
 
-  defp signal_matching_processes(criteria, signal, candidates \\ nil)
+  # The settlement variants keep a failed process-table read typed instead of
+  # degrading it to "no process matches", which reads identically to a clean
+  # run and would forge the cleanup-verified marker.
+  defp checked_matching_processes(criteria) when is_list(criteria) do
+    case checked_process_table() do
+      {:ok, processes} ->
+        {:ok,
+         processes
+         |> Enum.map(fn {pid, _ppid, _pgid} -> pid end)
+         |> Enum.filter(&process_env_matches?(&1, criteria))}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # An unscoped criteria set is never swept, so no machinery runs and no
+  # machinery can fail: that is a successful empty scan, not an unavailable
+  # one.
+  defp scoped_matching_processes(criteria) when is_list(criteria) do
+    if ownership_env_criteria_scoped?(criteria) do
+      checked_matching_processes(criteria)
+    else
+      {:ok, []}
+    end
+  end
+
+  defp signal_matching_processes(criteria, signal)
        when is_list(criteria) and signal in ["TERM", "KILL"] do
-    pids = if is_list(candidates), do: candidates, else: matching_processes(criteria)
+    case checked_matching_processes(criteria) do
+      {:ok, pids} ->
+        matching_pids = Enum.filter(pids, &process_env_matches?(&1, criteria))
+        Enum.each(matching_pids, &signal_process(&1, signal))
 
-    matching_pids = Enum.filter(pids, &process_env_matches?(&1, criteria))
-    Enum.each(matching_pids, &signal_process(&1, signal))
+        {:ok, matching_pids}
 
-    matching_pids
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp signal_process(pid, signal) when is_integer(pid) and signal in ["TERM", "KILL"] do
@@ -1415,16 +1478,19 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     _ -> :ok
   end
 
-  defp await_matching_processes(criteria, 0), do: matching_processes(criteria)
+  defp await_matching_processes(criteria, 0), do: checked_matching_processes(criteria)
 
   defp await_matching_processes(criteria, attempts) when attempts > 0 do
-    case matching_processes(criteria) do
-      [] ->
-        []
+    case checked_matching_processes(criteria) do
+      {:ok, []} ->
+        {:ok, []}
 
-      _live_pids ->
+      {:ok, _live_pids} ->
         Process.sleep(@owned_process_exit_interval_ms)
         await_matching_processes(criteria, attempts - 1)
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -1516,17 +1582,36 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp issue_identifier(_issue, attrs), do: attrs.issue_identifier
 
   defp process_table do
+    case checked_process_table() do
+      {:ok, processes} -> processes
+      {:error, _reason} -> []
+    end
+  end
+
+  # A failed process-table read is never evidence of an empty table.
+  # `ps -eo pid=,ppid=,pgid=` on a live host always lists at least this BEAM
+  # process, so all three failure shapes — a non-zero exit, a raised call
+  # (no readable `ps`), and output without a single parseable row — mean the
+  # read is unusable rather than empty.
+  defp checked_process_table do
     case System.cmd("ps", ["-eo", "pid=,ppid=,pgid="], stderr_to_stdout: true) do
       {output, 0} ->
-        output
-        |> String.split("\n", trim: true)
-        |> Enum.flat_map(&parse_process_table_line/1)
+        case parse_process_table(output) do
+          [] -> {:error, :settlement_evidence_unavailable}
+          processes -> {:ok, processes}
+        end
 
-      _ ->
-        []
+      _failed_read ->
+        {:error, :settlement_evidence_unavailable}
     end
   rescue
-    _ -> []
+    _error -> {:error, :settlement_evidence_unavailable}
+  end
+
+  defp parse_process_table(output) when is_binary(output) do
+    output
+    |> String.split("\n", trim: true)
+    |> Enum.flat_map(&parse_process_table_line/1)
   end
 
   defp parse_process_table_line(line) when is_binary(line) do

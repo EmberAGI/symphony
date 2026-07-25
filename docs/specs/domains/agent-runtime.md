@@ -771,8 +771,12 @@ process-ownership record on every terminal path: success, failure,
 cancellation, and timeout. Settlement never re-derives its evidence by
 re-reading mutable global state after teardown, and a failed post-teardown
 re-read can never manufacture a cleanup failure for a physically clean run.
-Truly unwriteable settlement evidence is logged as a cleanup failure rather
-than left silently active. The same terminal
+Settlement evidence that truly cannot be captured — a process-table read
+that fails, returns unparseable output, or crashes the capture — or that
+cannot be written settles as a typed cleanup failure recorded unverified,
+never as a verified-clean settlement and never left silently active. A
+capture whose machinery worked and observed no owned process still settles
+clean: empty evidence is only trustworthy when it was actually observed. The same terminal
 cleanup boundary runs after normal or abnormal task exit and after forced
 stall, timeout, state, routing, or shutdown cancellation for every role. If an
 issue-owned hook or provider descendant survives task/session stop, cleanup
