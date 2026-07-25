@@ -73,7 +73,12 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   """
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
-    with {:ok, session} <- start_session(workspace, Keyword.put(opts, :issue, issue)) do
+    opts =
+      opts
+      |> Keyword.put(:issue, issue)
+      |> Keyword.put_new(:issue_bootstrap_env, :no_role_bootstrap)
+
+    with {:ok, session} <- start_session(workspace, opts) do
       try do
         run_turn(session, prompt, issue, opts)
       after
@@ -404,13 +409,15 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   # `AgentRuntime.start_session/2` projects the declared role bootstrap inputs
   # once, before it selects a session path, and threads the result here; a role
-  # turn that cannot be supplied one never reaches this adapter. Direct adapter
-  # invocation (adapter-protocol exercises) carries no role bootstrap and
-  # projects none.
+  # turn that cannot be supplied one never reaches this adapter. The key is
+  # read with `fetch!` so a caller that stops projecting fails loudly instead
+  # of silently launching a turn with no bootstrap: opting out is the explicit
+  # `:no_role_bootstrap` sentinel `run/4` sets for adapter-protocol exercises,
+  # never an absent key.
   defp issue_bootstrap_env(opts) do
-    case Keyword.get(opts, :issue_bootstrap_env) do
+    case Keyword.fetch!(opts, :issue_bootstrap_env) do
       env when is_map(env) -> Map.to_list(env)
-      _ -> []
+      :no_role_bootstrap -> []
     end
   end
 
