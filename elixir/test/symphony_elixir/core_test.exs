@@ -2116,8 +2116,6 @@ defmodule SymphonyElixir.CoreTest do
       issue = %Issue{
         id: "issue-policy-overrides",
         identifier: "MT-99",
-        repository: "EmberAGI/scaling-octo-engine",
-        repository_source: "linear_label",
         title: "Validate codex policy overrides",
         description: "Check startup policy payload overrides",
         state: "In Progress",

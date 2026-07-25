@@ -6,19 +6,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Linear.Client
   alias SymphonyElixir.Linear.Issue
 
-  # Workspace hooks are a run's bootstrap surface: production creates these
-  # workspaces for a real issue, which carries the repository the hook clones.
-  # A bare identifier cannot supply one, so hook-running fixtures are
-  # issue-backed.
-  defp hook_issue(identifier) do
-    %{
-      id: "issue-#{identifier}",
-      identifier: identifier,
-      repository: "EmberAGI/scaling-octo-engine",
-      repository_source: "linear_label"
-    }
-  end
-
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
       Path.join(
@@ -45,7 +32,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         hook_after_create: "git clone --depth 1 #{template_repo} ."
       )
 
-      assert {:ok, workspace} = Workspace.create_for_issue(hook_issue("S-1"))
+      assert {:ok, workspace} = Workspace.create_for_issue("S-1")
       assert File.exists?(Path.join(workspace, ".git"))
       assert File.read!(Path.join(workspace, "README.md")) == "hook clone\n"
       assert File.read!(Path.join([workspace, "keep", "file.txt"])) == "keep me"
@@ -207,7 +194,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         hook_after_create: "echo first > README.md"
       )
 
-      assert {:ok, first_workspace} = Workspace.create_for_issue(hook_issue("MT-REUSE"))
+      assert {:ok, first_workspace} = Workspace.create_for_issue("MT-REUSE")
 
       File.write!(Path.join(first_workspace, "README.md"), "changed\n")
       File.write!(Path.join(first_workspace, "local-progress.txt"), "in progress\n")
@@ -218,7 +205,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       File.write!(Path.join([first_workspace, "_build", "artifact.txt"]), "compiled artifact\n")
       File.write!(Path.join([first_workspace, "tmp", "scratch.txt"]), "remove me\n")
 
-      assert {:ok, second_workspace} = Workspace.create_for_issue(hook_issue("MT-REUSE"))
+      assert {:ok, second_workspace} = Workspace.create_for_issue("MT-REUSE")
       assert second_workspace == first_workspace
       assert File.read!(Path.join(second_workspace, "README.md")) == "changed\n"
       assert File.read!(Path.join(second_workspace, "local-progress.txt")) == "in progress\n"
@@ -343,7 +330,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       )
 
       assert {:error, {:workspace_hook_failed, "after_create", 17, _output}} =
-               Workspace.create_for_issue(hook_issue("MT-FAIL"))
+               Workspace.create_for_issue("MT-FAIL")
     after
       File.rm_rf(workspace_root)
     end
@@ -364,7 +351,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       )
 
       assert {:error, {:workspace_hook_timeout, "after_create", 10}} =
-               Workspace.create_for_issue(hook_issue("MT-TIMEOUT"))
+               Workspace.create_for_issue("MT-TIMEOUT")
     after
       File.rm_rf(workspace_root)
     end
@@ -1034,13 +1021,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert config.hooks.after_create =~ "echo after_create > after_create.log"
       assert config.hooks.before_remove =~ "echo before_remove >"
 
-      assert {:ok, workspace} = Workspace.create_for_issue(hook_issue("MT-HOOKS"))
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-HOOKS")
       assert File.read!(Path.join(workspace, "after_create.log")) == "after_create\n"
 
-      assert {:ok, _workspace} = Workspace.create_for_issue(hook_issue("MT-HOOKS"))
+      assert {:ok, _workspace} = Workspace.create_for_issue("MT-HOOKS")
       assert length(String.split(String.trim(File.read!(after_create_counter)), "\n")) == 1
 
-      assert :ok = Workspace.remove_issue_workspaces(hook_issue("MT-HOOKS"))
+      assert :ok = Workspace.remove_issue_workspaces("MT-HOOKS")
       assert File.read!(before_remove_marker) == "before_remove\n"
       refute File.exists?(workspace)
     after
@@ -1756,10 +1743,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert Config.settings!().worker.ssh_hosts == ["worker-01:2200"]
       assert Config.settings!().workspace.root == workspace_root
-      assert {:ok, ^workspace_path} = Workspace.create_for_issue(hook_issue("MT-SSH-WS"), "worker-01:2200")
-      assert :ok = Workspace.run_before_run_hook(workspace_path, hook_issue("MT-SSH-WS"), "worker-01:2200")
-      assert :ok = Workspace.run_after_run_hook(workspace_path, hook_issue("MT-SSH-WS"), "worker-01:2200")
-      assert :ok = Workspace.remove_issue_workspaces(hook_issue("MT-SSH-WS"), "worker-01:2200")
+      assert {:ok, ^workspace_path} = Workspace.create_for_issue("MT-SSH-WS", "worker-01:2200")
+      assert :ok = Workspace.run_before_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
+      assert :ok = Workspace.run_after_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
+      assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WS", "worker-01:2200")
 
       trace = File.read!(trace_file)
       assert trace =~ "-p 2200 worker-01 bash -lc"

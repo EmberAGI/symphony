@@ -41,8 +41,6 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
       issue = %Issue{
         id: "issue-before-run-auth",
         identifier: "EMB-1128",
-        repository: "EmberAGI/scaling-octo-engine",
-        repository_source: "linear_label",
         title: "Classify pre-turn provider auth",
         description: "Runtime auth failure",
         state: "In Progress",
@@ -92,8 +90,6 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
       issue = %Issue{
         id: "issue-before-run-ordinary",
         identifier: "EMB-1128",
-        repository: "EmberAGI/scaling-octo-engine",
-        repository_source: "linear_label",
         title: "Keep ordinary hook failures ordinary",
         description: "Ordinary hook failure",
         state: "In Progress",
@@ -142,8 +138,6 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
       issue = %Issue{
         id: "issue-before-run-missing-tool",
         identifier: "EMB-1127",
-        repository: "EmberAGI/scaling-octo-engine",
-        repository_source: "linear_label",
         title: "Classify missing tool",
         description: "Runtime missing tool",
         state: "In Progress",
