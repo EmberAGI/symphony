@@ -2,6 +2,8 @@ defmodule SymphonyElixir.RoleBootstrapEnvironmentTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.AgentRuntime
+  alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
+  alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
 
   import SymphonyElixir.ClaudeShimFixture, only: [stream_success: 0, write_fake_claude!: 3]
 
@@ -225,6 +227,54 @@ defmodule SymphonyElixir.RoleBootstrapEnvironmentTest do
 
     # Nothing was launched: the projection failed before any turn process ran.
     refute File.exists?(ctx.trace_file)
+  end
+
+  # The seam projects the bootstrap env for every role; the adapters read it
+  # with `fetch!` so a caller that stops projecting raises instead of quietly
+  # launching a turn with none. That guard is what stands between a future
+  # refactor and a byte-for-byte recurrence of the defect this PR fixes, so it
+  # is exercised directly rather than left to hold only by inspection.
+  test "an adapter refuses to start a session without an explicit bootstrap projection" do
+    ctx = setup_root("sentinel")
+    codex_binary = Path.join(ctx.test_root, "fake-codex")
+    claude_binary = Path.join(ctx.test_root, "fake-claude")
+
+    on_exit(fn -> File.rm_rf(ctx.test_root) end)
+
+    write_fake_codex!(codex_binary, ctx.trace_file)
+    write_fake_claude!(claude_binary, ctx.trace_file, stream_success())
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: ctx.workspace_root,
+      codex_command: "#{codex_binary} app-server",
+      claude_code_command: claude_binary,
+      claude_code_model: "sonnet"
+    )
+
+    session_opts = [issue: bootstrap_issue(), role: "reviewer"]
+
+    for adapter <- [CodexAppServer, ClaudeAppServer] do
+      assert_raise KeyError, ~r/:issue_bootstrap_env/, fn ->
+        adapter.start_session(ctx.workspace, session_opts)
+      end
+    end
+
+    # Neither refusal launched anything.
+    refute File.exists?(ctx.trace_file)
+
+    # The explicit opt-out an adapter-protocol exercise uses still starts, and
+    # means what it says: no bootstrap input reaches the launched process.
+    opt_out = Keyword.put(session_opts, :issue_bootstrap_env, :no_role_bootstrap)
+
+    assert {:ok, codex_session} = CodexAppServer.start_session(ctx.workspace, opt_out)
+    assert :ok = CodexAppServer.stop_session(codex_session)
+
+    assert {:ok, claude_session} = ClaudeAppServer.start_session(ctx.workspace, opt_out)
+    refute List.keymember?(claude_session.launch.env, "SYMPHONY_ISSUE_REPOSITORY", 0)
+    refute List.keymember?(claude_session.launch.env, "SYMPHONY_EXPECTED_BRANCH", 0)
+    assert :ok = ClaudeAppServer.stop_session(claude_session)
+
+    assert env_values(File.read!(ctx.trace_file), "SYMPHONY_ISSUE_REPOSITORY") == [""]
   end
 
   # The classifier assertion above reads a constructed term. This one reads the
