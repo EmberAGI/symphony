@@ -611,6 +611,8 @@ defmodule SymphonyElixir.WorkAdmissionTest do
       identifier: identifier,
       title: "Work admission #{identifier}",
       state: "In Progress",
+      repository: "EmberAGI/demo-repo",
+      repository_source: "linear_label",
       labels: ["implementation-effort:minimal"],
       url: "https://linear.app/example/#{id}"
     }

@@ -195,6 +195,8 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
       issue = %Issue{
         id: "issue-non-live-delegation-seal",
         identifier: "EMB-1180",
+        repository: "EmberAGI/scaling-octo-engine",
+        repository_source: "linear_label",
         title: "Sealed non-live delegation transport",
         description: "Hook-less workflow must not reach real herdr",
         state: "In Progress",

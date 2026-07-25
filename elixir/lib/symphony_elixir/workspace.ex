@@ -8,15 +8,37 @@ defmodule SymphonyElixir.Workspace do
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
 
+  # Per-turn bootstrap inputs the role workflows declare as required. Every
+  # role fails closed when one is absent rather than inferring repository or
+  # branch metadata, so a nil here is a missing input, not an empty variable:
+  # the role projection names it and fails at its own boundary instead of
+  # handing the role an unset variable three layers later, inside the turn.
+  #
+  # This is a property of the role-turn projection only. Workspace-lifecycle
+  # hooks share the same environment shape but are not role turns, and the
+  # service spec leaves what they do with it implementation-defined, so they
+  # keep projecting whatever the issue context carries.
+  @required_bootstrap_env [
+    {"SYMPHONY_ISSUE_REPOSITORY", :repository},
+    {"SYMPHONY_EXPECTED_BRANCH", :expected_branch}
+  ]
+
   @type worker_host :: String.t() | nil
 
-  @doc "Return the non-secret issue context exported to workspace hooks and delegated runtimes."
-  @spec issue_environment(map() | String.t() | nil) :: %{String.t() => String.t()}
+  @doc """
+  Return the non-secret issue context projected into a role turn.
+
+  This is the single bootstrap projection every role turn goes through. It
+  fails typed and named when a required bootstrap input cannot be supplied.
+  """
+  @spec issue_environment(map() | String.t() | nil) ::
+          {:ok, %{String.t() => String.t()}} | {:error, {:missing_required_bootstrap_input, map()}}
   def issue_environment(issue_or_identifier) do
-    issue_or_identifier
-    |> issue_context()
-    |> hook_env()
-    |> Map.new()
+    issue_context = issue_context(issue_or_identifier)
+
+    with :ok <- validate_required_bootstrap_inputs(issue_context) do
+      {:ok, issue_context |> hook_env() |> Map.new()}
+    end
   end
 
   @spec create_for_issue(map() | String.t() | nil, worker_host()) ::
@@ -632,6 +654,30 @@ defmodule SymphonyElixir.Workspace do
     |> Map.new()
     |> Map.merge(Map.new(extra_env))
     |> Map.to_list()
+  end
+
+  # A role turn's required bootstrap input is never dropped into an absent
+  # variable: either it is projected with its value, or the projection fails
+  # naming the variable that could not be supplied and the issue it was
+  # projected for.
+  defp validate_required_bootstrap_inputs(issue_context) do
+    Enum.reduce_while(@required_bootstrap_env, :ok, fn {key, field}, :ok ->
+      case Map.get(issue_context, field) do
+        value when is_binary(value) and value != "" ->
+          {:cont, :ok}
+
+        _value ->
+          {:halt,
+           {:error,
+            {:missing_required_bootstrap_input,
+             %{
+               name: key,
+               field: field,
+               issue_id: issue_context.issue_id,
+               issue_identifier: issue_context.issue_identifier
+             }}}}
+      end
+    end)
   end
 
   defp hook_env_exports(issue_context, extra_env) do

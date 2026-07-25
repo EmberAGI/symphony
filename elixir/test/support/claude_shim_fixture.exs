@@ -82,6 +82,8 @@ defmodule SymphonyElixir.ClaudeShimFixture do
     printf 'ENV_SYMPHONY_ROLE_ISSUE_IDENTIFIER:%s\\n' "${SYMPHONY_ROLE_ISSUE_IDENTIFIER}" >> "$trace_file"
     printf 'ENV_SYMPHONY_ROLE_NAME:%s\\n' "${SYMPHONY_ROLE_NAME}" >> "$trace_file"
     printf 'ENV_SYMPHONY_ROLE_WORKSPACE_PATH:%s\\n' "${SYMPHONY_ROLE_WORKSPACE_PATH}" >> "$trace_file"
+    printf 'ENV_SYMPHONY_ISSUE_REPOSITORY:%s\\n' "${SYMPHONY_ISSUE_REPOSITORY}" >> "$trace_file"
+    printf 'ENV_SYMPHONY_EXPECTED_BRANCH:%s\\n' "${SYMPHONY_EXPECTED_BRANCH}" >> "$trace_file"
     printf 'ENV_SYMPHONY_SKILL_EXECUTION_CONTRACTS:%s\\n' "${SYMPHONY_SKILL_EXECUTION_CONTRACTS}" >> "$trace_file"
     printf 'ENV_CLAUDE_CODE_OAUTH_TOKEN_PRESENT:%s\\n' "${CLAUDE_CODE_OAUTH_TOKEN:+present}" >> "$trace_file"
     #{body}

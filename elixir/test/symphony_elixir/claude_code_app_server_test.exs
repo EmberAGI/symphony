@@ -90,6 +90,8 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       issue = %SymphonyElixir.Linear.Issue{
         id: "issue-agent-runtime-claude-skills",
         identifier: "MT-CC-skill-contract",
+        repository: "EmberAGI/scaling-octo-engine",
+        repository_source: "linear_label",
         title: "Project registered skills",
         state: "In Progress",
         labels: ["implementation-effort:moderate"]

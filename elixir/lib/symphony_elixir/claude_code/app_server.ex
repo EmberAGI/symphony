@@ -73,7 +73,12 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   """
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
-    with {:ok, session} <- start_session(workspace, Keyword.put(opts, :issue, issue)) do
+    opts =
+      opts
+      |> Keyword.put(:issue, issue)
+      |> Keyword.put_new(:issue_bootstrap_env, :no_role_bootstrap)
+
+    with {:ok, session} <- start_session(workspace, opts) do
       try do
         run_turn(session, prompt, issue, opts)
       after
@@ -102,6 +107,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, launch} <- launch_config(issue, role) do
+      bootstrap_env = issue_bootstrap_env(opts)
       ownership_env = ownership_env(issue, role, expanded_workspace, opts)
       provider_auth_env = local_provider_auth_env(worker_host)
 
@@ -113,7 +119,11 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
          worker_host: worker_host,
          launch:
            launch
-           |> Map.put(:env, launch.env ++ Map.to_list(skill_projection.environment) ++ provider_auth_env ++ ownership_env)
+           |> Map.put(
+             :env,
+             launch.env ++
+               bootstrap_env ++ Map.to_list(skill_projection.environment) ++ provider_auth_env ++ ownership_env
+           )
            |> Map.put(:skill_args, skill_projection.args),
          claude_session_id: nil
        }}
@@ -395,6 +405,20 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
       exec
     ]
     |> Enum.join(" && ")
+  end
+
+  # `AgentRuntime.start_session/2` projects the declared role bootstrap inputs
+  # once, before it selects a session path, and threads the result here; a role
+  # turn that cannot be supplied one never reaches this adapter. The key is
+  # read with `fetch!` so a caller that stops projecting fails loudly instead
+  # of silently launching a turn with no bootstrap: opting out is the explicit
+  # `:no_role_bootstrap` sentinel `run/4` sets for adapter-protocol exercises,
+  # never an absent key.
+  defp issue_bootstrap_env(opts) do
+    case Keyword.fetch!(opts, :issue_bootstrap_env) do
+      env when is_map(env) -> Map.to_list(env)
+      :no_role_bootstrap -> []
+    end
   end
 
   defp ownership_env(issue, role, workspace, opts) do

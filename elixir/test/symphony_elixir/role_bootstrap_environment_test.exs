@@ -1,0 +1,331 @@
+defmodule SymphonyElixir.RoleBootstrapEnvironmentTest do
+  use SymphonyElixir.TestSupport
+
+  alias SymphonyElixir.AgentRuntime
+  alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
+  alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
+
+  import SymphonyElixir.ClaudeShimFixture, only: [stream_success: 0, write_fake_claude!: 3]
+
+  @moduledoc """
+  Every role's per-turn bootstrap projection, asserted at the public runtime
+  seam (`AgentRuntime.start_session/2` + `AgentRuntime.run_turn/4`).
+
+  The observable is the environment of the process the runtime actually
+  launches, recorded by the fake provider binary itself. That read works
+  identically on macOS and Linux: nothing here depends on `/proc`, on
+  `ProcessOwnership.process_env/1`, or on any other mechanism that is inert off
+  the Linux role hosts, so these assertions cannot degrade into tautologies on
+  a dev host (see the warning in
+  `orchestrator_terminal_settlement_evidence_test.exs`).
+  """
+
+  @non_implementer_roles ["reviewer", "qa", "landing", "backlog-processor"]
+
+  @repository "EmberAGI/scaling-octo-engine"
+  @expected_branch "agent/emb-1270-role-bootstrap-projection"
+
+  defp bootstrap_issue(overrides \\ []) do
+    struct(
+      %Issue{
+        id: "issue-emb-1270",
+        identifier: "EMB-1270",
+        title: "Role bootstrap projection",
+        state: "In Progress",
+        url: "https://linear.app/emberai/issue/EMB-1270",
+        repository: @repository,
+        repository_source: "linear_label",
+        labels: ["implementation-effort:moderate"]
+      },
+      overrides
+    )
+  end
+
+  defp setup_root(name) do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-role-bootstrap-#{name}-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "EMB-1270")
+    File.mkdir_p!(workspace)
+
+    %{
+      test_root: test_root,
+      workspace_root: workspace_root,
+      workspace: workspace,
+      trace_file: Path.join(test_root, "provider.trace")
+    }
+  end
+
+  # Records the bootstrap inputs the launched turn process actually received,
+  # then replays the recorded Codex app-server handshake.
+  defp write_fake_codex!(path, trace_file) do
+    File.write!(path, """
+    #!/bin/sh
+    trace_file="#{trace_file}"
+    printf 'ENV_SYMPHONY_ISSUE_REPOSITORY:%s\\n' "${SYMPHONY_ISSUE_REPOSITORY}" >> "$trace_file"
+    printf 'ENV_SYMPHONY_EXPECTED_BRANCH:%s\\n' "${SYMPHONY_EXPECTED_BRANCH}" >> "$trace_file"
+    printf 'ENV_SYMPHONY_ISSUE_IDENTIFIER:%s\\n' "${SYMPHONY_ISSUE_IDENTIFIER}" >> "$trace_file"
+    count=0
+
+    while IFS= read -r line; do
+      count=$((count + 1))
+
+      case "$count" in
+        1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        2) ;;
+        3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1270"}}}' ;;
+        4)
+          printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1270"}}}'
+          printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"BOOTSTRAP_OK"}}'
+          printf '%s\\n' '{"method":"turn/completed"}'
+          exit 0
+          ;;
+        *) exit 0 ;;
+      esac
+    done
+    """)
+
+    File.chmod!(path, 0o755)
+  end
+
+  defp env_values(trace, key) do
+    ~r/^ENV_#{key}:(.*)$/m
+    |> Regex.scan(trace)
+    |> Enum.map(fn [_line, value] -> value end)
+  end
+
+  test "every non-Implementer Codex role turn is launched with its declared bootstrap inputs" do
+    ctx = setup_root("codex")
+    codex_binary = Path.join(ctx.test_root, "fake-codex")
+    previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
+
+    on_exit(fn ->
+      restore_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_provider)
+      File.rm_rf(ctx.test_root)
+    end)
+
+    write_fake_codex!(codex_binary, ctx.trace_file)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: ctx.workspace_root,
+      agent_runtime_provider: "codex",
+      codex_command: "#{codex_binary} app-server"
+    )
+
+    issue = bootstrap_issue()
+
+    for role <- @non_implementer_roles do
+      assert {:ok, session} =
+               AgentRuntime.start_session(ctx.workspace,
+                 issue: issue,
+                 role: role,
+                 run_id: "run-#{role}"
+               )
+
+      assert {:ok, {next_session, _turn}} = AgentRuntime.run_turn(session, "Bootstrap probe", issue, [])
+      assert :ok = AgentRuntime.stop_session(next_session)
+    end
+
+    trace = File.read!(ctx.trace_file)
+    role_count = length(@non_implementer_roles)
+
+    assert env_values(trace, "SYMPHONY_ISSUE_REPOSITORY") == List.duplicate(@repository, role_count)
+    assert env_values(trace, "SYMPHONY_EXPECTED_BRANCH") == List.duplicate(@expected_branch, role_count)
+    assert env_values(trace, "SYMPHONY_ISSUE_IDENTIFIER") == List.duplicate("EMB-1270", role_count)
+  end
+
+  test "every non-Implementer Claude role turn is launched with its declared bootstrap inputs" do
+    ctx = setup_root("claude")
+    claude_binary = Path.join(ctx.test_root, "fake-claude")
+    previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "claude_code")
+
+    on_exit(fn ->
+      restore_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_provider)
+      File.rm_rf(ctx.test_root)
+    end)
+
+    write_fake_claude!(claude_binary, ctx.trace_file, stream_success())
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: ctx.workspace_root,
+      agent_runtime_provider: "claude_code",
+      claude_code_command: claude_binary,
+      claude_code_model: "sonnet"
+    )
+
+    issue = bootstrap_issue()
+
+    for role <- @non_implementer_roles do
+      assert {:ok, session} =
+               AgentRuntime.start_session(ctx.workspace,
+                 issue: issue,
+                 role: role,
+                 run_id: "run-#{role}"
+               )
+
+      assert {:ok, {next_session, _turn}} = AgentRuntime.run_turn(session, "Bootstrap probe", issue, [])
+      assert :ok = AgentRuntime.stop_session(next_session)
+    end
+
+    trace = File.read!(ctx.trace_file)
+    role_count = length(@non_implementer_roles)
+
+    assert env_values(trace, "SYMPHONY_ISSUE_REPOSITORY") == List.duplicate(@repository, role_count)
+    assert env_values(trace, "SYMPHONY_EXPECTED_BRANCH") == List.duplicate(@expected_branch, role_count)
+  end
+
+  test "a role turn that cannot be supplied a required bootstrap input fails typed and named" do
+    ctx = setup_root("missing")
+    codex_binary = Path.join(ctx.test_root, "fake-codex")
+    previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
+
+    on_exit(fn ->
+      restore_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_provider)
+      File.rm_rf(ctx.test_root)
+    end)
+
+    write_fake_codex!(codex_binary, ctx.trace_file)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: ctx.workspace_root,
+      agent_runtime_provider: "codex",
+      codex_command: "#{codex_binary} app-server"
+    )
+
+    issue = bootstrap_issue(repository: nil, repository_source: nil)
+
+    for role <- @non_implementer_roles ++ ["implementer"] do
+      assert {:error, {:missing_required_bootstrap_input, details}} =
+               AgentRuntime.start_session(ctx.workspace,
+                 issue: issue,
+                 role: role,
+                 run_id: "run-#{role}"
+               )
+
+      assert details.name == "SYMPHONY_ISSUE_REPOSITORY"
+      assert details.issue_identifier == "EMB-1270"
+
+      # The failure must be irrecoverable and name the missing input, so the
+      # run escalates on runtime evidence rather than on agent judgement.
+      assert {:irrecoverable, failure} =
+               AgentRuntime.classify_failure(
+                 {:missing_required_bootstrap_input, details},
+                 %{issue_id: issue.id, role: role, workspace_path: ctx.workspace}
+               )
+
+      assert failure.family == :missing_required_runtime_configuration
+      assert failure.summary =~ "SYMPHONY_ISSUE_REPOSITORY"
+      assert failure.irrecoverable?
+    end
+
+    # Nothing was launched: the projection failed before any turn process ran.
+    refute File.exists?(ctx.trace_file)
+  end
+
+  # The seam projects the bootstrap env for every role; the adapters read it
+  # with `fetch!` so a caller that stops projecting raises instead of quietly
+  # launching a turn with none. That guard is what stands between a future
+  # refactor and a byte-for-byte recurrence of the defect this PR fixes, so it
+  # is exercised directly rather than left to hold only by inspection.
+  test "an adapter refuses to start a session without an explicit bootstrap projection" do
+    ctx = setup_root("sentinel")
+    codex_binary = Path.join(ctx.test_root, "fake-codex")
+    claude_binary = Path.join(ctx.test_root, "fake-claude")
+
+    on_exit(fn -> File.rm_rf(ctx.test_root) end)
+
+    write_fake_codex!(codex_binary, ctx.trace_file)
+    write_fake_claude!(claude_binary, ctx.trace_file, stream_success())
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: ctx.workspace_root,
+      codex_command: "#{codex_binary} app-server",
+      claude_code_command: claude_binary,
+      claude_code_model: "sonnet"
+    )
+
+    session_opts = [issue: bootstrap_issue(), role: "reviewer"]
+
+    for adapter <- [CodexAppServer, ClaudeAppServer] do
+      assert_raise KeyError, ~r/:issue_bootstrap_env/, fn ->
+        adapter.start_session(ctx.workspace, session_opts)
+      end
+    end
+
+    # Neither refusal launched anything.
+    refute File.exists?(ctx.trace_file)
+
+    # The explicit opt-out an adapter-protocol exercise uses still starts, and
+    # means what it says: no bootstrap input reaches the launched process.
+    opt_out = Keyword.put(session_opts, :issue_bootstrap_env, :no_role_bootstrap)
+
+    assert {:ok, codex_session} = CodexAppServer.start_session(ctx.workspace, opt_out)
+    assert :ok = CodexAppServer.stop_session(codex_session)
+
+    assert {:ok, claude_session} = ClaudeAppServer.start_session(ctx.workspace, opt_out)
+    refute List.keymember?(claude_session.launch.env, "SYMPHONY_ISSUE_REPOSITORY", 0)
+    refute List.keymember?(claude_session.launch.env, "SYMPHONY_EXPECTED_BRANCH", 0)
+    assert :ok = ClaudeAppServer.stop_session(claude_session)
+
+    assert env_values(File.read!(ctx.trace_file), "SYMPHONY_ISSUE_REPOSITORY") == [""]
+  end
+
+  # The classifier assertion above reads a constructed term. This one reads the
+  # term the runner actually produces, through the public `AgentRunner.run/3`
+  # boundary, with the workspace lifecycle hooks every deployed role configures.
+  # A post-turn routing hook runs after the failed turn either way; whether it
+  # succeeds or fails, it must not re-open an irrecoverable run as retryable.
+  test "the runner exits irrecoverable for a missing bootstrap input under a configured after_run hook" do
+    previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    previous_role = System.get_env("SYMPHONY_ROLE")
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
+    System.put_env("SYMPHONY_ROLE", "reviewer")
+
+    on_exit(fn ->
+      restore_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_provider)
+      restore_env("SYMPHONY_ROLE", previous_role)
+    end)
+
+    after_run_hooks = [
+      {"succeeding", "echo post-turn-handoff-gate-ok"},
+      {"failing", "echo post-turn-handoff-gate-down && exit 17"}
+    ]
+
+    for {label, after_run_hook} <- after_run_hooks do
+      ctx = setup_root("runner-#{label}")
+
+      try do
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: ctx.workspace_root,
+          agent_runtime_provider: "codex",
+          hook_after_create: "echo workspace-created",
+          hook_before_run: "echo before-run",
+          hook_after_run: after_run_hook
+        )
+
+        issue = bootstrap_issue(repository: nil, repository_source: nil)
+
+        exit_reason =
+          catch_exit(run_agent_with_ownership(issue, nil, role: "reviewer", run_id: "run-bootstrap-#{label}"))
+
+        assert {:irrecoverable_runtime_failed, failure} = exit_reason,
+               "a #{label} after_run hook must not change the run's typed reason, got #{inspect(exit_reason)}"
+
+        assert failure.family == :missing_required_runtime_configuration
+        assert failure.subtype == "missing_required_bootstrap_input"
+        assert failure.summary =~ "SYMPHONY_ISSUE_REPOSITORY"
+        assert failure.irrecoverable?
+        refute failure.retryable?
+      after
+        File.rm_rf(ctx.test_root)
+      end
+    end
+  end
+end

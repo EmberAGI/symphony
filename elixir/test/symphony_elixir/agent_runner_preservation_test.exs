@@ -103,6 +103,8 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
       issue = %Issue{
         id: "issue-preservation-#{label}",
         identifier: "EMB-1244",
+        repository: "EmberAGI/scaling-octo-engine",
+        repository_source: "linear_label",
         title: "Preserve supervised work",
         description: "Stage 2 preservation",
         state: "In Progress",

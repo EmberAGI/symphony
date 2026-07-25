@@ -1279,6 +1279,8 @@ defmodule SymphonyElixir.CoreTest do
       issue = %Issue{
         id: "issue-smoke-workspace",
         identifier: "S-99",
+        repository: "EmberAGI/scaling-octo-engine",
+        repository_source: "linear_label",
         title: "Smoke test",
         description: "Run and keep workspace",
         state: "In Progress",
@@ -1290,14 +1292,18 @@ defmodule SymphonyElixir.CoreTest do
       assert :ok = run_agent_with_ownership(issue, nil, role: "reviewer")
       entries_after = MapSet.new(File.ls!(workspace_root))
 
+      # An issue that declares its repository keeps the repository-suffixed
+      # workspace name the workspace layout already assigns it.
+      expected_workspace_name = "S-99-scaling-octo-engine"
+
       created =
-        MapSet.difference(entries_after, before) |> Enum.filter(&(&1 == "S-99"))
+        MapSet.difference(entries_after, before) |> Enum.filter(&(&1 == expected_workspace_name))
 
       created = MapSet.new(created)
 
       assert MapSet.size(created) == 1
       workspace_name = created |> Enum.to_list() |> List.first()
-      assert workspace_name == "S-99"
+      assert workspace_name == expected_workspace_name
 
       workspace = Path.join(workspace_root, workspace_name)
       assert File.exists?(workspace)
@@ -1367,6 +1373,8 @@ defmodule SymphonyElixir.CoreTest do
       issue = %Issue{
         id: "issue-live-updates",
         identifier: "MT-99",
+        repository: "EmberAGI/scaling-octo-engine",
+        repository_source: "linear_label",
         title: "Smoke test",
         description: "Capture codex updates",
         state: "In Progress",
@@ -1496,6 +1504,8 @@ defmodule SymphonyElixir.CoreTest do
       issue = %Issue{
         id: "issue-runner-auth",
         identifier: "EMB-1123",
+        repository: "EmberAGI/scaling-octo-engine",
+        repository_source: "linear_label",
         title: "Preserve provider auth",
         description: "Runtime auth failure",
         state: "In Progress",
@@ -1612,6 +1622,8 @@ defmodule SymphonyElixir.CoreTest do
            %Issue{
              id: "issue-continue",
              identifier: "MT-247",
+             repository: "EmberAGI/scaling-octo-engine",
+             repository_source: "linear_label",
              title: "Continue until done",
              description: "Still active after first turn",
              state: state
@@ -1622,6 +1634,8 @@ defmodule SymphonyElixir.CoreTest do
       issue = %Issue{
         id: "issue-continue",
         identifier: "MT-247",
+        repository: "EmberAGI/scaling-octo-engine",
+        repository_source: "linear_label",
         title: "Continue until done",
         description: "Still active after first turn",
         state: "In Progress",
@@ -1740,6 +1754,8 @@ defmodule SymphonyElixir.CoreTest do
            %Issue{
              id: "issue-max-turns",
              identifier: "MT-248",
+             repository: "EmberAGI/scaling-octo-engine",
+             repository_source: "linear_label",
              title: "Stop at max turns",
              description: "Still active",
              state: "In Progress"
@@ -1750,6 +1766,8 @@ defmodule SymphonyElixir.CoreTest do
       issue = %Issue{
         id: "issue-max-turns",
         identifier: "MT-248",
+        repository: "EmberAGI/scaling-octo-engine",
+        repository_source: "linear_label",
         title: "Stop at max turns",
         description: "Still active",
         state: "In Progress",

@@ -444,6 +444,8 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     %Issue{
       id: "issue-failed-run-#{label}",
       identifier: "EMB-HOTFIX",
+      repository: "EmberAGI/scaling-octo-engine",
+      repository_source: "linear_label",
       title: "Typed failed runs",
       description: "A failed run must never look normal",
       state: "In Progress",

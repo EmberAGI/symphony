@@ -137,14 +137,23 @@ defmodule SymphonyElixir.AgentRuntime do
 
   @doc """
   Start a runtime session with the configured adapter.
+
+  The per-turn bootstrap inputs every role declares are projected once here,
+  before the role branch, so no role can be routed around them. A required
+  input that cannot be supplied fails typed at this boundary instead of
+  reaching a role turn as an unset variable.
   """
   @spec start_session(Path.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def start_session(workspace, opts) do
     provider = provider()
     role = Keyword.get(opts, :role, role_name())
 
-    with {:ok, skill_execution_contracts} <- resolve_skill_execution_contracts(workspace, opts) do
-      opts = Keyword.put(opts, :skill_execution_contracts, skill_execution_contracts)
+    with {:ok, skill_execution_contracts} <- resolve_skill_execution_contracts(workspace, opts),
+         {:ok, issue_bootstrap_env} <- Workspace.issue_environment(Keyword.get(opts, :issue)) do
+      opts =
+        opts
+        |> Keyword.put(:skill_execution_contracts, skill_execution_contracts)
+        |> Keyword.put(:issue_bootstrap_env, issue_bootstrap_env)
 
       if role == "implementer" do
         start_implementer_session(workspace, provider, role, opts)
@@ -244,7 +253,8 @@ defmodule SymphonyElixir.AgentRuntime do
             run_id,
             workspace,
             contract,
-            Keyword.get(opts, :process_ownership_env)
+            Keyword.get(opts, :process_ownership_env),
+            Keyword.fetch!(opts, :issue_bootstrap_env)
           ),
         skill_execution_contracts: Keyword.get(opts, :skill_execution_contracts, []),
         transport: transport,
@@ -270,7 +280,8 @@ defmodule SymphonyElixir.AgentRuntime do
          run_id,
          workspace,
          contract,
-         process_ownership_env
+         process_ownership_env,
+         issue_bootstrap_env
        ) do
     ownership_env =
       case process_ownership_env do
@@ -287,8 +298,7 @@ defmodule SymphonyElixir.AgentRuntime do
       end
       |> Map.new()
 
-    issue
-    |> Workspace.issue_environment()
+    issue_bootstrap_env
     |> Map.merge(ownership_env)
     |> Map.merge(%{
       "SYMPHONY_ROLE_NAME" => role,
@@ -733,6 +743,18 @@ defmodule SymphonyElixir.AgentRuntime do
        subtype: subtype,
        path: path,
        message: "runtime workspace path is invalid"
+     }}
+  end
+
+  # A role turn that cannot be supplied a declared bootstrap input never runs:
+  # the missing variable is named here so escalation is decided on runtime
+  # evidence rather than on the agent noticing the absence mid-turn.
+  defp real_irrecoverable_runtime_reason({:missing_required_bootstrap_input, details}) when is_map(details) do
+    {:missing_required_runtime_configuration,
+     %{
+       name: safe_detail_fragment(Map.get(details, :name)),
+       subtype: "missing_required_bootstrap_input",
+       message: "required role bootstrap input is unavailable for #{safe_detail_fragment(Map.get(details, :issue_identifier))}"
      }}
   end
 

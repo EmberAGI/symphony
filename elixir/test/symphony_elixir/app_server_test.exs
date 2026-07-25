@@ -348,6 +348,8 @@ defmodule SymphonyElixir.AppServerTest do
     issue = %Issue{
       id: "issue-agent-runtime-codex-skills",
       identifier: "MT-201",
+      repository: "EmberAGI/scaling-octo-engine",
+      repository_source: "linear_label",
       title: "Project registered skills",
       state: "In Progress",
       labels: ["implementation-effort:moderate"]
@@ -455,6 +457,8 @@ defmodule SymphonyElixir.AppServerTest do
     issue = %Issue{
       id: "issue-agent-runtime-remote-skills",
       identifier: "MT-REMOTE-SKILLS",
+      repository: "EmberAGI/scaling-octo-engine",
+      repository_source: "linear_label",
       title: "Validate remote registered skills",
       state: "In Progress",
       labels: ["implementation-effort:moderate"]

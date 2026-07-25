@@ -126,6 +126,27 @@ admission opens.
   not exposed through prompts or logs.
 - Runtime adapters must expose tools through controlled runtime-native
   mechanisms. Credentials and tracker tokens must not be pasted into prompts.
+- Every role turn receives the per-turn bootstrap inputs its workflow declares
+  as required, from one projection at the runtime session Interface taken
+  before the session path for a role is selected. No role runs through a
+  session path that bypasses that projection.
+- `SYMPHONY_ISSUE_REPOSITORY` and `SYMPHONY_EXPECTED_BRANCH` are required
+  bootstrap inputs of a role turn. A missing value is never silently dropped
+  into an absent variable: the role projection fails at its own boundary,
+  naming the variable and the issue it was projected for, and classifies as an
+  irrecoverable missing-required-runtime-configuration failure. Roles fail
+  closed rather than infer repository or branch metadata, so the runtime, not
+  agent judgement, is the enforcement point for a boundary input it cannot
+  supply.
+- That requirement is scoped to the role-turn projection. Workspace-lifecycle
+  hooks share the same environment shape but are not role turns, and workspace
+  population through them stays implementation-defined (symphony-service
+  spec 9.2-9.3), so they continue to project whatever the issue context
+  carries.
+- An irrecoverable runtime failure keeps its family through post-turn routing.
+  A failing `after_run` hook records its own failure but must not replace an
+  already-irrecoverable reason, which would re-open the run as retryable under
+  a different family.
 - A configured skill with executable resources is not available merely
   because its metadata or body is discoverable. The integrating workflow must
   supply its registered skill execution contract, and `AgentRuntime` must
