@@ -215,7 +215,8 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
       id: "issue-emb-1259-stall",
       identifier: "MT-1259S",
       title: "Terminal settlement evidence on stall",
-      state: "In Progress"
+      state: "In Progress",
+      repository: "EmberAGI/demo-repo"
     }
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -292,7 +293,8 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
     issue = %Issue{
       id: "issue-emb-1259-survivor",
       identifier: "MT-1259L",
-      state: "In Progress"
+      state: "In Progress",
+      repository: "EmberAGI/demo-repo"
     }
 
     sleep = System.find_executable("sleep")
@@ -380,7 +382,13 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
       workspace_root: workspace_root
     )
 
-    issue = %Issue{id: "issue-emb-1259-ordering", identifier: "MT-1259O", state: "In Progress"}
+    issue = %Issue{
+      id: "issue-emb-1259-ordering",
+      identifier: "MT-1259O",
+      state: "In Progress",
+      repository: "EmberAGI/demo-repo"
+    }
+
     events_path = Path.join(test_root, "settlement-events.log")
 
     orchestrator_name = Module.concat(__MODULE__, :OrderingSettlementOrchestrator)
@@ -482,7 +490,7 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
       workspace_root: workspace_root
     )
 
-    issue = %Issue{id: issue_id, identifier: identifier, state: "In Progress"}
+    issue = %Issue{id: issue_id, identifier: identifier, state: "In Progress", repository: "EmberAGI/demo-repo"}
 
     orchestrator_name = Module.concat(__MODULE__, :"Settlement#{identifier}Orchestrator")
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
