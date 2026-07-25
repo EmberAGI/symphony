@@ -527,26 +527,51 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   def read_agent(_session, _agent, _opts, _context), do: {:error, :invalid_herdr_agent_read}
 
+  @doc """
+  Report what this session can prove about its worker delegations.
+
+  An empty list means the recording was readable and the orchestrator
+  delivered nothing to the worker. Anything that prevents that observation —
+  a session without a runtime root, or a runtime root whose worker-event
+  recording was never materialized — is a typed
+  `:worker_assignments_unobservable` error, never a silent `[]`.
+  """
   @impl true
   def worker_assignments(%{runtime_root: runtime_root} = session, context)
       when is_binary(runtime_root) and is_map(context) do
-    worker = Map.get(session, :worker, %{name: "implementer_worker"})
+    worker_events = worker_events_root(runtime_root)
 
-    with {:ok, assignment_messages} <-
-           read_worker_messages(runtime_root, "assignment.*", @worker_assignment_prefix),
-         {:ok, result_messages} <-
-           read_worker_messages(runtime_root, "result.*", @worker_result_prefix) do
-      assignments =
-        assignment_messages
-        |> Enum.map(&message_fields/1)
-        |> Enum.filter(&(is_binary(Map.get(&1, "assignment")) and Map.get(&1, "assignment") != ""))
+    if File.dir?(worker_events) do
+      worker = Map.get(session, :worker, %{name: "implementer_worker"})
 
-      results = Enum.map(result_messages, &message_fields/1)
-      {:ok, correlate_worker_assignments(assignments, results, session, worker, context)}
+      with {:ok, assignment_messages} <-
+             read_worker_messages(runtime_root, "assignment.*", @worker_assignment_prefix),
+           {:ok, result_messages} <-
+             read_worker_messages(runtime_root, "result.*", @worker_result_prefix) do
+        assignments =
+          assignment_messages
+          |> Enum.map(&message_fields/1)
+          |> Enum.filter(&(is_binary(Map.get(&1, "assignment")) and Map.get(&1, "assignment") != ""))
+
+        results = Enum.map(result_messages, &message_fields/1)
+
+        {:ok,
+         observed_worker_assignments(
+           assignments,
+           results,
+           channel_records(worker_events),
+           session,
+           worker,
+           context
+         )}
+      end
+    else
+      {:error, {:worker_assignments_unobservable, %{reason: :worker_events_root_missing, runtime_root: runtime_root}}}
     end
   end
 
-  def worker_assignments(_session, _context), do: {:ok, []}
+  def worker_assignments(_session, _context),
+    do: {:error, {:worker_assignments_unobservable, %{reason: :session_runtime_root_missing}}}
 
   @impl true
   def stop_session(%{name: name, env: env, server_task: server_task, runtime_root: runtime_root}, context) do
@@ -1444,6 +1469,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     #!/bin/sh
     set -eu
     #{authorization}
+    #{worker_event_recorder(runtime_root)}
     if [ "${1:-}" = "agent" ] && [ "${2:-}" = "prompt" ] && [ "$#" -ge 4 ]; then
       agent_name=$3
       message=$4
@@ -1484,27 +1510,52 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     """
   end
 
-  defp worker_message_recording(:orchestrator, runtime_root) do
+  # Sequence-numbered so the read side recovers delivery order from a lexical
+  # sort. Each role writes its own prefixes, and one agent's prompts are
+  # serial, so the count-then-create step needs no cross-process locking.
+  defp worker_event_recorder(runtime_root) do
     worker_events = worker_events_root(runtime_root)
 
     """
+    record_worker_event() {
+      _prefix=$1
+      _seq=$( (set -- #{shell_escape(worker_events)}/"$_prefix".*; if [ -e "$1" ]; then printf '%s' "$#"; else printf '0'; fi) )
+      _file=$(mktemp #{shell_escape(worker_events)}/"$_prefix"."$(printf '%06d' "$((_seq + 1))")".XXXXXX)
+      printf '%s\\n' "$2" > "$_file"
+    }
+    """
+  end
+
+  # The channel itself is the record. Every prompt the orchestrator sends to
+  # the worker is a delivery and every prompt the worker sends back is a reply,
+  # whether or not either side used the `OCTO_MSG` envelope. The envelope stays
+  # the richer record — it carries the agent's own assignment id and status —
+  # but the evidence contract no longer depends on an agent remembering it.
+  defp worker_message_recording(:orchestrator, _runtime_root) do
+    """
+    case "$agent_name" in
+      implementer_worker)
+        record_worker_event delivery "$message"
+        ;;
+    esac
     case "$agent_name:$message" in
       implementer_worker:'#{@worker_assignment_prefix}'*)
-        event_file=$(mktemp #{shell_escape(Path.join(worker_events, "assignment.XXXXXX"))})
-        printf '%s\\n' "$message" > "$event_file"
+        record_worker_event assignment "$message"
         ;;
     esac
     """
   end
 
-  defp worker_message_recording(:worker, runtime_root) do
-    worker_events = worker_events_root(runtime_root)
-
+  defp worker_message_recording(:worker, _runtime_root) do
     """
+    case "$agent_name" in
+      implementer_orchestrator)
+        record_worker_event reply "$message"
+        ;;
+    esac
     case "$agent_name:$message" in
       implementer_orchestrator:'#{@worker_result_prefix}'*)
-        event_file=$(mktemp #{shell_escape(Path.join(worker_events, "result.XXXXXX"))})
-        printf '%s\\n' "$message" > "$event_file"
+        record_worker_event result "$message"
         ;;
     esac
     """
@@ -1580,6 +1631,78 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         [key, value] -> Map.put(fields, key, value)
         _ -> fields
       end
+    end)
+  end
+
+  defp channel_records(worker_events) do
+    %{
+      deliveries: sequenced_worker_events(worker_events, "delivery.*"),
+      replies: sequenced_worker_events(worker_events, "reply.*")
+    }
+  end
+
+  defp sequenced_worker_events(worker_events, pattern) do
+    worker_events
+    |> Path.join(pattern)
+    |> Path.wildcard()
+    |> Enum.sort()
+    |> Enum.map(&Path.basename/1)
+  end
+
+  # The `OCTO_MSG` envelope is preferred where an agent used it, because it
+  # carries the agent's own assignment id and status. Where it was not used the
+  # channel still proves the delegation, so a delivered assignment is never
+  # read back as a run that had no worker.
+  defp observed_worker_assignments(assignments, results, channel, session, worker, context) do
+    correlated = correlate_worker_assignments(assignments, results, session, worker, context)
+
+    case correlated ++ unrecorded_assignment_results(assignments, results) do
+      [] -> channel_worker_assignments(channel, session, worker, context)
+      observed -> Enum.map(observed, &Map.put(&1, :evidence, :envelope))
+    end
+  end
+
+  defp channel_worker_assignments(%{deliveries: deliveries, replies: replies}, session, worker, context) do
+    deliveries
+    |> Enum.with_index()
+    |> Enum.map(fn {delivery, index} ->
+      assignment_id = channel_assignment_id(session, delivery)
+
+      case Enum.at(replies, index) do
+        nil ->
+          assignment_id
+          |> worker_assignment_status(nil, session, worker, context)
+          |> Map.put(:evidence, :channel)
+
+        _reply ->
+          %{
+            assignment_id: assignment_id,
+            status: :completed,
+            evidence: :channel,
+            result: %{assignment_id: assignment_id, status: "returned"}
+          }
+      end
+    end)
+  end
+
+  defp channel_assignment_id(session, delivery),
+    do: "#{Map.get(session, :name)}/#{delivery}"
+
+  defp unrecorded_assignment_results(assignments, results) do
+    assigned = MapSet.new(assignments, &Map.get(&1, "assignment"))
+
+    results
+    |> Enum.reject(&MapSet.member?(assigned, Map.get(&1, "assignment")))
+    |> Enum.map(fn result ->
+      %{
+        assignment_id: Map.get(result, "assignment"),
+        status: :assignment_unrecorded,
+        result: %{
+          assignment_id: Map.get(result, "assignment"),
+          status: Map.get(result, "status"),
+          message: Map.get(result, "message")
+        }
+      }
     end)
   end
 

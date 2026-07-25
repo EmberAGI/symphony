@@ -168,8 +168,9 @@ defmodule SymphonyElixir.ImplementerDelegation do
          :ok <- terminal_turn_status(contract_provider(Map.get(session, :contract, %{}), :orchestrator), response),
          {:ok, worker_assignments} <-
            worker_assignments(transport, herdr_session, transport_context),
-         :ok <- validate_worker_assignments(worker_assignments) do
+         :ok <- validate_worker_assignments(worker_assignments, herdr_session) do
       session_id = agent_session_id(completed)
+      worker_assignments = observed_assignments(worker_assignments)
       worker_evidence = bounded_worker_evidence(worker_assignments)
 
       if worker_evidence != [] do
@@ -219,15 +220,28 @@ defmodule SymphonyElixir.ImplementerDelegation do
     end
   end
 
+  # A transport that cannot report assignments has not reported "no
+  # assignments"; it has reported nothing. The two are kept apart here so the
+  # caller decides, rather than inheriting an empty list it cannot distinguish.
   defp worker_assignments(transport, herdr_session, transport_context) do
-    if function_exported?(transport, :worker_assignments, 2),
-      do: transport.worker_assignments(herdr_session, transport_context),
-      else: {:ok, :unsupported}
+    if function_exported?(transport, :worker_assignments, 2) do
+      transport.worker_assignments(herdr_session, transport_context)
+    else
+      {:ok, {:unobservable, %{reason: :transport_capability_missing, transport: transport}}}
+    end
   end
 
-  defp validate_worker_assignments(:unsupported), do: :ok
+  # Unobservable is only benign where there is provably nothing to observe: a
+  # session that never launched a worker. Once a worker agent is live in the
+  # session, an unreadable assignment set fails typed instead of settling as an
+  # empty one.
+  defp validate_worker_assignments({:unobservable, details}, herdr_session) do
+    if is_map(Map.get(herdr_session, :worker)),
+      do: {:error, {:implementer_worker_assignments_unobservable, details}},
+      else: :ok
+  end
 
-  defp validate_worker_assignments(assignments) when is_list(assignments) do
+  defp validate_worker_assignments(assignments, _herdr_session) when is_list(assignments) do
     Enum.reduce_while(assignments, :ok, fn assignment, :ok ->
       case worker_assignment_result(assignment) do
         :ok -> {:cont, :ok}
@@ -236,8 +250,31 @@ defmodule SymphonyElixir.ImplementerDelegation do
     end)
   end
 
-  defp validate_worker_assignments(_assignments),
+  defp validate_worker_assignments(_assignments, _herdr_session),
     do: {:error, {:implementer_worker_result_missing, %{assignment_id: nil}}}
+
+  defp observed_assignments({:unobservable, _details}), do: []
+  defp observed_assignments(assignments) when is_list(assignments), do: assignments
+
+  # The channel proves the assignment was delivered and that the worker
+  # answered it. It carries no success claim of the worker's own — only the
+  # `OCTO_MSG` envelope does — so its result status says exactly that.
+  defp worker_assignment_result(%{
+         assignment_id: assignment_id,
+         status: :completed,
+         evidence: :channel,
+         result: %{assignment_id: assignment_id, status: "returned"}
+       })
+       when is_binary(assignment_id) and assignment_id != "",
+       do: :ok
+
+  defp worker_assignment_result(%{
+         assignment_id: assignment_id,
+         status: :assignment_unrecorded,
+         result: result
+       }) do
+    {:error, {:implementer_worker_assignment_unrecorded, %{assignment_id: assignment_id, result: result}}}
+  end
 
   defp worker_assignment_result(%{
          assignment_id: assignment_id,
@@ -309,13 +346,12 @@ defmodule SymphonyElixir.ImplementerDelegation do
       %{
         assignment_id: Map.get(assignment, :assignment_id),
         status: Map.get(assignment, :status),
+        evidence: Map.get(assignment, :evidence),
         result_assignment_id: get_in(assignment, [:result, :assignment_id]),
         result_status: get_in(assignment, [:result, :status])
       }
     end)
   end
-
-  defp bounded_worker_evidence(:unsupported), do: []
 
   @spec stop_session(session()) :: :ok | {:error, term()}
   def stop_session(%{
@@ -495,7 +531,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
       "--config",
       "model_reasoning_effort=#{effort}",
       "--config",
-      "developer_instructions=#{inspect(instructions)}",
+      "developer_instructions=#{config_value(instructions)}",
       "--config",
       "shell_environment_policy.inherit=all",
       "--config",
@@ -503,14 +539,14 @@ defmodule SymphonyElixir.ImplementerDelegation do
       "--config",
       codex_filesystem_permissions(runtime_root, permission_read_roots),
       "--config",
-      "permissions.octo_herdr.network={enabled=true,unix_sockets={#{inspect(socket)}=\"allow\"}}",
+      "permissions.octo_herdr.network={enabled=true,unix_sockets={#{config_value(socket)}=\"allow\"}}",
       "--ask-for-approval",
       "never",
       "--disable",
       "multi_agent",
       "--dangerously-bypass-hook-trust",
       "--config",
-      "projects={#{inspect(workspace)}={trust_level=\"trusted\"}}",
+      "projects={#{config_value(workspace)}={trust_level=\"trusted\"}}",
       "--no-alt-screen"
     ]
   end
@@ -547,11 +583,18 @@ defmodule SymphonyElixir.ImplementerDelegation do
   defp launcher_argv(provider, _profile, _workspace, _herdr_session),
     do: raise(ArgumentError, "unsupported Implementer provider #{inspect(provider)}")
 
+  # Every Codex `--config` value is a TOML string, and a launch contract that
+  # silently loses part of one is worse than a launch that fails. `inspect/1`
+  # truncates a printable binary at its 4096-byte `:printable_limit` and
+  # appends `<> ...`, which quietly dropped everything past that boundary in a
+  # profile's instructions — the worker-assignment protocol included.
+  defp config_value(value), do: inspect(value, printable_limit: :infinity, limit: :infinity)
+
   defp codex_filesystem_permissions(runtime_root, permission_read_roots) do
     read_roots =
       [runtime_root | permission_read_roots]
       |> Enum.uniq()
-      |> Enum.map_join(",", &"#{inspect(&1)}=\"read\"")
+      |> Enum.map_join(",", &"#{config_value(&1)}=\"read\"")
 
     "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"},#{read_roots}}"
   end
