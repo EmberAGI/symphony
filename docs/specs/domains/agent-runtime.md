@@ -776,7 +776,18 @@ that fails, returns unparseable output, or crashes the capture — or that
 cannot be written settles as a typed cleanup failure recorded unverified,
 never as a verified-clean settlement and never left silently active. A
 capture whose machinery worked and observed no owned process still settles
-clean: empty evidence is only trustworthy when it was actually observed. The same terminal
+clean: empty evidence is only trustworthy when it was actually observed.
+Owned-process liveness — for settlement evidence and for the dispatch-admission
+gates alike — is matched by recorded PID, and a process-table read that failed
+is never evidence that an owned process died: an unusable read reports the
+recorded PIDs live, so a degraded host blocks dispatch rather than starting a
+second run over a live one. Deferred: PID-reuse identity is not resolved. An
+unrelated process that inherits a recorded PID after the owned process exits
+reads as a false survivor, because distinguishing it requires recording each
+owned process's start time in the ownership record — a record-schema change
+left to a follow-up issue. Until then a false survivor settles conservatively,
+quarantining the record for an operator and withholding dispatch, never
+producing a verified-clean settlement. The same terminal
 cleanup boundary runs after normal or abnormal task exit and after forced
 stall, timeout, state, routing, or shutdown cancellation for every role. If an
 issue-owned hook or provider descendant survives task/session stop, cleanup
