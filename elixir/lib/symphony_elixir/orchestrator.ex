@@ -1411,11 +1411,32 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp kill_settlement_task(_settlement), do: :ok
 
-  defp terminal_settlement_timeout_ms do
+  @doc """
+  Resolves the terminal settlement deadline in milliseconds.
+
+  Precedence is explicit app-env override > configured value > compiled
+  default. The app-env entry is the existing TEST seam and keeps winning; the
+  production surface is `agent_runtime.terminal_settlement_timeout_ms` in the
+  workflow configuration (EMB-1260 67-SF4c). Configuration that cannot be read
+  or carries no usable value falls back to the compiled default rather than
+  raising: this runs on the settlement dispatch path, where a config problem
+  must not take out the orchestrator.
+  """
+  @spec terminal_settlement_timeout_ms() :: pos_integer()
+  def terminal_settlement_timeout_ms do
     case Application.get_env(:symphony_elixir, :terminal_settlement_timeout_ms) do
+      value when is_integer(value) and value > 0 -> value
+      _ -> configured_terminal_settlement_timeout_ms()
+    end
+  end
+
+  defp configured_terminal_settlement_timeout_ms do
+    case Config.settings!().agent_runtime.terminal_settlement_timeout_ms do
       value when is_integer(value) and value > 0 -> value
       _ -> @default_terminal_settlement_timeout_ms
     end
+  rescue
+    _error -> @default_terminal_settlement_timeout_ms
   end
 
   # Marker-step failures stay typed: a mismatched or missing ownership

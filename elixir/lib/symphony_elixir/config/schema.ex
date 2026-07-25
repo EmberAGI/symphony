@@ -394,13 +394,18 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:provider, :string, default: "codex")
       field(:skill_execution_contracts, {:array, :map}, default: [])
+      # Deadline for one terminal settlement (teardown + evidence capture) to
+      # reach a typed outcome. Production surface for the value the orchestrator
+      # previously exposed only through an app-env test seam (EMB-1260).
+      field(:terminal_settlement_timeout_ms, :integer, default: 60_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:provider, :skill_execution_contracts], empty_values: [])
-      |> validate_required([:provider])
+      |> cast(attrs, [:provider, :skill_execution_contracts, :terminal_settlement_timeout_ms], empty_values: [])
+      |> validate_required([:provider, :terminal_settlement_timeout_ms])
+      |> validate_number(:terminal_settlement_timeout_ms, greater_than: 0)
       |> validate_inclusion(:provider, @supported_providers, message: "must be one of: #{Enum.join(@supported_providers, ", ")}")
     end
   end

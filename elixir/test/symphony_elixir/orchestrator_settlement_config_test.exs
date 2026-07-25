@@ -109,25 +109,41 @@ defmodule SymphonyElixir.OrchestratorSettlementConfigTest do
 
   describe "terminal settlement timeout is production-configurable (4c)" do
     test "the configured settings value is the production surface" do
+      write_settlement_workflow_file!("config-default", nil)
+
       settings = SymphonyElixir.Config.settings!()
 
-      assert %{settlement: %{terminal_timeout_ms: timeout_ms}} = settings,
+      assert %{agent_runtime: %{terminal_settlement_timeout_ms: timeout_ms}} = settings,
              "the terminal settlement timeout must be reachable from Config.settings!/0"
 
-      assert is_integer(timeout_ms) and timeout_ms > 0
       assert timeout_ms == 60_000, "the shipped default must stay 60_000"
     end
 
+    test "a configured value is used when no app-env override is set" do
+      write_settlement_workflow_file!("config-set", 9_100)
+
+      Application.delete_env(:symphony_elixir, :terminal_settlement_timeout_ms)
+
+      assert SymphonyElixir.Orchestrator.terminal_settlement_timeout_ms() == 9_100,
+             "the configured production value must be used when nothing overrides it"
+    end
+
     test "the app-env seam still overrides the configured value" do
+      write_settlement_workflow_file!("config-overridden", 9_100)
+
       Application.put_env(:symphony_elixir, :terminal_settlement_timeout_ms, 137)
 
       assert SymphonyElixir.Orchestrator.terminal_settlement_timeout_ms() == 137,
              "the existing app-env test seam must keep winning over the config value"
+    end
+
+    test "the compiled default survives an unconfigured runtime" do
+      write_settlement_workflow_file!("config-absent", nil)
 
       Application.delete_env(:symphony_elixir, :terminal_settlement_timeout_ms)
 
       assert SymphonyElixir.Orchestrator.terminal_settlement_timeout_ms() == 60_000,
-             "with no app-env override the configured value must be used"
+             "with neither an override nor a configured value the default must hold"
     end
   end
 
@@ -214,6 +230,48 @@ defmodule SymphonyElixir.OrchestratorSettlementConfigTest do
              SymphonyElixir.Orchestrator.handle_info({:settlement_timeout, token}, state)
 
     {issue, updated}
+  end
+
+  # Renders the standard workflow fixture and, when a value is given, injects
+  # `agent_runtime.terminal_settlement_timeout_ms` into it — the production
+  # configuration surface — then points the store at it.
+  defp write_settlement_workflow_file!(label, timeout_ms) do
+    test_root = unique_test_root("settlement-config-#{label}")
+    File.mkdir_p!(Path.join(test_root, "workspaces"))
+    staging_path = Path.join(test_root, "staging-workflow.yaml")
+    workflow_path = Path.join(test_root, "workflow.yaml")
+
+    previous_path = Workflow.workflow_file_path()
+
+    on_exit(fn ->
+      Workflow.set_workflow_file_path(previous_path)
+      File.rm_rf(test_root)
+    end)
+
+    write_workflow_file!(staging_path,
+      tracker_kind: "memory",
+      workspace_root: Path.join(test_root, "workspaces"),
+      agent_runtime_provider: "codex"
+    )
+
+    body = File.read!(staging_path)
+
+    body =
+      if is_integer(timeout_ms) do
+        String.replace(
+          body,
+          ~r/^agent_runtime:$/m,
+          "agent_runtime:\n  terminal_settlement_timeout_ms: #{timeout_ms}",
+          global: false
+        )
+      else
+        body
+      end
+
+    File.write!(workflow_path, body)
+    Workflow.set_workflow_file_path(workflow_path)
+
+    :ok
   end
 
   defp iso8601_now, do: DateTime.utc_now() |> DateTime.to_iso8601()
