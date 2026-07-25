@@ -133,10 +133,66 @@ defmodule SymphonyElixir.Orchestrator do
   @impl true
   def terminate(reason, %State{} = state) do
     Enum.each(state.running, fn {issue_id, running_entry} ->
-      settle_cancelled_role_run(issue_id, running_entry, reason)
+      safely_settle_on_shutdown(issue_id, running_entry, reason)
+    end)
+
+    Enum.each(abandoned_settlements(state), fn settlement ->
+      settle_abandoned_settlement(settlement, reason)
     end)
 
     :ok
+  end
+
+  # A run popped out of `state.running` and handed to off-loop settlement is
+  # still mid-teardown. Iterating `running` alone meant shutdown dropped every
+  # in-flight settlement on the floor and left its ownership record parked
+  # non-terminal forever — the observed production failure (EMB-1258's QA record
+  # stuck at state=retrying / cleanup=retrying with 306 pids).
+  #
+  # `running` and `settlements` are disjoint by construction (the :DOWN handler
+  # pops before it dispatches), but the filter makes that obvious and makes a
+  # double-settle impossible rather than merely unlikely.
+  defp abandoned_settlements(%State{} = state) do
+    state.settlements
+    |> Map.values()
+    |> Enum.filter(fn
+      %{issue_id: issue_id} when is_binary(issue_id) -> not Map.has_key?(state.running, issue_id)
+      _settlement -> true
+    end)
+  end
+
+  # Bounded and non-raising: this runs inside the GenServer shutdown budget, so
+  # it kills the racer rather than waiting on it. The settlement task and its
+  # deadline timer both write the same ownership record, so both must be gone
+  # before the terminal write below — otherwise a dying task can clobber it.
+  # Nothing here reads `:snapshot`, which is populated asynchronously.
+  defp settle_abandoned_settlement(settlement, reason) when is_map(settlement) do
+    cancel_settlement_timer(settlement)
+    kill_settlement_task(settlement)
+
+    safely_settle_on_shutdown(
+      Map.get(settlement, :issue_id),
+      Map.get(settlement, :running_entry),
+      reason
+    )
+  end
+
+  defp settle_abandoned_settlement(_settlement, _reason), do: :ok
+
+  # One entry failing to settle must never abort the shutdown sweep over the
+  # rest. `settle_cancelled_role_run/3` already logs typed cleanup failures
+  # instead of raising; this is the belt-and-braces boundary for anything the
+  # OS-facing teardown throws or exits with on the way down.
+  defp safely_settle_on_shutdown(issue_id, running_entry, reason) do
+    settle_cancelled_role_run(issue_id, running_entry, reason)
+  catch
+    kind, value ->
+      Logger.error(
+        "Shutdown settlement raised issue_id=#{inspect(issue_id)} " <>
+          "stop_reason=#{inspect(reason)} kind=#{inspect(kind)} error=#{inspect(value)}"
+      )
+
+      :ok
   end
 
   @impl true
