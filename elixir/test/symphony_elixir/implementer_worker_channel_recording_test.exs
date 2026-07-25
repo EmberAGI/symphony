@@ -27,7 +27,7 @@ defmodule SymphonyElixir.ImplementerWorkerChannelRecordingTest do
   alias SymphonyElixir.TestSupport.HerdrReplayFixture
 
   setup do
-    root = Path.join(System.tmp_dir!(), "iwcr-#{System.unique_integer([:positive])}")
+    root = Path.join(System.tmp_dir!(), "iwcr-#{unique_suffix()}")
     provider_bin = Path.join(root, "provider-bin")
     workspace = Path.join(root, "selected-product")
 
@@ -49,7 +49,7 @@ defmodule SymphonyElixir.ImplementerWorkerChannelRecordingTest do
     HerdrReplayFixture.materialize_replay_dir!(replay_dir)
     HerdrReplayFixture.write_fake_herdr!(herdr_bin, replay_dir)
 
-    runtime_root = Path.join(System.tmp_dir!(), "iwcr-rt-#{System.unique_integer([:positive])}")
+    runtime_root = Path.join(System.tmp_dir!(), "iwcr-rt-#{unique_suffix()}")
 
     context = %{
       herdr_bin: herdr_bin,
@@ -59,11 +59,10 @@ defmodule SymphonyElixir.ImplementerWorkerChannelRecordingTest do
       start_timeout_ms: 2_000
     }
 
+    name = "octo-1284-#{unique_suffix()}"
+
     assert {:ok, session} =
-             HerdrTransport.start_session(
-               %{name: "octo-emb-1284-channel", isolated: true, workspace: workspace, env: %{}},
-               context
-             )
+             HerdrTransport.start_session(%{name: name, isolated: true, workspace: workspace, env: %{}}, context)
 
     # The shims are materialized before the worker prestart, which needs a
     # launchable pane the replay fixture does not provide here.
@@ -235,6 +234,13 @@ defmodule SymphonyElixir.ImplementerWorkerChannelRecordingTest do
       end)
 
     {status, counts}
+  end
+
+  # Unique across VM restarts as well as within one: a leftover runtime root
+  # from an earlier run is rejected by `validate_runtime_root/1`.
+  defp unique_suffix do
+    Integer.to_string(System.system_time(:millisecond), 36) <>
+      Integer.to_string(System.unique_integer([:positive]), 36)
   end
 
   defp worker_spec(workspace) do
