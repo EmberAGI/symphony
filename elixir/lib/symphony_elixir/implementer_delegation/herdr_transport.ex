@@ -527,26 +527,51 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   def read_agent(_session, _agent, _opts, _context), do: {:error, :invalid_herdr_agent_read}
 
+  @doc """
+  Report what this session can prove about its worker delegations.
+
+  An empty list means the recording was readable and the orchestrator
+  delivered nothing to the worker. Anything that prevents that observation —
+  a session without a runtime root, or a runtime root whose worker-event
+  recording was never materialized — is a typed
+  `:worker_assignments_unobservable` error, never a silent `[]`.
+  """
   @impl true
   def worker_assignments(%{runtime_root: runtime_root} = session, context)
       when is_binary(runtime_root) and is_map(context) do
-    worker = Map.get(session, :worker, %{name: "implementer_worker"})
+    worker_events = worker_events_root(runtime_root)
 
-    with {:ok, assignment_messages} <-
-           read_worker_messages(runtime_root, "assignment.*", @worker_assignment_prefix),
-         {:ok, result_messages} <-
-           read_worker_messages(runtime_root, "result.*", @worker_result_prefix) do
-      assignments =
-        assignment_messages
-        |> Enum.map(&message_fields/1)
-        |> Enum.filter(&(is_binary(Map.get(&1, "assignment")) and Map.get(&1, "assignment") != ""))
+    if File.dir?(worker_events) do
+      worker = Map.get(session, :worker, %{name: "implementer_worker"})
 
-      results = Enum.map(result_messages, &message_fields/1)
-      {:ok, correlate_worker_assignments(assignments, results, session, worker, context)}
+      with {:ok, assignment_messages} <-
+             read_worker_messages(runtime_root, "assignment.*", @worker_assignment_prefix),
+           {:ok, result_messages} <-
+             read_worker_messages(runtime_root, "result.*", @worker_result_prefix) do
+        assignments =
+          assignment_messages
+          |> Enum.map(&message_fields/1)
+          |> Enum.filter(&(is_binary(Map.get(&1, "assignment")) and Map.get(&1, "assignment") != ""))
+
+        results = Enum.map(result_messages, &message_fields/1)
+
+        {:ok,
+         observed_worker_assignments(
+           assignments,
+           results,
+           delivered_worker_messages(worker_events),
+           session,
+           worker,
+           context
+         )}
+      end
+    else
+      {:error, {:worker_assignments_unobservable, %{reason: :worker_events_root_missing, runtime_root: runtime_root}}}
     end
   end
 
-  def worker_assignments(_session, _context), do: {:ok, []}
+  def worker_assignments(_session, _context),
+    do: {:error, {:worker_assignments_unobservable, %{reason: :session_runtime_root_missing}}}
 
   @impl true
   def stop_session(%{name: name, env: env, server_task: server_task, runtime_root: runtime_root}, context) do
@@ -1484,10 +1509,20 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     """
   end
 
+  # Every delivery to the worker is recorded, not only the ones shaped as an
+  # `OCTO_MSG/1 kind=assignment`. A delegation whose assignment record is
+  # missing is then still observable as a delegation that happened, so it
+  # cannot be read back as a run that never used its worker.
   defp worker_message_recording(:orchestrator, runtime_root) do
     worker_events = worker_events_root(runtime_root)
 
     """
+    case "$agent_name" in
+      implementer_worker)
+        delivery_file=$(mktemp #{shell_escape(Path.join(worker_events, "delivery.XXXXXX"))})
+        printf '%s\\n' "$message" > "$delivery_file"
+        ;;
+    esac
     case "$agent_name:$message" in
       implementer_worker:'#{@worker_assignment_prefix}'*)
         event_file=$(mktemp #{shell_escape(Path.join(worker_events, "assignment.XXXXXX"))})
@@ -1580,6 +1615,49 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         [key, value] -> Map.put(fields, key, value)
         _ -> fields
       end
+    end)
+  end
+
+  defp delivered_worker_messages(worker_events) do
+    worker_events
+    |> Path.join("delivery.*")
+    |> Path.wildcard()
+    |> length()
+  end
+
+  # A delivery to the worker that produced neither a recorded assignment nor a
+  # recorded result is a delegation Symphony cannot describe. It is reported as
+  # an observation the caller must type, never folded back into "no worker
+  # assignments".
+  defp observed_worker_assignments(assignments, results, delivered, session, worker, context) do
+    correlated = correlate_worker_assignments(assignments, results, session, worker, context)
+
+    case correlated ++ unrecorded_assignment_results(assignments, results) do
+      [] -> undelivered_or_unrecorded(delivered)
+      observed -> observed
+    end
+  end
+
+  defp undelivered_or_unrecorded(0), do: []
+
+  defp undelivered_or_unrecorded(delivered),
+    do: [%{assignment_id: nil, status: :delegation_unrecorded, delivered: delivered}]
+
+  defp unrecorded_assignment_results(assignments, results) do
+    assigned = MapSet.new(assignments, &Map.get(&1, "assignment"))
+
+    results
+    |> Enum.reject(&MapSet.member?(assigned, Map.get(&1, "assignment")))
+    |> Enum.map(fn result ->
+      %{
+        assignment_id: Map.get(result, "assignment"),
+        status: :assignment_unrecorded,
+        result: %{
+          assignment_id: Map.get(result, "assignment"),
+          status: Map.get(result, "status"),
+          message: Map.get(result, "message")
+        }
+      }
     end)
   end
 

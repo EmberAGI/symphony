@@ -222,8 +222,11 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
       File.mkdir_p!(runtime_root)
       on_exit(fn -> File.rm_rf(runtime_root) end)
 
-      assert {:error, {:worker_assignments_unobservable, %{reason: :worker_events_root_missing, runtime_root: ^runtime_root}}} =
-               HerdrTransport.worker_assignments(%{name: "octo-emb-1282-bare", runtime_root: runtime_root}, %{})
+      session = %{name: "octo-emb-1282-bare", runtime_root: runtime_root}
+      unobservable = %{reason: :worker_events_root_missing, runtime_root: runtime_root}
+
+      assert {:error, {:worker_assignments_unobservable, ^unobservable}} =
+               HerdrTransport.worker_assignments(session, %{})
     end
 
     test "a materialized recording with nothing delivered is genuinely assignment-free" do
@@ -237,7 +240,9 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
   end
 
   test "a launched worker under a transport with no assignment capability fails typed" do
-    assert {:error, {:implementer_worker_assignments_unobservable, %{reason: :transport_capability_missing, transport: BlindTransport}}} =
+    unobservable = %{reason: :transport_capability_missing, transport: BlindTransport}
+
+    assert {:error, {:implementer_worker_assignments_unobservable, ^unobservable}} =
              run_blind_turn(%{launch_worker: true})
   end
 

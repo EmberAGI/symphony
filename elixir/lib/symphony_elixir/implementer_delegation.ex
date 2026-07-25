@@ -168,8 +168,9 @@ defmodule SymphonyElixir.ImplementerDelegation do
          :ok <- terminal_turn_status(contract_provider(Map.get(session, :contract, %{}), :orchestrator), response),
          {:ok, worker_assignments} <-
            worker_assignments(transport, herdr_session, transport_context),
-         :ok <- validate_worker_assignments(worker_assignments) do
+         :ok <- validate_worker_assignments(worker_assignments, herdr_session) do
       session_id = agent_session_id(completed)
+      worker_assignments = observed_assignments(worker_assignments)
       worker_evidence = bounded_worker_evidence(worker_assignments)
 
       if worker_evidence != [] do
@@ -219,15 +220,28 @@ defmodule SymphonyElixir.ImplementerDelegation do
     end
   end
 
+  # A transport that cannot report assignments has not reported "no
+  # assignments"; it has reported nothing. The two are kept apart here so the
+  # caller decides, rather than inheriting an empty list it cannot distinguish.
   defp worker_assignments(transport, herdr_session, transport_context) do
-    if function_exported?(transport, :worker_assignments, 2),
-      do: transport.worker_assignments(herdr_session, transport_context),
-      else: {:ok, :unsupported}
+    if function_exported?(transport, :worker_assignments, 2) do
+      transport.worker_assignments(herdr_session, transport_context)
+    else
+      {:ok, {:unobservable, %{reason: :transport_capability_missing, transport: transport}}}
+    end
   end
 
-  defp validate_worker_assignments(:unsupported), do: :ok
+  # Unobservable is only benign where there is provably nothing to observe: a
+  # session that never launched a worker. Once a worker agent is live in the
+  # session, an unreadable assignment set fails typed instead of settling as an
+  # empty one.
+  defp validate_worker_assignments({:unobservable, details}, herdr_session) do
+    if is_map(Map.get(herdr_session, :worker)),
+      do: {:error, {:implementer_worker_assignments_unobservable, details}},
+      else: :ok
+  end
 
-  defp validate_worker_assignments(assignments) when is_list(assignments) do
+  defp validate_worker_assignments(assignments, _herdr_session) when is_list(assignments) do
     Enum.reduce_while(assignments, :ok, fn assignment, :ok ->
       case worker_assignment_result(assignment) do
         :ok -> {:cont, :ok}
@@ -236,8 +250,23 @@ defmodule SymphonyElixir.ImplementerDelegation do
     end)
   end
 
-  defp validate_worker_assignments(_assignments),
+  defp validate_worker_assignments(_assignments, _herdr_session),
     do: {:error, {:implementer_worker_result_missing, %{assignment_id: nil}}}
+
+  defp observed_assignments({:unobservable, _details}), do: []
+  defp observed_assignments(assignments) when is_list(assignments), do: assignments
+
+  defp worker_assignment_result(%{status: :delegation_unrecorded} = observation) do
+    {:error, {:implementer_worker_delegation_unrecorded, %{delivered: Map.get(observation, :delivered)}}}
+  end
+
+  defp worker_assignment_result(%{
+         assignment_id: assignment_id,
+         status: :assignment_unrecorded,
+         result: result
+       }) do
+    {:error, {:implementer_worker_assignment_unrecorded, %{assignment_id: assignment_id, result: result}}}
+  end
 
   defp worker_assignment_result(%{
          assignment_id: assignment_id,
@@ -314,8 +343,6 @@ defmodule SymphonyElixir.ImplementerDelegation do
       }
     end)
   end
-
-  defp bounded_worker_evidence(:unsupported), do: []
 
   @spec stop_session(session()) :: :ok | {:error, term()}
   def stop_session(%{
