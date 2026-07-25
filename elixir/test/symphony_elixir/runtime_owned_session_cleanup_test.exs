@@ -135,7 +135,13 @@ defmodule SymphonyElixir.RuntimeOwnedSessionCleanupTest do
     end
   end
 
-  test "missing or malformed scoped ownership evidence cannot verify cleanup" do
+  # EMB-1259: a missing or malformed ownership record at settlement time is
+  # not a cleanup failure the runtime inflicts on itself. Settlement captures
+  # its own owned-PID snapshot before teardown and verifies liveness against
+  # that snapshot afterwards, so a physically clean teardown settles clean —
+  # typed cleanup failure stays reserved for genuine survivors or truly
+  # unwritable evidence.
+  test "missing or malformed scoped ownership records do not fabricate cleanup failures on clean teardown" do
     for {label, prepare} <- [
           {"missing", fn _issue -> :ok end},
           {"malformed",
@@ -145,8 +151,13 @@ defmodule SymphonyElixir.RuntimeOwnedSessionCleanupTest do
              File.write!(path, "{}\n")
            end}
         ] do
+      issue_id = "issue-cleanup-unavailable-#{label}"
+      session_name = "octo-cleanup-#{label}"
+      process_pid = spawn(fn -> Process.sleep(:infinity) end)
+      monitor_ref = make_ref()
+
       issue = %Issue{
-        id: "issue-cleanup-unavailable-#{label}",
+        id: issue_id,
         identifier: "EMB-CLEANUP-UNAVAILABLE-#{label}",
         state: "In Progress",
         labels: []
@@ -154,14 +165,74 @@ defmodule SymphonyElixir.RuntimeOwnedSessionCleanupTest do
 
       prepare.(issue)
 
-      assert {:error, :owned_session_process_evidence_unavailable} =
-               Orchestrator.verify_owned_process_cleanup_for_test(
-                 %{
-                   issue_id: issue.id,
-                   session_name: "octo-cleanup-#{label}"
-                 },
-                 issue
+      state = %Orchestrator.State{
+        running: %{
+          issue_id => %{
+            pid: process_pid,
+            ref: monitor_ref,
+            identifier: issue.identifier,
+            issue: issue,
+            run_id: "run-cleanup-unavailable-#{label}",
+            owned_session_ref: %{
+              cleanup_module: ProcessCleanup,
+              owner: self(),
+              issue_id: issue_id,
+              session_name: session_name,
+              process_pid: process_pid
+            },
+            started_at: DateTime.utc_now()
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{},
+        failure_observations: %{},
+        completed: MapSet.new(),
+        codex_totals: %{
+          input_tokens: 0,
+          output_tokens: 0,
+          total_tokens: 0,
+          seconds_running: 0
+        }
+      }
+
+      assert {:noreply, updated_state} =
+               Orchestrator.handle_info(
+                 {:DOWN, monitor_ref, :process, process_pid, :normal},
+                 state
                )
+
+      assert_receive {:owned_session_cleanup_verified,
+                      %{
+                        issue_id: ^issue_id,
+                        session_name: ^session_name,
+                        live_after: false
+                      }},
+                     1_000
+
+      refute Process.alive?(process_pid)
+
+      # The clean teardown keeps its normal completion: the settlement must
+      # not rewrite the exit into a typed owned-session cleanup failure just
+      # because its own record re-read found nothing.
+      #
+      # A `:normal` exit always schedules the active-state continuation check
+      # and that retry carries no error at all. A settlement that rewrote the
+      # exit routes through the retryable branch instead, whose retry carries
+      # "agent exited: ... owned_session_cleanup_failed ...". Asserting the
+      # retry exists and its error is nil therefore has no arm that can pass
+      # by absence.
+      retry = updated_state.retry_attempts[issue_id]
+
+      assert is_map(retry),
+             "a clean :normal teardown must still schedule its active-state continuation check, " <>
+               "got retry_attempts=#{inspect(updated_state.retry_attempts)}"
+
+      assert is_nil(retry.error),
+             "settlement rewrote a physically clean teardown into a typed failure: #{inspect(retry.error)}"
+
+      refute match?(%{state: "quarantined"}, ProcessOwnership.status_for_issue(issue)),
+             "a physically clean teardown must not leave a quarantined ownership record " <>
+               "(#{inspect(ProcessOwnership.status_for_issue(issue))})"
     end
   end
 end

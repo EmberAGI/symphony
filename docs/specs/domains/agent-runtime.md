@@ -760,8 +760,34 @@ provider prompt. A missing acknowledgement is a typed failed run and the
 runner cleans the session instead of proceeding. Registered orchestrator
 shutdown stops only its exact tracked task/session entries, consumes the
 acknowledged capability, verifies `live_after=0`, and settles the matching
-process-ownership record; missing or unwriteable settlement evidence is logged
-as a cleanup failure rather than left silently active. The same terminal
+process-ownership record. Terminal settlement self-produces its process
+evidence (EMB-1259): it captures the owned PID set — the exact record's
+recorded process tree plus a live ownership-environment scan — BEFORE
+teardown destroys the records that identify it, verifies liveness against
+that captured snapshot AFTER teardown with one batched process-table read,
+and writes the explicit evidence (owned PID set, live-after count,
+cleanup-verified marker, capture timestamp) into the terminal
+process-ownership record on every terminal path: success, failure,
+cancellation, and timeout. Settlement never re-derives its evidence by
+re-reading mutable global state after teardown, and a failed post-teardown
+re-read can never manufacture a cleanup failure for a physically clean run.
+Settlement evidence that truly cannot be captured — a process-table read
+that fails, returns unparseable output, or crashes the capture — or that
+cannot be written settles as a typed cleanup failure recorded unverified,
+never as a verified-clean settlement and never left silently active. A
+capture whose machinery worked and observed no owned process still settles
+clean: empty evidence is only trustworthy when it was actually observed.
+Owned-process liveness — for settlement evidence and for the dispatch-admission
+gates alike — is matched by recorded PID, and a process-table read that failed
+is never evidence that an owned process died: an unusable read reports the
+recorded PIDs live, so a degraded host blocks dispatch rather than starting a
+second run over a live one. Deferred: PID-reuse identity is not resolved. An
+unrelated process that inherits a recorded PID after the owned process exits
+reads as a false survivor, because distinguishing it requires recording each
+owned process's start time in the ownership record — a record-schema change
+left to a follow-up issue. Until then a false survivor settles conservatively,
+quarantining the record for an operator and withholding dispatch, never
+producing a verified-clean settlement. The same terminal
 cleanup boundary runs after normal or abnormal task exit and after forced
 stall, timeout, state, routing, or shutdown cancellation for every role. If an
 issue-owned hook or provider descendant survives task/session stop, cleanup
@@ -770,7 +796,11 @@ permits one bounded TERM grace period, and sends KILL only to exact-marker
 survivors. A different issue, role, run, or unmarked process is never eligible,
 and ownership release waits until the exact-marker live set is empty. Cleanup
 failure replaces normal completion with a typed runtime failure and is logged
-before retry or terminal classification.
+before retry or terminal classification; the typed failure is reserved for
+genuine inability — owned processes that actually survive the bounded
+TERM/KILL sequence, or settlement evidence that truly cannot be captured or
+written — never for evidence unavailability the teardown ordering itself
+caused.
 If the acquired ownership record is missing, malformed, or does not match the
 run capability before hook dispatch, the attempt returns the typed
 `process_ownership_publication_failed` result directly. Neither `before_run`,

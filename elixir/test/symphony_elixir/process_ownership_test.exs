@@ -673,6 +673,86 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
     _ -> :ok
   end
 
+  # 66-F1, admission side. `checked_process_table/0` is fail-closed for the
+  # settlement evidence path, but the dispatch-admission gates resolved
+  # liveness through readers that collapsed the identical typed failure to
+  # "nothing is live". A degraded `ps`/`kill` therefore made a live owned run
+  # look dead, so its record stopped blocking and a second run could be
+  # started over it. Admission obeys the same invariant as settlement: a
+  # process-table read that failed is never evidence that an owned run died.
+  describe "dispatch admission on a degraded process table" do
+    test "a live owned process still reads live when ps and kill are both broken", %{issue: issue} do
+      {port, live_os_pid} = spawn_live_process()
+      on_exit(fn -> close_port(port) end)
+
+      attrs =
+        ownership_attrs("run-admission-failopen", ProcessOwnership.holder_id())
+        |> Map.put(:app_server_pid, live_os_pid)
+        |> Map.put(:issue_id, issue.id)
+        |> Map.put(:issue_identifier, issue.identifier)
+
+      assert ProcessOwnership.owned_process_live?(attrs),
+             "the healthy probe must see the live owned process (os_pid=#{live_os_pid})"
+
+      assert with_broken_process_tools(fn -> ProcessOwnership.owned_process_live?(attrs) end),
+             "a degraded ps/kill reported live owned os_pid=#{live_os_pid} as dead; " <>
+               "admission would stop blocking and a second run could start over a live one"
+    end
+
+    test "an active record for a live holder keeps blocking acquisition when ps and kill are broken",
+         %{issue: issue} do
+      {port, live_os_pid} = spawn_live_process()
+      on_exit(fn -> close_port(port) end)
+
+      {:ok, _held} =
+        ProcessOwnership.acquire(
+          issue,
+          ownership_attrs("run-admission-held", ProcessOwnership.holder_id())
+          |> Map.put(:app_server_pid, live_os_pid)
+        )
+
+      assert ProcessOwnership.acquire(issue, ownership_attrs("run-admission-other", "other-holder")) ==
+               {:error, :ownership_held}
+
+      assert with_broken_process_tools(fn ->
+               ProcessOwnership.acquire(issue, ownership_attrs("run-admission-other", "other-holder"))
+             end) == {:error, :ownership_held},
+             "a degraded ps/kill let a second run take over the live run's ownership record"
+    end
+  end
+
+  defp spawn_live_process do
+    sleep = System.find_executable("sleep")
+    assert is_binary(sleep)
+    port = Port.open({:spawn_executable, sleep}, [:binary, :exit_status, args: [~c"30"]])
+    {:os_pid, os_pid} = :erlang.port_info(port, :os_pid)
+    {port, os_pid}
+  end
+
+  # `ps` and `kill` are both resolved through PATH at call time, so shadowing
+  # them is a seam-free way to break exactly the process-liveness machinery:
+  # no production code path is aware of the test.
+  defp with_broken_process_tools(fun) do
+    shim_dir = Path.join(System.tmp_dir!(), "symphony-broken-proc-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(shim_dir)
+    previous_path = System.get_env("PATH")
+
+    for name <- ["ps", "kill"] do
+      path = Path.join(shim_dir, name)
+      File.write!(path, "#!/bin/sh\nexit 1\n")
+      File.chmod!(path, 0o755)
+    end
+
+    System.put_env("PATH", shim_dir <> ":" <> previous_path)
+
+    try do
+      fun.()
+    after
+      restore_env("PATH", previous_path)
+      File.rm_rf(shim_dir)
+    end
+  end
+
   defp assert_eventually(fun, attempts \\ 100)
 
   defp assert_eventually(fun, attempts) when attempts > 0 do
