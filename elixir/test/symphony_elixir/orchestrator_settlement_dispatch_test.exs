@@ -208,7 +208,9 @@ defmodule SymphonyElixir.OrchestratorSettlementDispatchTest do
 
     {pid, name, issue, ref} =
       start_orchestrator_with_running_entry(
-        "dispatch-live", "issue-emb-1260-live", "MT-1260LIVE",
+        "dispatch-live",
+        "issue-emb-1260-live",
+        "MT-1260LIVE",
         owned_session_ref: %{
           kind: "test-owned-session",
           session_name: "octo-emb-1260-live",
@@ -292,8 +294,8 @@ defmodule SymphonyElixir.OrchestratorSettlementDispatchTest do
                "a settlement that could not be spawned must not be left pending"
       end)
 
-    assert log =~ "issue-emb-1260-noproc",
-           "the degenerate spawn path must be diagnosable by issue_id"
+    assert log =~ "could not start" and log =~ "issue-emb-1260-noproc",
+           "a :noproc exit from start_child must be logged at error with its issue_id and reason"
 
     refute ProcessOwnership.status_for_issue(issue).state == "active",
            "the ownership record stayed silently active after the settlement task could not start"
@@ -315,8 +317,8 @@ defmodule SymphonyElixir.OrchestratorSettlementDispatchTest do
                  "a settlement that could not be spawned must not be left pending"
         end)
 
-      assert log =~ issue_id,
-             "the degenerate spawn path must be diagnosable by issue_id"
+      assert log =~ "could not start" and log =~ issue_id,
+             "the degenerate spawn path must be logged at error with its issue_id and reason"
 
       refute ProcessOwnership.status_for_issue(issue).state == "active",
              "the ownership record stayed silently active after a #{inspect(reply)} start"

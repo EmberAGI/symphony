@@ -279,6 +279,14 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, finalize_terminal_settlement(state, token, result)}
   end
 
+  # The settlement task reports its pre-teardown snapshot back to the loop (the
+  # loop itself never forks `ps`). Storing it is a cheap map write; an unknown
+  # or already-settled token is a no-op so a report that raced the deadline can
+  # never resurrect a popped settlement entry.
+  def handle_info({:settlement_snapshot, token, snapshot}, %State{} = state) do
+    {:noreply, store_settlement_snapshot(state, token, snapshot)}
+  end
+
   def handle_info({:settlement_timeout, token}, %State{} = state) do
     {:noreply, time_out_terminal_settlement(state, token)}
   end
@@ -1019,27 +1027,26 @@ defmodule SymphonyElixir.Orchestrator do
     token = make_ref()
     server = self()
 
-    # Capture the owned-PID snapshot on the loop BEFORE teardown starts (cheap:
-    # one batched process-table read). If settlement then times out, this is the
-    # evidence the typed quarantine preserves — the same pre-teardown-evidence
-    # discipline S1 established (EMB-1259), now surviving a hung teardown.
-    settlement_snapshot = capture_settlement_snapshot(running_entry)
-
+    # The pre-teardown owned-PID snapshot is captured by the TASK, as its first
+    # action, and reported back via {:settlement_snapshot, token, snapshot}: the
+    # loop must not fork `ps` — that is the head-of-line blocking this whole
+    # change exists to remove. `:snapshot` therefore starts nil and stays a
+    # PRESENT key, so every reader sees a well-formed entry; if settlement times
+    # out before the report lands, timed_out_settlement_evidence/1 degrades it to
+    # typed-unavailable rather than inventing an observation (EMB-1259 66-F1).
     settlement_context = %{
       issue_id: issue_id,
       running_entry: running_entry,
       reason: reason,
-      snapshot: settlement_snapshot,
+      snapshot: nil,
       started_at_ms: System.monotonic_time(:millisecond)
     }
 
     task_pid =
-      case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-             result = run_terminal_settlement(running_entry, reason)
-             send(server, {:settlement_result, token, result})
-           end) do
-        {:ok, pid} -> pid
-        {:error, _reason} -> nil
+      case start_settlement_task(issue_id, running_entry, reason, server, token) do
+        {:ok, pid} when is_pid(pid) -> pid
+        {:ok, pid, _info} when is_pid(pid) -> pid
+        _degenerate -> nil
       end
 
     if is_nil(task_pid) do
@@ -1056,10 +1063,66 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  # Task.Supervisor.start_child/2 returns DynamicSupervisor.on_start_child():
+  # {:ok, pid} | {:ok, pid, info} | :ignore | {:error, reason}. It also EXITS
+  # :noproc when SymphonyElixir.TaskSupervisor is not running (shutdown race).
+  # Every one of those must be survivable on the Orchestrator loop: an
+  # unmatched shape or a propagated exit would crash the GenServer and lose the
+  # settlement outright. Non-started outcomes are returned to the caller, which
+  # routes them into the synchronous fallback.
+  defp start_settlement_task(issue_id, running_entry, reason, server, token) do
+    outcome =
+      try do
+        Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+          # FIRST action, before any teardown: the pre-teardown evidence the
+          # timeout path preserves. Threaded into the settlement so the same
+          # run never reads the process table twice.
+          snapshot = capture_settlement_snapshot(running_entry)
+          send(server, {:settlement_snapshot, token, snapshot})
+
+          result = run_terminal_settlement(running_entry, reason, snapshot)
+          send(server, {:settlement_result, token, result})
+        end)
+      catch
+        kind, caught -> {:error, {kind, caught}}
+      end
+
+    case outcome do
+      {:ok, pid} when is_pid(pid) ->
+        outcome
+
+      {:ok, pid, _info} when is_pid(pid) ->
+        outcome
+
+      degenerate ->
+        Logger.error(
+          "Terminal settlement task could not start issue_id=#{issue_id} " <>
+            "session_id=#{running_entry_session_id(running_entry)} " <>
+            "reason=#{inspect(degenerate)}; settling synchronously on the orchestrator loop"
+        )
+
+        degenerate
+    end
+  end
+
+  defp store_settlement_snapshot(%State{} = state, token, snapshot) do
+    case Map.fetch(state.settlements, token) do
+      {:ok, settlement} ->
+        settlement = Map.put(settlement, :snapshot, snapshot)
+        %{state | settlements: Map.put(state.settlements, token, settlement)}
+
+      :error ->
+        # Unknown or already-settled token: the deadline popped this entry and
+        # already settled it typed. Re-creating it here would strand a
+        # settlement that nothing will ever finalize.
+        state
+    end
+  end
+
   # The OS-heavy half that needs no State: physical teardown, liveness against
   # the pre-teardown snapshot, and the terminal ownership record write.
-  defp run_terminal_settlement(running_entry, reason) do
-    {cleanup_result, cleanup_evidence} = cleanup_terminal_owned_runtime(running_entry)
+  defp run_terminal_settlement(running_entry, reason, snapshot \\ nil) do
+    {cleanup_result, cleanup_evidence} = cleanup_terminal_owned_runtime(running_entry, false, snapshot)
     adjusted_reason = cleanup_task_exit_reason(reason, cleanup_result)
     process_completion_status = record_process_completion(running_entry, adjusted_reason, cleanup_evidence)
     ownership = ProcessOwnership.status_for_issue(Map.get(running_entry, :issue))
@@ -1369,9 +1432,14 @@ defmodule SymphonyElixir.Orchestrator do
   # Physical teardown runs on every path, including one whose capture
   # failed: evidence that cannot be produced is a typed settlement failure,
   # never a reason to skip the cleanup it is evidence for.
-  defp cleanup_terminal_owned_runtime(running_entry, require_ownership \\ false)
+  #
+  # `pre_captured` lets the terminal settlement pass the snapshot its task
+  # already took before teardown, so one settlement reads the process table
+  # once. Every other caller (including cancelled_terminal_cleanup/1) passes
+  # nil and captures here exactly as before.
+  defp cleanup_terminal_owned_runtime(running_entry, require_ownership \\ false, pre_captured \\ nil)
        when is_map(running_entry) do
-    snapshot = capture_settlement_snapshot(running_entry)
+    snapshot = pre_captured || capture_settlement_snapshot(running_entry)
     session_result = teardown_owned_session(running_entry)
 
     marker_result =
