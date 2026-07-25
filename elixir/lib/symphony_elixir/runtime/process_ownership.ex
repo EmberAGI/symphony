@@ -1435,20 +1435,18 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   defp process_group_live?(pgid) do
     case pid_value(pgid) do
-      nil ->
-        false
-
-      integer ->
-        case checked_process_table() do
-          {:ok, processes} ->
-            Enum.any?(processes, fn {_pid, _ppid, process_pgid} -> process_pgid == integer end)
-
-          {:error, reason} ->
-            Logger.warning("Process table unreadable (#{inspect(reason)}); treating owned process group #{integer} as live")
-
-            true
-        end
+      nil -> false
+      integer -> process_group_live_in_table?(integer, checked_process_table())
     end
+  end
+
+  defp process_group_live_in_table?(pgid, {:ok, processes}),
+    do: Enum.any?(processes, fn {_pid, _ppid, process_pgid} -> process_pgid == pgid end)
+
+  defp process_group_live_in_table?(pgid, {:error, reason}) do
+    Logger.warning("Process table unreadable (#{inspect(reason)}); treating owned process group #{pgid} as live")
+
+    true
   end
 
   # Admission-side liveness, so a failed sweep is not "no process matches".
