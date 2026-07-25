@@ -69,7 +69,10 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     end)
 
     send(pid, {:DOWN, ref, :process, self(), reason})
-    Process.sleep(50)
+
+    # Terminal settlement runs off the serial path (EMB-1260); poll for the
+    # scheduled retry instead of a fixed sleep. Assertions below are unchanged.
+    assert_eventually(fn -> Map.has_key?(:sys.get_state(pid).retry_attempts, issue_id) end)
 
     assert %{attempt: 2, due_at_ms: due_at_ms} = :sys.get_state(pid).retry_attempts[issue_id]
     run_log_path = Path.join([run_log_root, "MT-RUN-LOG", "#{run_id}.jsonl"])
@@ -397,11 +400,11 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
       }
 
-      assert {:noreply, updated} =
-               Orchestrator.handle_info(
-                 {:DOWN, ref, :process, self(), {:shutdown, :owned_marker_failure}},
-                 state
-               )
+      # Terminal settlement is off the serial path (EMB-1260): the DOWN
+      # handler dispatches it and finalizes on the settlement-result message.
+      # Drive that message through handle_info so the direct-call test observes
+      # the same finalized state a live loop would, with assertions unchanged.
+      updated = drive_down_settlement(state, ref, {:shutdown, :owned_marker_failure})
 
       assert updated.retry_attempts[issue_id].process_ownership.state == "retrying"
       assert_eventually(fn -> !os_process_alive?(owned_shell_pid) end)
@@ -447,8 +450,11 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
 
     log =
       capture_log(fn ->
-        assert {:noreply, updated} =
-                 Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+        # Terminal settlement is off the serial path (EMB-1260): the DOWN
+        # handler dispatches it and finalizes on the settlement-result message.
+        # Drive that message through handle_info so the direct-call test observes
+        # the same finalized state a live loop would, with assertions unchanged.
+        updated = drive_down_settlement(state, ref, :normal)
 
         refute MapSet.member?(updated.completed, issue_id)
 
@@ -632,6 +638,23 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
   end
 
   defp assert_eventually(_fun, 0), do: flunk("condition not met in time")
+
+  # Drive an off-loop terminal settlement to completion for direct-handle_info
+  # tests: dispatch the DOWN, then feed the {:settlement_result, ...} message the
+  # settlement task sends back through handle_info, exactly as a live GenServer
+  # loop would, and return the finalized state.
+  defp drive_down_settlement(state, ref, reason) do
+    assert {:noreply, dispatched} =
+             Orchestrator.handle_info({:DOWN, ref, :process, self(), reason}, state)
+
+    receive do
+      {:settlement_result, _token, _result} = message ->
+        assert {:noreply, finalized} = Orchestrator.handle_info(message, dispatched)
+        finalized
+    after
+      5_000 -> flunk("terminal settlement did not report its result in time")
+    end
+  end
 
   defp wait_for_orchestrator_state(pid, predicate, timeout_ms \\ 5_000) when is_function(predicate, 1) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms

@@ -309,7 +309,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
     }
 
-    assert {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), :timeout}, state)
+    # Terminal settlement runs off the serial path (EMB-1260): dispatch the DOWN
+    # and drive the settlement-result message through handle_info so this direct
+    # call observes the finalized state a live loop would. Assertions unchanged.
+    state = drive_down_settlement(state, ref, :timeout)
     assert state.running == %{}
     assert MapSet.member?(state.claimed, issue_id)
     assert Map.has_key?(state.retry_attempts, issue_id)
@@ -1380,6 +1383,23 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert rendered =~ "app_status=offline"
     refute rendered =~ "Timestamp:"
+  end
+
+  # Drive an off-loop terminal settlement (EMB-1260) to completion for a
+  # direct-handle_info test: dispatch the DOWN, then feed the settlement task's
+  # {:settlement_result, ...} message through handle_info as a live loop would,
+  # returning the finalized state.
+  defp drive_down_settlement(state, ref, reason) do
+    assert {:noreply, dispatched} =
+             Orchestrator.handle_info({:DOWN, ref, :process, self(), reason}, state)
+
+    receive do
+      {:settlement_result, _token, _result} = message ->
+        assert {:noreply, finalized} = Orchestrator.handle_info(message, dispatched)
+        finalized
+    after
+      5_000 -> flunk("terminal settlement did not report its result in time")
+    end
   end
 
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do

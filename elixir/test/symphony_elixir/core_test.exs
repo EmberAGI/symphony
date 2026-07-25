@@ -509,8 +509,7 @@ defmodule SymphonyElixir.CoreTest do
 
     down_sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
-    Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = settled_state_after_down(pid, issue_id)
 
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
@@ -596,9 +595,8 @@ defmodule SymphonyElixir.CoreTest do
     end)
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
-    Process.sleep(50)
 
-    state = :sys.get_state(pid)
+    state = settled_state_after_down(pid, issue_id)
     refute Map.has_key?(state.running, issue_id)
     assert %{attempt: 1} = state.retry_attempts[issue_id]
     process_status = ProcessOwnership.status_for_issue(issue)
@@ -643,8 +641,7 @@ defmodule SymphonyElixir.CoreTest do
     end)
 
     send(pid, {:DOWN, ref, :process, self(), :boom})
-    Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = settled_state_after_down(pid, issue_id)
 
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
@@ -727,9 +724,8 @@ defmodule SymphonyElixir.CoreTest do
     end)
 
     send(pid, {:DOWN, ref, :process, self(), :boom})
-    Process.sleep(50)
 
-    state = :sys.get_state(pid)
+    state = settled_state_after_down(pid, issue_id)
     refute Map.has_key?(state.running, issue_id)
     assert %{attempt: 2} = state.retry_attempts[issue_id]
     process_status = ProcessOwnership.status_for_issue(issue)
@@ -766,8 +762,7 @@ defmodule SymphonyElixir.CoreTest do
     end)
 
     send(pid, {:DOWN, ref, :process, self(), :boom})
-    Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = settled_state_after_down(pid, issue_id)
 
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
@@ -954,6 +949,25 @@ defmodule SymphonyElixir.CoreTest do
 
     assert remaining_ms >= min_remaining_ms - instrumentation_slack_ms
     assert remaining_ms <= max_remaining_ms
+  end
+
+  # Terminal settlement now runs off the GenServer serial path (EMB-1260), so a
+  # DOWN no longer schedules the retry synchronously. Poll for the settled
+  # state instead of a fixed sleep — timing only; the assertions that follow are
+  # unchanged.
+  defp settled_state_after_down(pid, issue_id, attempts \\ 200)
+
+  defp settled_state_after_down(pid, _issue_id, 0), do: :sys.get_state(pid)
+
+  defp settled_state_after_down(pid, issue_id, attempts) do
+    state = :sys.get_state(pid)
+
+    if Map.has_key?(state.retry_attempts, issue_id) do
+      state
+    else
+      Process.sleep(25)
+      settled_state_after_down(pid, issue_id, attempts - 1)
+    end
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)

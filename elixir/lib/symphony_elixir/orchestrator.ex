@@ -26,6 +26,26 @@ defmodule SymphonyElixir.Orchestrator do
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
   @process_ownership_refresh_interval_ms 30_000
+  # Terminal settlement runs off the serial path but must still reach a typed
+  # outcome in bounded time: on timeout the settlement task is killed and the
+  # ownership record is quarantined typed via one cheap write, never left
+  # silently active because teardown hung (EMB-1260). Generous default,
+  # overridable for tests via app env.
+  @default_terminal_settlement_timeout_ms 60_000
+  # Ownership states that mean settlement already reached its terminal write.
+  # A record in one of these has LEFT active on its own observed evidence, so
+  # the settlement deadline must never overwrite it with a fabricated failure.
+  #
+  # `quarantined` belongs here UNCONDITIONALLY, not only when its evidence shows
+  # a physically clean runtime. The question this list answers is "did the
+  # settlement already land a terminal typed write?", not "is the runtime
+  # clean?". A quarantine carrying evidence marked unavailable is still a true
+  # statement about what the settlement could observe; replacing it with a
+  # fabricated `terminal_settlement_timed_out` reason would destroy true
+  # evidence and substitute a claim that may be false (EMB-1260 67-SF4b,
+  # preserving the 67-F1 property). A settled record still hands off to the
+  # ordinary retry lease, so nothing is left unreconciled.
+  @settled_ownership_states ~w(cleaned released quarantined)
   @work_admission_marker_version 1
   @max_generation_length 128
   @settlement_evidence_unavailable_reason "settlement_evidence_unavailable: terminal cleanup evidence could not be captured"
@@ -61,6 +81,11 @@ defmodule SymphonyElixir.Orchestrator do
       retry_attempts: %{},
       failure_observations: %{},
       blocked_failures: %{},
+      # In-flight terminal settlements moved OFF the serial GenServer path
+      # (EMB-1260): token -> settlement context. The issue stays claimed while
+      # settling so it cannot be re-dispatched, and the expensive OS teardown
+      # runs in a supervised task while the GenServer keeps answering.
+      settlements: %{},
       codex_totals: nil,
       codex_rate_limits: nil,
       work_admission: %{status: "open", target_generation: nil},
@@ -118,10 +143,66 @@ defmodule SymphonyElixir.Orchestrator do
   @impl true
   def terminate(reason, %State{} = state) do
     Enum.each(state.running, fn {issue_id, running_entry} ->
-      settle_cancelled_role_run(issue_id, running_entry, reason)
+      safely_settle_on_shutdown(issue_id, running_entry, reason)
+    end)
+
+    Enum.each(abandoned_settlements(state), fn settlement ->
+      settle_abandoned_settlement(settlement, reason)
     end)
 
     :ok
+  end
+
+  # A run popped out of `state.running` and handed to off-loop settlement is
+  # still mid-teardown. Iterating `running` alone meant shutdown dropped every
+  # in-flight settlement on the floor and left its ownership record parked
+  # non-terminal forever — the observed production failure (EMB-1258's QA record
+  # stuck at state=retrying / cleanup=retrying with 306 pids).
+  #
+  # `running` and `settlements` are disjoint by construction (the :DOWN handler
+  # pops before it dispatches), but the filter makes that obvious and makes a
+  # double-settle impossible rather than merely unlikely.
+  defp abandoned_settlements(%State{} = state) do
+    state.settlements
+    |> Map.values()
+    |> Enum.filter(fn
+      %{issue_id: issue_id} when is_binary(issue_id) -> not Map.has_key?(state.running, issue_id)
+      _settlement -> true
+    end)
+  end
+
+  # Bounded and non-raising: this runs inside the GenServer shutdown budget, so
+  # it kills the racer rather than waiting on it. The settlement task and its
+  # deadline timer both write the same ownership record, so both must be gone
+  # before the terminal write below — otherwise a dying task can clobber it.
+  # Nothing here reads `:snapshot`, which is populated asynchronously.
+  defp settle_abandoned_settlement(settlement, reason) when is_map(settlement) do
+    cancel_settlement_timer(settlement)
+    kill_settlement_task(settlement)
+
+    safely_settle_on_shutdown(
+      Map.get(settlement, :issue_id),
+      Map.get(settlement, :running_entry),
+      reason
+    )
+  end
+
+  defp settle_abandoned_settlement(_settlement, _reason), do: :ok
+
+  # One entry failing to settle must never abort the shutdown sweep over the
+  # rest. `settle_cancelled_role_run/3` already logs typed cleanup failures
+  # instead of raising; this is the belt-and-braces boundary for anything the
+  # OS-facing teardown throws or exits with on the way down.
+  defp safely_settle_on_shutdown(issue_id, running_entry, reason) do
+    settle_cancelled_role_run(issue_id, running_entry, reason)
+  catch
+    kind, value ->
+      Logger.error(
+        "Shutdown settlement raised issue_id=#{inspect(issue_id)} " <>
+          "stop_reason=#{inspect(reason)} kind=#{inspect(kind)} error=#{inspect(value)}"
+      )
+
+      :ok
   end
 
   @impl true
@@ -190,76 +271,34 @@ defmodule SymphonyElixir.Orchestrator do
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
-        {cleanup_result, cleanup_evidence} = cleanup_terminal_owned_runtime(running_entry)
-        log_terminal_cleanup_failure(issue_id, cleanup_result)
-        reason = cleanup_task_exit_reason(reason, cleanup_result)
         state = record_session_completion_totals(state, running_entry)
-        session_id = running_entry_session_id(running_entry)
-        process_completion_status = record_process_completion(running_entry, reason, cleanup_evidence)
 
-        state =
-          case classify_task_exit(reason, running_entry, issue_id, state) do
-            :normal ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
-              RoleTurnRecovery.clear_turn(issue_id)
-
-              state
-              |> clear_failure_observation(issue_id)
-              |> complete_issue(issue_id)
-              |> schedule_issue_retry(issue_id, 1, %{
-                identifier: running_entry.identifier,
-                delay_type: :continuation,
-                worker_host: Map.get(running_entry, :worker_host),
-                workspace_path: Map.get(running_entry, :workspace_path),
-                issue: Map.get(running_entry, :issue),
-                run_id: Map.get(running_entry, :run_id),
-                process_ownership: ProcessOwnership.status_for_issue(Map.get(running_entry, :issue)),
-                session_id: session_id,
-                attempt: Map.get(running_entry, :retry_attempt) || 1,
-                started_at: Map.get(running_entry, :started_at),
-                retry_reason: "active-state-continuation-check",
-                lease_state: retry_lease_state(process_completion_status)
-              })
-
-            {:irrecoverable, failure, failure_observation} ->
-              RoleTurnRecovery.clear_turn(issue_id)
-
-              state
-              |> put_failure_observation(issue_id, failure_observation)
-              |> block_irrecoverable_runtime_failure(issue_id, running_entry, failure)
-
-            {:retryable, failure, failure_observation} ->
-              exit_reason = retryable_task_exit_reason(reason, failure)
-
-              Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{exit_reason}; scheduling retry")
-              maybe_notify_agent_failed(running_entry, reason)
-
-              next_attempt = next_retry_attempt_from_running(running_entry)
-
-              state
-              |> put_failure_observation(issue_id, failure_observation)
-              |> schedule_issue_retry(issue_id, next_attempt, %{
-                identifier: running_entry.identifier,
-                error: "agent exited: #{exit_reason}",
-                worker_host: Map.get(running_entry, :worker_host),
-                workspace_path: Map.get(running_entry, :workspace_path),
-                issue: Map.get(running_entry, :issue),
-                run_id: Map.get(running_entry, :run_id),
-                process_ownership: ProcessOwnership.status_for_issue(Map.get(running_entry, :issue)),
-                session_id: session_id,
-                attempt: Map.get(running_entry, :retry_attempt) || 1,
-                started_at: Map.get(running_entry, :started_at),
-                retry_reason: "agent exited: #{exit_reason}",
-                failure_observation: failure_observation,
-                lease_state: retry_lease_state(process_completion_status)
-              })
-          end
-
-        Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{task_exit_reason_for_log(reason)}")
+        # Move the expensive, shell-forking terminal settlement OFF the serial
+        # GenServer path (EMB-1260): the OS teardown + ownership record write
+        # run in a supervised task while the GenServer stays serviceable. The
+        # issue stays claimed so it cannot be re-dispatched while settling; the
+        # result is finalized in handle_info({:settlement_result, ...}).
+        state = dispatch_terminal_settlement(state, issue_id, running_entry, reason)
 
         notify_dashboard()
         {:noreply, state}
     end
+  end
+
+  def handle_info({:settlement_result, token, result}, %State{} = state) do
+    {:noreply, finalize_terminal_settlement(state, token, result)}
+  end
+
+  # The settlement task reports its pre-teardown snapshot back to the loop (the
+  # loop itself never forks `ps`). Storing it is a cheap map write; an unknown
+  # or already-settled token is a no-op so a report that raced the deadline can
+  # never resurrect a popped settlement entry.
+  def handle_info({:settlement_snapshot, token, snapshot}, %State{} = state) do
+    {:noreply, store_settlement_snapshot(state, token, snapshot)}
+  end
+
+  def handle_info({:settlement_timeout, token}, %State{} = state) do
+    {:noreply, time_out_terminal_settlement(state, token)}
   end
 
   def handle_info({:worker_runtime_info, issue_id, runtime_info}, %{running: running} = state)
@@ -984,6 +1023,422 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp terminate_registered_task(_running_entry), do: :ok
 
+  # ---------------------------------------------------------------------------
+  # Off-loop terminal settlement (EMB-1260)
+  #
+  # The expensive teardown/liveness/record-write work runs in a supervised task
+  # so the GenServer mailbox stays serviceable (state snapshot + work admission).
+  # The issue remains claimed while settling; classification, retry scheduling,
+  # and notification — all of which need State — happen back on the loop when
+  # the settlement result arrives, or on a bounded timeout that quarantines the
+  # record typed via one cheap write.
+  # ---------------------------------------------------------------------------
+  defp dispatch_terminal_settlement(%State{} = state, issue_id, running_entry, reason) do
+    token = make_ref()
+    server = self()
+
+    # The pre-teardown owned-PID snapshot is captured by the TASK, as its first
+    # action, and reported back via {:settlement_snapshot, token, snapshot}: the
+    # loop must not fork `ps` — that is the head-of-line blocking this whole
+    # change exists to remove. `:snapshot` therefore starts nil and stays a
+    # PRESENT key, so every reader sees a well-formed entry; if settlement times
+    # out before the report lands, timed_out_settlement_evidence/1 degrades it to
+    # typed-unavailable rather than inventing an observation (EMB-1259 66-F1).
+    settlement_context = %{
+      issue_id: issue_id,
+      running_entry: running_entry,
+      reason: reason,
+      snapshot: nil,
+      started_at_ms: System.monotonic_time(:millisecond)
+    }
+
+    task_pid =
+      case start_settlement_task(issue_id, running_entry, reason, server, token) do
+        {:ok, pid} when is_pid(pid) -> pid
+        {:ok, pid, _info} when is_pid(pid) -> pid
+        _degenerate -> nil
+      end
+
+    if is_nil(task_pid) do
+      # The task could not start; settle synchronously so the record never
+      # stays silently active. This is the rare degenerate path.
+      result = run_terminal_settlement(running_entry, reason)
+      finalize_terminal_settlement(state, token, result, settlement_context)
+    else
+      timeout_ms = terminal_settlement_timeout_ms()
+      timer_ref = Process.send_after(server, {:settlement_timeout, token}, timeout_ms)
+
+      settlement = Map.merge(settlement_context, %{task_pid: task_pid, timer_ref: timer_ref})
+      %{state | settlements: Map.put(state.settlements, token, settlement)}
+    end
+  end
+
+  # Task.Supervisor.start_child/2 returns DynamicSupervisor.on_start_child():
+  # {:ok, pid} | {:ok, pid, info} | :ignore | {:error, reason}. It also EXITS
+  # :noproc when SymphonyElixir.TaskSupervisor is not running (shutdown race).
+  # Every one of those must be survivable on the Orchestrator loop: an
+  # unmatched shape or a propagated exit would crash the GenServer and lose the
+  # settlement outright. Non-started outcomes are returned to the caller, which
+  # routes them into the synchronous fallback.
+  defp start_settlement_task(issue_id, running_entry, reason, server, token) do
+    outcome =
+      try do
+        Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+          # FIRST action, before any teardown: the pre-teardown evidence the
+          # timeout path preserves. Threaded into the settlement so the same
+          # run never reads the process table twice.
+          snapshot = capture_settlement_snapshot(running_entry)
+          send(server, {:settlement_snapshot, token, snapshot})
+
+          result = run_terminal_settlement(running_entry, reason, snapshot)
+          send(server, {:settlement_result, token, result})
+        end)
+      catch
+        kind, caught -> {:error, {kind, caught}}
+      end
+
+    case outcome do
+      {:ok, pid} when is_pid(pid) ->
+        outcome
+
+      {:ok, pid, _info} when is_pid(pid) ->
+        outcome
+
+      degenerate ->
+        Logger.error(
+          "Terminal settlement task could not start issue_id=#{issue_id} " <>
+            "session_id=#{running_entry_session_id(running_entry)} " <>
+            "reason=#{inspect(degenerate)}; settling synchronously on the orchestrator loop"
+        )
+
+        degenerate
+    end
+  end
+
+  defp store_settlement_snapshot(%State{} = state, token, snapshot) do
+    case Map.fetch(state.settlements, token) do
+      {:ok, settlement} ->
+        settlement = Map.put(settlement, :snapshot, snapshot)
+        %{state | settlements: Map.put(state.settlements, token, settlement)}
+
+      :error ->
+        # Unknown or already-settled token: the deadline popped this entry and
+        # already settled it typed. Re-creating it here would strand a
+        # settlement that nothing will ever finalize.
+        state
+    end
+  end
+
+  # The OS-heavy half that needs no State: physical teardown, liveness against
+  # the pre-teardown snapshot, and the terminal ownership record write.
+  defp run_terminal_settlement(running_entry, reason, snapshot \\ nil) do
+    {cleanup_result, cleanup_evidence} = cleanup_terminal_owned_runtime(running_entry, false, snapshot)
+    adjusted_reason = cleanup_task_exit_reason(reason, cleanup_result)
+    process_completion_status = record_process_completion(running_entry, adjusted_reason, cleanup_evidence)
+    ownership = ProcessOwnership.status_for_issue(Map.get(running_entry, :issue))
+
+    %{
+      cleanup_result: cleanup_result,
+      cleanup_evidence: cleanup_evidence,
+      adjusted_reason: adjusted_reason,
+      process_completion_status: process_completion_status,
+      process_ownership: ownership
+    }
+  end
+
+  defp finalize_terminal_settlement(%State{} = state, token, result) do
+    case Map.pop(state.settlements, token) do
+      {nil, _settlements} ->
+        # Already timed out (or unknown token); the timeout path settled it.
+        state
+
+      {settlement, settlements} ->
+        cancel_settlement_timer(settlement)
+        finalize_terminal_settlement(%{state | settlements: settlements}, token, result, settlement)
+    end
+  end
+
+  defp finalize_terminal_settlement(%State{} = state, _token, result, settlement) do
+    issue_id = settlement.issue_id
+    running_entry = settlement.running_entry
+    reason = result.adjusted_reason
+    session_id = running_entry_session_id(running_entry)
+
+    log_terminal_cleanup_failure(issue_id, result.cleanup_result)
+
+    state =
+      case classify_task_exit(reason, running_entry, issue_id, state) do
+        :normal ->
+          Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+          RoleTurnRecovery.clear_turn(issue_id)
+
+          state
+          |> clear_failure_observation(issue_id)
+          |> complete_issue(issue_id)
+          |> schedule_issue_retry(issue_id, 1, %{
+            identifier: running_entry.identifier,
+            delay_type: :continuation,
+            worker_host: Map.get(running_entry, :worker_host),
+            workspace_path: Map.get(running_entry, :workspace_path),
+            issue: Map.get(running_entry, :issue),
+            run_id: Map.get(running_entry, :run_id),
+            process_ownership: result.process_ownership,
+            session_id: session_id,
+            attempt: Map.get(running_entry, :retry_attempt) || 1,
+            started_at: Map.get(running_entry, :started_at),
+            retry_reason: "active-state-continuation-check",
+            lease_state: retry_lease_state(result.process_completion_status)
+          })
+
+        {:irrecoverable, failure, failure_observation} ->
+          RoleTurnRecovery.clear_turn(issue_id)
+
+          state
+          |> put_failure_observation(issue_id, failure_observation)
+          |> block_irrecoverable_runtime_failure(issue_id, running_entry, failure)
+
+        {:retryable, failure, failure_observation} ->
+          exit_reason = retryable_task_exit_reason(reason, failure)
+
+          Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{exit_reason}; scheduling retry")
+          maybe_notify_agent_failed(running_entry, reason)
+
+          next_attempt = next_retry_attempt_from_running(running_entry)
+
+          state
+          |> put_failure_observation(issue_id, failure_observation)
+          |> schedule_issue_retry(issue_id, next_attempt, %{
+            identifier: running_entry.identifier,
+            error: "agent exited: #{exit_reason}",
+            worker_host: Map.get(running_entry, :worker_host),
+            workspace_path: Map.get(running_entry, :workspace_path),
+            issue: Map.get(running_entry, :issue),
+            run_id: Map.get(running_entry, :run_id),
+            process_ownership: result.process_ownership,
+            session_id: session_id,
+            attempt: Map.get(running_entry, :retry_attempt) || 1,
+            started_at: Map.get(running_entry, :started_at),
+            retry_reason: "agent exited: #{exit_reason}",
+            failure_observation: failure_observation,
+            lease_state: retry_lease_state(result.process_completion_status)
+          })
+      end
+
+    Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{task_exit_reason_for_log(reason)}")
+
+    notify_dashboard()
+    state
+  end
+
+  defp time_out_terminal_settlement(%State{} = state, token) do
+    case Map.pop(state.settlements, token) do
+      {nil, _settlements} ->
+        state
+
+      {settlement, settlements} ->
+        state = %{state | settlements: settlements}
+        issue_id = settlement.issue_id
+        running_entry = settlement.running_entry
+        elapsed_ms = System.monotonic_time(:millisecond) - settlement.started_at_ms
+
+        kill_settlement_task(settlement)
+
+        # The settlement task may have landed its terminal record write in the
+        # microseconds before this deadline message reached the mailbox head. The
+        # quarantine write below verifies IDENTITY, not state, so without this
+        # one cheap read it would overwrite a completed settlement's real outcome
+        # with a fabricated timeout failure.
+        case settled_settlement_record(running_entry) do
+          {:settled, record_state} ->
+            settle_late_terminal_settlement(state, issue_id, running_entry, record_state, elapsed_ms)
+
+          :unsettled ->
+            quarantine_timed_out_settlement(state, issue_id, running_entry, settlement, elapsed_ms)
+        end
+    end
+  end
+
+  # The record is still active/retrying at the deadline: settle it typed.
+  defp quarantine_timed_out_settlement(%State{} = state, issue_id, running_entry, settlement, elapsed_ms) do
+    Logger.error(
+      "Terminal settlement timed out issue_id=#{issue_id} " <>
+        "session_id=#{running_entry_session_id(running_entry)} elapsed_ms=#{elapsed_ms}; " <>
+        "quarantining ownership record typed and scheduling retry"
+    )
+
+    quarantine_reason = "terminal_settlement_timed_out elapsed_ms=#{elapsed_ms}"
+
+    # ONE cheap write, no scans: quarantine the record typed using the held
+    # ownership identity so it leaves active instead of hanging forever. The
+    # pre-teardown snapshot captured on dispatch is preserved as unverified
+    # cleanup_evidence (settlement never got to confirm liveness).
+    _ =
+      update_owned_state(
+        Map.get(running_entry, :issue),
+        running_entry,
+        "quarantined",
+        %{
+          quarantine_reason: quarantine_reason,
+          session_id: running_entry_session_id(running_entry),
+          cleanup_evidence: timed_out_settlement_evidence(settlement)
+        }
+      )
+
+    finalize_settlement_deadline(
+      state,
+      issue_id,
+      running_entry,
+      {:terminal_settlement_timed_out, quarantine_reason},
+      "quarantined"
+    )
+  end
+
+  # The settlement task already wrote its terminal outcome — the record LEFT
+  # active on its own observed evidence. A completed settlement is never
+  # replaced by a fabricated failure: skip the quarantine write entirely and
+  # finalize the issue lifecycle on a plain retry lease whose error says the
+  # settlement landed late. (The task is killed either way; its
+  # {:settlement_result, ...} may still race the kill and arrive afterwards,
+  # where finalize_terminal_settlement/3 no-ops on the now-unknown token.)
+  defp settle_late_terminal_settlement(%State{} = state, issue_id, running_entry, record_state, elapsed_ms) do
+    Logger.warning(
+      "Terminal settlement completed at its deadline issue_id=#{issue_id} " <>
+        "session_id=#{running_entry_session_id(running_entry)} elapsed_ms=#{elapsed_ms} " <>
+        "record_state=#{record_state}; keeping the settled record and scheduling retry"
+    )
+
+    late_reason = "terminal_settlement_completed_late elapsed_ms=#{elapsed_ms} record_state=#{record_state}"
+
+    finalize_settlement_deadline(
+      state,
+      issue_id,
+      running_entry,
+      {:terminal_settlement_completed_late, late_reason},
+      "retrying"
+    )
+  end
+
+  # Reads the CURRENT state of the record this settlement owns through the held
+  # ownership identity: one exact-scope read, no process scans. A read that
+  # cannot confirm a settled record fails closed to :unsettled, keeping the
+  # existing typed-quarantine behaviour.
+  defp settled_settlement_record(running_entry) when is_map(running_entry) do
+    with %Issue{} = issue <- Map.get(running_entry, :issue),
+         ownership when is_map(ownership) <- Map.get(running_entry, :process_ownership),
+         {:ok, %{state: record_state}} when record_state in @settled_ownership_states <-
+           ProcessOwnership.verify(issue, ownership_identity(ownership)) do
+      {:settled, record_state}
+    else
+      _ -> :unsettled
+    end
+  end
+
+  defp settled_settlement_record(_running_entry), do: :unsettled
+
+  # A settlement that reached its deadline is a typed retryable failure either
+  # way: schedule a retry carrying the typed observation so the existing
+  # fingerprint machinery sees an identical repeat rather than treating it as
+  # fresh work. The lease reflects what the record actually shows — quarantined
+  # for a genuinely unsettled record, a plain retry lease for one the settlement
+  # already completed.
+  defp finalize_settlement_deadline(%State{} = state, issue_id, running_entry, {_tag, reason_text} = typed_reason, lease_state) do
+    maybe_notify_agent_failed(running_entry, reason_text)
+    RoleTurnRecovery.clear_turn(issue_id)
+
+    reason = {:agent_runtime_failed, typed_reason}
+    next_attempt = next_retry_attempt_from_running(running_entry)
+
+    state =
+      case classify_task_exit(reason, running_entry, issue_id, state) do
+        {:irrecoverable, failure, failure_observation} ->
+          state
+          |> put_failure_observation(issue_id, failure_observation)
+          |> block_irrecoverable_runtime_failure(issue_id, running_entry, failure)
+
+        {:retryable, failure, failure_observation} ->
+          state
+          |> put_failure_observation(issue_id, failure_observation)
+          |> schedule_issue_retry(issue_id, next_attempt, %{
+            identifier: Map.get(running_entry, :identifier, issue_id),
+            error: reason_text,
+            worker_host: Map.get(running_entry, :worker_host),
+            workspace_path: Map.get(running_entry, :workspace_path),
+            issue: Map.get(running_entry, :issue),
+            run_id: Map.get(running_entry, :run_id),
+            process_ownership: retry_process_ownership_status(running_entry),
+            retry_reason: Map.fetch!(failure, :retry_reason),
+            failure_observation: failure_observation,
+            lease_state: lease_state
+          })
+      end
+
+    notify_dashboard()
+    state
+  end
+
+  # A timed-out settlement never confirmed liveness, so the evidence is the
+  # captured owned-PID set marked unverified: live_after reflects the owned set
+  # (we cannot claim they died), verified is false. No scans are performed here.
+  # The on-loop capture is typed (EMB-1259 66-F1): a capture that failed its
+  # machinery carries no observed pids and stays marked unavailable rather than
+  # reading as an empty owned set.
+  defp timed_out_settlement_evidence(%{snapshot: {:ok, %{owned_pids: owned_pids} = snapshot}}) do
+    %{
+      owned_pids: owned_pids,
+      live_after: length(owned_pids),
+      verified: false,
+      captured_at: Map.get(snapshot, :captured_at),
+      evidence_status: :captured
+    }
+  end
+
+  defp timed_out_settlement_evidence(_settlement) do
+    %{owned_pids: [], live_after: 0, verified: false, captured_at: nil, evidence_status: :unavailable}
+  end
+
+  defp cancel_settlement_timer(%{timer_ref: timer_ref}) when is_reference(timer_ref) do
+    _ = Process.cancel_timer(timer_ref)
+    :ok
+  end
+
+  defp cancel_settlement_timer(_settlement), do: :ok
+
+  defp kill_settlement_task(%{task_pid: pid}) when is_pid(pid) do
+    _ = Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid)
+    if Process.alive?(pid), do: Process.exit(pid, :kill)
+    :ok
+  end
+
+  defp kill_settlement_task(_settlement), do: :ok
+
+  @doc """
+  Resolves the terminal settlement deadline in milliseconds.
+
+  Precedence is explicit app-env override > configured value > compiled
+  default. The app-env entry is the existing TEST seam and keeps winning; the
+  production surface is `agent_runtime.terminal_settlement_timeout_ms` in the
+  workflow configuration (EMB-1260 67-SF4c). Configuration that cannot be read
+  or carries no usable value falls back to the compiled default rather than
+  raising: this runs on the settlement dispatch path, where a config problem
+  must not take out the orchestrator.
+  """
+  @spec terminal_settlement_timeout_ms() :: pos_integer()
+  def terminal_settlement_timeout_ms do
+    case Application.get_env(:symphony_elixir, :terminal_settlement_timeout_ms) do
+      value when is_integer(value) and value > 0 -> value
+      _ -> configured_terminal_settlement_timeout_ms()
+    end
+  end
+
+  defp configured_terminal_settlement_timeout_ms do
+    case Config.settings!().agent_runtime.terminal_settlement_timeout_ms do
+      value when is_integer(value) and value > 0 -> value
+      _ -> @default_terminal_settlement_timeout_ms
+    end
+  rescue
+    _error -> @default_terminal_settlement_timeout_ms
+  end
+
   # Marker-step failures stay typed: a mismatched or missing ownership
   # identity means settlement can neither signal nor write evidence for the
   # run it believes it owns — genuine inability, not the self-inflicted
@@ -1008,9 +1463,14 @@ defmodule SymphonyElixir.Orchestrator do
   # Physical teardown runs on every path, including one whose capture
   # failed: evidence that cannot be produced is a typed settlement failure,
   # never a reason to skip the cleanup it is evidence for.
-  defp cleanup_terminal_owned_runtime(running_entry, require_ownership \\ false)
+  #
+  # `pre_captured` lets the terminal settlement pass the snapshot its task
+  # already took before teardown, so one settlement reads the process table
+  # once. Every other caller (including cancelled_terminal_cleanup/1) passes
+  # nil and captures here exactly as before.
+  defp cleanup_terminal_owned_runtime(running_entry, require_ownership \\ false, pre_captured \\ nil)
        when is_map(running_entry) do
-    snapshot = capture_settlement_snapshot(running_entry)
+    snapshot = pre_captured || capture_settlement_snapshot(running_entry)
     session_result = teardown_owned_session(running_entry)
 
     marker_result =
@@ -2069,13 +2529,35 @@ defmodule SymphonyElixir.Orchestrator do
       |> Map.keys()
       |> MapSet.new()
       |> MapSet.union(MapSet.new(Map.keys(state.retry_attempts)))
+      |> MapSet.union(settling_issue_ids(state))
 
     state.claimed
     |> MapSet.difference(active_claims)
     |> Enum.reduce(state, fn issue_id, state_acc ->
-      Logger.warning("Claimed issue is neither running nor retrying; releasing leaked claim issue_id=#{issue_id}")
+      Logger.warning("Claimed issue is neither running, retrying nor settling; releasing leaked claim issue_id=#{issue_id}")
+
       release_issue_claim(state_acc, issue_id)
     end)
+  end
+
+  # An issue whose terminal settlement is in flight has been popped out of
+  # `state.running` but is emphatically NOT free: its predecessor run is still
+  # tearing down. Reading claims from running ∪ retry_attempts alone made such
+  # an issue look orphaned, released its claim, and made it re-dispatchable
+  # mid-teardown — the canary contract's "no equivalent redispatch" violated.
+  #
+  # Settlement contexts are read defensively: a context without a usable issue
+  # id contributes nothing rather than crashing the reconciliation pass that
+  # every poll cycle depends on. Nothing here reads `:snapshot`, which is
+  # populated asynchronously and may still be nil.
+  defp settling_issue_ids(%State{} = state) do
+    state.settlements
+    |> Map.values()
+    |> Enum.flat_map(fn
+      %{issue_id: issue_id} when is_binary(issue_id) -> [issue_id]
+      _settlement -> []
+    end)
+    |> MapSet.new()
   end
 
   defp release_issue_claim(%State{} = state, issue_id, issue \\ nil) do
@@ -2459,6 +2941,17 @@ defmodule SymphonyElixir.Orchestrator do
   defp retry_process_ownership_snapshot(%{issue: %Issue{} = issue}), do: ProcessOwnership.status_for_issue(issue)
   defp retry_process_ownership_snapshot(_retry), do: nil
 
+  # Prefer the running entry's cached ownership (refreshed on the codex-update
+  # path and 30s cadence). Only when it is genuinely absent fall back to a
+  # read, which is now cheap: liveness is batched (single process-table read),
+  # not per-pid fork fan-out (EMB-1260).
+  defp snapshot_process_ownership(%{process_ownership: process_ownership})
+       when is_map(process_ownership),
+       do: process_ownership
+
+  defp snapshot_process_ownership(%{issue: %Issue{} = issue}), do: ProcessOwnership.status_for_issue(issue)
+  defp snapshot_process_ownership(_metadata), do: nil
+
   defp process_ownership_attrs(running_entry) when is_map(running_entry) do
     %{
       role: ProcessOwnership.current_role(),
@@ -2741,7 +3234,12 @@ defmodule SymphonyElixir.Orchestrator do
           state: metadata.issue.state,
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
-          process_ownership: ProcessOwnership.status_for_issue(metadata.issue),
+          # Serviceability: read the CACHED process ownership refreshed on the
+          # codex-update path and 30s cadence instead of scanning the process
+          # table per running issue inline on the snapshot call. Bounded
+          # staleness is acceptable; a snapshot that head-of-line blocks behind
+          # per-issue OS scans is the wedge this contract forbids (EMB-1260).
+          process_ownership: snapshot_process_ownership(metadata),
           session_id: metadata.session_id,
           codex_app_server_pid: metadata.codex_app_server_pid,
           codex_input_tokens: metadata.codex_input_tokens,

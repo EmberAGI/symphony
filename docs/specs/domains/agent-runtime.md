@@ -314,6 +314,16 @@ admission opens.
   mailbox. A successful close acknowledgement therefore occurs after any
   earlier selected dispatch has become visible in `running`, or before any
   later dispatch can start.
+- Because these controls share one mailbox, the Orchestrator must not perform
+  unbounded or shell-forking work inline on that mailbox. Work-admission
+  `close`/`open` and the state snapshot must stay serviceable during role turns
+  and terminal settlement: each returns its bounded result (a typed
+  generation/marker outcome for admission, a possibly-stale but well-formed
+  snapshot for state) rather than blocking behind terminal settlement or
+  per-issue process scans. A call timeout — surfaced as `orchestrator_unavailable`
+  for admission or `snapshot_timeout` for state — is a contract violation, not
+  an acceptable degradation (EMB-1260). Bounded snapshot staleness is
+  acceptable; a timeout is not.
 - Closed admission blocks normal and retry dispatch but does not stop
   reconciliation or already-running work. Only a retry whose matching timer
   actually fires while closed becomes held; unexpired retry timers keep their
@@ -801,6 +811,71 @@ genuine inability — owned processes that actually survive the bounded
 TERM/KILL sequence, or settlement evidence that truly cannot be captured or
 written — never for evidence unavailability the teardown ordering itself
 caused.
+Terminal settlement must not run on the Orchestrator's serial request path
+(EMB-1260). The expensive teardown, liveness, and ownership-record writes
+execute off that path so the Orchestrator keeps serving state snapshots and
+work-admission control while a settlement is in flight; the settling issue
+stays claimed so it cannot be re-dispatched, and classification, retry
+scheduling, and notification finalize when the settlement result returns.
+Every terminal settlement completes or fails TYPED within a bounded time. The
+bound is a production configuration value —
+`agent_runtime.terminal_settlement_timeout_ms`, a positive integer defaulting
+to `60000` — generous by default; on expiry the runtime settles the
+record typed through one cheap write that uses the held ownership identity and
+performs no process scans — the record LEAVES the active state (quarantined
+with a typed settlement-timeout reason, its captured pre-teardown evidence
+preserved as unverified) rather than remaining silently active because
+teardown hung. A timed-out settlement is a typed failure whose scheduled
+retry carries the typed failure observation, so an identical repeat is seen by
+the existing no-progress fingerprint machinery instead of looping as fresh
+work. The expiry write must never fabricate a timeout failure over a record
+that already reached a terminal typed write. Before it writes, the runtime
+reads the current state of the record it owns; a record that already left
+active — cleaned, released, or quarantined — is settled and is handed to the
+ordinary retry lease with a late-completion reason instead of being overwritten.
+`quarantined` counts as settled unconditionally: the question is whether a
+terminal typed write already landed, not whether the runtime is physically
+clean, and a quarantine carrying evidence marked unavailable is a true
+statement about what the settlement could observe, which a fabricated timeout
+claim would replace with a possibly false one. The synchronous GenServer-shutdown cancellation path may settle inline
+because the process is already terminating.
+Teardown and liveness evaluation is batched and bounded. Recorded process-tree
+liveness is decided against a single process-table snapshot per evaluation, not
+a per-PID probe fan-out over the recorded tree; the bounded TERM/KILL await
+re-checks only the still-live candidate set rather than re-scanning every host
+process's ownership environment each iteration; and an active-refresh record
+rebuild prunes recorded PIDs already dead in that same snapshot so stale trees
+stop accumulating. Pruning never alters the pre-teardown settlement evidence.
+Pruning is an optimisation over a SUCCESSFUL observation and must never run on
+an unusable one: the rebuild reads the process table through the typed reader,
+and a read that fails retains every recorded PID unpruned alongside the
+always-retained app-server anchor. A failed process-table read is never
+evidence of an empty table, so it can never be allowed to empty the recorded
+PID set and discard the evidence a later settlement depends on.
+The KILL pass of terminal teardown is narrowed to the TERM candidate list, and
+this is an ACCEPTED GAP, not an oversight. The TERM pass discovers candidates
+from one checked table read and env-matches them; the KILL pass then re-checks
+the ownership environment of only those pids. An owned process that becomes
+discoverable only AFTER the TERM snapshot — one forked late by a surviving
+descendant, or one whose ownership environment was not yet readable when the
+snapshot was taken — is therefore never reached by this settlement's KILL. The
+narrowing is deliberate: it bounds teardown to a single host-wide scan instead
+of re-scanning every process's environment on each pass, which is what keeps
+settlement bounded. The residue is not dropped — it is left to the ownership
+record's own liveness evidence, which reports the process as still live, and to
+later reconciliation of orphaned claims, which sweeps records whose owned
+processes outlived their settlement. A settlement that still observes live
+owned processes fails typed rather than reporting a verified-clean teardown, so
+the gap can never be laundered into a forged clean settlement.
+Ownership env-matching is host-dependent and this widens the same gap on
+non-Linux hosts. The exact-marker check reads a process's environment from
+`/proc/<pid>/environ`; where that path does not exist the read fails, the
+matcher is false for every PID, and the entire env-scoped sweep is inert. On
+such a host terminal teardown signals nothing and the KILL narrowing is
+trivially total, so ownership containment there rests entirely on the record's
+liveness evidence and reconciliation. Behavioral claims about the ownership
+sweep are therefore only meaningful on a host that exposes `/proc`; a test that
+asserts owned-PID set CONTENT off Linux asserts a tautology and proves nothing.
 If the acquired ownership record is missing, malformed, or does not match the
 run capability before hook dispatch, the attempt returns the typed
 `process_ownership_publication_failed` result directly. Neither `before_run`,

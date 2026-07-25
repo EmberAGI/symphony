@@ -195,11 +195,12 @@ defmodule SymphonyElixir.RuntimeOwnedSessionCleanupTest do
         }
       }
 
-      assert {:noreply, updated_state} =
-               Orchestrator.handle_info(
-                 {:DOWN, monitor_ref, :process, process_pid, :normal},
-                 state
-               )
+      # Terminal settlement is off the serial path (EMB-1260): the DOWN handler
+      # dispatches it and finalizes on the settlement-result message. Drive that
+      # message through handle_info so this direct-call test still observes the
+      # FINALIZED state — asserting on the dispatched state would leave the
+      # no-fabricated-failure check below vacuous. Assertions unchanged.
+      updated_state = drive_down_settlement(state, monitor_ref, process_pid, :normal)
 
       assert_receive {:owned_session_cleanup_verified,
                       %{
@@ -233,6 +234,23 @@ defmodule SymphonyElixir.RuntimeOwnedSessionCleanupTest do
       refute match?(%{state: "quarantined"}, ProcessOwnership.status_for_issue(issue)),
              "a physically clean teardown must not leave a quarantined ownership record " <>
                "(#{inspect(ProcessOwnership.status_for_issue(issue))})"
+    end
+  end
+
+  # Drive an off-loop terminal settlement (EMB-1260) to completion for a
+  # direct-handle_info test: dispatch the DOWN, then feed the settlement task's
+  # {:settlement_result, ...} message through handle_info as a live loop would,
+  # returning the finalized state.
+  defp drive_down_settlement(state, ref, pid, reason) do
+    assert {:noreply, dispatched} =
+             Orchestrator.handle_info({:DOWN, ref, :process, pid, reason}, state)
+
+    receive do
+      {:settlement_result, _token, _result} = message ->
+        assert {:noreply, finalized} = Orchestrator.handle_info(message, dispatched)
+        finalized
+    after
+      5_000 -> flunk("terminal settlement did not report its result in time")
     end
   end
 end
