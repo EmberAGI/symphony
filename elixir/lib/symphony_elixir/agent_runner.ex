@@ -368,8 +368,32 @@ defmodule SymphonyElixir.AgentRunner do
            ownership_env
          ) do
       :ok -> result
-      {:error, reason} -> {:error, {:post_turn_routing_failed, reason}}
+      {:error, reason} -> post_turn_routing_result(result, issue, reason)
     end
+  end
+
+  # A failing post-turn routing hook must not re-open a run the runtime already
+  # typed irrecoverable. Replacing that reason with the hook's own would send an
+  # irrecoverable failure back through retry under the wrong family, which is
+  # exactly the "runtime evidence, not agent judgement" property the typed
+  # classification exists to hold. The hook failure is still recorded.
+  defp post_turn_routing_result({:error, primary_reason} = result, issue, hook_reason) do
+    case AgentRuntime.classify_failure(primary_reason, runner_failure_context(issue)) do
+      {:irrecoverable, _failure} ->
+        Logger.error(
+          "Post-turn routing hook failed for #{issue_context(issue)} after an irrecoverable runtime failure: " <>
+            "#{AgentRuntime.sanitize_runtime_text(inspect(hook_reason))}; preserving the irrecoverable reason"
+        )
+
+        result
+
+      {:retryable, _failure} ->
+        {:error, {:post_turn_routing_failed, hook_reason}}
+    end
+  end
+
+  defp post_turn_routing_result(_result, _issue, hook_reason) do
+    {:error, {:post_turn_routing_failed, hook_reason}}
   end
 
   defp process_ownership_environment(issue, opts) do

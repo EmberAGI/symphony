@@ -226,4 +226,56 @@ defmodule SymphonyElixir.RoleBootstrapEnvironmentTest do
     # Nothing was launched: the projection failed before any turn process ran.
     refute File.exists?(ctx.trace_file)
   end
+
+  # The classifier assertion above reads a constructed term. This one reads the
+  # term the runner actually produces, through the public `AgentRunner.run/3`
+  # boundary, with the workspace lifecycle hooks every deployed role configures.
+  # A post-turn routing hook runs after the failed turn either way; whether it
+  # succeeds or fails, it must not re-open an irrecoverable run as retryable.
+  test "the runner exits irrecoverable for a missing bootstrap input under a configured after_run hook" do
+    previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    previous_role = System.get_env("SYMPHONY_ROLE")
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
+    System.put_env("SYMPHONY_ROLE", "reviewer")
+
+    on_exit(fn ->
+      restore_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_provider)
+      restore_env("SYMPHONY_ROLE", previous_role)
+    end)
+
+    after_run_hooks = [
+      {"succeeding", "echo post-turn-handoff-gate-ok"},
+      {"failing", "echo post-turn-handoff-gate-down && exit 17"}
+    ]
+
+    for {label, after_run_hook} <- after_run_hooks do
+      ctx = setup_root("runner-#{label}")
+
+      try do
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: ctx.workspace_root,
+          agent_runtime_provider: "codex",
+          hook_after_create: "echo workspace-created",
+          hook_before_run: "echo before-run",
+          hook_after_run: after_run_hook
+        )
+
+        issue = bootstrap_issue(repository: nil, repository_source: nil)
+
+        exit_reason =
+          catch_exit(run_agent_with_ownership(issue, nil, role: "reviewer", run_id: "run-bootstrap-#{label}"))
+
+        assert {:irrecoverable_runtime_failed, failure} = exit_reason,
+               "a #{label} after_run hook must not change the run's typed reason, got #{inspect(exit_reason)}"
+
+        assert failure.family == :missing_required_runtime_configuration
+        assert failure.subtype == "missing_required_bootstrap_input"
+        assert failure.summary =~ "SYMPHONY_ISSUE_REPOSITORY"
+        assert failure.irrecoverable?
+        refute failure.retryable?
+      after
+        File.rm_rf(ctx.test_root)
+      end
+    end
+  end
 end
