@@ -126,6 +126,17 @@ admission opens.
   not exposed through prompts or logs.
 - Runtime adapters must expose tools through controlled runtime-native
   mechanisms. Credentials and tracker tokens must not be pasted into prompts.
+- Every role turn receives the per-turn bootstrap inputs its workflow declares
+  as required, from one projection at the runtime session Interface taken
+  before the session path for a role is selected. No role runs through a
+  session path that bypasses that projection.
+- `SYMPHONY_ISSUE_REPOSITORY` and `SYMPHONY_EXPECTED_BRANCH` are required
+  bootstrap inputs. A missing value is never silently dropped into an absent
+  variable: the projection fails at its own boundary, naming the variable and
+  the issue it was projected for, and classifies as an irrecoverable
+  missing-required-runtime-configuration failure. Roles fail closed rather
+  than infer repository or branch metadata, so the runtime, not agent
+  judgement, is the enforcement point for a boundary input it cannot supply.
 - A configured skill with executable resources is not available merely
   because its metadata or body is discoverable. The integrating workflow must
   supply its registered skill execution contract, and `AgentRuntime` must
