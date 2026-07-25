@@ -1090,7 +1090,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     process_pids = record_process_pids(record)
 
     cond do
-      Enum.any?(process_pids, &pid_live?/1) ->
+      any_pid_live?(process_pids) ->
         true
 
       process_group_live?(record["app_server_pgid"]) or ownership_env_process_live?(record) ->
@@ -1114,7 +1114,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp quarantined_record_blocks?(record), do: local_process_live?(record)
 
   defp local_process_live?(record) do
-    Enum.any?(record_process_pids(record), &pid_live?/1) or
+    any_pid_live?(record_process_pids(record)) or
       process_group_live?(record["app_server_pgid"]) or ownership_env_process_live?(record)
   end
 
@@ -1124,7 +1124,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     app_server_pgid = normalized_attrs.app_server_pgid || process_group_id(normalized_attrs.app_server_pid)
     process_tree_pids = process_tree_pids(normalized_attrs.app_server_pid, normalized_attrs.process_tree_pids)
 
-    Enum.any?([normalized_attrs.app_server_pid, normalized_attrs.worker_pid | process_tree_pids], &pid_live?/1) or
+    any_pid_live?([normalized_attrs.app_server_pid, normalized_attrs.worker_pid | process_tree_pids]) or
       process_group_live?(app_server_pgid) or ownership_env_process_live?(normalized_attrs)
   end
 
@@ -1137,14 +1137,33 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     |> owned_process_live?()
   end
 
-  defp pid_live?(pid) when is_integer(pid) and pid > 0 do
-    case System.cmd("kill", ["-0", Integer.to_string(pid)], stderr_to_stdout: true) do
-      {_output, 0} -> true
-      _ -> false
+  # Liveness feeds the dispatch-admission gates, so it obeys the same
+  # invariant as the settlement evidence path (66-F1): a process-table read
+  # that failed is never evidence that an owned process died. Liveness is
+  # therefore resolved from ONE checked process-table read — never from a
+  # per-PID `kill -0`, whose non-zero exit cannot distinguish "dead" from
+  # "kill is unusable" or "not permitted" — and an unusable read reports the
+  # recorded PIDs LIVE. Failing the other way is what lets a second run start
+  # over a live one.
+  defp any_pid_live?(pids) when is_list(pids) do
+    candidates = pids |> Enum.map(&pid_value/1) |> Enum.reject(&is_nil/1)
+
+    case {candidates, checked_process_table()} do
+      {[], _process_table} ->
+        false
+
+      {candidates, {:ok, processes}} ->
+        live = MapSet.new(processes, fn {pid, _ppid, _pgid} -> pid end)
+        Enum.any?(candidates, &MapSet.member?(live, &1))
+
+      {candidates, {:error, reason}} ->
+        Logger.warning("Process table unreadable (#{inspect(reason)}); treating owned pids #{inspect(candidates)} as live")
+
+        true
     end
-  rescue
-    _ -> false
   end
+
+  defp pid_live?(pid) when is_integer(pid) and pid > 0, do: any_pid_live?([pid])
 
   defp pid_live?(pid) when is_binary(pid) do
     case Integer.parse(pid) do
@@ -1187,17 +1206,19 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     case value_for(attrs, :cleanup_evidence) do
       %{} = evidence ->
         owned_pids = pid_list_value(value_for(evidence, :owned_pids))
-        live_after = value_for(evidence, :live_after)
         verified = boolean_value_for(evidence, :verified)
         captured_at = string_value(value_for(evidence, :captured_at))
 
-        if is_integer(live_after) and live_after >= 0 and is_boolean(verified) do
+        status = settlement_evidence_status(evidence)
+        live_after = settlement_live_after(status, value_for(evidence, :live_after))
+
+        if is_boolean(verified) and settlement_live_after_valid?(status, live_after) do
           %{
             owned_pids: owned_pids,
             live_after: live_after,
             verified: verified,
             captured_at: captured_at,
-            evidence_status: settlement_evidence_status(evidence)
+            evidence_status: status
           }
         end
 
@@ -1221,6 +1242,16 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       _unavailable -> :unavailable
     end
   end
+
+  # Evidence that observed nothing carries no survivor count. A `live_after`
+  # written next to an `:unavailable` status — including the fabricated `0`
+  # persisted by pre-66-F1 builds — is read back as absent, so no consumer can
+  # mistake "nothing was counted" for "0 survivors confirmed".
+  defp settlement_live_after(:unavailable, _live_after), do: nil
+  defp settlement_live_after(:captured, live_after), do: live_after
+
+  defp settlement_live_after_valid?(:unavailable, live_after), do: is_nil(live_after)
+  defp settlement_live_after_valid?(:captured, live_after), do: is_integer(live_after) and live_after >= 0
 
   # `value_for/2` folds legitimate `false` into the string-key fallback, so
   # boolean evidence fields need explicit key resolution.
@@ -1404,12 +1435,40 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   defp process_group_live?(pgid) do
     case pid_value(pgid) do
-      nil -> false
-      integer -> Enum.any?(process_table(), fn {_pid, _ppid, process_pgid} -> process_pgid == integer end)
+      nil ->
+        false
+
+      integer ->
+        case checked_process_table() do
+          {:ok, processes} ->
+            Enum.any?(processes, fn {_pid, _ppid, process_pgid} -> process_pgid == integer end)
+
+          {:error, reason} ->
+            Logger.warning("Process table unreadable (#{inspect(reason)}); treating owned process group #{integer} as live")
+
+            true
+        end
     end
   end
 
-  defp ownership_env_process_live?(attrs_or_record), do: ownership_env_pids(attrs_or_record) != []
+  # Admission-side liveness, so a failed sweep is not "no process matches".
+  defp ownership_env_process_live?(attrs_or_record) do
+    criteria = ownership_env_criteria(attrs_or_record)
+
+    if ownership_env_criteria_scoped?(criteria) do
+      case checked_matching_processes(criteria) do
+        {:ok, pids} ->
+          pids != []
+
+        {:error, reason} ->
+          Logger.warning("Process table unreadable (#{inspect(reason)}); treating the run's ownership environment as live")
+
+          true
+      end
+    else
+      false
+    end
+  end
 
   defp ownership_env_pids(attrs_or_record) when is_map(attrs_or_record) do
     criteria = ownership_env_criteria(attrs_or_record)
@@ -1581,6 +1640,14 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp issue_identifier(%Issue{identifier: identifier}, _attrs) when is_binary(identifier), do: identifier
   defp issue_identifier(_issue, attrs), do: attrs.issue_identifier
 
+  # The untyped view, kept ONLY for the two record-construction readers that
+  # widen what a record knows and never narrow it: `process_group_id/1` and
+  # `descendant_pids/1`. Both union newly discovered PIDs into the recorded
+  # tree, so an unusable read records less than the host could have shown but
+  # never discards a PID the record already carries, and never reports a live
+  # process dead. Every liveness decision — settlement evidence and the
+  # dispatch-admission gates alike — goes through `checked_process_table/0`
+  # and fails closed instead (66-F1).
   defp process_table do
     case checked_process_table() do
       {:ok, processes} -> processes

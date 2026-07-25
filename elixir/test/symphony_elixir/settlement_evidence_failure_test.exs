@@ -102,41 +102,50 @@ defmodule SymphonyElixir.SettlementEvidenceFailureTest do
 
   describe "terminal settlement" do
     test "settles typed when the process table read exits non-zero" do
-      status = settle_under_process_table(:failing_exit, "settlement-exit", "MT-1259E1")
+      {status, states, log} = settle_under_process_table(:failing_exit, "settlement-exit", "MT-1259E1")
 
-      assert_settled_evidence_unavailable(status)
+      assert_settled_evidence_unavailable(status, states, log)
     end
 
     test "settles typed when the process table output cannot be parsed" do
-      status = settle_under_process_table(:unparseable, "settlement-unparseable", "MT-1259E2")
+      {status, states, log} = settle_under_process_table(:unparseable, "settlement-unparseable", "MT-1259E2")
 
-      assert_settled_evidence_unavailable(status)
+      assert_settled_evidence_unavailable(status, states, log)
     end
 
     test "settles typed when the process table reader is absent" do
-      status = settle_under_process_table(:absent, "settlement-absent", "MT-1259E3")
+      {status, states, log} = settle_under_process_table(:absent, "settlement-absent", "MT-1259E3")
 
-      assert_settled_evidence_unavailable(status)
+      assert_settled_evidence_unavailable(status, states, log)
     end
 
     test "settles verified-clean when capture works and nothing owned survives" do
-      status = settle_under_process_table(:healthy, "settlement-healthy", "MT-1259E4")
+      {status, states, log} = settle_under_process_table(:healthy, "settlement-healthy", "MT-1259E4")
 
-      # The continuation lease scheduled after the clean release may re-mark
-      # the record "retrying" (timing-dependent, pre-existing semantics); the
-      # evidence contract is verified-clean evidence and no fabricated
-      # quarantine.
-      refute status.state == "quarantined",
-             "expected clean settlement, got quarantined (quarantine_reason=#{inspect(status.quarantine_reason)})"
+      # Terminal settlement must RELEASE the record, not merely avoid
+      # quarantining it. The continuation lease scheduled straight afterwards
+      # legitimately re-marks the released record "retrying", so the released
+      # state is transient and the observed transitions carry the assertion.
+      assert "cleaned" in states,
+             "settlement must release the ownership record; observed states=#{inspect(states)}"
 
-      assert %{owned_pids: [], live_after: 0, verified: true} = status.cleanup_evidence
+      refute "quarantined" in states,
+             "expected clean settlement, observed #{inspect(states)} " <>
+               "(quarantine_reason=#{inspect(status.quarantine_reason)})"
+
+      assert %{owned_pids: [], live_after: 0, verified: true, evidence_status: :captured} =
+               status.cleanup_evidence
+
+      assert log =~ "Run-owned runtime cleanup verified"
+      assert log =~ "owned_pids=[] live_after=0"
+      refute log =~ "Run-owned runtime cleanup evidence unavailable"
     end
   end
 
-  defp assert_settled_evidence_unavailable(status) do
-    refute status.state == "cleaned",
+  defp assert_settled_evidence_unavailable(status, states, log) do
+    refute "cleaned" in states,
            "settlement released the run as cleaned on a capture-machinery failure " <>
-             "(cleanup_evidence=#{inspect(status.cleanup_evidence)})"
+             "(observed states=#{inspect(states)}, cleanup_evidence=#{inspect(status.cleanup_evidence)})"
 
     assert status.state == "quarantined",
            "expected typed quarantine, got #{status.state} (quarantine_reason=#{inspect(status.quarantine_reason)})"
@@ -145,6 +154,29 @@ defmodule SymphonyElixir.SettlementEvidenceFailureTest do
            "quarantine reason must name the typed capture failure, got #{inspect(status.quarantine_reason)}"
 
     assert %{verified: false, evidence_status: :unavailable} = status.cleanup_evidence
+
+    # Nothing was observed, so there is no survivor count to report. A
+    # recorded `live_after: 0` reads as "0 survivors confirmed" to any
+    # dashboard or query keyed on that field alone.
+    assert is_nil(status.cleanup_evidence.live_after),
+           "unavailable evidence fabricated a survivor count: " <>
+             "live_after=#{inspect(status.cleanup_evidence.live_after)}"
+
+    # A settlement that proved nothing must say so on the operator channel.
+    # The verified line is what the production contract and
+    # docs/specs/domains/agent-runtime.md name as proof of cleanup: emitting
+    # it here would hand every canary gate and log-based verifier forged
+    # proof on any host whose process table cannot be read.
+    assert log =~ "Run-owned runtime cleanup evidence unavailable",
+           "settlement did not report its evidence unavailable on the operator channel"
+
+    assert log =~ "cleanup_reason=settlement_evidence_unavailable"
+
+    refute log =~ "Run-owned runtime cleanup verified",
+           "a settlement that captured no evidence emitted the verified cleanup proof line"
+
+    refute log =~ "Run-owned runtime cleanup unverified",
+           "unavailable evidence must not be reported as a merely-unverified settlement"
   end
 
   defp settle_under_process_table(process_table_kind, label, identifier) do
@@ -177,22 +209,20 @@ defmodule SymphonyElixir.SettlementEvidenceFailureTest do
     ref = make_ref()
     install_running_entry(pid, issue, ref, process_ownership)
 
-    with_process_table(process_table_kind, fn ->
-      send(pid, {:DOWN, ref, :process, self(), :normal})
+    {{status, states}, log} =
+      with_log(fn ->
+        with_process_table(process_table_kind, fn ->
+          send(pid, {:DOWN, ref, :process, self(), :normal})
 
-      # Physical teardown still runs: an evidence failure must never skip
-      # the cleanup it is supposed to be evidence for.
-      assert_receive {:cleanup_probe_ran, _session_name}, 5_000
+          # Physical teardown still runs: an evidence failure must never skip
+          # the cleanup it is supposed to be evidence for.
+          assert_receive {:cleanup_probe_ran, _session_name}, 5_000
 
-      assert_eventually_value(fn -> settled_status(issue) end)
-    end)
-  end
+          await_settlement_status(issue)
+        end)
+      end)
 
-  defp settled_status(issue) do
-    case ProcessOwnership.status_for_issue(issue) do
-      %{state: state} = status when state in ["cleaned", "quarantined", "retrying"] -> status
-      _other -> nil
-    end
+    {status, states, log}
   end
 
   defp acquired_ownership(label, identifier) do
@@ -295,24 +325,5 @@ defmodule SymphonyElixir.SettlementEvidenceFailureTest do
       System.tmp_dir!(),
       "symphony-elixir-#{label}-#{System.unique_integer([:positive])}"
     )
-  end
-
-  defp assert_eventually_value(fun, attempts \\ 100)
-
-  defp assert_eventually_value(fun, 0) do
-    value = fun.()
-    assert value, "condition did not produce a value in time"
-    value
-  end
-
-  defp assert_eventually_value(fun, attempts) do
-    case fun.() do
-      nil ->
-        Process.sleep(50)
-        assert_eventually_value(fun, attempts - 1)
-
-      value ->
-        value
-    end
   end
 end

@@ -1060,16 +1060,20 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
+  # Nothing was observed, so there is no survivor count to record. `live_after`
+  # stays absent rather than carrying the `0` a dashboard or log query keyed on
+  # that field alone would read as "0 survivors confirmed" — the same forged
+  # reading `verified: true` was removed for.
   defp unavailable_settlement_evidence(cleanup_result, step, reason, owned_pids, captured_at) do
     evidence = %{
       owned_pids: owned_pids,
-      live_after: 0,
+      live_after: nil,
       verified: false,
       captured_at: captured_at,
       evidence_status: :unavailable
     }
 
-    {settlement_evidence_failure(cleanup_result, step, reason), evidence, %{live_after: 0, live_pids: []}}
+    {settlement_evidence_failure(cleanup_result, step, reason), evidence, %{live_after: nil, live_pids: []}}
   end
 
   defp settlement_evidence_failure(:ok, step, reason),
@@ -2431,7 +2435,10 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp settlement_processes_remain?(%{live_after: live_after}), do: live_after > 0
+  # Evidence with no survivor count observed nothing; it is handled by
+  # `settlement_evidence_unavailable?/1`, never read as "no survivors".
+  defp settlement_processes_remain?(%{live_after: live_after}) when is_integer(live_after), do: live_after > 0
+  defp settlement_processes_remain?(_cleanup_evidence), do: false
 
   defp settlement_evidence_unavailable?(%{evidence_status: :unavailable}), do: true
   defp settlement_evidence_unavailable?(_cleanup_evidence), do: false

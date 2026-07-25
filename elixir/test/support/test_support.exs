@@ -34,6 +34,8 @@ defmodule SymphonyElixir.TestSupport do
           write_workflow_file!: 1,
           write_workflow_file!: 2,
           restore_env: 2,
+          await_settlement_status: 1,
+          await_settlement_status: 2,
           run_agent_with_ownership: 2,
           run_agent_with_ownership: 3,
           stop_default_http_server: 0,
@@ -155,6 +157,49 @@ defmodule SymphonyElixir.TestSupport do
 
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
+
+  @settled_ownership_states ["cleaned", "quarantined", "retrying"]
+
+  @doc """
+  Waits for one issue's terminal settlement and returns
+  `{status, observed_states}`.
+
+  `observed_states` is the ordered list of distinct ownership-record states
+  seen while waiting. Terminal settlement releases the record ("cleaned") and
+  the continuation/retry lease scheduled immediately afterwards legitimately
+  re-marks it "retrying", so the released state is transient (measured window
+  on a macOS dev host: ~180ms). Asserting only the state a single late read
+  happens to observe therefore cannot distinguish a settlement that released
+  the record from one that never released it — both read "retrying". The
+  transition list keeps the release itself assertable while tolerating the
+  lease that follows it.
+  """
+  def await_settlement_status(issue, timeout_ms \\ 15_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    poll_settlement_status(issue, [], deadline)
+  end
+
+  defp poll_settlement_status(issue, seen, deadline) do
+    status = ProcessOwnership.status_for_issue(issue)
+    state = settlement_record_state(status)
+    seen = if match?([^state | _], seen), do: seen, else: [state | seen]
+
+    cond do
+      state in @settled_ownership_states and is_map(Map.get(status, :cleanup_evidence)) ->
+        {status, Enum.reverse(seen)}
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        raise "terminal settlement did not record cleanup evidence within the timeout; " <>
+                "observed ownership states=#{inspect(Enum.reverse(seen))}"
+
+      true ->
+        Process.sleep(1)
+        poll_settlement_status(issue, seen, deadline)
+    end
+  end
+
+  defp settlement_record_state(%{state: state}), do: state
+  defp settlement_record_state(_status), do: nil
 
   def run_agent_with_ownership(issue, recipient, opts \\ []) do
     run_id =

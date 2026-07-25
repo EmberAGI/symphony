@@ -214,14 +214,25 @@ defmodule SymphonyElixir.RuntimeOwnedSessionCleanupTest do
       # The clean teardown keeps its normal completion: the settlement must
       # not rewrite the exit into a typed owned-session cleanup failure just
       # because its own record re-read found nothing.
-      case updated_state.retry_attempts[issue_id] do
-        nil ->
-          :ok
+      #
+      # A `:normal` exit always schedules the active-state continuation check
+      # and that retry carries no error at all. A settlement that rewrote the
+      # exit routes through the retryable branch instead, whose retry carries
+      # "agent exited: ... owned_session_cleanup_failed ...". Asserting the
+      # retry exists and its error is nil therefore has no arm that can pass
+      # by absence.
+      retry = updated_state.retry_attempts[issue_id]
 
-        %{error: error} ->
-          refute is_binary(error) and error =~ "owned_session_cleanup_failed"
-          refute is_binary(error) and error =~ "owned_session_process_evidence_unavailable"
-      end
+      assert is_map(retry),
+             "a clean :normal teardown must still schedule its active-state continuation check, " <>
+               "got retry_attempts=#{inspect(updated_state.retry_attempts)}"
+
+      assert is_nil(retry.error),
+             "settlement rewrote a physically clean teardown into a typed failure: #{inspect(retry.error)}"
+
+      refute match?(%{state: "quarantined"}, ProcessOwnership.status_for_issue(issue)),
+             "a physically clean teardown must not leave a quarantined ownership record " <>
+               "(#{inspect(ProcessOwnership.status_for_issue(issue))})"
     end
   end
 end
