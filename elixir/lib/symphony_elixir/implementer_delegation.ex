@@ -104,7 +104,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
           orchestrator: orchestrator
         } = session,
         prompt,
-        _issue,
+        issue,
         opts
       )
       when is_binary(prompt) and prompt != "" and is_list(opts) do
@@ -169,17 +169,15 @@ defmodule SymphonyElixir.ImplementerDelegation do
          {:ok, worker_assignments} <-
            worker_assignments(transport, herdr_session, transport_context),
          :ok <- validate_worker_assignments(worker_assignments, herdr_session) do
-      session_id = agent_session_id(completed)
+      # Herdr's terminal `agent get` response may omit `agent_session` even
+      # though the acknowledged prompt response carried it. Preserve the
+      # provider session identity from that first observation so the durable
+      # correlation outcome remains joinable after supervision settles.
+      session_id = agent_session_id(completed) || agent_session_id(observed)
       worker_assignments = observed_assignments(worker_assignments)
       worker_evidence = bounded_worker_evidence(worker_assignments)
 
-      if worker_evidence != [] do
-        Logger.info(
-          "Implementer worker result correlated " <>
-            "herdr_session=#{Map.get(herdr_session, :name)} " <>
-            "worker_assignments=#{inspect(worker_evidence)}"
-        )
-      end
+      log_worker_correlation(issue, herdr_session, session_id, worker_evidence)
 
       emit_message(on_message, :turn_completed, %{
         provider: contract_provider(Map.get(session, :contract, %{}), :orchestrator),
@@ -225,7 +223,13 @@ defmodule SymphonyElixir.ImplementerDelegation do
   # caller decides, rather than inheriting an empty list it cannot distinguish.
   defp worker_assignments(transport, herdr_session, transport_context) do
     if function_exported?(transport, :worker_assignments, 2) do
-      transport.worker_assignments(herdr_session, transport_context)
+      case transport.worker_assignments(herdr_session, transport_context) do
+        {:error, {:worker_assignments_unobservable, details}} ->
+          {:ok, {:unobservable, details}}
+
+        result ->
+          result
+      end
     else
       {:ok, {:unobservable, %{reason: :transport_capability_missing, transport: transport}}}
     end
@@ -355,6 +359,31 @@ defmodule SymphonyElixir.ImplementerDelegation do
         result_status: get_in(assignment, [:result, :status])
       }
     end)
+  end
+
+  defp log_worker_correlation(issue, herdr_session, session_id, []) do
+    Logger.info(
+      "Implementer worker result correlation not required " <>
+        "outcome=no_delegation " <>
+        worker_correlation_context(issue, herdr_session, session_id) <>
+        " worker_assignments=[]"
+    )
+  end
+
+  defp log_worker_correlation(issue, herdr_session, session_id, worker_evidence) do
+    Logger.info(
+      "Implementer worker result correlated " <>
+        "outcome=correlated " <>
+        worker_correlation_context(issue, herdr_session, session_id) <>
+        " worker_assignments=#{inspect(worker_evidence)}"
+    )
+  end
+
+  defp worker_correlation_context(issue, herdr_session, session_id) do
+    "issue_id=#{Map.get(issue, :id)} " <>
+      "issue_identifier=#{Map.get(issue, :identifier)} " <>
+      "session_id=#{session_id} " <>
+      "herdr_session=#{Map.get(herdr_session, :name)}"
   end
 
   @spec stop_session(session()) :: :ok | {:error, term()}

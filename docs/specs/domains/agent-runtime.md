@@ -627,8 +627,12 @@ and worker alike — the launching side therefore prepares the target pane with 
 non-interactive `sh -c 'command -v <kind>'` (immune to interactive shell
 function shadowing, mirroring Herdr's exec resolution) must resolve to exactly
 the session provider wrapper, byte for byte, or the launch fails closed before
-`agent start` is issued. `pane run` is permitted solely for this launch
-preparation and preflight; prompts and raw input never travel through it.
+`agent start` is issued. Before the orchestrator starts, a second preflight
+resolves bare-name `herdr` through a login Bash with the run-owned environment
+and requires the exact session `orchestrator-bin/herdr`; one read-only
+`agent list` probe through that same path attests the recorder. `pane run` is
+permitted solely for this launch preparation and preflight; prompts and raw
+input never travel through it.
 
 The native arguments are materialized in an executable launch-projection file
 under the isolated session runtime root, named by a per-launch token (a stable
@@ -649,10 +653,17 @@ caller-owned, mode 0500 — writes a per-launch `wrapper.ack` containing the
 launch token, and only then execs the projection. The projection writes its own
 `projection.ack` with the same token before exec-ing the provider, so Codex
 receives `developer_instructions` and Claude receives `--append-system-prompt`
-unchanged from their provider contracts. The transport mirrors the projection
-validation before launching and requires both acknowledgements, with exact
-token content, within a five-second startup-acknowledgement window inside the
-shared budget. Launch failures are distinct typed stages, never collapsed:
+unchanged from their provider contracts. Each provider wrapper also exports a
+role-specific, run-owned `BASH_ENV` file that re-prepends the orchestrator or
+restricted-worker Herdr projection after a provider tool's login shell reads
+system and user profiles. A profile that replaces `PATH` therefore cannot
+route inter-agent commands to a user-installed Herdr outside the recorder.
+The files live only beneath the isolated runtime root; provider `HOME` and
+provider-auth environment values remain unchanged. The transport mirrors the
+projection validation before launching and requires both acknowledgements,
+with exact token content, within a five-second startup-acknowledgement window
+inside the shared budget. Launch failures are distinct typed stages, never
+collapsed:
 pane preparation, wrapper resolution, wrapper acknowledgement, projection
 acknowledgement (including malformed or cross-launch content), and provider
 start. The acknowledgements are intra-runtime liveness evidence that the
@@ -733,12 +744,24 @@ assignment-specific fields. A worker result is
 The run-owned transport projection records only those messages as ephemeral
 per-session evidence beneath the existing isolated runtime root. The records
 are not runtime authority, are never Linear comments, and are removed with the
-runtime root. At turn completion, the Transport Interface reports bounded
+runtime root. Every invocation of either role's Herdr projection first records
+a bounded attestation. A session with a live worker and no attestation fails
+typed as `worker_event_recorder_unattested`; the single launch probe makes an
+otherwise-empty recording positive evidence that no delegation occurred.
+At turn completion, the Transport Interface reports bounded
 assignment entries containing `assignment_id`, lifecycle `status`, and a
 result with the observed `assignment_id`; the Implementer runtime accepts only
 an exact correlation. Launch failure, worker death, an idle/done worker without
 a result, a still-working worker after the orchestrator settles, a mismatched
 token, and `status=failed` remain distinct typed failed-run outcomes.
+After validation, every successful Implementer turn emits one durable
+correlation-evidence log event with the issue id, issue identifier, provider
+session id, and isolated Herdr session name. A correlated delegation includes
+the bounded assignment evidence and `outcome=correlated`; a turn whose
+materialized recording proves no delegation occurred emits positive
+`outcome=no_delegation` evidence instead of ambiguous silence. An unobservable
+recording or a delegated result that cannot be correlated remains a typed
+failure and cannot emit either successful outcome.
 
 After submission, turn lifecycle observation is a bounded, idempotent
 supervision state machine (EMB-1244 Stage 2), not a single budget-length
