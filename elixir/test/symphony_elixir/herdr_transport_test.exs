@@ -1501,7 +1501,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       assert {:ok, session} =
                HerdrTransport.start_session(
                  %{
-                   name: "octo-emb-1231-recover-#{provider}",
+                   name: "octo-emb-1231-recover-#{provider}-#{System.unique_integer([:positive])}",
                    isolated: true,
                    workspace: "/tmp/selected-workspace"
                  },
@@ -1574,7 +1574,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       assert {:ok, session} =
                HerdrTransport.start_session(
                  %{
-                   name: "octo-emb-1231-exhausted-#{provider}",
+                   name: "octo-emb-1231-exhausted-#{provider}-#{System.unique_integer([:positive])}",
                    isolated: true,
                    workspace: "/tmp/selected-workspace"
                  },
