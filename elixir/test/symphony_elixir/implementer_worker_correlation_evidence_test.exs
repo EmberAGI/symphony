@@ -19,6 +19,11 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
   These tests pin the distinction at the public runtime seam
   (`AgentRuntime.start_session/2` + `AgentRuntime.run_turn/4` over the real
   `HerdrTransport`) and at each of the three fail-open steps.
+
+  EMB-1295 closes the remaining observability ambiguity at that same public
+  seam. A successful correlation must name the provider session and issue in
+  its durable log event, while a turn that proved it did not delegate must emit
+  its own positive evidence. Silence can no longer mean either outcome.
   """
 
   alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation}
@@ -27,6 +32,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
   alias SymphonyElixir.TestSupport.HerdrReplayFixture
 
   @correlation_event "Implementer worker result correlated"
+  @no_delegation_event "Implementer worker result correlation not required"
 
   setup do
     root = Path.join(System.tmp_dir!(), "iwce-#{System.unique_integer([:positive])}")
@@ -281,7 +287,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
-  test "a fully recorded delegation emits the correlation event naming assignment, result and session", context do
+  test "a fully recorded delegation emits durable correlation evidence joinable to provider session and issue", context do
     session = start_implementer_session(context, "evidence-correlated")
 
     assert :ok =
@@ -307,7 +313,12 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     assert [%{assignment_id: "EMB1282-EVIDENCE-7F3A", status: :completed, evidence: :envelope}] =
              turn.worker_assignments
 
+    assert is_binary(turn.session_id) and turn.session_id != ""
     assert log =~ @correlation_event
+    assert log =~ "outcome=correlated"
+    assert log =~ "issue_id=#{issue().id}"
+    assert log =~ "issue_identifier=#{issue().identifier}"
+    assert log =~ "session_id=#{turn.session_id}"
     assert log =~ "herdr_session=#{session.name}"
     assert log =~ "EMB1282-EVIDENCE-7F3A"
     assert log =~ "result_status: \"completed\""
@@ -315,14 +326,21 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
-  test "a run that never delegated succeeds with no assignments and no spurious correlation event", context do
+  test "a run that never delegated emits durable positive evidence instead of ambiguous silence", context do
     session = start_implementer_session(context, "evidence-direct-work")
 
     {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
 
     assert {:ok, {_next_session, turn}} = result
     assert turn.worker_assignments == []
+    assert is_binary(turn.session_id) and turn.session_id != ""
     refute log =~ @correlation_event
+    assert log =~ @no_delegation_event
+    assert log =~ "outcome=no_delegation"
+    assert log =~ "issue_id=#{issue().id}"
+    assert log =~ "issue_identifier=#{issue().identifier}"
+    assert log =~ "session_id=#{turn.session_id}"
+    assert log =~ "herdr_session=#{session.name}"
 
     stop(session)
   end
