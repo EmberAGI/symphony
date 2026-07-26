@@ -154,6 +154,46 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
+  test "a live worker under an unattested recorder fails typed instead of settling as no delegation", context do
+    session = start_implementer_session(context, "evidence-recorder-unattested")
+
+    # Exercise the native binary directly, exactly as a recorder-bypassing
+    # resolution does. Removing any launch probe attestation isolates the
+    # residual fail-closed seam: a live worker must never turn an unattested
+    # recording into positive no-delegation evidence.
+    session.herdr_session.runtime_root
+    |> Path.join("worker-events/observed.*")
+    |> Path.wildcard()
+    |> Enum.each(&File.rm!/1)
+
+    assert {_output, 0} =
+             System.cmd(
+               context.herdr_bin,
+               [
+                 "--session",
+                 session.name,
+                 "agent",
+                 "prompt",
+                 "implementer_worker",
+                 "EMB1295-BYPASS: produce the bounded deliverable"
+               ],
+               env: [
+                 {"HERDR_FAKE_LOG", context.herdr_log},
+                 {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
+               ],
+               stderr_to_stdout: true
+             )
+
+    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+
+    refute log =~ @correlation_event
+    refute log =~ @no_delegation_event
+
+    assert {:error, {:implementer_worker_assignments_unobservable, %{reason: :worker_event_recorder_unattested}}} = result
+
+    stop(session)
+  end
+
   test "a delegation the worker answered is correlated from the channel itself, with no envelope", context do
     session = start_implementer_session(context, "evidence-structural")
 
@@ -243,6 +283,10 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     login_bin = Path.join(Path.dirname(context.workspace), "login-bin")
     File.mkdir_p!(login_bin)
 
+    launch_commands = File.read!(context.herdr_log)
+    assert launch_commands =~ "/bin/bash -lc"
+    assert launch_commands =~ "command -v herdr"
+
     # Model the post-/etc/profile state seen in production: bare `herdr`
     # resolves successfully, but to the user installation rather than the
     # run-owned recorder. The symlink keeps delivery behavior identical while
@@ -304,7 +348,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
 
     refute log =~ @correlation_event
 
-    assert {:error, {:worker_assignments_unobservable, %{reason: :unrecognized_herdr_command_form, unparsed: 1}}} =
+    assert {:error, {:implementer_worker_assignments_unobservable, %{reason: :unrecognized_herdr_command_form, unparsed: 1}}} =
              result
 
     stop(session)
@@ -378,6 +422,12 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     assert {:ok, {_next_session, turn}} = result
     assert turn.worker_assignments == []
     assert is_binary(turn.session_id) and turn.session_id != ""
+
+    assert [_launch_attestation] =
+             session.herdr_session.runtime_root
+             |> Path.join("worker-events/observed.*")
+             |> Path.wildcard()
+
     refute log =~ @correlation_event
     assert log =~ @no_delegation_event
     assert log =~ "outcome=no_delegation"
