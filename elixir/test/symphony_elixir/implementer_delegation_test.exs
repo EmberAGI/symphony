@@ -1033,6 +1033,10 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       |> Enum.uniq()
       |> Enum.map_join(",", &"#{inspect(&1)}=\"read\"")
 
+    filesystem_permission =
+      ~s|permissions.octo_herdr.filesystem={":minimal"="read",":workspace_roots"={"."="write",".git"="write"},| <>
+        ~s|#{read_roots},#{inspect(Path.join(runtime_root, "worker-events"))}="write"}|
+
     [
       "codex",
       "--model",
@@ -1048,7 +1052,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       "--config",
       "default_permissions=\"octo_herdr\"",
       "--config",
-      "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"},#{read_roots}}",
+      filesystem_permission,
       "--config",
       "permissions.octo_herdr.network={enabled=true,unix_sockets={#{inspect(socket)}=\"allow\"}}",
       "--ask-for-approval",
