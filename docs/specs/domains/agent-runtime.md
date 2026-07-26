@@ -359,7 +359,19 @@ admission opens.
   not appear as an ordinary retry while cleanup remains unresolved.
 - When a running issue leaves active dispatch because it becomes terminal,
   non-active, unroutable, or reassigned, the runtime must verify the holder/run
-  and record process completion or quarantine before releasing ownership.
+  and record process completion or quarantine before releasing ownership. A
+  run-owned Implementer Herdr turn that has just moved its issue into a
+  downstream non-active state is the one bounded exception to immediate
+  termination: its narrow ownership reference marks it for terminal handoff
+  settlement, and the Orchestrator retains that already-running task for a
+  30-second grace evaluated at each state reconciliation so the turn can emit
+  worker-correlation and post-turn-gate evidence before stopping its own
+  session. Forced termination therefore occurs after the grace at the next
+  successful reconciliation. Returning to an active state clears the grace
+  anchor before any later handoff. Terminal states, reassignment, missing
+  issues, and runtimes without that explicit marker retain immediate
+  termination. Expiry force-terminates through the existing typed, non-vacuous
+  cleanup path.
 - Normal worker completion must not mark process ownership as cleaned until the
   scoped app-server process tree is no longer live. If the app-server PID,
   observed process tree, process group, or inherited ownership-marker process
@@ -832,6 +844,15 @@ materialized recording proves no delegation occurred emits positive
 `outcome=no_delegation` evidence instead of ambiguous silence. An unobservable
 recording or a delegated result that cannot be correlated remains a typed
 failure and cannot emit either successful outcome.
+An Implementer commonly performs its own `In Progress -> Agent Review`
+transition before its provider turn has returned. State reconciliation must
+not destroy the run-owned session on the first observation of that downstream
+state: doing so would bypass the turn-completion cursor read while allowing
+generic process cleanup to report success. The Implementer's ownership
+reference therefore opts that in-flight turn into the bounded handoff
+settlement grace above. Natural completion still owns correlation validation,
+post-turn gates, and session stop; the Orchestrator owns bounded expiry and
+forced cleanup.
 
 After submission, turn lifecycle observation is a bounded, idempotent
 supervision state machine (EMB-1244 Stage 2), not a single budget-length

@@ -220,6 +220,196 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "Implementer handoff keeps its run-owned turn alive for terminal evidence settlement" do
+    issue_id = "issue-implementer-handoff"
+    owner = self()
+
+    agent_pid =
+      spawn(fn ->
+        receive do
+          :finish_turn ->
+            send(owner, :terminal_correlation_evidence_emitted)
+        end
+      end)
+
+    on_exit(fn ->
+      if Process.alive?(agent_pid), do: Process.exit(agent_pid, :kill)
+    end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: agent_pid,
+          ref: nil,
+          identifier: "MT-557",
+          issue: %Issue{id: issue_id, state: "In Progress", identifier: "MT-557"},
+          started_at: DateTime.utc_now(),
+          owned_session_ref: %{
+            cleanup_module: RecordingOwnedSessionCleanup,
+            handoff_settlement: :implementer_turn,
+            owner: self(),
+            agent_pid: agent_pid,
+            session_name: "octo-mt-557"
+          }
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    downstream_issue = %Issue{
+      id: issue_id,
+      identifier: "MT-557",
+      state: "Agent Review",
+      title: "Handed off",
+      description: "The in-flight turn still needs to emit terminal evidence.",
+      labels: []
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([downstream_issue], state)
+
+    assert Map.has_key?(updated_state.running, issue_id)
+    assert MapSet.member?(updated_state.claimed, issue_id)
+    assert Process.alive?(agent_pid)
+    assert updated_state.running[issue_id].issue.state == "Agent Review"
+    assert is_integer(updated_state.running[issue_id].handoff_settlement_started_at_ms)
+
+    settlement_started_at_ms =
+      updated_state.running[issue_id].handoff_settlement_started_at_ms
+
+    repeatedly_observed_state =
+      Orchestrator.reconcile_issue_states_for_test([downstream_issue], updated_state)
+
+    assert repeatedly_observed_state.running[issue_id].handoff_settlement_started_at_ms ==
+             settlement_started_at_ms
+
+    reactivated_issue = %{downstream_issue | state: "In Progress"}
+
+    reactivated_state =
+      Orchestrator.reconcile_issue_states_for_test([reactivated_issue], repeatedly_observed_state)
+
+    refute Map.has_key?(
+             reactivated_state.running[issue_id],
+             :handoff_settlement_started_at_ms
+           )
+
+    second_handoff_state =
+      Orchestrator.reconcile_issue_states_for_test([downstream_issue], reactivated_state)
+
+    assert is_integer(second_handoff_state.running[issue_id].handoff_settlement_started_at_ms)
+    assert Process.alive?(agent_pid)
+
+    send(agent_pid, :finish_turn)
+    assert_receive :terminal_correlation_evidence_emitted
+    refute_receive {:owned_session_cleanup, "octo-mt-557", _alive?}
+  end
+
+  test "expired Implementer handoff settlement is force-cleaned" do
+    previous_grace = Application.get_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms)
+    Application.put_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms, 10)
+
+    on_exit(fn ->
+      restore_app_env(:implementer_handoff_settlement_grace_ms, previous_grace)
+    end)
+
+    issue_id = "issue-expired-implementer-handoff"
+
+    agent_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: agent_pid,
+          ref: nil,
+          identifier: "MT-558",
+          issue: %Issue{id: issue_id, state: "In Progress", identifier: "MT-558"},
+          started_at: DateTime.utc_now(),
+          handoff_settlement_started_at_ms: System.monotonic_time(:millisecond) - 11,
+          owned_session_ref: %{
+            cleanup_module: RecordingOwnedSessionCleanup,
+            handoff_settlement: :implementer_turn,
+            owner: self(),
+            agent_pid: agent_pid,
+            session_name: "octo-mt-558"
+          }
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    downstream_issue = %Issue{
+      id: issue_id,
+      identifier: "MT-558",
+      state: "Agent Review",
+      title: "Handed off but stuck",
+      description: "The in-flight turn exceeded its settlement grace.",
+      labels: []
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([downstream_issue], state)
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    refute Process.alive?(agent_pid)
+    assert_receive {:owned_session_cleanup, "octo-mt-558", false}
+  end
+
+  test "run-owned non-Implementer session keeps immediate non-active termination" do
+    issue_id = "issue-non-implementer-handoff"
+
+    agent_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: agent_pid,
+          ref: nil,
+          identifier: "MT-559",
+          issue: %Issue{id: issue_id, state: "In Progress", identifier: "MT-559"},
+          started_at: DateTime.utc_now(),
+          owned_session_ref: %{
+            cleanup_module: RecordingOwnedSessionCleanup,
+            owner: self(),
+            agent_pid: agent_pid,
+            session_name: "octo-mt-559"
+          }
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    downstream_issue = %Issue{
+      id: issue_id,
+      identifier: "MT-559",
+      state: "Agent Review",
+      title: "Non-Implementer handoff",
+      description: "Only Implementer opts into terminal evidence settlement.",
+      labels: []
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([downstream_issue], state)
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    refute Process.alive?(agent_pid)
+    assert_receive {:owned_session_cleanup, "octo-mt-559", false}
+  end
+
   test "terminal issue state stops running agent and cleans workspace" do
     test_root =
       Path.join(

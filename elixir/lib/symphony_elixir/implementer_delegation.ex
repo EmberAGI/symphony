@@ -454,9 +454,17 @@ defmodule SymphonyElixir.ImplementerDelegation do
         transport_context: transport_context,
         herdr_session: herdr_session
       }) do
-    if function_exported?(transport, :owned_session_ref, 2),
-      do: transport.owned_session_ref(herdr_session, transport_context),
-      else: nil
+    if function_exported?(transport, :owned_session_ref, 2) do
+      case transport.owned_session_ref(herdr_session, transport_context) do
+        ownership_ref when is_map(ownership_ref) ->
+          Map.put(ownership_ref, :handoff_settlement, :implementer_turn)
+
+        _other ->
+          nil
+      end
+    else
+      nil
+    end
   end
 
   def owned_session_ref(_session), do: nil
