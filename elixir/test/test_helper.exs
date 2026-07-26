@@ -88,6 +88,11 @@ excluded_tags =
       do: tags,
       else: [:herdr_differential | tags]
   end)
+  |> then(fn tags ->
+    if System.get_env("RUN_CODEX_REAL_SANDBOX_SMOKE") == "1",
+      do: tags,
+      else: [:codex_real_sandbox_smoke | tags]
+  end)
 
 # Both CD-tier gates are decided at runtime on every invocation so a warm
 # _build can neither stale-skip nor stale-run either live contract test.

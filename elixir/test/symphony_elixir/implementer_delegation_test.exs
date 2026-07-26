@@ -1048,7 +1048,8 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       "--config",
       "default_permissions=\"octo_herdr\"",
       "--config",
-      "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"},#{read_roots}}",
+      "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"}," <>
+        "#{read_roots},#{inspect(Path.join(runtime_root, "worker-events"))}=\"write\"}",
       "--config",
       "permissions.octo_herdr.network={enabled=true,unix_sockets={#{inspect(socket)}=\"allow\"}}",
       "--ask-for-approval",

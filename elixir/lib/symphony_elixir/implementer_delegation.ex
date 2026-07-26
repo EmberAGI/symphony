@@ -677,14 +677,32 @@ defmodule SymphonyElixir.ImplementerDelegation do
   # profile's instructions — the worker-assignment protocol included.
   defp config_value(value), do: inspect(value, printable_limit: :infinity, limit: :infinity)
 
+  # The session runtime root stays read-only: the socket, the role Herdr
+  # wrappers, the launch projections, and the launch acknowledgements are
+  # evidence a sandboxed agent must not be able to rewrite.
+  #
+  # `<runtime_root>/worker-events` is the one exception. The role Herdr wrapper
+  # records every observed delegation command by `mktemp`-ing a file there, and
+  # that recorder runs from inside the real Codex tool sandbox. Without this
+  # grant the recorder fails with `Read-only file system`, the run produces no
+  # observation, and worker correlation fails closed with `no_delegation` even
+  # though the orchestrator was healthy. A sandbox resolves a request against
+  # the most specific matching grant, so the nested write applies to the
+  # worker-events subtree only and leaves the rest of the root read-only.
   defp codex_filesystem_permissions(runtime_root, permission_read_roots) do
     read_roots =
       [runtime_root | permission_read_roots]
       |> Enum.uniq()
       |> Enum.map_join(",", &"#{config_value(&1)}=\"read\"")
 
-    "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"},#{read_roots}}"
+    worker_events = config_value(worker_events_root(runtime_root))
+
+    "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"},#{read_roots},#{worker_events}=\"write\"}"
   end
+
+  # Must stay the same directory `HerdrTransport` materializes and its role
+  # Herdr wrappers record into; the real-sandbox smoke binds the two together.
+  defp worker_events_root(runtime_root), do: Path.join(runtime_root, "worker-events")
 
   defp worker_spec(contract, workspace, herdr_session) do
     %{
