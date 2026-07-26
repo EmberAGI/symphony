@@ -765,7 +765,17 @@ defmodule SymphonyElixir.Orchestrator do
     %{state | running: Map.put(state.running, issue.id, updated_entry)}
   end
 
-  defp implementer_handoff_settlement_grace_ms do
+  @doc """
+  Bound on how long a routed Implementer turn may keep its run-owned session
+  after the handoff, before forced cleanup.
+
+  The default is not a tuned constant: it is derived from the delegation
+  runtime's own supervision cadence and terminal evidence path, so it can never
+  silently fall to one observation cycle again (EMB-1306). The app-env override
+  stays the test seam for driving the expired path quickly.
+  """
+  @spec implementer_handoff_settlement_grace_ms() :: pos_integer()
+  def implementer_handoff_settlement_grace_ms do
     case Application.get_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms) do
       value when is_integer(value) and value > 0 ->
         value

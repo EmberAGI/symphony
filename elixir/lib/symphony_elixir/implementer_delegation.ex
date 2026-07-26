@@ -18,6 +18,13 @@ defmodule SymphonyElixir.ImplementerDelegation do
   @max_session_name_bytes 44
   @session_name_digest_chars 16
 
+  # After supervision reports completion, `run_turn/4` still owes its terminal
+  # evidence before teardown: the agent-output read and the worker-assignment
+  # read. Each is a bounded transport read governed by the same status-read
+  # timeout, so the allowance is expressed in those reads rather than as a
+  # separate tuned number.
+  @terminal_evidence_reads 2
+
   @type session :: %{
           required(:name) => String.t(),
           required(:contract) => map(),
@@ -95,6 +102,46 @@ defmodule SymphonyElixir.ImplementerDelegation do
   def skill_execution_projection_for_test("claude_code", contracts),
     do: ClaudeAppServer.skill_execution_projection_for_test(contracts)
 
+  @doc """
+  Bounded evidence allowance a routed turn still owes after supervision
+  completes, derived from the number of terminal transport reads.
+  """
+  @spec terminal_evidence_allowance_ms(pos_integer()) :: pos_integer()
+  def terminal_evidence_allowance_ms(status_read_timeout_ms)
+      when is_integer(status_read_timeout_ms) and status_read_timeout_ms > 0 do
+    @terminal_evidence_reads * status_read_timeout_ms
+  end
+
+  @doc """
+  Longest a routed Implementer turn can still legitimately be running before an
+  outside observer may treat it as stuck.
+
+  The Implementer performs its own In Progress -> Agent Review handoff from
+  inside its turn, so the orchestrator sees the downstream state while the turn
+  is still live. From that instant the turn owes, at worst, the remainder of
+  one normal supervision observation cycle plus its terminal evidence path
+  (output read, worker-assignment read/validation, correlation outcome,
+  completion event, post-turn gates, teardown).
+
+  A bound at or under one observation cycle expires inside a window the
+  supervisor was always going to spend, killing the turn before it can emit its
+  correlation outcome (EMB-1306). Deriving the bound from the cadence keeps the
+  two from drifting apart: raising the heartbeat interval raises this with it.
+  """
+  @spec handoff_settlement_bound_ms(pos_integer(), pos_integer()) :: pos_integer()
+  def handoff_settlement_bound_ms(heartbeat_interval_ms, status_read_timeout_ms) do
+    Supervision.observation_cycle_ms(heartbeat_interval_ms, status_read_timeout_ms) +
+      terminal_evidence_allowance_ms(status_read_timeout_ms)
+  end
+
+  @spec default_handoff_settlement_bound_ms() :: pos_integer()
+  def default_handoff_settlement_bound_ms do
+    handoff_settlement_bound_ms(
+      Supervision.default_heartbeat_interval_ms(),
+      Supervision.default_status_read_timeout_ms()
+    )
+  end
+
   @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run_turn(
         %{
@@ -110,7 +157,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
       when is_binary(prompt) and prompt != "" and is_list(opts) do
     turn_timeout_ms = Keyword.get(opts, :turn_timeout_ms, 3_600_000)
     start_timeout_ms = Keyword.get(opts, :start_timeout_ms, 120_000)
-    heartbeat_interval_ms = Keyword.get(opts, :heartbeat_interval_ms, 30_000)
+    heartbeat_interval_ms = Keyword.get(opts, :heartbeat_interval_ms, Supervision.default_heartbeat_interval_ms())
     status_read_timeout_ms = Keyword.get(opts, :status_read_timeout_ms, Supervision.default_status_read_timeout_ms())
     on_message = Keyword.get(opts, :on_message, fn _message -> :ok end)
 

@@ -19,6 +19,7 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
   @statuses ~w(idle working blocked done unknown)
 
   @default_status_read_timeout_ms 5_000
+  @default_heartbeat_interval_ms 30_000
   @default_max_indeterminate_reads 4
   @default_stale_working_ms 900_000
   @default_max_recovery_attempts 2
@@ -31,6 +32,30 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
 
   @spec default_status_read_timeout_ms() :: pos_integer()
   def default_status_read_timeout_ms, do: @default_status_read_timeout_ms
+
+  @spec default_heartbeat_interval_ms() :: pos_integer()
+  def default_heartbeat_interval_ms, do: @default_heartbeat_interval_ms
+
+  @doc """
+  Longest normal observation cycle: one bounded status read plus the heartbeat
+  pause that follows it.
+
+  A turn that has already done its work can still be anywhere inside this
+  window when an outside observer looks at it, because `loop/2` only learns the
+  agent finished on its next read. Any bound an outside observer places on
+  "how long may this turn still legitimately be running?" must exceed this, or
+  it expires inside a cycle the supervisor was always going to spend.
+  """
+  @spec observation_cycle_ms(pos_integer(), pos_integer()) :: pos_integer()
+  def observation_cycle_ms(interval_ms, status_read_timeout_ms)
+      when is_integer(interval_ms) and interval_ms > 0 and
+             is_integer(status_read_timeout_ms) and status_read_timeout_ms > 0 do
+    interval_ms + status_read_timeout_ms
+  end
+
+  @spec default_observation_cycle_ms() :: pos_integer()
+  def default_observation_cycle_ms,
+    do: observation_cycle_ms(@default_heartbeat_interval_ms, @default_status_read_timeout_ms)
 
   # Herdr 0.7.5's prompt-effect window: a same-revision idle/done read inside
   # this window after submission is transitional, not completion.
