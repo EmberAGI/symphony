@@ -755,7 +755,8 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
        when state in ["active", "retrying", "quarantined"],
        do: stale_in_flight_reacquisition_allowed?(record, attrs)
 
-  defp reacquirable_record?(record, _attrs), do: stale_record?(record)
+  defp reacquirable_record?(record, attrs),
+    do: stale_record?(record) and failure_observation_allows_reacquisition?(record, attrs)
 
   defp holder_has_dead_pid?(holder) when is_binary(holder) do
     case holder |> String.split(":") |> Enum.reverse() do
