@@ -239,11 +239,19 @@ normal-completion path when its reset marker is unchanged, regardless of
 reconstructed retry-attempt metadata. A verified successful retry after changed
 material issue/branch/workspace input or execution generation is a distinct run
 and clears the prior observation at terminal settlement. The orchestrator
-passes that current marker into ownership acquisition, which may replace a
-blocked record only when the stored marker differs, even after holder death or
-a role-service restart. The automatically applied `Human Escalation` label does
-not change that marker. Clean continuation checks do not carry or consult stale
-failure observations.
+passes that current marker into ownership acquisition before worker launch.
+Dead-holder stale `active`, `retrying`, or `quarantined` ownership carrying a
+valid observation refuses an equal marker and may be archived and replaced on
+a changed marker with the observation preserved. Stale ownership without an
+observation retains ordinary crash recovery, while a present malformed
+observation fails closed. Blocked records with valid observations follow the
+same marker rule even after holder death or a role-service restart. As a
+rollout-only exception, a legacy blocked record with no `failure_observation`
+field may be archived and replaced when a nonempty produced marker arrives;
+Symphony neither fabricates nor backfills a marker, and a present malformed
+value remains fail-closed. The automatically applied `Human Escalation` label
+does not change the marker. Clean continuation checks do not carry or consult
+stale failure observations.
 
 The fail-closed default intentionally sends previously generic workspace/setup,
 maximum-turn, cleanup/settlement, supervisor, exception, and future adapter

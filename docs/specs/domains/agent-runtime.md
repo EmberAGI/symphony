@@ -241,15 +241,26 @@ admission opens.
   Continuation checks after a clean run carry no failure observation and never
   consult stale failure evidence. This is claim metadata, not a new storage or
   runtime authority.
-- A blocked ownership record remains non-reacquirable while its stored reset
-  marker equals the current marker, even when its holder process is dead or the
-  role service restarted. When an active issue presents changed material input,
-  candidate selection treats the dispatch as a retry and passes the current
-  marker into ownership acquisition. Acquisition may archive and replace the
-  blocked record only when that marker differs, preserving the old failure
-  observation for settlement. Symphony's own `Human Escalation` control label
-  is excluded from the input fingerprint, so escalation cannot create its own
-  reset evidence. The same public ownership rule accepts a changed verified
+- Poll dispatch computes the current reset marker and passes it into ownership
+  acquisition before any replacement worker starts. A stale `active`,
+  `retrying`, or `quarantined` record carrying a valid failure observation
+  remains non-reacquirable while that marker is unchanged, even when its holder
+  process is dead or the role service restarted. Acquisition may archive and
+  replace it only when the incoming produced marker differs, preserving the
+  observation for settlement. A stale in-flight record with no failure
+  observation retains ordinary crash-recovery takeover. A present but malformed
+  observation fails closed and is not treated as absent.
+- A blocked ownership record carrying a valid failure observation follows the
+  same marker rule. When an active issue presents changed material input,
+  candidate selection treats the dispatch as a retry; the changed incoming
+  marker may archive and replace the blocked record while preserving its
+  observation. For rollout compatibility only, a genuinely legacy blocked
+  record with no `failure_observation` field may be archived and replaced when
+  acquisition receives a nonempty produced marker. Symphony does not fabricate
+  or backfill a marker for that record, and a present malformed observation
+  remains fail-closed. Symphony's own `Human Escalation` control label is
+  excluded from the input fingerprint, so escalation cannot create its own
+  reset evidence. The public ownership rule accepts a changed verified
   execution generation and rejects an unchanged generation; no role-service
   restart is required to make changed evidence safe.
 - Fail-closed classification deliberately increases the Human Escalation blast

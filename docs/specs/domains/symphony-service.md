@@ -785,6 +785,12 @@ Retry entry creation:
   current checkpoint. Refuse redispatch and surface a typed blocker when the
   checkpoint and failure fingerprint are unchanged and there is no new reset
   evidence.
+- Every poll dispatch passes the current produced reset marker into ownership
+  acquisition before starting a worker. A stale `active`, `retrying`, or
+  `quarantined` record with a valid failure observation refuses takeover on an
+  equal marker and permits takeover on a changed marker while preserving the
+  observation. A stale record without an observation retains ordinary
+  crash-recovery takeover; a present malformed observation fails closed.
 - A blocked issue remains claimed and skipped while its current reset marker
   equals the stored failure marker. Holder death and role-service restart are
   not reset evidence. If the active issue's material issue/branch/workspace
@@ -792,7 +798,11 @@ Retry entry creation:
   `1` and passes the current marker to ownership acquisition. The blocked
   record may be archived and replaced only on that mismatch, with its failure
   observation preserved. The automatically applied `Human Escalation` label is
-  control metadata, not reset evidence.
+  control metadata, not reset evidence. As an explicit rollout exception, a
+  legacy blocked record with no `failure_observation` field may be archived and
+  replaced when acquisition receives a nonempty produced marker. No marker is
+  fabricated or backfilled, and any present malformed observation remains
+  fail-closed.
 
 Backoff formula:
 
@@ -2093,6 +2103,16 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Retry timer refreshes the queued issue by ID rather than fetching the full candidate page
 - Retry timer releases claims for missing or inactive issues and cleans workspaces for terminal
   issues
+- Poll dispatch supplies its current produced reset marker to public ownership
+  acquisition before worker launch
+- Dead-holder stale `active`, `retrying`, and `quarantined` records with valid
+  observations refuse an equal marker and preserve the observation after
+  changed-marker takeover
+- Legacy blocked records without an observation field reacquire on a nonempty
+  produced marker, while equal valid evidence and malformed present evidence
+  remain held
+- Dead-holder stale records without an observation retain ordinary crash
+  recovery
 - Stall detection kills stalled sessions and schedules retry
 - Slot exhaustion requeues retries with explicit error reason
 - If a snapshot API is implemented, it returns running rows, retry rows, token totals, and rate

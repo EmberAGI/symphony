@@ -198,7 +198,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     assert ProcessOwnership.status_for_issue(issue).state == "blocked"
   end
 
-  test "a normal exit after a failed retry preserves the typed failure instead of recording completion" do
+  test "an attempt-zero normal exit after failure preserves the typed failure" do
     unique = System.unique_integer([:positive])
     issue_id = "issue-retry-success-laundering-#{unique}"
 
@@ -256,9 +256,11 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
       issue: issue,
       run_id: ownership.run_id,
       process_ownership: ownership,
-      retry_attempt: 1,
+      retry_attempt: 0,
       started_at: DateTime.utc_now()
     }
+
+    assert running_entry.retry_attempt == 0
 
     state = %Orchestrator.State{
       execution_generation: "generation-stable",
@@ -282,7 +284,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
              ProcessOwnership.status_for_issue(issue)
   end
 
-  test "a restarted stale retry takeover with attempt zero cannot launder an unchanged failure" do
+  test "restart refuses stale retry takeover before an attempt-zero run can start" do
     unique = System.unique_integer([:positive])
     issue_id = "issue-restarted-retry-success-laundering-#{unique}"
     dead_holder = "#{ProcessOwnership.current_host()}:999999:implementer"
@@ -332,46 +334,15 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
                failure_observation: observation
              })
 
-    assert {:ok, %{state: "active", failure_observation: ^observation} = ownership} =
+    assert {:error, :ownership_held} =
              ProcessOwnership.acquire(issue, %{
                role: "implementer",
                run_id: "run-after-service-restart",
-               holder: ProcessOwnership.holder_id()
+               holder: ProcessOwnership.holder_id(),
+               reset_marker: observation.reset_marker
              })
 
-    ref = make_ref()
-
-    running_entry = %{
-      pid: nil,
-      ref: ref,
-      identifier: issue.identifier,
-      issue: issue,
-      run_id: ownership.run_id,
-      process_ownership: ownership,
-      retry_attempt: 0,
-      started_at: DateTime.utc_now()
-    }
-
-    assert running_entry.retry_attempt == 0
-
-    state = %Orchestrator.State{
-      execution_generation: "generation-stable",
-      running: %{issue_id => running_entry},
-      claimed: MapSet.new([issue_id]),
-      completed: MapSet.new(),
-      failure_observations: %{issue_id => observation},
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
-    }
-
-    updated = drive_down_settlement(state, ref, :normal)
-
-    refute MapSet.member?(updated.completed, issue_id)
-    refute Map.has_key?(updated.retry_attempts, issue_id)
-    durable_observation = updated.failure_observations[issue_id]
-    assert durable_observation.fingerprint.family == :repeated_identical_no_progress_failure
-    assert updated.blocked_failures[issue_id].family == :repeated_identical_no_progress_failure
-
-    assert %{state: "blocked", failure_observation: ^durable_observation} =
+    assert %{state: "retrying", failure_observation: ^observation} =
              ProcessOwnership.status_for_issue(issue)
   end
 

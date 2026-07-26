@@ -701,7 +701,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   defp stale_record?(_record), do: false
 
-  defp blocked_reset_marker_changed?(
+  defp blocked_reacquisition_allowed?(
          %{"state" => "blocked"} = record,
          %{reset_marker: incoming_marker}
        )
@@ -710,15 +710,50 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       %{reset_marker: stored_marker} when is_map(stored_marker) ->
         incoming_marker != stored_marker
 
+      nil ->
+        not failure_observation_present?(record)
+
       _ ->
         false
     end
   end
 
-  defp blocked_reset_marker_changed?(_record, _attrs), do: false
+  defp blocked_reacquisition_allowed?(_record, _attrs), do: false
+
+  defp stale_in_flight_reacquisition_allowed?(record, attrs) do
+    stale_record?(record) and failure_observation_allows_reacquisition?(record, attrs)
+  end
+
+  defp failure_observation_allows_reacquisition?(record, attrs) do
+    case failure_observation_value(record) do
+      %{reset_marker: stored_marker} when is_map(stored_marker) ->
+        reset_marker_changed?(stored_marker, attrs)
+
+      nil ->
+        not failure_observation_present?(record)
+
+      _ ->
+        false
+    end
+  end
+
+  defp reset_marker_changed?(stored_marker, %{reset_marker: incoming_marker})
+       when is_map(incoming_marker) and map_size(incoming_marker) > 0,
+       do: incoming_marker != stored_marker
+
+  defp reset_marker_changed?(_stored_marker, _attrs), do: false
+
+  defp failure_observation_present?(record) when is_map(record) do
+    Map.has_key?(record, :failure_observation) or
+      Map.has_key?(record, "failure_observation")
+  end
 
   defp reacquirable_record?(%{"state" => "blocked"} = record, attrs),
-    do: blocked_reset_marker_changed?(record, attrs)
+    do: blocked_reacquisition_allowed?(record, attrs)
+
+  defp reacquirable_record?(%{"state" => state} = record, attrs)
+       when state in ["active", "retrying", "quarantined"],
+       do: stale_in_flight_reacquisition_allowed?(record, attrs)
 
   defp reacquirable_record?(record, _attrs), do: stale_record?(record)
 
