@@ -160,7 +160,7 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
       File.rm_rf(test_root)
     end)
 
-    assert_eventually(fn -> File.regular?(observed_record) end)
+    assert_eventually(fn -> File.regular?(observed_record) end, 100)
 
     record = observed_record |> File.read!() |> Jason.decode!()
     assert record["issue_id"] == issue.id
