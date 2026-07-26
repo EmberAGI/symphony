@@ -1049,11 +1049,19 @@ defmodule SymphonyElixir.Orchestrator do
       running_entry: running_entry,
       reason: reason,
       snapshot: nil,
+      execution_generation: state.execution_generation,
       started_at_ms: System.monotonic_time(:millisecond)
     }
 
     task_pid =
-      case start_settlement_task(issue_id, running_entry, reason, server, token) do
+      case start_settlement_task(
+             issue_id,
+             running_entry,
+             reason,
+             state.execution_generation,
+             server,
+             token
+           ) do
         {:ok, pid} when is_pid(pid) -> pid
         {:ok, pid, _info} when is_pid(pid) -> pid
         _degenerate -> nil
@@ -1062,7 +1070,7 @@ defmodule SymphonyElixir.Orchestrator do
     if is_nil(task_pid) do
       # The task could not start; settle synchronously so the record never
       # stays silently active. This is the rare degenerate path.
-      result = run_terminal_settlement(running_entry, reason)
+      result = run_terminal_settlement(running_entry, reason, nil, state.execution_generation)
       finalize_terminal_settlement(state, token, result, settlement_context)
     else
       timeout_ms = terminal_settlement_timeout_ms()
@@ -1080,7 +1088,14 @@ defmodule SymphonyElixir.Orchestrator do
   # unmatched shape or a propagated exit would crash the GenServer and lose the
   # settlement outright. Non-started outcomes are returned to the caller, which
   # routes them into the synchronous fallback.
-  defp start_settlement_task(issue_id, running_entry, reason, server, token) do
+  defp start_settlement_task(
+         issue_id,
+         running_entry,
+         reason,
+         execution_generation,
+         server,
+         token
+       ) do
     outcome =
       try do
         Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
@@ -1090,7 +1105,14 @@ defmodule SymphonyElixir.Orchestrator do
           snapshot = capture_settlement_snapshot(running_entry)
           send(server, {:settlement_snapshot, token, snapshot})
 
-          result = run_terminal_settlement(running_entry, reason, snapshot)
+          result =
+            run_terminal_settlement(
+              running_entry,
+              reason,
+              snapshot,
+              execution_generation
+            )
+
           send(server, {:settlement_result, token, result})
         end)
       catch
@@ -1131,15 +1153,22 @@ defmodule SymphonyElixir.Orchestrator do
 
   # The OS-heavy half that needs no State: physical teardown, liveness against
   # the pre-teardown snapshot, and the terminal ownership record write.
-  defp run_terminal_settlement(running_entry, reason, snapshot \\ nil) do
+  defp run_terminal_settlement(running_entry, reason, snapshot, execution_generation) do
     {cleanup_result, cleanup_evidence} = cleanup_terminal_owned_runtime(running_entry, false, snapshot)
 
-    adjusted_reason =
+    {adjusted_reason, completion_attrs} =
       reason
       |> cleanup_task_exit_reason(cleanup_result)
-      |> preserve_failed_retry_reason(running_entry)
+      |> preserve_failed_retry_completion(running_entry, execution_generation)
 
-    process_completion_status = record_process_completion(running_entry, adjusted_reason, cleanup_evidence)
+    process_completion_status =
+      record_process_completion(
+        running_entry,
+        adjusted_reason,
+        cleanup_evidence,
+        completion_attrs
+      )
+
     ownership = ProcessOwnership.status_for_issue(Map.get(running_entry, :issue))
 
     %{
@@ -1151,7 +1180,7 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp preserve_failed_retry_reason(:normal, running_entry) do
+  defp preserve_failed_retry_completion(:normal, running_entry, execution_generation) do
     observation = get_in(running_entry, [:process_ownership, :failure_observation])
 
     if retry_dispatch?(Map.get(running_entry, :retry_attempt)) do
@@ -1159,19 +1188,21 @@ defmodule SymphonyElixir.Orchestrator do
         runtime_failure_context(
           running_entry_issue_id(running_entry),
           running_entry,
-          nil
+          execution_generation
         )
 
       case AgentRuntime.retried_completion_failure(observation, context) do
-        {:block, failure} -> {:irrecoverable_runtime_failed, failure}
-        :none -> :normal
+        {:block, failure} -> {{:irrecoverable_runtime_failed, failure}, %{}}
+        :clear -> {:normal, %{failure_observation: :clear}}
+        :none -> {:normal, %{}}
       end
     else
-      :normal
+      {:normal, %{}}
     end
   end
 
-  defp preserve_failed_retry_reason(reason, _running_entry), do: reason
+  defp preserve_failed_retry_completion(reason, _running_entry, _execution_generation),
+    do: {reason, %{}}
 
   defp running_entry_issue_id(%{issue: %Issue{id: issue_id}}), do: issue_id
   defp running_entry_issue_id(_running_entry), do: nil
@@ -2173,7 +2204,8 @@ defmodule SymphonyElixir.Orchestrator do
           issue: Map.get(retry_entry, :issue),
           run_id: Map.get(retry_entry, :run_id),
           process_ownership: Map.get(retry_entry, :process_ownership),
-          failure_observation: Map.get(retry_entry, :failure_observation)
+          failure_observation: Map.get(retry_entry, :failure_observation),
+          delay_type: Map.get(retry_entry, :delay_type)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -2349,13 +2381,11 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp equivalent_retry_blocker(%State{} = state, %Issue{} = issue, metadata) do
-    durable_ownership = ProcessOwnership.status_for_issue(issue) || metadata[:process_ownership]
+  defp equivalent_retry_blocker(_state, %Issue{}, %{delay_type: :continuation}), do: :allow
 
-    queued_observation =
-      metadata[:failure_observation] ||
-        Map.get(state.failure_observations, issue.id) ||
-        get_in(metadata, [:process_ownership, :failure_observation])
+  defp equivalent_retry_blocker(%State{} = state, %Issue{} = issue, metadata) do
+    durable_ownership = ProcessOwnership.status_for_issue(issue)
+    queued_observation = metadata[:failure_observation]
 
     durable_observation = get_in(durable_ownership || %{}, [:failure_observation])
 
@@ -2426,7 +2456,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp runtime_failure_context(issue_id, running_entry, execution_generation) do
     issue = Map.get(running_entry, :issue)
-    workspace_path = Map.get(running_entry, :workspace_path)
+
+    workspace_path =
+      Map.get(running_entry, :workspace_path) ||
+        get_in(running_entry, [:process_ownership, :workspace_path])
 
     %{
       issue_id: issue_id,
@@ -2705,7 +2738,9 @@ defmodule SymphonyElixir.Orchestrator do
       workspace_path: pick_retry_workspace_path(previous_retry, metadata),
       issue: pick_retry_issue(previous_retry, metadata),
       run_id: pick_retry_run_id(previous_retry, metadata),
-      process_ownership: pick_retry_process_ownership(previous_retry, metadata)
+      process_ownership: pick_retry_process_ownership(previous_retry, metadata),
+      failure_observation: metadata[:failure_observation],
+      delay_type: metadata[:delay_type]
     }
   end
 
@@ -2732,9 +2767,8 @@ defmodule SymphonyElixir.Orchestrator do
       issue: retry_context.issue,
       run_id: retry_context.run_id || (process_ownership && process_ownership.run_id),
       process_ownership: process_ownership || retry_context.process_ownership,
-      failure_observation:
-        (process_ownership && Map.get(process_ownership, :failure_observation)) ||
-          get_in(retry_context, [:process_ownership, :failure_observation])
+      failure_observation: retry_context.failure_observation,
+      delay_type: retry_context.delay_type
     }
   end
 
@@ -2935,7 +2969,16 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_process_ownership(running_entry, _issue_id), do: running_entry
 
-  defp record_process_completion(%{issue: %Issue{} = issue} = running_entry, :normal, cleanup_evidence) do
+  defp record_process_completion(running_entry, reason, cleanup_evidence) do
+    record_process_completion(running_entry, reason, cleanup_evidence, %{})
+  end
+
+  defp record_process_completion(
+         %{issue: %Issue{} = issue} = running_entry,
+         :normal,
+         cleanup_evidence,
+         completion_attrs
+       ) do
     attrs =
       running_entry
       |> process_ownership_attrs()
@@ -2976,12 +3019,18 @@ defmodule SymphonyElixir.Orchestrator do
         :quarantined
 
       true ->
-        _ = release_completed_owned_state(issue, running_entry, %{cleanup_evidence: cleanup_evidence})
+        release_attrs = Map.put(completion_attrs, :cleanup_evidence, cleanup_evidence)
+        _ = release_completed_owned_state(issue, running_entry, release_attrs)
         :cleaned
     end
   end
 
-  defp record_process_completion(%{issue: %Issue{} = issue} = running_entry, reason, cleanup_evidence) do
+  defp record_process_completion(
+         %{issue: %Issue{} = issue} = running_entry,
+         reason,
+         cleanup_evidence,
+         _completion_attrs
+       ) do
     attrs =
       running_entry
       |> process_ownership_attrs()

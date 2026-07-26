@@ -185,10 +185,21 @@ admission opens.
   `ANTHROPIC_API_KEY` migration is introduced.
 - Runtime retry policy must be driven by a provider-neutral runtime failure
   family, not by ad hoc process-exit text at each retry call site. Retryable
-  classifications are an explicit structural allowlist for genuinely
-  recoverable provider/runtime conditions such as provider rate limiting,
-  capacity, service availability, and network interruption. Substring matches
-  never make arbitrary errors or timeouts retryable. Known
+  classifications are this exact structural allowlist:
+  `turn_timeout`, `network_error`, `service_unavailable`, `rate_limited`,
+  `capacity_unavailable`, and `operator_interrupted` as atoms or two-tuples;
+  two-tuples tagged `empty_turn_completed`, `turn_input_required`,
+  `approval_required`, `implementer_hard_budget_exhausted`,
+  `implementer_agent_stalled`, or `implementer_agent_unobservable`;
+  `workspace_hook_timeout/3`; `workspace_hook_failed/4` with status `75`; and
+  `post_turn_routing_failed/2` or `remote_command_failed/3` only when the nested
+  reason is itself allowlisted. `implementer_status_reads_failed/2` is
+  recoverable only when its `last_error` is itself allowlisted. The provider
+  rate-limit, capacity, service, network, and turn-timeout shapes represent
+  explicit transient contracts; the no-progress, approval/input, operator, and
+  preserved-checkpoint supervision shapes retain their existing bounded
+  recovery contracts. Substring matches never make arbitrary errors or
+  timeouts retryable. Known
   deterministic irrecoverable families are:
   `provider_authentication_or_revocation`,
   `missing_required_runtime_configuration`, `missing_required_tool_or_cli`,
@@ -222,11 +233,20 @@ admission opens.
 - The same scoped `Runtime.ProcessOwnership` claim durably carries the bounded
   failure observation while a failed run is released or retried. A role-service
   restart reloads that observation before classifying the next equivalent
-  failure. A later normal exit from a retry must not clear it or enter the
-  ordinary completion branch; the prior typed failure remains durable and the
-  run is surfaced blocked. An ordinary failed-run or successful claim release
-  does not erase this history. This is claim metadata, not a new storage or
+  failure. A later normal exit from a retry at the same reset marker must not
+  clear it or enter the ordinary completion branch; the prior typed failure
+  remains durable and the run is surfaced blocked. A verified successful retry
+  after the reset marker changes is a distinct run: it may enter normal
+  completion and clear the prior observation at that one settlement seam.
+  Continuation checks after a clean run carry no failure observation and never
+  consult stale failure evidence. This is claim metadata, not a new storage or
   runtime authority.
+- Fail-closed classification deliberately increases the Human Escalation blast
+  radius for previously generic operational exits, including unknown
+  workspace/setup, maximum-turn, cleanup/settlement, supervisor, exception, and
+  future adapter failures. Those failures remain blocked until they gain an
+  exact recoverable contract or an operator records new repair/input evidence;
+  infrastructure-sounding tuple names and timeout prose are not exceptions.
 - Worker death, worker launch failure, missing or mismatched worker result,
   timeout, `agent.max_turns` exhaustion, and post-turn routing failure are typed
   failed runs. They must never use the normal task-completion branch. A
@@ -963,9 +983,12 @@ bare typed blocked outcome of a prompt or wait — classifies as
 work-preservation checkpoint failure (direct or embedded in a supervised
 outcome) and an out-of-enum protocol status classify as
 `invalid_workspace_or_runtime_protocol` — all irrecoverable, never ordinary
-retry — while hard-budget, stale, unknown, read-failure, and closed outcomes
-with preserved checkpoints keep ordinary bounded retry semantics. Failure
-summaries never include pane transcript content. This supervision layer is
+retry — while hard-budget, stale, unknown, and closed outcomes with preserved
+checkpoints keep ordinary bounded retry semantics. A status-read wrapper
+inherits retry eligibility only from its exact `last_error`; therefore a
+wrapped `herdr_agent_status_timeout` is the same irrecoverable protocol failure
+as the bare timeout. Failure summaries never include pane transcript content.
+This supervision layer is
 observation only: it
 emits typed outcomes and never grows lifecycle arbitration, teardown, or
 quarantine verdict semantics, which EMB-1217 owns over what this layer

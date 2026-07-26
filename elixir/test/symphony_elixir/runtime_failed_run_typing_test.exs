@@ -63,12 +63,18 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
         send(test_pid, {:worker_outcome_turn_started, prompt})
       end
 
+      phase = Map.get(context, :turn_phase) || :completed
+      agent_status = if phase == :working, do: "working", else: "idle"
+
       {:ok,
        %{
-         phase: :completed,
-         agent: %{name: agent.name, agent_status: "idle", agent_session: %{value: "sess"}}
+         phase: phase,
+         agent: %{name: agent.name, agent_status: agent_status, agent_session: %{value: "sess"}}
        }}
     end
+
+    def get_agent(_session, _agent, _timeout_ms, %{status_read_result: {:error, _reason} = result}),
+      do: result
 
     def get_agent(_session, agent, _timeout_ms, _context),
       do: {:ok, %{name: agent.name, agent_status: "idle"}}
@@ -153,11 +159,18 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     assert_typed_failed_run(reason)
   end
 
-  test "a Herdr agent-status timeout exits as a typed failed run naming the timeout" do
+  test "a supervision status-read Herdr timeout exits as a typed failed run naming the timeout" do
     timeout =
       {:herdr_agent_status_timeout, "implementer_orchestrator", ["working", "idle", "done"]}
 
-    reason = run_reason("herdr-status-timeout", turn_result: {:error, timeout})
+    reason =
+      run_reason("herdr-status-timeout",
+        turn_phase: :working,
+        status_read_result: {:error, timeout},
+        max_indeterminate_reads: 1,
+        heartbeat_interval_ms: 1,
+        turn_timeout_ms: 1_000
+      )
 
     assert_typed_failed_run(reason)
 
@@ -391,9 +404,18 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
           assignments: Keyword.get(opts, :assignments, []),
           stop_result: Keyword.get(opts, :stop_result, :ok),
           test_pid: Keyword.get(opts, :test_pid),
-          turn_result: Keyword.get(opts, :turn_result)
+          turn_result: Keyword.get(opts, :turn_result),
+          turn_phase: Keyword.get(opts, :turn_phase),
+          status_read_result: Keyword.get(opts, :status_read_result)
         }
-      ] ++ Keyword.take(opts, [:max_turns, :issue_state_fetcher])
+      ] ++
+        Keyword.take(opts, [
+          :max_turns,
+          :issue_state_fetcher,
+          :max_indeterminate_reads,
+          :heartbeat_interval_ms,
+          :turn_timeout_ms
+        ])
 
     {reason, _log} =
       with_log(fn ->

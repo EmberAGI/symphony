@@ -446,15 +446,22 @@ defmodule SymphonyElixir.AgentRuntime do
   normally.
 
   A normal task exit cannot erase the durable fact that this top-level run is a
-  retry of a failed checkpoint.
+  retry of a failed checkpoint. A verified success after the reset marker
+  changes is a distinct run and may clear the prior observation.
   """
   @spec retried_completion_failure(failure_observation() | nil, map()) ::
-          :none | {:block, failure_decision()}
+          :clear | :none | {:block, failure_decision()}
   def retried_completion_failure(observation, context \\ %{}) when is_map(context) do
-    if valid_failure_observation?(observation) do
-      {:block, repeated_failure_decision(observation, context)}
-    else
-      :none
+    cond do
+      valid_failure_observation?(observation) and
+          Map.get(observation, :reset_marker) == reset_marker(context) ->
+        {:block, repeated_failure_decision(observation, context)}
+
+      valid_failure_observation?(observation) ->
+        :clear
+
+      true ->
+        :none
     end
   end
 
@@ -989,6 +996,10 @@ defmodule SymphonyElixir.AgentRuntime do
      }}
   end
 
+  defp real_irrecoverable_runtime_reason({:implementer_status_reads_failed, %{last_error: reason}}) do
+    real_irrecoverable_runtime_reason(reason)
+  end
+
   # A post-turn gate that ran to completion and exited non-zero inspected this
   # run and rejected it. The same durable checkpoint replayed through the same
   # gate produces the same rejection, so redispatching it is repetition rather
@@ -1259,10 +1270,12 @@ defmodule SymphonyElixir.AgentRuntime do
               :approval_required,
               :implementer_hard_budget_exhausted,
               :implementer_agent_stalled,
-              :implementer_agent_unobservable,
-              :implementer_status_reads_failed
+              :implementer_agent_unobservable
             ],
        do: true
+
+  defp recoverable_failure?({:implementer_status_reads_failed, %{last_error: reason}}),
+    do: recoverable_failure?(reason)
 
   defp recoverable_failure?({:workspace_hook_timeout, _hook, _timeout_ms}), do: true
 

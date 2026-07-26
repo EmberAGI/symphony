@@ -217,16 +217,23 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
                holder: ProcessOwnership.holder_id()
              })
 
-    context = %{
-      issue_id: issue_id,
+    failure_state = %Orchestrator.State{execution_generation: "generation-stable"}
+
+    failure_entry = %{
+      identifier: issue.identifier,
+      issue: issue,
+      run_id: ownership.run_id,
       workspace_path: ownership.workspace_path,
-      role: "implementer",
-      provider: :codex,
-      input_fingerprint: "checkpoint-a"
+      process_ownership: ownership
     }
 
-    assert {observation, {:retryable, _failure}} =
-             AgentRuntime.record_failure_observation(nil, {:network_error, :econnreset}, context)
+    assert {:retryable, _failure, observation} =
+             Orchestrator.classify_task_exit_for_test(
+               {:network_error, :econnreset},
+               failure_entry,
+               issue_id,
+               failure_state
+             )
 
     identity = %{
       holder: ownership.holder,
@@ -254,6 +261,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     }
 
     state = %Orchestrator.State{
+      execution_generation: "generation-stable",
       running: %{issue_id => running_entry},
       claimed: MapSet.new([issue_id]),
       completed: MapSet.new(),
@@ -272,6 +280,259 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
 
     assert %{state: "blocked", failure_observation: ^durable_observation} =
              ProcessOwnership.status_for_issue(issue)
+  end
+
+  test "an allowlisted retry with changed reset evidence settles successfully and clears the old observation" do
+    unique = System.unique_integer([:positive])
+    issue_id = "issue-reset-retry-success-#{unique}"
+
+    failed_issue = %Issue{
+      id: issue_id,
+      identifier: "MT-RESET-SUCCESS-#{unique}",
+      title: "Reset retry may settle",
+      description: "checkpoint before operator repair",
+      state: "In Progress"
+    }
+
+    assert {:ok, ownership} =
+             ProcessOwnership.acquire(failed_issue, %{
+               role: "implementer",
+               run_id: "run-reset-success",
+               holder: ProcessOwnership.holder_id()
+             })
+
+    failure_state = %Orchestrator.State{execution_generation: "generation-reset"}
+
+    failure_entry = %{
+      identifier: failed_issue.identifier,
+      issue: failed_issue,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path,
+      process_ownership: ownership
+    }
+
+    assert {:retryable, _failure, observation} =
+             Orchestrator.classify_task_exit_for_test(
+               {:network_error, :econnreset},
+               failure_entry,
+               issue_id,
+               failure_state
+             )
+
+    identity = %{
+      holder: ownership.holder,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path
+    }
+
+    assert {:ok, ownership} =
+             ProcessOwnership.verify_and_update(failed_issue, identity, %{
+               state: "active",
+               failure_observation: observation
+             })
+
+    repaired_issue = %{failed_issue | description: "checkpoint after operator repair"}
+    ref = make_ref()
+
+    running_entry = %{
+      pid: nil,
+      ref: ref,
+      identifier: repaired_issue.identifier,
+      issue: repaired_issue,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path,
+      process_ownership: ownership,
+      retry_attempt: 1,
+      started_at: DateTime.utc_now()
+    }
+
+    state = %Orchestrator.State{
+      execution_generation: "generation-reset",
+      running: %{issue_id => running_entry},
+      claimed: MapSet.new([issue_id]),
+      completed: MapSet.new(),
+      failure_observations: %{issue_id => observation},
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    updated = drive_down_settlement(state, ref, :normal)
+
+    assert MapSet.member?(updated.completed, issue_id)
+    assert %{delay_type: :continuation} = updated.retry_attempts[issue_id]
+    refute Map.has_key?(updated.failure_observations, issue_id)
+
+    assert %{state: "retrying", failure_observation: nil} =
+             ProcessOwnership.status_for_issue(repaired_issue)
+  end
+
+  test "a continuation retry is not blocked by a stale failure observation" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    unique = System.unique_integer([:positive])
+    issue_id = "issue-continuation-stale-observation-#{unique}"
+    workspace_root = Path.join(System.tmp_dir!(), "symphony-continuation-stale-#{unique}")
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-CONTINUATION-#{unique}",
+      title: "Continuation ignores stale failure",
+      description: "completed turn",
+      state: "In Progress"
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      File.rm_rf(workspace_root)
+    end)
+
+    assert {:ok, ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: "run-continuation-stale",
+               holder: ProcessOwnership.holder_id()
+             })
+
+    context = %{
+      issue_id: issue_id,
+      workspace_path: ownership.workspace_path,
+      role: "implementer",
+      provider: :codex,
+      execution_generation: "generation-continuation",
+      input_fingerprint: "completed-checkpoint"
+    }
+
+    assert {observation, {:retryable, _failure}} =
+             AgentRuntime.record_failure_observation(nil, {:network_error, :econnreset}, context)
+
+    identity = %{
+      holder: ownership.holder,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path
+    }
+
+    assert {:ok, ownership} =
+             ProcessOwnership.verify_and_update(issue, identity, %{
+               state: "retrying",
+               failure_observation: observation
+             })
+
+    state = %Orchestrator.State{
+      execution_generation: "generation-continuation",
+      max_concurrent_agents: 0,
+      claimed: MapSet.new([issue_id]),
+      failure_observations: %{issue_id => observation}
+    }
+
+    assert {:noreply, updated} =
+             Orchestrator.handle_retry_issue_for_test(state, issue_id, 1, %{
+               identifier: issue.identifier,
+               issue: issue,
+               workspace_path: ownership.workspace_path,
+               run_id: ownership.run_id,
+               process_ownership: ownership,
+               delay_type: :continuation
+             })
+
+    refute Map.has_key?(updated.blocked_failures, issue_id)
+
+    assert %{delay_type: :continuation, failure_observation: nil} =
+             updated.retry_attempts[issue_id]
+  end
+
+  test "a nil running workspace uses durable ownership for the failure fingerprint" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    unique = System.unique_integer([:positive])
+    issue_id = "issue-nil-workspace-#{unique}"
+    workspace_root = Path.join(System.tmp_dir!(), "symphony-nil-workspace-#{unique}")
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-NIL-WORKSPACE-#{unique}",
+      title: "Durable workspace fallback",
+      description: "unchanged input",
+      state: "In Progress"
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      File.rm_rf(workspace_root)
+    end)
+
+    workspace_path = Path.join(workspace_root, issue.identifier)
+
+    assert {:ok, ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: "run-nil-workspace",
+               holder: ProcessOwnership.holder_id(),
+               workspace_path: workspace_path
+             })
+
+    running_entry = %{
+      identifier: issue.identifier,
+      issue: issue,
+      run_id: ownership.run_id,
+      workspace_path: nil,
+      process_ownership: ownership
+    }
+
+    state = %Orchestrator.State{
+      execution_generation: "generation-nil-workspace",
+      max_concurrent_agents: 0,
+      claimed: MapSet.new([issue_id])
+    }
+
+    assert {:retryable, _failure, observation} =
+             Orchestrator.classify_task_exit_for_test(
+               {:network_error, :econnreset},
+               running_entry,
+               issue_id,
+               state
+             )
+
+    identity = %{
+      holder: ownership.holder,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path
+    }
+
+    assert {:ok, durable_ownership} =
+             ProcessOwnership.verify_and_update(issue, identity, %{
+               state: "retrying",
+               failure_observation: observation
+             })
+
+    assert {:noreply, blocked} =
+             Orchestrator.handle_retry_issue_for_test(state, issue_id, 1, %{
+               identifier: issue.identifier,
+               issue: issue,
+               workspace_path: nil,
+               run_id: ownership.run_id,
+               process_ownership: durable_ownership,
+               failure_observation: observation
+             })
+
+    assert blocked.blocked_failures[issue_id].family ==
+             :repeated_identical_no_progress_failure
   end
 
   test "orchestrator restarts stalled workers with retry backoff" do

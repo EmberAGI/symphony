@@ -151,7 +151,10 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     )
   end
 
-  @doc "Releases successful ownership without erasing any prior typed failed-run observation."
+  @doc """
+  Releases successful ownership, applying an explicit failure-observation
+  clear only when the orchestrator verified changed reset evidence.
+  """
   @spec release_completed(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
   @spec release_completed(Issue.t(), map(), map()) :: {:ok, map()} | {:error, term()}
   def release_completed(%Issue{} = issue, expected, extra_attrs \\ %{})

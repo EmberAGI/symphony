@@ -680,9 +680,12 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - For irrecoverable runtime failures, avoid ordinary retry scheduling and
     drive the configured tracker escalation path instead.
 - `Retried Worker Exit (normal)`
-  - Do not enter the ordinary completion branch or clear the prior failure.
-  - Preserve the typed failed-run observation durably and surface the run as
-    blocked.
+  - At an unchanged reset marker, do not enter the ordinary completion branch
+    or clear the prior failure; preserve the typed observation and surface the
+    run as blocked.
+  - After verified reset evidence changes, treat the successful retry as a
+    distinct run, clear the prior observation during terminal settlement, and
+    schedule a clean continuation check.
 
 - `Codex Update Event`
   - Update live session fields, token counters, and rate limits.
@@ -773,6 +776,8 @@ Retry entry creation:
 
 - Cancel any existing retry timer for the same issue.
 - Store `attempt`, `identifier`, `error`, `due_at_ms`, and new timer handle.
+- Preserve `delay_type` across timer pop/requeue. Clean continuation entries
+  carry no failure observation and bypass equivalent-failure suppression.
 - Do not create or preserve a retry entry after the runtime failure classifier
   marks the failure as irrecoverable.
 - Before the first failure-driven redispatch, compare the queued failure
@@ -808,10 +813,21 @@ Note:
   not retries. The tracker escalation path records the redacted failure family,
   affected provider/runtime when known, and required human action; it must not
   log raw provider payloads, secret values, or full issue bodies.
-- Retry classification is an exact structural allowlist. Provider rate-limit,
-  capacity, service-availability, and network classifications remain
-  recoverable; unknown errors and arbitrary names or prose containing
+- Retry classification is an exact structural allowlist: atom or two-tuple
+  `turn_timeout`, `network_error`, `service_unavailable`, `rate_limited`,
+  `capacity_unavailable`, and `operator_interrupted`; two-tuple
+  `empty_turn_completed`, `turn_input_required`, `approval_required`,
+  `implementer_hard_budget_exhausted`, `implementer_agent_stalled`, and
+  `implementer_agent_unobservable`; `workspace_hook_timeout/3`;
+  `workspace_hook_failed/4` with status `75`; and recursively wrapped
+  `post_turn_routing_failed/2`, `remote_command_failed/3`, or
+  `implementer_status_reads_failed/2` only when their nested reason is
+  allowlisted. Unknown errors and arbitrary names or prose containing
   `timeout` are not recoverable.
+- The fail-closed default means previously generic workspace/setup,
+  maximum-turn, cleanup/settlement, supervisor, exception, and future adapter
+  exits now block and enter Human Escalation unless their exact shape is added
+  to the allowlist or new repair/input evidence changes the reset marker.
 
 ### 8.5 Active Run Reconciliation
 
