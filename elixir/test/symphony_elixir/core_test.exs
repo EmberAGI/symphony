@@ -273,16 +273,16 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(updated_state.claimed, issue_id)
     assert Process.alive?(agent_pid)
     assert updated_state.running[issue_id].issue.state == "Agent Review"
-    assert is_integer(updated_state.running[issue_id].handoff_settlement_started_at_ms)
+    assert is_integer(updated_state.running[issue_id].handoff_settlement_last_activity_at_ms)
 
-    settlement_started_at_ms =
-      updated_state.running[issue_id].handoff_settlement_started_at_ms
+    settlement_last_activity_at_ms =
+      updated_state.running[issue_id].handoff_settlement_last_activity_at_ms
 
     repeatedly_observed_state =
       Orchestrator.reconcile_issue_states_for_test([downstream_issue], updated_state)
 
-    assert repeatedly_observed_state.running[issue_id].handoff_settlement_started_at_ms ==
-             settlement_started_at_ms
+    assert repeatedly_observed_state.running[issue_id].handoff_settlement_last_activity_at_ms ==
+             settlement_last_activity_at_ms
 
     reactivated_issue = %{downstream_issue | state: "In Progress"}
 
@@ -291,13 +291,13 @@ defmodule SymphonyElixir.CoreTest do
 
     refute Map.has_key?(
              reactivated_state.running[issue_id],
-             :handoff_settlement_started_at_ms
+             :handoff_settlement_last_activity_at_ms
            )
 
     second_handoff_state =
       Orchestrator.reconcile_issue_states_for_test([downstream_issue], reactivated_state)
 
-    assert is_integer(second_handoff_state.running[issue_id].handoff_settlement_started_at_ms)
+    assert is_integer(second_handoff_state.running[issue_id].handoff_settlement_last_activity_at_ms)
     assert Process.alive?(agent_pid)
 
     send(agent_pid, :finish_turn)
@@ -330,7 +330,7 @@ defmodule SymphonyElixir.CoreTest do
           identifier: "MT-558",
           issue: %Issue{id: issue_id, state: "In Progress", identifier: "MT-558"},
           started_at: DateTime.utc_now(),
-          handoff_settlement_started_at_ms: System.monotonic_time(:millisecond) - 11,
+          handoff_settlement_last_activity_at_ms: System.monotonic_time(:millisecond) - 11,
           owned_session_ref: %{
             cleanup_module: RecordingOwnedSessionCleanup,
             handoff_settlement: :implementer_turn,

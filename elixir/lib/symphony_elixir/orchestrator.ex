@@ -32,7 +32,22 @@ defmodule SymphonyElixir.Orchestrator do
   # silently active because teardown hung (EMB-1260). Generous default,
   # overridable for tests via app env.
   @default_terminal_settlement_timeout_ms 60_000
-  @default_implementer_handoff_settlement_grace_ms 30_000
+  # How long a settling Implementer turn may go WITHOUT runtime activity before
+  # forced cleanup — not how long the whole turn may take. Delegation
+  # supervision emits `turn_heartbeat` while the Herdr orchestrator is working,
+  # and every such update refreshes this window (EMB-1307), so a legitimately
+  # progressing turn is never raced no matter how long it runs; a genuinely
+  # live-but-stale provider turn stays owned by Supervision's stale-working
+  # threshold and hard turn budget.
+  #
+  # The window only has to outlive one silent stretch of a healthy turn: one
+  # normal observation cycle (a 30s heartbeat interval plus a 5s bounded status
+  # read) plus the terminal evidence path the turn still owes after supervision
+  # returns. 90s gives a practical margin over the normal cycle while staying a
+  # finite escape hatch if terminal evidence collection itself hangs — the real
+  # Herdr transport's `read_agent` shells out through an unbounded `System.cmd`,
+  # so the normal-cycle estimate is deliberately not a total-turn bound.
+  @default_implementer_handoff_settlement_inactivity_ms 90_000
   # Ownership states that mean settlement already reached its terminal write.
   # A record in one of these has LEFT active on its own observed evidence, so
   # the settlement deadline must never overwrite it with a fabricated failure.
@@ -695,7 +710,7 @@ defmodule SymphonyElixir.Orchestrator do
         updated_entry =
           running_entry
           |> Map.put(:issue, issue)
-          |> Map.delete(:handoff_settlement_started_at_ms)
+          |> Map.delete(:handoff_settlement_last_activity_at_ms)
 
         %{state | running: Map.put(state.running, issue.id, updated_entry)}
 
@@ -710,6 +725,14 @@ defmodule SymphonyElixir.Orchestrator do
   # evidence, runs post-turn gates, and then stops the Herdr session. Killing
   # it on the first downstream-state observation races all of that evidence
   # while still allowing generic cleanup to look successful.
+  #
+  # The retention window is anchored on the turn's LAST OBSERVED ACTIVITY, not
+  # on when the handoff was first seen (EMB-1307). Any fixed wall-clock bound
+  # measured from the handoff eventually races a turn that is still legitimately
+  # working: the production canary was force-cleaned ~44s after the route with
+  # eight live owned PIDs and no correlation evidence. Every worker update
+  # refreshes the anchor, so runtime activity keeps the already-running task
+  # alive and only genuine silence expires it.
   #
   # Only the Implementer runtime opts into this grace through its narrow
   # ownership reference. Terminal states, reassignment, missing issues, and
@@ -731,36 +754,37 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp settle_or_expire_implementer_handoff(state, issue, running_entry) do
     now_ms = System.monotonic_time(:millisecond)
-    started_at_ms = Map.get(running_entry, :handoff_settlement_started_at_ms)
+    last_activity_at_ms = Map.get(running_entry, :handoff_settlement_last_activity_at_ms)
     grace_ms = implementer_handoff_settlement_grace_ms()
 
     cond do
-      is_nil(started_at_ms) ->
+      is_nil(last_activity_at_ms) ->
         Logger.info(
           "Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; " <>
-            "allowing bounded Implementer handoff settlement grace_ms=#{grace_ms}"
+            "allowing bounded Implementer handoff settlement inactivity_grace_ms=#{grace_ms}"
         )
 
         retain_implementer_handoff(state, issue, running_entry, now_ms)
 
-      is_integer(started_at_ms) and now_ms - started_at_ms < grace_ms ->
-        retain_implementer_handoff(state, issue, running_entry, started_at_ms)
+      is_integer(last_activity_at_ms) and now_ms - last_activity_at_ms < grace_ms ->
+        retain_implementer_handoff(state, issue, running_entry, last_activity_at_ms)
 
       true ->
         Logger.warning(
           "Implementer handoff settlement grace expired: #{issue_context(issue)} " <>
-            "state=#{issue.state} grace_ms=#{grace_ms}; stopping active agent"
+            "state=#{issue.state} inactivity_grace_ms=#{grace_ms} " <>
+            "inactive_ms=#{now_ms - last_activity_at_ms}; stopping active agent"
         )
 
         terminate_running_issue(state, issue.id, false, issue)
     end
   end
 
-  defp retain_implementer_handoff(state, issue, running_entry, started_at_ms) do
+  defp retain_implementer_handoff(state, issue, running_entry, last_activity_at_ms) do
     updated_entry =
       running_entry
       |> Map.put(:issue, issue)
-      |> Map.put(:handoff_settlement_started_at_ms, started_at_ms)
+      |> Map.put(:handoff_settlement_last_activity_at_ms, last_activity_at_ms)
 
     %{state | running: Map.put(state.running, issue.id, updated_entry)}
   end
@@ -771,7 +795,7 @@ defmodule SymphonyElixir.Orchestrator do
         value
 
       _other ->
-        @default_implementer_handoff_settlement_grace_ms
+        @default_implementer_handoff_settlement_inactivity_ms
     end
   end
 
@@ -3735,10 +3759,32 @@ defmodule SymphonyElixir.Orchestrator do
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
         turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
-      }),
+      })
+      |> refresh_handoff_settlement_activity(),
       token_delta
     }
   end
+
+  # Runtime activity from a turn that is already settling proves the turn is
+  # still alive and working, so it pushes the no-activity deadline out in the
+  # same update that records `last_codex_timestamp` (EMB-1307). Delegation
+  # supervision emits `turn_heartbeat` on every observation cycle while the
+  # Herdr orchestrator is working, so a legitimately progressing turn refreshes
+  # this continuously and is never force-cleaned; when the activity stops, the
+  # anchor ages and forced cleanup still happens after the finite grace.
+  #
+  # The anchor is only ever REFRESHED here, never created: settlement tracking
+  # starts at the first eligible non-active reconciliation, and activity on a
+  # turn that is not settling must not enrol it.
+  defp refresh_handoff_settlement_activity(%{handoff_settlement_last_activity_at_ms: _} = running_entry) do
+    Map.put(
+      running_entry,
+      :handoff_settlement_last_activity_at_ms,
+      System.monotonic_time(:millisecond)
+    )
+  end
+
+  defp refresh_handoff_settlement_activity(running_entry), do: running_entry
 
   defp codex_app_server_pid_for_update(_existing, %{codex_app_server_pid: pid})
        when is_binary(pid),
