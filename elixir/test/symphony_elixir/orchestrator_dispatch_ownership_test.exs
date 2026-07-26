@@ -242,6 +242,7 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
       )
 
     workspace_root = Path.join(test_root, "workspaces")
+    before_run_started = Path.join(test_root, "before-run-started")
 
     issue = %Issue{
       id: "issue-registered-stop-cleanup-failure",
@@ -256,7 +257,11 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
       tracker_kind: "memory",
       workspace_root: workspace_root,
       poll_interval_ms: 30_000,
-      hook_before_run: "sleep 30"
+      hook_before_run: """
+      set -eu
+      touch #{before_run_started}
+      sleep 30
+      """
     )
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
@@ -269,14 +274,27 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
       File.rm_rf(test_root)
     end)
 
-    assert_eventually(fn ->
-      match?(
-        %{state: "active", cleanup_status: "active"},
-        ProcessOwnership.status_for_issue(issue)
-      )
-    end)
+    issue_id = issue.id
 
-    :ok = File.rm(ProcessOwnership.registry_path(issue))
+    assert_eventually(
+      fn ->
+        File.regular?(before_run_started) and
+          match?(
+            %{running: %{^issue_id => %{process_ownership_refreshed_at_ms: refreshed_at}}}
+            when is_integer(refreshed_at),
+            :sys.get_state(pid)
+          )
+      end,
+      200
+    )
+
+    assert %{state: "active", cleanup_status: "active"} =
+             ProcessOwnership.status_for_issue(issue)
+
+    registry_path = ProcessOwnership.registry_path(issue)
+    :ok = File.rm(registry_path)
+    refute File.exists?(registry_path)
+    assert ProcessOwnership.status_for_issue(issue) == nil
 
     log =
       capture_log(fn ->
@@ -554,8 +572,6 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
       5_000 -> flunk("terminal settlement did not report its result in time")
     end
   end
-
-  defp assert_eventually(fun, attempts \\ 20)
 
   defp assert_eventually(fun, attempts) when attempts > 0 do
     if fun.() do
