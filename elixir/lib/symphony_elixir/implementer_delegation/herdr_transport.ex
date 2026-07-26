@@ -532,9 +532,10 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   An empty list means the recording was readable and the orchestrator
   delivered nothing to the worker. Anything that prevents that observation —
-  a session without a runtime root, or a runtime root whose worker-event
-  recording was never materialized — is a typed
-  `:worker_assignments_unobservable` error, never a silent `[]`.
+  a session without a runtime root, a runtime root whose worker-event recording
+  was never materialized, or a delegation issued in a Herdr command form the
+  recorder could not classify — is a typed `:worker_assignments_unobservable`
+  error, never a silent `[]`.
   """
   @impl true
   def worker_assignments(%{runtime_root: runtime_root} = session, context)
@@ -544,7 +545,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     if File.dir?(worker_events) do
       worker = Map.get(session, :worker, %{name: "implementer_worker"})
 
-      with {:ok, assignment_messages} <-
+      with :ok <- validate_recordable_commands(worker_events),
+           {:ok, assignment_messages} <-
              read_worker_messages(runtime_root, "assignment.*", @worker_assignment_prefix),
            {:ok, result_messages} <-
              read_worker_messages(runtime_root, "result.*", @worker_result_prefix) do
@@ -1451,7 +1453,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       case role do
         :worker ->
           """
-          case "${1:-}:${2:-}" in
+          case "$herdr_subcommand:$herdr_action" in
             agent:get|agent:list|agent:read|agent:prompt|agent:wait)
               ;;
             *)
@@ -1468,17 +1470,25 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     """
     #!/bin/sh
     set -eu
-    #{authorization}
     #{worker_event_recorder(runtime_root)}
-    if [ "${1:-}" = "agent" ] && [ "${2:-}" = "prompt" ] && [ "$#" -ge 4 ]; then
-      agent_name=$3
-      message=$4
+    #{herdr_command_parser(role)}
+    parse_herdr_command "$@"
+    #{authorization}
+    if [ "$herdr_prompt_parsed" -eq 1 ]; then
+      agent_name=$herdr_prompt_target
+      message=$herdr_prompt_message
       recovery_attempt=0
       while :; do
         if [ "$recovery_attempt" -eq 0 ]; then
-          set -- "$@" --wait --until working --until idle --until done --until blocked --timeout #{@generated_prompt_timeout_ms}
+          outbound=$message
         else
-          set -- agent prompt "$agent_name" ' ' --wait --until working --until idle --until done --until blocked --timeout #{@generated_prompt_timeout_ms}
+          outbound=' '
+        fi
+
+        if [ -n "$herdr_prompt_session" ]; then
+          set -- --session "$herdr_prompt_session" agent prompt "$agent_name" "$outbound" --wait --until working --until idle --until done --until blocked --timeout #{@generated_prompt_timeout_ms}
+        else
+          set -- agent prompt "$agent_name" "$outbound" --wait --until working --until idle --until done --until blocked --timeout #{@generated_prompt_timeout_ms}
         fi
 
         set +e
@@ -1506,7 +1516,89 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       done
     fi
 
+    if [ "$herdr_prompt_unrecordable" -eq 1 ]; then
+      record_worker_event unparsed "$*"
+    fi
+
     exec #{shell_escape(real_herdr)} "$@"
+    """
+  end
+
+  # Herdr accepts its global options before the subcommand, so the delegation
+  # is spelled `agent prompt <name> <message>` or
+  # `--session <name> agent prompt <name> <message>` interchangeably. Position
+  # alone cannot classify it. Options this parser does not model may or may not
+  # consume a value, so any argv containing one is reported as unrecordable
+  # rather than mis-parsed — an evidence recorder has to know its own blind
+  # spots.
+  defp herdr_command_parser(role) do
+    counterpart =
+      case role do
+        :orchestrator -> "implementer_worker"
+        :worker -> "implementer_orchestrator"
+      end
+
+    """
+    parse_herdr_command() {
+      herdr_subcommand=
+      herdr_action=
+      herdr_prompt_target=
+      herdr_prompt_message=
+      herdr_prompt_session=
+      herdr_prompt_parsed=0
+      herdr_prompt_unrecordable=0
+      _unmodelled=0
+      _positional=0
+      _have_message=0
+      _saw_prompt=0
+      _saw_counterpart=0
+
+      for _arg in "$@"; do
+        if [ "$_arg" = prompt ]; then _saw_prompt=1; fi
+        if [ "$_arg" = #{counterpart} ]; then _saw_counterpart=1; fi
+      done
+
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --session)
+            if [ "$#" -lt 2 ]; then _unmodelled=1; break; fi
+            herdr_prompt_session=$2
+            shift 2
+            ;;
+          --until|--timeout|--source|--lines|--kind|--pane|--direction)
+            if [ "$#" -lt 2 ]; then _unmodelled=1; break; fi
+            shift 2
+            ;;
+          --wait|--no-focus|--)
+            shift
+            ;;
+          --*=*)
+            shift
+            ;;
+          -*)
+            _unmodelled=1
+            shift
+            ;;
+          *)
+            _positional=$((_positional + 1))
+            case "$_positional" in
+              1) herdr_subcommand=$1 ;;
+              2) herdr_action=$1 ;;
+              3) herdr_prompt_target=$1 ;;
+              4) herdr_prompt_message=$1; _have_message=1 ;;
+            esac
+            shift
+            ;;
+        esac
+      done
+
+      if [ "$_unmodelled" -eq 0 ] && [ "$herdr_subcommand" = agent ] && [ "$herdr_action" = prompt ] &&
+         [ -n "$herdr_prompt_target" ] && [ "$_have_message" -eq 1 ]; then
+        herdr_prompt_parsed=1
+      elif [ "$_unmodelled" -eq 1 ] && [ "$_saw_prompt" -eq 1 ] && [ "$_saw_counterpart" -eq 1 ]; then
+        herdr_prompt_unrecordable=1
+      fi
+    }
     """
   end
 
@@ -1634,6 +1726,19 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     end)
   end
 
+  # The shim reports the argv shapes it could not classify. One of those is
+  # proof that a delegation happened and was not recorded, which is exactly the
+  # observation this contract must never round down to "no worker assignments".
+  defp validate_recordable_commands(worker_events) do
+    case worker_events |> Path.join("unparsed.*") |> Path.wildcard() |> length() do
+      0 ->
+        :ok
+
+      unparsed ->
+        {:error, {:worker_assignments_unobservable, %{reason: :unrecognized_herdr_command_form, unparsed: unparsed}}}
+    end
+  end
+
   defp channel_records(worker_events) do
     %{
       deliveries: sequenced_worker_events(worker_events, "delivery.*"),
@@ -1663,26 +1768,38 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   defp channel_worker_assignments(%{deliveries: deliveries, replies: replies}, session, worker, context) do
-    deliveries
-    |> Enum.with_index()
-    |> Enum.map(fn {delivery, index} ->
-      assignment_id = channel_assignment_id(session, delivery)
+    correlated =
+      deliveries
+      |> Enum.with_index()
+      |> Enum.map(fn {delivery, index} ->
+        assignment_id = channel_assignment_id(session, delivery)
 
-      case Enum.at(replies, index) do
-        nil ->
-          assignment_id
-          |> worker_assignment_status(nil, session, worker, context)
-          |> Map.put(:evidence, :channel)
+        case Enum.at(replies, index) do
+          nil ->
+            assignment_id
+            |> worker_assignment_status(nil, session, worker, context)
+            |> Map.put(:evidence, :channel)
 
-        _reply ->
-          %{
-            assignment_id: assignment_id,
-            status: :completed,
-            evidence: :channel,
-            result: %{assignment_id: assignment_id, status: "returned"}
-          }
-      end
-    end)
+          _reply ->
+            %{
+              assignment_id: assignment_id,
+              status: :completed,
+              evidence: :channel,
+              result: %{assignment_id: assignment_id, status: "returned"}
+            }
+        end
+      end)
+
+    correlated ++ unmatched_worker_replies(deliveries, replies)
+  end
+
+  # A reply can only exist because the worker was prompted. One with no
+  # delivery behind it means the orchestrator side of the channel was not
+  # recorded — the run delegated and Symphony cannot say to what.
+  defp unmatched_worker_replies(deliveries, replies) do
+    replies
+    |> Enum.drop(length(deliveries))
+    |> Enum.map(fn _reply -> %{assignment_id: nil, status: :delivery_unrecorded, evidence: :channel} end)
   end
 
   defp channel_assignment_id(session, delivery),

@@ -193,6 +193,73 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
+  test "a delegation spelled with Herdr's global --session option is correlated end to end", context do
+    session = start_implementer_session(context, "evidence-global-session")
+
+    # The spelling canary EMB-1284 used, and the one the generated
+    # `launch-worker` script uses: the session is named before the subcommand.
+    assert :ok =
+             orchestrator_argv(session, context, [
+               "--session",
+               session.name,
+               "agent",
+               "prompt",
+               "implementer_worker",
+               "OCTO_MSG/1 kind=assignment assignment=EMB1284-EVIDENCE-9C21 deliverable=bounded"
+             ])
+
+    assert :ok =
+             worker_argv(session, context, [
+               "--session",
+               session.name,
+               "agent",
+               "prompt",
+               "implementer_orchestrator",
+               "OCTO_MSG/1 kind=result assignment=EMB1284-EVIDENCE-9C21 status=completed"
+             ])
+
+    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+
+    assert {:ok, {_next_session, turn}} = result
+
+    assert [%{assignment_id: "EMB1284-EVIDENCE-9C21", status: :completed, evidence: :envelope}] =
+             turn.worker_assignments
+
+    assert log =~ @correlation_event
+    assert log =~ "herdr_session=#{session.name}"
+    assert log =~ "EMB1284-EVIDENCE-9C21"
+
+    stop(session)
+  end
+
+  test "a delegation the recorder could not classify fails the run instead of completing it", context do
+    session = start_implementer_session(context, "evidence-unclassifiable")
+
+    assert :ok =
+             orchestrator_argv(
+               session,
+               context,
+               [
+                 "--unmodelled-global",
+                 "value",
+                 "agent",
+                 "prompt",
+                 "implementer_worker",
+                 "OCTO_MSG/1 kind=assignment assignment=EMB1284-EVIDENCE-9C21 deliverable=bounded"
+               ],
+               :any
+             )
+
+    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+
+    refute log =~ @correlation_event
+
+    assert {:error, {:worker_assignments_unobservable, %{reason: :unrecognized_herdr_command_form, unparsed: 1}}} =
+             result
+
+    stop(session)
+  end
+
   test "a recorded worker result whose assignment record is missing is typed, not discarded", context do
     session = start_implementer_session(context, "evidence-orphan-result")
 
@@ -344,15 +411,35 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
         message
       )
 
-  defp shim_prompt(shim, session, context, agent, message) do
-    assert {_output, 0} =
-             System.cmd(shim, ["agent", "prompt", agent, message],
+  defp shim_prompt(shim, session, context, agent, message),
+    do: shim_argv(shim, session, context, ["agent", "prompt", agent, message], 0)
+
+  defp orchestrator_argv(session, context, argv, expected_status \\ 0),
+    do: shim_argv(Path.join(session.herdr_session.orchestrator_bin, "herdr"), session, context, argv, expected_status)
+
+  defp worker_argv(session, context, argv),
+    do:
+      shim_argv(
+        Path.join([session.herdr_session.runtime_root, "worker-bin", "herdr"]),
+        session,
+        context,
+        argv,
+        0
+      )
+
+  defp shim_argv(shim, session, context, argv, expected_status) do
+    assert {_output, status} =
+             System.cmd(shim, argv,
                env: [
                  {"HERDR_FAKE_LOG", context.herdr_log},
                  {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
                ],
                stderr_to_stdout: true
              )
+
+    # The recorder runs before the command is handed to the real binary, so an
+    # argv the binary itself rejects still leaves its evidence behind.
+    if expected_status != :any, do: assert(status == expected_status)
 
     :ok
   end

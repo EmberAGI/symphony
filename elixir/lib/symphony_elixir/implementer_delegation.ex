@@ -256,6 +256,10 @@ defmodule SymphonyElixir.ImplementerDelegation do
   defp observed_assignments({:unobservable, _details}), do: []
   defp observed_assignments(assignments) when is_list(assignments), do: assignments
 
+  defp worker_assignment_result(%{status: :delivery_unrecorded}) do
+    {:error, {:implementer_worker_delivery_unrecorded, %{assignment_id: nil}}}
+  end
+
   # The channel proves the assignment was delivered and that the worker
   # answered it. It carries no success claim of the worker's own — only the
   # `OCTO_MSG` envelope does — so its result status says exactly that.
