@@ -559,7 +559,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
          }}
       else
         {:error, reason} ->
-          {:error, {:worker_assignments_unobservable, %{reason: :worker_state_unobservable, stage: :turn_start, error: reason}}}
+          worker_state_unobservable(:turn_start, reason)
 
         _missing_revision ->
           {:error, {:worker_assignments_unobservable, %{reason: :worker_revision_missing, stage: :turn_start}}}
@@ -689,7 +689,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
           {:error, reason}
 
         {:error, reason} ->
-          {:error, {:worker_assignments_unobservable, %{reason: :worker_state_unobservable, stage: :turn_completion, error: reason}}}
+          worker_state_unobservable(:turn_completion, reason)
       end
     else
       {:error, {:worker_assignments_unobservable, %{reason: :worker_events_root_missing, runtime_root: runtime_root}}}
@@ -2062,6 +2062,10 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp validate_worker_revision_observation(_baseline_revision, _observed_revision, []),
     do: {:error, {:worker_assignments_unobservable, %{reason: :worker_revision_missing, stage: :turn_completion}}}
+
+  defp worker_state_unobservable(stage, error) do
+    {:error, {:worker_assignments_unobservable, %{reason: :worker_state_unobservable, stage: stage, error: error}}}
+  end
 
   # The `OCTO_MSG` envelope is preferred where an agent used it, because it
   # carries the agent's own assignment id and status. Where it was not used the
