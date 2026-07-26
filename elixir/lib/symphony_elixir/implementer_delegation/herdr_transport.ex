@@ -289,26 +289,30 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     effective_timeout_ms = max(timeout_ms, @prompt_effect_window_ms + 1)
     deadline = System.monotonic_time(:millisecond) + effective_timeout_ms
 
-    case submit_prompt(context, session_name, env, agent_name, prompt, deadline) do
-      {:ok, output} ->
-        with {:ok, observed} <- decode_agent_response(output),
-             {:ok, phase} <- prompt_outcome(observed, agent_name) do
-          {:ok, %{phase: phase, agent: preserve_provider(observed, agent)}}
-        else
-          {:error, reason} -> prompt_error(reason, agent_name)
-        end
-
-      {:error, reason} ->
-        if cli_error_code(reason) == "agent_prompt_stalled" do
-          recover_stalled_prompt(context, session_name, env, agent, deadline)
-        else
-          prompt_error(reason, agent_name)
-        end
-    end
+    context
+    |> submit_prompt(session_name, env, agent_name, prompt, deadline)
+    |> begin_prompt_turn_result(context, session_name, env, agent, deadline)
   end
 
   def begin_turn(_session, _agent, _prompt, _timeout_ms, _context),
     do: {:error, :invalid_herdr_begin_turn}
+
+  defp begin_prompt_turn_result({:ok, output}, _context, _session_name, _env, agent, _deadline) do
+    with {:ok, observed} <- decode_agent_response(output),
+         {:ok, phase} <- prompt_outcome(observed, agent.name) do
+      {:ok, %{phase: phase, agent: preserve_provider(observed, agent)}}
+    else
+      {:error, reason} -> prompt_error(reason, agent.name)
+    end
+  end
+
+  defp begin_prompt_turn_result({:error, reason}, context, session_name, env, agent, deadline) do
+    if cli_error_code(reason) == "agent_prompt_stalled" do
+      recover_stalled_prompt(context, session_name, env, agent, deadline)
+    else
+      prompt_error(reason, agent.name)
+    end
+  end
 
   defp submit_prompt(context, session_name, env, agent_name, prompt, deadline) do
     # The wait must exceed the 5000 ms prompt-effect window so an unchanged
