@@ -363,15 +363,30 @@ admission opens.
   run-owned Implementer Herdr turn that has just moved its issue into a
   downstream non-active state is the one bounded exception to immediate
   termination: its narrow ownership reference marks it for terminal handoff
-  settlement, and the Orchestrator retains that already-running task for a
-  30-second grace evaluated at each state reconciliation so the turn can emit
-  worker-correlation and post-turn-gate evidence before stopping its own
-  session. Forced termination therefore occurs after the grace at the next
-  successful reconciliation. Returning to an active state clears the grace
-  anchor before any later handoff. Terminal states, reassignment, missing
-  issues, and runtimes without that explicit marker retain immediate
-  termination. Expiry force-terminates through the existing typed, non-vacuous
-  cleanup path.
+  settlement, and the Orchestrator retains that already-running task so the
+  turn can emit worker-correlation and post-turn-gate evidence before stopping
+  its own session. That retention is bounded by INACTIVITY, not by elapsed time
+  since the handoff: the Orchestrator anchors a no-activity grace on the turn's
+  last observed runtime activity, sets the anchor on the first eligible
+  non-active reconciliation, and resets it to the current monotonic time on
+  every worker update that also records the last provider timestamp. Because
+  delegation supervision emits a `turn_heartbeat` worker update on each
+  observation cycle while the provider reads `working`, a turn that is still
+  making progress refreshes its own anchor and is never force-cleaned for
+  taking longer than some fixed wall clock; any such fixed bound would race a
+  legitimately progressing turn. A genuinely live-but-stale provider turn stays
+  owned by the delegation supervision stale-working threshold and hard turn
+  budget, and PID liveness is never treated as progress. The no-activity grace
+  must exceed one normal observation cycle plus the terminal evidence the turn
+  still owes after supervision returns, and remains finite so it is still an
+  escape hatch when terminal evidence collection itself hangs. Forced
+  termination therefore occurs once the turn has been silent for the whole
+  grace, at the next successful reconciliation. Returning to an active state
+  clears all settlement tracking before any later handoff, and runtime activity
+  refreshes an existing anchor without enrolling a non-settling turn. Terminal
+  states, reassignment, missing issues, and runtimes without that explicit
+  marker retain immediate termination. Expiry force-terminates through the
+  existing typed, non-vacuous cleanup path.
 - Normal worker completion must not mark process ownership as cleaned until the
   scoped app-server process tree is no longer live. If the app-server PID,
   observed process tree, process group, or inherited ownership-marker process
@@ -849,10 +864,11 @@ transition before its provider turn has returned. State reconciliation must
 not destroy the run-owned session on the first observation of that downstream
 state: doing so would bypass the turn-completion cursor read while allowing
 generic process cleanup to report success. The Implementer's ownership
-reference therefore opts that in-flight turn into the bounded handoff
-settlement grace above. Natural completion still owns correlation validation,
-post-turn gates, and session stop; the Orchestrator owns bounded expiry and
-forced cleanup.
+reference therefore opts that in-flight turn into the activity-anchored handoff
+settlement grace above, whose anchor is refreshed by the same supervision
+`turn_heartbeat` updates described below. Natural completion still owns
+correlation validation, post-turn gates, and session stop; the Orchestrator
+owns only the no-activity expiry and forced cleanup.
 
 After submission, turn lifecycle observation is a bounded, idempotent
 supervision state machine (EMB-1244 Stage 2), not a single budget-length
