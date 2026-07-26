@@ -32,6 +32,7 @@ defmodule SymphonyElixir.Orchestrator do
   # silently active because teardown hung (EMB-1260). Generous default,
   # overridable for tests via app env.
   @default_terminal_settlement_timeout_ms 60_000
+  @default_implementer_handoff_settlement_grace_ms 30_000
   # Ownership states that mean settlement already reached its terminal write.
   # A record in one of these has LEFT active on its own observed evidence, so
   # the settlement deadline must never overwrite it with a fabricated failure.
@@ -618,9 +619,7 @@ defmodule SymphonyElixir.Orchestrator do
         refresh_running_issue_state(state, issue)
 
       true ->
-        Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
-
-        terminate_running_issue(state, issue.id, false, issue)
+        settle_or_terminate_non_active_issue(state, issue)
     end
   end
 
@@ -693,10 +692,86 @@ defmodule SymphonyElixir.Orchestrator do
   defp refresh_running_issue_state(%State{} = state, %Issue{} = issue) do
     case Map.get(state.running, issue.id) do
       %{issue: _} = running_entry ->
-        %{state | running: Map.put(state.running, issue.id, %{running_entry | issue: issue})}
+        updated_entry =
+          running_entry
+          |> Map.put(:issue, issue)
+          |> Map.delete(:handoff_settlement_started_at_ms)
+
+        %{state | running: Map.put(state.running, issue.id, updated_entry)}
 
       _ ->
         state
+    end
+  end
+
+  # An Implementer normally performs its own In Progress -> Agent Review
+  # handoff before its provider turn has returned. The turn's terminal path
+  # reads and validates the run-owned worker-event cursor, emits correlation
+  # evidence, runs post-turn gates, and then stops the Herdr session. Killing
+  # it on the first downstream-state observation races all of that evidence
+  # while still allowing generic cleanup to look successful.
+  #
+  # Only the Implementer runtime opts into this grace through its narrow
+  # ownership reference. Terminal states, reassignment, missing issues, and
+  # every other runtime keep their existing immediate-stop semantics.
+  defp settle_or_terminate_non_active_issue(%State{} = state, %Issue{} = issue) do
+    case Map.get(state.running, issue.id) do
+      %{owned_session_ref: %{handoff_settlement: :implementer_turn}} = running_entry ->
+        settle_or_expire_implementer_handoff(state, issue, running_entry)
+
+      _running_entry ->
+        Logger.info(
+          "Issue moved to non-active state: #{issue_context(issue)} " <>
+            "state=#{issue.state}; stopping active agent"
+        )
+
+        terminate_running_issue(state, issue.id, false, issue)
+    end
+  end
+
+  defp settle_or_expire_implementer_handoff(state, issue, running_entry) do
+    now_ms = System.monotonic_time(:millisecond)
+    started_at_ms = Map.get(running_entry, :handoff_settlement_started_at_ms)
+    grace_ms = implementer_handoff_settlement_grace_ms()
+
+    cond do
+      is_nil(started_at_ms) ->
+        Logger.info(
+          "Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; " <>
+            "allowing bounded Implementer handoff settlement grace_ms=#{grace_ms}"
+        )
+
+        retain_implementer_handoff(state, issue, running_entry, now_ms)
+
+      is_integer(started_at_ms) and now_ms - started_at_ms < grace_ms ->
+        retain_implementer_handoff(state, issue, running_entry, started_at_ms)
+
+      true ->
+        Logger.warning(
+          "Implementer handoff settlement grace expired: #{issue_context(issue)} " <>
+            "state=#{issue.state} grace_ms=#{grace_ms}; stopping active agent"
+        )
+
+        terminate_running_issue(state, issue.id, false, issue)
+    end
+  end
+
+  defp retain_implementer_handoff(state, issue, running_entry, started_at_ms) do
+    updated_entry =
+      running_entry
+      |> Map.put(:issue, issue)
+      |> Map.put(:handoff_settlement_started_at_ms, started_at_ms)
+
+    %{state | running: Map.put(state.running, issue.id, updated_entry)}
+  end
+
+  defp implementer_handoff_settlement_grace_ms do
+    case Application.get_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms) do
+      value when is_integer(value) and value > 0 ->
+        value
+
+      _other ->
+        @default_implementer_handoff_settlement_grace_ms
     end
   end
 

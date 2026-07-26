@@ -258,6 +258,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     ownership_ref = AgentRuntime.owned_session_ref(session)
     assert ownership_ref.kind == "recording"
     assert ownership_ref.session_name == "octo-emb-1141-run-7"
+    assert ownership_ref.handoff_settlement == :implementer_turn
     assert :ok = AgentRuntime.cleanup_owned_session(ownership_ref)
     assert_receive {:transport, :cleanup_owned_session, "octo-emb-1141-run-7"}
 
