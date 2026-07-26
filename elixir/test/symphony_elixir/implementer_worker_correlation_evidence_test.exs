@@ -238,6 +238,50 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
+  test "a login-shell PATH reset cannot route delegation around the run-owned recorder", context do
+    session = start_implementer_session(context, "evidence-login-path-reset")
+    login_bin = Path.join(Path.dirname(context.workspace), "login-bin")
+    File.mkdir_p!(login_bin)
+
+    # Model the post-/etc/profile state seen in production: bare `herdr`
+    # resolves successfully, but to the user installation rather than the
+    # run-owned recorder. The symlink keeps delivery behavior identical while
+    # making recorder traversal the only distinction.
+    File.ln_s!(context.herdr_bin, Path.join(login_bin, "herdr"))
+
+    bash_env = Path.join(session.herdr_session.runtime_root, "orchestrator-bash-env")
+    assignment_id = "EMB1295-LOGIN-PATH-RESET"
+
+    {output, status} =
+      System.cmd(
+        "/bin/bash",
+        [
+          "--noprofile",
+          "--norc",
+          "-lc",
+          "herdr --session #{session.name} agent prompt implementer_worker " <>
+            "'OCTO_MSG/1 kind=assignment assignment=#{assignment_id} deliverable=bounded'"
+        ],
+        env: [
+          {"BASH_ENV", bash_env},
+          {"HERDR_FAKE_LOG", context.herdr_log},
+          {"PATH", login_bin <> ":/usr/bin:/bin"},
+          {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
+        ],
+        stderr_to_stdout: true
+      )
+
+    assert status == 0, output
+
+    assert {:ok, [%{assignment_id: ^assignment_id, status: :launched, evidence: :envelope}]} =
+             HerdrTransport.worker_assignments(
+               session.herdr_session,
+               session.transport_context
+             )
+
+    stop(session)
+  end
+
   test "a delegation the recorder could not classify fails the run instead of completing it", context do
     session = start_implementer_session(context, "evidence-unclassifiable")
 
