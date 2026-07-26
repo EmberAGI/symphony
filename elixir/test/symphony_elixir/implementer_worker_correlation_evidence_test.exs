@@ -548,7 +548,8 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
 
     assert is_binary(turn.session_id) and turn.session_id != ""
     assert log =~ @correlation_event
-    assert log =~ "outcome=correlated"
+    assert occurrences(log, "outcome=correlated") == 1, "a settled turn must emit its outcome exactly once"
+    assert occurrences(log, "outcome=no_delegation") == 0
     assert log =~ "issue_id=#{issue().id}"
     assert log =~ "issue_identifier=#{issue().identifier}"
     assert log =~ "session_id=#{turn.session_id}"
@@ -575,7 +576,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
 
     refute log =~ @correlation_event
     assert log =~ @no_delegation_event
-    assert log =~ "outcome=no_delegation"
+    assert occurrences(log, "outcome=no_delegation") == 1, "a settled turn must emit its outcome exactly once"
     assert log =~ "issue_id=#{issue().id}"
     assert log =~ "issue_identifier=#{issue().identifier}"
     assert log =~ "session_id=#{turn.session_id}"
@@ -738,6 +739,10 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     assert {:ok, contract} = ImplementationEffort.runtime_profile_for_issue(:codex, issue(), "implementer")
     contract
   end
+
+  # A settled turn emits one positive outcome, not zero (ambiguous silence) and
+  # not several (an outcome the cleanup event cannot be joined to).
+  defp occurrences(log, marker), do: log |> String.split(marker) |> length() |> Kernel.-(1)
 
   defp issue do
     %Issue{
