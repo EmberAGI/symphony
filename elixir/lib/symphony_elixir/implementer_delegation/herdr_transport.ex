@@ -192,7 +192,17 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
              %{"PATH" => inherited_provider_path(env, orchestrator_bin)}
            ),
          :ok <- validate_launch_projection(runtime_root, projection_path),
-         :ok <- prepare_launch_pane(context, session_name, env, pane_id, kind, orchestrator_bin, runtime_root),
+         :ok <-
+           prepare_launch_pane(
+             context,
+             session_name,
+             env,
+             pane_id,
+             Map.get(spec, :role),
+             kind,
+             orchestrator_bin,
+             runtime_root
+           ),
          args =
            [
              "--session",
@@ -527,6 +537,49 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   def read_agent(_session, _agent, _opts, _context), do: {:error, :invalid_herdr_agent_read}
 
+  @doc false
+  @impl true
+  def begin_worker_assignment_observation(
+        %{runtime_root: runtime_root, worker: worker} = session,
+        timeout_ms,
+        context
+      )
+      when is_binary(runtime_root) and is_map(worker) and
+             is_integer(timeout_ms) and timeout_ms > 0 and is_map(context) do
+    worker_events = worker_events_root(runtime_root)
+
+    if File.dir?(worker_events) do
+      with {:ok, observed_worker} <- get_agent(session, worker, timeout_ms, context),
+           revision when is_integer(revision) <- Map.get(observed_worker, :revision) do
+        {:ok,
+         %{
+           worker_revision: revision,
+           worker_event_paths: worker_event_paths(worker_events),
+           status_read_timeout_ms: timeout_ms
+         }}
+      else
+        {:error, reason} ->
+          worker_state_unobservable(:turn_start, reason)
+
+        _missing_revision ->
+          {:error, {:worker_assignments_unobservable, %{reason: :worker_revision_missing, stage: :turn_start}}}
+      end
+    else
+      {:error, {:worker_assignments_unobservable, %{reason: :worker_events_root_missing, runtime_root: runtime_root}}}
+    end
+  end
+
+  def begin_worker_assignment_observation(%{worker: worker}, _timeout_ms, _context)
+      when not is_map(worker),
+      do: {:ok, :worker_absent}
+
+  def begin_worker_assignment_observation(session, _timeout_ms, _context)
+      when is_map(session) and not is_map_key(session, :worker),
+      do: {:ok, :worker_absent}
+
+  def begin_worker_assignment_observation(_session, _timeout_ms, _context),
+    do: {:error, {:worker_assignments_unobservable, %{reason: :session_runtime_root_missing}}}
+
   @doc """
   Report what this session can prove about its worker delegations.
 
@@ -546,6 +599,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       worker = Map.get(session, :worker, %{name: "implementer_worker"})
 
       with :ok <- validate_recordable_commands(worker_events),
+           :ok <- validate_worker_event_recorder_attestation(worker_events, session),
            {:ok, assignment_messages} <-
              read_worker_messages(runtime_root, "assignment.*", @worker_assignment_prefix),
            {:ok, result_messages} <-
@@ -574,6 +628,79 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   def worker_assignments(_session, _context),
     do: {:error, {:worker_assignments_unobservable, %{reason: :session_runtime_root_missing}}}
+
+  @doc false
+  @impl true
+  def worker_assignments(
+        %{runtime_root: runtime_root, worker: worker} = session,
+        %{
+          worker_revision: baseline_revision,
+          worker_event_paths: baseline_paths,
+          status_read_timeout_ms: timeout_ms
+        },
+        context
+      )
+      when is_binary(runtime_root) and is_map(worker) and
+             is_integer(baseline_revision) and is_struct(baseline_paths, MapSet) and
+             is_integer(timeout_ms) and timeout_ms > 0 and is_map(context) do
+    worker_events = worker_events_root(runtime_root)
+
+    if File.dir?(worker_events) do
+      turn_paths =
+        worker_events
+        |> worker_event_paths()
+        |> MapSet.difference(baseline_paths)
+
+      with :ok <- validate_recordable_command_paths(turn_paths),
+           {:ok, assignment_messages} <-
+             read_worker_message_paths(
+               worker_event_paths(turn_paths, "assignment."),
+               @worker_assignment_prefix
+             ),
+           {:ok, result_messages} <-
+             read_worker_message_paths(
+               worker_event_paths(turn_paths, "result."),
+               @worker_result_prefix
+             ),
+           assignments =
+             assignment_messages
+             |> Enum.map(&message_fields/1)
+             |> Enum.filter(&(is_binary(Map.get(&1, "assignment")) and Map.get(&1, "assignment") != "")),
+           results = Enum.map(result_messages, &message_fields/1),
+           observed_assignments =
+             observed_worker_assignments(
+               assignments,
+               results,
+               channel_records(turn_paths),
+               session,
+               worker,
+               context
+             ),
+           {:ok, observed_worker} <- get_agent(session, worker, timeout_ms, context),
+           :ok <-
+             validate_worker_revision_observation(
+               baseline_revision,
+               Map.get(observed_worker, :revision),
+               observed_assignments
+             ) do
+        {:ok, observed_assignments}
+      else
+        {:error, {:worker_assignments_unobservable, _details} = reason} ->
+          {:error, reason}
+
+        {:error, reason} ->
+          worker_state_unobservable(:turn_completion, reason)
+      end
+    else
+      {:error, {:worker_assignments_unobservable, %{reason: :worker_events_root_missing, runtime_root: runtime_root}}}
+    end
+  end
+
+  def worker_assignments(session, :worker_absent, context),
+    do: worker_assignments(session, context)
+
+  def worker_assignments(_session, _observation, _context),
+    do: {:error, {:worker_assignments_unobservable, %{reason: :invalid_worker_assignment_observation}}}
 
   @impl true
   def stop_session(%{name: name, env: env, server_task: server_task, runtime_root: runtime_root}, context) do
@@ -931,6 +1058,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     worker_env = Map.get(worker, :env, %{})
 
     with {:ok, kind, native_args} <- native_agent_launch(worker, argv),
+         :ok <- ensure_role_bash_environments(runtime_root),
          {:ok, worker_token, worker_projection_path} <-
            materialize_launch_projection(
              runtime_root,
@@ -1048,6 +1176,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     worker_bin = Path.join(runtime_root, "worker-bin")
     worker_panes = Path.join(runtime_root, "worker-panes")
     orchestrator_bin = Path.join(runtime_root, "orchestrator-bin")
+    orchestrator_bash_env = role_bash_environment_path(runtime_root, :orchestrator)
+    worker_bash_env = role_bash_environment_path(runtime_root, :worker)
 
     """
     #!/bin/sh
@@ -1071,8 +1201,10 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     if [ "$worker_projection" = true ]; then
       export PATH=#{shell_escape(worker_bin)}:#{shell_escape(inherited_path)}
       #{launcher_env_exports(worker_env)}
+      export BASH_ENV=#{shell_escape(worker_bash_env)}
     else
       export PATH=#{shell_escape(orchestrator_bin)}:#{shell_escape(inherited_path)}
+      export BASH_ENV=#{shell_escape(orchestrator_bash_env)}
     fi
     #{strip_herdr_injected_flag(provider_command)}if [ "${1:-}" != "#{@launch_projection_sentinel}" ]; then
       printf '%s\n' 'provider wrapper only accepts the launch projection sentinel' >&2
@@ -1144,6 +1276,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   defp herdr_injected_launch_flag(_provider_command), do: nil
 
   defp ensure_provider_wrapper(runtime_root, provider_command, session_env, _context) do
+    case ensure_role_bash_environments(runtime_root) do
+      :ok ->
+        ensure_provider_wrapper_file(runtime_root, provider_command, session_env)
+
+      {:error, reason} ->
+        {:error, {:herdr_wrapper_resolution_failed, %{reason: {:bash_env_materialization_failed, reason}}}}
+    end
+  end
+
+  defp ensure_provider_wrapper_file(runtime_root, provider_command, session_env) do
     orchestrator_bin = Path.join(runtime_root, "orchestrator-bin")
     provider_wrapper = Path.join(orchestrator_bin, provider_command)
 
@@ -1153,18 +1295,43 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         {:error, details} -> {:error, {:herdr_wrapper_resolution_failed, details}}
       end
     else
-      inherited_path = inherited_provider_path(session_env, orchestrator_bin)
-      body = provider_wrapper_body(runtime_root, provider_command, inherited_path, %{})
-
-      with :ok <- File.mkdir_p(orchestrator_bin),
-           :ok <- write_executable(provider_wrapper, body) do
-        :ok
-      else
-        {:error, reason} ->
-          {:error, {:herdr_wrapper_resolution_failed, %{reason: {:materialization_failed, reason}}}}
-      end
+      materialize_provider_wrapper(runtime_root, provider_wrapper, provider_command, session_env)
     end
   end
+
+  defp materialize_provider_wrapper(runtime_root, provider_wrapper, provider_command, session_env) do
+    orchestrator_bin = Path.join(runtime_root, "orchestrator-bin")
+    inherited_path = inherited_provider_path(session_env, orchestrator_bin)
+    body = provider_wrapper_body(runtime_root, provider_command, inherited_path, %{})
+
+    with :ok <- File.mkdir_p(orchestrator_bin),
+         :ok <- write_executable(provider_wrapper, body) do
+      :ok
+    else
+      {:error, reason} ->
+        {:error, {:herdr_wrapper_resolution_failed, %{reason: {:materialization_failed, reason}}}}
+    end
+  end
+
+  defp ensure_role_bash_environments(runtime_root) do
+    with :ok <-
+           write_bash_environment(
+             role_bash_environment_path(runtime_root, :orchestrator),
+             Path.join(runtime_root, "orchestrator-bin")
+           ) do
+      write_bash_environment(
+        role_bash_environment_path(runtime_root, :worker),
+        Path.join(runtime_root, "worker-bin")
+      )
+    end
+  end
+
+  defp write_bash_environment(path, role_bin) do
+    write_executable(path, "export PATH=#{shell_escape(role_bin)}:\"${PATH:-}\"\n")
+  end
+
+  defp role_bash_environment_path(runtime_root, role),
+    do: Path.join(runtime_root, "#{role}-bash-env")
 
   # Transport-side mirror of the wrapper's launch-artifact validation:
   # canonicalized containment (symlink escapes rejected), regular
@@ -1226,7 +1393,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     end
   end
 
-  defp prepare_launch_pane(context, session_name, env, pane_id, kind, orchestrator_bin, runtime_root) do
+  defp prepare_launch_pane(
+         context,
+         session_name,
+         env,
+         pane_id,
+         role,
+         kind,
+         orchestrator_bin,
+         runtime_root
+       ) do
     preflight_dir = Path.join(runtime_root, "pane-preflight")
     File.mkdir_p!(preflight_dir)
     preflight_file = Path.join(preflight_dir, launch_nonce())
@@ -1237,10 +1413,77 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         "mv -f #{shell_escape(preflight_file <> ".tmp")} #{shell_escape(preflight_file)}"
 
     with :ok <- pane_run(context, session_name, env, pane_id, export_command, :herdr_pane_preparation_failed),
-         :ok <- pane_run(context, session_name, env, pane_id, resolve_command, :herdr_wrapper_resolution_failed) do
-      verify_wrapper_resolution(preflight_file, Path.join(orchestrator_bin, kind), context)
+         :ok <- pane_run(context, session_name, env, pane_id, resolve_command, :herdr_wrapper_resolution_failed),
+         :ok <- verify_wrapper_resolution(preflight_file, Path.join(orchestrator_bin, kind), context) do
+      attest_orchestrator_recorder(
+        context,
+        session_name,
+        env,
+        pane_id,
+        role,
+        orchestrator_bin,
+        runtime_root,
+        preflight_dir
+      )
     end
   end
+
+  defp attest_orchestrator_recorder(
+         context,
+         session_name,
+         env,
+         pane_id,
+         :orchestrator,
+         orchestrator_bin,
+         runtime_root,
+         preflight_dir
+       ) do
+    bash_env = role_bash_environment_path(runtime_root, :orchestrator)
+    expected_herdr = Path.join(orchestrator_bin, "herdr")
+    resolution_file = Path.join(preflight_dir, launch_nonce())
+
+    resolve_command =
+      "BASH_ENV=#{shell_escape(bash_env)} /bin/bash -lc " <>
+        shell_escape("command -v herdr") <>
+        " > #{shell_escape(resolution_file <> ".tmp")} 2>&1 && " <>
+        "mv -f #{shell_escape(resolution_file <> ".tmp")} #{shell_escape(resolution_file)}"
+
+    probe_command =
+      "BASH_ENV=#{shell_escape(bash_env)} /bin/bash -lc " <>
+        shell_escape("herdr --session #{shell_escape(session_name)} agent list >/dev/null")
+
+    with :ok <-
+           pane_run(
+             context,
+             session_name,
+             env,
+             pane_id,
+             resolve_command,
+             :herdr_wrapper_resolution_failed
+           ),
+         :ok <- verify_wrapper_resolution(resolution_file, expected_herdr, context) do
+      pane_run(
+        context,
+        session_name,
+        env,
+        pane_id,
+        probe_command,
+        :herdr_wrapper_resolution_failed
+      )
+    end
+  end
+
+  defp attest_orchestrator_recorder(
+         _context,
+         _session_name,
+         _env,
+         _pane_id,
+         _role,
+         _orchestrator_bin,
+         _runtime_root,
+         _preflight_dir
+       ),
+       do: :ok
 
   defp start_agent_command(context, args, env, runtime_root, launch_token) do
     deadline = System.monotonic_time(:millisecond) + launch_handshake_timeout_ms(context)
@@ -1471,6 +1714,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     #!/bin/sh
     set -eu
     #{worker_event_recorder(runtime_root)}
+    record_worker_event observed "$*"
     #{herdr_command_parser(role)}
     parse_herdr_command "$@"
     #{authorization}
@@ -1618,6 +1862,19 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     """
   end
 
+  defp validate_worker_event_recorder_attestation(worker_events, %{worker: worker})
+       when is_map(worker) do
+    case Path.wildcard(Path.join(worker_events, "observed.*")) do
+      [] ->
+        {:error, {:worker_assignments_unobservable, %{reason: :worker_event_recorder_unattested}}}
+
+      [_first | _rest] ->
+        :ok
+    end
+  end
+
+  defp validate_worker_event_recorder_attestation(_worker_events, _session), do: :ok
+
   # The channel itself is the record. Every prompt the orchestrator sends to
   # the worker is a delivery and every prompt the worker sends back is a reply,
   # whether or not either side used the `OCTO_MSG` envelope. The envelope stays
@@ -1684,11 +1941,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   defp read_worker_messages(runtime_root, pattern, prefix) do
+    runtime_root
+    |> worker_events_root()
+    |> Path.join(pattern)
+    |> Path.wildcard()
+    |> read_worker_message_paths(prefix)
+  end
+
+  defp read_worker_message_paths(paths, prefix) do
     messages =
-      runtime_root
-      |> worker_events_root()
-      |> Path.join(pattern)
-      |> Path.wildcard()
+      paths
       |> Enum.sort()
       |> Enum.reduce_while([], &read_worker_message(&1, prefix, &2))
 
@@ -1730,7 +1992,15 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   # proof that a delegation happened and was not recorded, which is exactly the
   # observation this contract must never round down to "no worker assignments".
   defp validate_recordable_commands(worker_events) do
-    case worker_events |> Path.join("unparsed.*") |> Path.wildcard() |> length() do
+    worker_events
+    |> Path.join("unparsed.*")
+    |> Path.wildcard()
+    |> MapSet.new()
+    |> validate_recordable_command_paths()
+  end
+
+  defp validate_recordable_command_paths(paths) do
+    case paths |> worker_event_paths("unparsed.") |> length() do
       0 ->
         :ok
 
@@ -1739,19 +2009,62 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     end
   end
 
-  defp channel_records(worker_events) do
+  defp channel_records(worker_events) when is_binary(worker_events) do
     %{
       deliveries: sequenced_worker_events(worker_events, "delivery.*"),
       replies: sequenced_worker_events(worker_events, "reply.*")
     }
   end
 
-  defp sequenced_worker_events(worker_events, pattern) do
+  defp channel_records(%MapSet{} = paths) do
+    %{
+      deliveries: sequenced_worker_events(paths, "delivery."),
+      replies: sequenced_worker_events(paths, "reply.")
+    }
+  end
+
+  defp sequenced_worker_events(worker_events, pattern) when is_binary(worker_events) do
     worker_events
     |> Path.join(pattern)
     |> Path.wildcard()
     |> Enum.sort()
     |> Enum.map(&Path.basename/1)
+  end
+
+  defp sequenced_worker_events(%MapSet{} = paths, prefix) do
+    paths
+    |> worker_event_paths(prefix)
+    |> Enum.sort()
+    |> Enum.map(&Path.basename/1)
+  end
+
+  defp worker_event_paths(worker_events) when is_binary(worker_events) do
+    worker_events
+    |> Path.join("*")
+    |> Path.wildcard()
+    |> MapSet.new()
+  end
+
+  defp worker_event_paths(%MapSet{} = paths, prefix) do
+    Enum.filter(paths, &(Path.basename(&1) |> String.starts_with?(prefix)))
+  end
+
+  defp validate_worker_revision_observation(_baseline_revision, _observed_revision, [_first | _rest]),
+    do: :ok
+
+  defp validate_worker_revision_observation(revision, revision, [])
+       when is_integer(revision),
+       do: :ok
+
+  defp validate_worker_revision_observation(baseline_revision, observed_revision, [])
+       when is_integer(baseline_revision) and is_integer(observed_revision),
+       do: {:error, {:worker_assignments_unobservable, %{reason: :worker_event_recorder_unattested}}}
+
+  defp validate_worker_revision_observation(_baseline_revision, _observed_revision, []),
+    do: {:error, {:worker_assignments_unobservable, %{reason: :worker_revision_missing, stage: :turn_completion}}}
+
+  defp worker_state_unobservable(stage, error) do
+    {:error, {:worker_assignments_unobservable, %{reason: :worker_state_unobservable, stage: stage, error: error}}}
   end
 
   # The `OCTO_MSG` envelope is preferred where an agent used it, because it

@@ -19,6 +19,11 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
   These tests pin the distinction at the public runtime seam
   (`AgentRuntime.start_session/2` + `AgentRuntime.run_turn/4` over the real
   `HerdrTransport`) and at each of the three fail-open steps.
+
+  EMB-1295 closes the remaining observability ambiguity at that same public
+  seam. A successful correlation must name the provider session and issue in
+  its durable log event, while a turn that proved it did not delegate must emit
+  its own positive evidence. Silence can no longer mean either outcome.
   """
 
   alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation}
@@ -27,6 +32,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
   alias SymphonyElixir.TestSupport.HerdrReplayFixture
 
   @correlation_event "Implementer worker result correlated"
+  @no_delegation_event "Implementer worker result correlation not required"
 
   setup do
     root = Path.join(System.tmp_dir!(), "iwce-#{System.unique_integer([:positive])}")
@@ -129,15 +135,17 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     # Exactly what the EMB-1282 orchestrator did: it delegated bounded work to
     # the prestarted worker through its own Herdr authority. Here the worker
     # never answers, so there is a delegation and no result to correlate.
-    assert :ok =
-             orchestrator_prompt(
-               session,
-               context,
-               "implementer_worker",
-               "EMB1282-EVIDENCE-7F3A: produce the bounded deliverable"
-             )
+    action = fn ->
+      assert :ok =
+               orchestrator_prompt(
+                 session,
+                 context,
+                 "implementer_worker",
+                 "EMB1282-EVIDENCE-7F3A: produce the bounded deliverable"
+               )
+    end
 
-    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
 
     refute log =~ @correlation_event
 
@@ -148,29 +156,167 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
+  test "a live worker under an unattested recorder fails typed instead of settling as no delegation", context do
+    session = start_implementer_session(context, "evidence-recorder-unattested")
+
+    # Exercise the native binary directly, exactly as a recorder-bypassing
+    # resolution does. Removing any launch probe attestation isolates the
+    # residual fail-closed seam: a live worker must never turn an unattested
+    # recording into positive no-delegation evidence.
+    session.herdr_session.runtime_root
+    |> Path.join("worker-events/observed.*")
+    |> Path.wildcard()
+    |> Enum.each(&File.rm!/1)
+
+    action = fn ->
+      assert {_output, 0} =
+               native_worker_prompt(
+                 session,
+                 context,
+                 "EMB1295-BYPASS: produce the bounded deliverable"
+               )
+    end
+
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
+
+    refute log =~ @correlation_event
+    refute log =~ @no_delegation_event
+
+    unattested = %{reason: :worker_event_recorder_unattested}
+    assert {:error, {:implementer_worker_assignments_unobservable, ^unattested}} = result
+
+    stop(session)
+  end
+
+  test "a native delegation during the runtime turn cannot hide behind launch attestation", context do
+    session = start_implementer_session(context, "evidence-runtime-native-bypass")
+
+    assert [_launch_attestation] =
+             session.herdr_session.runtime_root
+             |> Path.join("worker-events/observed.*")
+             |> Path.wildcard()
+
+    on_message = fn
+      %{event: :session_started} ->
+        assert {_output, 0} =
+                 System.cmd(
+                   context.herdr_bin,
+                   [
+                     "--session",
+                     session.name,
+                     "agent",
+                     "prompt",
+                     "implementer_worker",
+                     "EMB1295-RUNTIME-BYPASS: produce the bounded deliverable"
+                   ],
+                   env: [
+                     {"HERDR_FAKE_LOG", context.herdr_log},
+                     {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
+                   ],
+                   stderr_to_stdout: true
+                 )
+
+      _message ->
+        :ok
+    end
+
+    {result, log} =
+      with_log(fn ->
+        AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), on_message: on_message)
+      end)
+
+    refute log =~ @correlation_event
+    refute log =~ @no_delegation_event
+
+    unattested = %{reason: :worker_event_recorder_unattested}
+    assert {:error, {:implementer_worker_assignments_unobservable, ^unattested}} = result
+
+    assert [_launch_attestation] =
+             session.herdr_session.runtime_root
+             |> Path.join("worker-events/observed.*")
+             |> Path.wildcard()
+
+    stop(session)
+  end
+
+  @tag timeout: 600_000
+  test "a later runtime turn cannot reuse an earlier turn's recorded delegation", context do
+    session = start_implementer_session(context, "evidence-turn-local-native-bypass")
+
+    turn_one_action = fn ->
+      assert :ok =
+               orchestrator_prompt(
+                 session,
+                 context,
+                 "implementer_worker",
+                 "OCTO_MSG/1 kind=assignment assignment=EMB1295-TURN-ONE deliverable=bounded"
+               )
+
+      assert :ok =
+               worker_prompt(
+                 session,
+                 context,
+                 "implementer_orchestrator",
+                 "OCTO_MSG/1 kind=result assignment=EMB1295-TURN-ONE status=completed"
+               )
+    end
+
+    {turn_one_result, turn_one_log} =
+      with_log(fn -> run_runtime_turn(session, turn_one_action) end)
+
+    assert {:ok, {next_session, turn_one}} = turn_one_result
+
+    assert [%{assignment_id: "EMB1295-TURN-ONE", status: :completed, evidence: :envelope}] =
+             turn_one.worker_assignments
+
+    assert turn_one_log =~ @correlation_event
+
+    turn_two_action = fn ->
+      assert {_output, 0} =
+               native_worker_prompt(
+                 next_session,
+                 context,
+                 "EMB1295-TURN-TWO-BYPASS: produce the bounded deliverable"
+               )
+    end
+
+    {turn_two_result, turn_two_log} =
+      with_log(fn -> run_runtime_turn(next_session, turn_two_action) end)
+
+    unattested = %{reason: :worker_event_recorder_unattested}
+    assert {:error, {:implementer_worker_assignments_unobservable, ^unattested}} = turn_two_result
+
+    refute turn_two_log =~ @correlation_event
+    refute turn_two_log =~ @no_delegation_event
+
+    stop(next_session)
+  end
+
   test "a delegation the worker answered is correlated from the channel itself, with no envelope", context do
     session = start_implementer_session(context, "evidence-structural")
 
     # Neither side uses the `OCTO_MSG` envelope. The delegation is still fully
     # observable: the orchestrator's only authority over the worker is its own
     # Herdr shim, and the worker's only way back is the same channel.
-    assert :ok =
-             orchestrator_prompt(
-               session,
-               context,
-               "implementer_worker",
-               "EMB1282-EVIDENCE-7F3A: produce the bounded deliverable"
-             )
+    action = fn ->
+      assert :ok =
+               orchestrator_prompt(
+                 session,
+                 context,
+                 "implementer_worker",
+                 "EMB1282-EVIDENCE-7F3A: produce the bounded deliverable"
+               )
 
-    assert :ok =
-             worker_prompt(
-               session,
-               context,
-               "implementer_orchestrator",
-               "bounded deliverable finished; artifact written"
-             )
+      assert :ok =
+               worker_prompt(
+                 session,
+                 context,
+                 "implementer_orchestrator",
+                 "bounded deliverable finished; artifact written"
+               )
+    end
 
-    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
 
     assert {:ok, {_next_session, turn}} = result
 
@@ -198,27 +344,29 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
 
     # The spelling canary EMB-1284 used, and the one the generated
     # `launch-worker` script uses: the session is named before the subcommand.
-    assert :ok =
-             orchestrator_argv(session, context, [
-               "--session",
-               session.name,
-               "agent",
-               "prompt",
-               "implementer_worker",
-               "OCTO_MSG/1 kind=assignment assignment=EMB1284-EVIDENCE-9C21 deliverable=bounded"
-             ])
+    action = fn ->
+      assert :ok =
+               orchestrator_argv(session, context, [
+                 "--session",
+                 session.name,
+                 "agent",
+                 "prompt",
+                 "implementer_worker",
+                 "OCTO_MSG/1 kind=assignment assignment=EMB1284-EVIDENCE-9C21 deliverable=bounded"
+               ])
 
-    assert :ok =
-             worker_argv(session, context, [
-               "--session",
-               session.name,
-               "agent",
-               "prompt",
-               "implementer_orchestrator",
-               "OCTO_MSG/1 kind=result assignment=EMB1284-EVIDENCE-9C21 status=completed"
-             ])
+      assert :ok =
+               worker_argv(session, context, [
+                 "--session",
+                 session.name,
+                 "agent",
+                 "prompt",
+                 "implementer_orchestrator",
+                 "OCTO_MSG/1 kind=result assignment=EMB1284-EVIDENCE-9C21 status=completed"
+               ])
+    end
 
-    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
 
     assert {:ok, {_next_session, turn}} = result
 
@@ -232,29 +380,116 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
+  test "each launched provider role receives recorder-safe direct and Bash login environments", context do
+    root = Path.dirname(context.workspace)
+    provider = Path.join([root, "provider-bin", "codex"])
+    orchestrator_observation = Path.join(root, "provider-environment-orchestrator")
+    worker_observation = Path.join(root, "provider-environment-worker")
+    login_home = Path.join(root, "login-home")
+    login_bin = Path.join(root, "login-bin")
+
+    File.mkdir_p!(login_home)
+    File.mkdir_p!(login_bin)
+
+    # Model the post-/etc/profile state seen in production: bare `herdr`
+    # resolves successfully, but to the user installation rather than the
+    # run-owned recorder. The provider itself records the environment produced
+    # by the materialized wrapper and projection; the test does not supply its
+    # own BASH_ENV or corrected PATH.
+    File.ln_s!(context.herdr_bin, Path.join(login_bin, "herdr"))
+
+    File.write!(
+      Path.join(login_home, ".bash_profile"),
+      "export PATH=#{login_bin}:/usr/bin:/bin\n"
+    )
+
+    File.write!(provider, """
+    #!/bin/sh
+    set -eu
+    case "${HERDR_FAKE_AGENT_NAME:-}" in
+      implementer_orchestrator) observation=#{orchestrator_observation} ;;
+      implementer_worker) observation=#{worker_observation} ;;
+      *) exit 0 ;;
+    esac
+    direct=$(command -v herdr || :)
+    login=$(HOME=#{login_home} /bin/bash -lc 'command -v herdr' || :)
+    {
+      printf 'bash_env=%s\\n' "${BASH_ENV:-}"
+      printf 'direct=%s\\n' "$direct"
+      printf 'login=%s\\n' "$login"
+    } > "$observation"
+    exit 0
+    """)
+
+    File.chmod!(provider, 0o755)
+
+    session = start_implementer_session(context, "evidence-provider-environment")
+    File.rm!(worker_observation)
+
+    assert {worker_launch_output, 0} =
+             System.cmd(
+               session.herdr_session.worker_launcher,
+               ["implementer_worker", session.herdr_session.worker_pane_id],
+               env: [
+                 {"HERDR_FAKE_LOG", context.herdr_log},
+                 {"PATH", session.herdr_session.orchestrator_bin <> ":" <> (System.get_env("PATH") || "")},
+                 {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
+               ],
+               stderr_to_stdout: true
+             )
+
+    assert worker_launch_output != ""
+
+    expected_herdr = Path.join(session.herdr_session.orchestrator_bin, "herdr")
+    expected_bash_env = Path.join(session.herdr_session.runtime_root, "orchestrator-bash-env")
+
+    assert File.read!(orchestrator_observation) ==
+             """
+             bash_env=#{expected_bash_env}
+             direct=#{expected_herdr}
+             login=#{expected_herdr}
+             """
+
+    expected_worker_herdr = Path.join(session.herdr_session.runtime_root, "worker-bin/herdr")
+    expected_worker_bash_env = Path.join(session.herdr_session.runtime_root, "worker-bash-env")
+
+    assert File.read!(worker_observation) ==
+             """
+             bash_env=#{expected_worker_bash_env}
+             direct=#{expected_worker_herdr}
+             login=#{expected_worker_herdr}
+             """
+
+    stop(session)
+  end
+
   test "a delegation the recorder could not classify fails the run instead of completing it", context do
     session = start_implementer_session(context, "evidence-unclassifiable")
 
-    assert :ok =
-             orchestrator_argv(
-               session,
-               context,
-               [
-                 "--unmodelled-global",
-                 "value",
-                 "agent",
-                 "prompt",
-                 "implementer_worker",
-                 "OCTO_MSG/1 kind=assignment assignment=EMB1284-EVIDENCE-9C21 deliverable=bounded"
-               ],
-               :any
-             )
+    action = fn ->
+      assert :ok =
+               orchestrator_argv(
+                 session,
+                 context,
+                 [
+                   "--unmodelled-global",
+                   "value",
+                   "agent",
+                   "prompt",
+                   "implementer_worker",
+                   "OCTO_MSG/1 kind=assignment assignment=EMB1284-EVIDENCE-9C21 deliverable=bounded"
+                 ],
+                 :any
+               )
+    end
 
-    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
 
     refute log =~ @correlation_event
 
-    assert {:error, {:worker_assignments_unobservable, %{reason: :unrecognized_herdr_command_form, unparsed: 1}}} =
+    unrecognized = %{reason: :unrecognized_herdr_command_form, unparsed: 1}
+
+    assert {:error, {:implementer_worker_assignments_unobservable, ^unrecognized}} =
              result
 
     stop(session)
@@ -263,51 +498,60 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
   test "a recorded worker result whose assignment record is missing is typed, not discarded", context do
     session = start_implementer_session(context, "evidence-orphan-result")
 
-    assert :ok =
-             worker_prompt(
-               session,
-               context,
-               "implementer_orchestrator",
-               "OCTO_MSG/1 kind=result assignment=EMB1282-EVIDENCE-7F3A status=completed"
-             )
+    action = fn ->
+      assert :ok =
+               worker_prompt(
+                 session,
+                 context,
+                 "implementer_orchestrator",
+                 "OCTO_MSG/1 kind=result assignment=EMB1282-EVIDENCE-7F3A status=completed"
+               )
+    end
 
     assert {:error,
             {:implementer_worker_assignment_unrecorded,
              %{
                assignment_id: "EMB1282-EVIDENCE-7F3A",
                result: %{assignment_id: "EMB1282-EVIDENCE-7F3A", status: "completed"}
-             }}} = AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), [])
+             }}} = run_runtime_turn(session, action)
 
     stop(session)
   end
 
-  test "a fully recorded delegation emits the correlation event naming assignment, result and session", context do
+  test "a fully recorded delegation emits durable correlation evidence joinable to provider session and issue", context do
     session = start_implementer_session(context, "evidence-correlated")
 
-    assert :ok =
-             orchestrator_prompt(
-               session,
-               context,
-               "implementer_worker",
-               "OCTO_MSG/1 kind=assignment assignment=EMB1282-EVIDENCE-7F3A deliverable=bounded"
-             )
+    action = fn ->
+      assert :ok =
+               orchestrator_prompt(
+                 session,
+                 context,
+                 "implementer_worker",
+                 "OCTO_MSG/1 kind=assignment assignment=EMB1282-EVIDENCE-7F3A deliverable=bounded"
+               )
 
-    assert :ok =
-             worker_prompt(
-               session,
-               context,
-               "implementer_orchestrator",
-               "OCTO_MSG/1 kind=result assignment=EMB1282-EVIDENCE-7F3A status=completed"
-             )
+      assert :ok =
+               worker_prompt(
+                 session,
+                 context,
+                 "implementer_orchestrator",
+                 "OCTO_MSG/1 kind=result assignment=EMB1282-EVIDENCE-7F3A status=completed"
+               )
+    end
 
-    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
 
     assert {:ok, {_next_session, turn}} = result
 
     assert [%{assignment_id: "EMB1282-EVIDENCE-7F3A", status: :completed, evidence: :envelope}] =
              turn.worker_assignments
 
+    assert is_binary(turn.session_id) and turn.session_id != ""
     assert log =~ @correlation_event
+    assert log =~ "outcome=correlated"
+    assert log =~ "issue_id=#{issue().id}"
+    assert log =~ "issue_identifier=#{issue().identifier}"
+    assert log =~ "session_id=#{turn.session_id}"
     assert log =~ "herdr_session=#{session.name}"
     assert log =~ "EMB1282-EVIDENCE-7F3A"
     assert log =~ "result_status: \"completed\""
@@ -315,14 +559,27 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
-  test "a run that never delegated succeeds with no assignments and no spurious correlation event", context do
+  test "a run that never delegated emits durable positive evidence instead of ambiguous silence", context do
     session = start_implementer_session(context, "evidence-direct-work")
 
-    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+    {result, log} = with_log(fn -> run_runtime_turn(session, fn -> :ok end) end)
 
     assert {:ok, {_next_session, turn}} = result
     assert turn.worker_assignments == []
+    assert is_binary(turn.session_id) and turn.session_id != ""
+
+    assert [_launch_attestation] =
+             session.herdr_session.runtime_root
+             |> Path.join("worker-events/observed.*")
+             |> Path.wildcard()
+
     refute log =~ @correlation_event
+    assert log =~ @no_delegation_event
+    assert log =~ "outcome=no_delegation"
+    assert log =~ "issue_id=#{issue().id}"
+    assert log =~ "issue_identifier=#{issue().identifier}"
+    assert log =~ "session_id=#{turn.session_id}"
+    assert log =~ "herdr_session=#{session.name}"
 
     stop(session)
   end
@@ -398,6 +655,37 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     session
   end
 
+  defp run_runtime_turn(session, action) when is_function(action, 0) do
+    AgentRuntime.run_turn(
+      session,
+      "Implement the bounded issue.",
+      issue(),
+      on_message: fn
+        %{event: :session_started} -> action.()
+        _message -> :ok
+      end
+    )
+  end
+
+  defp native_worker_prompt(session, context, message) do
+    System.cmd(
+      context.herdr_bin,
+      [
+        "--session",
+        session.name,
+        "agent",
+        "prompt",
+        "implementer_worker",
+        message
+      ],
+      env: [
+        {"HERDR_FAKE_LOG", context.herdr_log},
+        {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
+      ],
+      stderr_to_stdout: true
+    )
+  end
+
   defp orchestrator_prompt(session, context, agent, message),
     do: shim_prompt(Path.join(session.herdr_session.orchestrator_bin, "herdr"), session, context, agent, message)
 
@@ -428,7 +716,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
       )
 
   defp shim_argv(shim, session, context, argv, expected_status) do
-    assert {_output, status} =
+    assert {output, status} =
              System.cmd(shim, argv,
                env: [
                  {"HERDR_FAKE_LOG", context.herdr_log},
@@ -439,7 +727,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
 
     # The recorder runs before the command is handed to the real binary, so an
     # argv the binary itself rejects still leaves its evidence behind.
-    if expected_status != :any, do: assert(status == expected_status)
+    if expected_status != :any, do: assert(status == expected_status, output)
 
     :ok
   end
