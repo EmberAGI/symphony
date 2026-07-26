@@ -138,6 +138,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
     socket_path=
     workspace_cwd=
     pane_id=
+    agent_revision=
 
     recall_kind() {
       if [ -f "$state_root/kind.$agent_name" ]; then
@@ -145,14 +146,30 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       fi
     }
 
-    replay() {
-      fixture=$1
+    recall_revision() {
+      agent_revision=0
+      if [ -f "$state_root/revision.$agent_name" ]; then
+        IFS= read -r agent_revision < "$state_root/revision.$agent_name"
+      fi
+    }
+
+    replay_stdout() {
       sed -e "s|{{AGENT_NAME}}|$agent_name|g" \\
           -e "s|{{AGENT_KIND}}|$agent_kind|g" \\
           -e "s|{{SOCKET_PATH}}|$socket_path|g" \\
           -e "s|{{WORKSPACE_CWD}}|$workspace_cwd|g" \\
           -e "s|{{PANE_ID}}|$pane_id|g" \\
-          "$REPLAY/$fixture.stdout"
+          "$REPLAY/$1.stdout"
+    }
+
+    replay() {
+      fixture=$1
+      if [ -n "$agent_revision" ]; then
+        replay_stdout "$fixture" |
+          sed "s|\\\"revision\\\":[0-9][0-9]*|\\\"revision\\\":$agent_revision|g"
+      else
+        replay_stdout "$fixture"
+      fi
       if [ -s "$REPLAY/$fixture.stderr" ]; then
         cat "$REPLAY/$fixture.stderr" >&2
       fi
@@ -250,6 +267,8 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       pane_id="$pane"
       mkdir -p "$state_root"
       printf '%s\\n' "$agent_kind" > "$state_root/kind.$agent_name"
+      printf '0\\n' > "$state_root/revision.$agent_name"
+      recall_revision
 
       if [ "${HERDR_FAKE_AGENT_START_ERROR:-}" = "1" ]; then
         printf 'sabotage: agent start refused\\n' >&2
@@ -352,18 +371,23 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
         fi
       fi
 
+      recall_revision
+      agent_revision=$((agent_revision + 1))
+      printf '%s\\n' "$agent_revision" > "$state_root/revision.$agent_name"
       recall_kind prompt
       replay "${HERDR_REPLAY_PROMPT:-agent-prompt-working}"
     fi
 
     if [ "$1" = "agent" ] && [ "$2" = "wait" ]; then
       agent_name="$3"
+      recall_revision
       recall_kind wait
       replay "${HERDR_REPLAY_WAIT:-agent-wait-idle}"
     fi
 
     if [ "$1" = "agent" ] && [ "$2" = "get" ]; then
       agent_name="$3"
+      recall_revision
       recall_kind get
       replay "${HERDR_REPLAY_GET:-agent-get-idle}"
     fi

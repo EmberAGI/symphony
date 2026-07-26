@@ -195,6 +195,57 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
+  test "a native delegation during the runtime turn cannot hide behind launch attestation", context do
+    session = start_implementer_session(context, "evidence-runtime-native-bypass")
+
+    assert [_launch_attestation] =
+             session.herdr_session.runtime_root
+             |> Path.join("worker-events/observed.*")
+             |> Path.wildcard()
+
+    on_message = fn
+      %{event: :session_started} ->
+        assert {_output, 0} =
+                 System.cmd(
+                   context.herdr_bin,
+                   [
+                     "--session",
+                     session.name,
+                     "agent",
+                     "prompt",
+                     "implementer_worker",
+                     "EMB1295-RUNTIME-BYPASS: produce the bounded deliverable"
+                   ],
+                   env: [
+                     {"HERDR_FAKE_LOG", context.herdr_log},
+                     {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
+                   ],
+                   stderr_to_stdout: true
+                 )
+
+      _message ->
+        :ok
+    end
+
+    {result, log} =
+      with_log(fn ->
+        AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), on_message: on_message)
+      end)
+
+    refute log =~ @correlation_event
+    refute log =~ @no_delegation_event
+
+    unattested = %{reason: :worker_event_recorder_unattested}
+    assert {:error, {:implementer_worker_assignments_unobservable, ^unattested}} = result
+
+    assert [_launch_attestation] =
+             session.herdr_session.runtime_root
+             |> Path.join("worker-events/observed.*")
+             |> Path.wildcard()
+
+    stop(session)
+  end
+
   test "a delegation the worker answered is correlated from the channel itself, with no envelope", context do
     session = start_implementer_session(context, "evidence-structural")
 
