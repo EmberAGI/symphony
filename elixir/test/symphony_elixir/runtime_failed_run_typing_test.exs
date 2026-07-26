@@ -176,6 +176,17 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     assert_typed_failed_run(reason)
   end
 
+  test "a post-turn gate rejection exits irrecoverable so no equivalent redispatch is authorized" do
+    reason =
+      run_reason("routing-gate-rejection",
+        hook_after_run: ~s(printf '%s\\n' 'ERROR: illegal state transition for implementer: todo -> todo' >&2; exit 1)
+      )
+
+    assert_typed_failed_run(reason)
+
+    assert {:irrecoverable_runtime_failed, %{family: :post_turn_gate_rejected, retryable?: false}} = reason
+  end
+
   test "a post-turn routing hook failure stops before normal continuation" do
     reason =
       run_reason("routing-hook-no-continuation",

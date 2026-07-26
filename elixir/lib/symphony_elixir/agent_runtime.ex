@@ -27,6 +27,7 @@ defmodule SymphonyElixir.AgentRuntime do
           | :unsupported_app_server_contract
           | :malformed_provider_event_schema
           | :human_input_required
+          | :post_turn_gate_rejected
           | :repeated_identical_no_progress_failure
 
   @type failure_decision :: %{
@@ -55,8 +56,15 @@ defmodule SymphonyElixir.AgentRuntime do
     :unsupported_app_server_contract,
     :malformed_provider_event_schema,
     :human_input_required,
+    :post_turn_gate_rejected,
     :repeated_identical_no_progress_failure
   ]
+
+  # sysexits.h EX_TEMPFAIL. A workspace hook exits with this to declare that it
+  # could not reach a verdict for its own transient reason, which is the only
+  # way a completed hook can ask to be retried. Every other non-zero exit is
+  # read as a verdict on the run.
+  @hook_temporary_failure_status 75
 
   @transient_markers [
     "transient",
@@ -941,6 +949,24 @@ defmodule SymphonyElixir.AgentRuntime do
 
   defp real_irrecoverable_runtime_reason({:unexpected_herdr_agent_status, status, evidence}) when is_map(evidence) do
     real_irrecoverable_runtime_reason({:unexpected_herdr_agent_status, status})
+  end
+
+  # A post-turn gate that ran to completion and exited non-zero inspected this
+  # run and rejected it. The same durable checkpoint replayed through the same
+  # gate produces the same rejection, so redispatching it is repetition rather
+  # than recovery. A gate that never reached a verdict — timed out, or on a host
+  # the runtime could not reach — leaves `{:post_turn_routing_failed, _}`
+  # wrapping something other than a completed hook failure and stays retryable.
+  defp real_irrecoverable_runtime_reason({:post_turn_routing_failed, {:workspace_hook_failed, hook, status, output}})
+       when status != @hook_temporary_failure_status do
+    family = workspace_hook_irrecoverable_family(status, output) || :post_turn_gate_rejected
+
+    {family,
+     %{
+       subtype: "post_turn_gate_rejected",
+       method: hook,
+       message: workspace_hook_summary(output)
+     }}
   end
 
   defp real_irrecoverable_runtime_reason(_reason), do: nil
