@@ -242,6 +242,7 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
       )
 
     workspace_root = Path.join(test_root, "workspaces")
+    before_run_started = Path.join(test_root, "before-run-started")
 
     issue = %Issue{
       id: "issue-registered-stop-cleanup-failure",
@@ -256,7 +257,11 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
       tracker_kind: "memory",
       workspace_root: workspace_root,
       poll_interval_ms: 30_000,
-      hook_before_run: "sleep 30"
+      hook_before_run: """
+      set -eu
+      touch #{before_run_started}
+      sleep 30
+      """
     )
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
@@ -269,14 +274,27 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
       File.rm_rf(test_root)
     end)
 
-    assert_eventually(fn ->
-      match?(
-        %{state: "active", cleanup_status: "active"},
-        ProcessOwnership.status_for_issue(issue)
-      )
-    end)
+    issue_id = issue.id
 
-    :ok = File.rm(ProcessOwnership.registry_path(issue))
+    assert_eventually(
+      fn ->
+        File.regular?(before_run_started) and
+          match?(
+            %{running: %{^issue_id => %{process_ownership_refreshed_at_ms: refreshed_at}}}
+            when is_integer(refreshed_at),
+            :sys.get_state(pid)
+          )
+      end,
+      200
+    )
+
+    assert %{state: "active", cleanup_status: "active"} =
+             ProcessOwnership.status_for_issue(issue)
+
+    registry_path = ProcessOwnership.registry_path(issue)
+    :ok = File.rm(registry_path)
+    refute File.exists?(registry_path)
+    assert ProcessOwnership.status_for_issue(issue) == nil
 
     log =
       capture_log(fn ->
@@ -368,9 +386,18 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
 
     # The child must stay alive through every assertion below even when the
     # suite runs under heavy load; the on_exit TERMs it, so the long sleep is
-    # only a last-resort self-cleanup, not the test's clock.
+    # only a last-resort self-cleanup, not the test's clock. The parent blocks
+    # on the port until the test releases it, making process-tree readiness an
+    # explicit handshake instead of a scheduling assumption.
     script =
-      "echo $$ > #{parent_pid_file}; sleep 300 >/dev/null 2>&1 & echo $! > #{child_pid_file}; sleep 0.5"
+      """
+      set -eu
+      echo $$ > #{parent_pid_file}
+      sleep 300 >/dev/null 2>&1 &
+      echo $! > #{child_pid_file}
+      printf 'READY\n'
+      IFS= read -r _
+      """
 
     port =
       Port.open({:spawn_executable, System.find_executable("bash")}, [
@@ -397,9 +424,9 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
       File.rm_rf(test_root)
     end)
 
-    assert_eventually(fn ->
-      File.exists?(parent_pid_file) and File.exists?(child_pid_file)
-    end)
+    assert_receive {^port, {:data, "READY\n"}}, 5_000
+    assert File.regular?(parent_pid_file)
+    assert File.regular?(child_pid_file)
 
     assert {:ok, _ownership} =
              ProcessOwnership.acquire(issue, %{
@@ -409,8 +436,8 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
                app_server_pid: app_server_pid
              })
 
-    assert_receive {^port, {:exit_status, 0}}, 1_000
-    assert_eventually(fn -> File.exists?(child_pid_file) end)
+    assert Port.command(port, "release\n")
+    assert_receive {^port, {:exit_status, 0}}, 5_000
 
     child_pid = child_pid_file |> File.read!() |> String.trim() |> String.to_integer()
     assert {_, 0} = System.cmd("kill", ["-0", Integer.to_string(child_pid)], stderr_to_stdout: true)
@@ -460,8 +487,8 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
 
     script =
       """
+      set -eu
       echo $$ > #{parent_pid_file}
-      sleep 0.2
       setsid env \
         SYMPHONY_ROLE_RUN_ID=#{run_id} \
         SYMPHONY_ROLE_ISSUE_ID=#{issue.id} \
@@ -470,7 +497,9 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
         SYMPHONY_ROLE_HOLDER=#{holder} \
         SYMPHONY_ROLE_WORKSPACE_PATH=#{workspace_path} \
         sh -c 'echo $$ > #{child_pid_file}; sleep 300' >/dev/null 2>&1 &
-      sleep 0.2
+      while [ ! -s #{child_pid_file} ]; do sleep 0.01; done
+      printf 'READY\n'
+      IFS= read -r _
       """
 
     port =
@@ -498,7 +527,9 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
       File.rm_rf(test_root)
     end)
 
-    assert_eventually(fn -> File.exists?(parent_pid_file) end)
+    assert_receive {^port, {:data, "READY\n"}}, 5_000
+    assert File.regular?(parent_pid_file)
+    assert File.regular?(child_pid_file)
 
     assert {:ok, _ownership} =
              ProcessOwnership.acquire(issue, %{
@@ -509,8 +540,8 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
                app_server_pid: app_server_pid
              })
 
-    assert_receive {^port, {:exit_status, 0}}, 1_000
-    assert_eventually(fn -> File.exists?(child_pid_file) end)
+    assert Port.command(port, "release\n")
+    assert_receive {^port, {:exit_status, 0}}, 5_000
 
     child_pid = child_pid_file |> File.read!() |> String.trim() |> String.to_integer()
     assert {_, 0} = System.cmd("kill", ["-0", Integer.to_string(child_pid)], stderr_to_stdout: true)
@@ -541,8 +572,6 @@ defmodule SymphonyElixir.OrchestratorDispatchOwnershipTest do
       5_000 -> flunk("terminal settlement did not report its result in time")
     end
   end
-
-  defp assert_eventually(fun, attempts \\ 20)
 
   defp assert_eventually(fun, attempts) when attempts > 0 do
     if fun.() do
