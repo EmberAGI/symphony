@@ -8,6 +8,16 @@ defmodule SymphonyElixir.AgentRunner do
 
   @type worker_host :: String.t() | nil
   @owned_session_registration_timeout_ms 5_000
+  @delegation_turn_option_keys [
+    :turn_timeout_ms,
+    :start_timeout_ms,
+    :heartbeat_interval_ms,
+    :status_read_timeout_ms,
+    :max_indeterminate_reads,
+    :stale_working_ms,
+    :max_recovery_attempts,
+    :settle_window_ms
+  ]
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
@@ -302,12 +312,17 @@ defmodule SymphonyElixir.AgentRunner do
        ) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
+    turn_opts =
+      opts
+      |> Keyword.take(@delegation_turn_option_keys)
+      |> Keyword.put(:on_message, codex_message_handler(codex_update_recipient, issue))
+
     turn_result =
       AgentRuntime.run_turn(
         app_session,
         prompt,
         issue,
-        on_message: codex_message_handler(codex_update_recipient, issue)
+        turn_opts
       )
 
     case finish_with_after_run_hook(

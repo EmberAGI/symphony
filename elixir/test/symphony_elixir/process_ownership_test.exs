@@ -117,7 +117,7 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
              ProcessOwnership.release(issue, %{holder: "owned-holder", run_id: "owned-run"})
   end
 
-  test "failed-run release and role restart preserve same-checkpoint retry suppression", %{issue: issue} do
+  test "failed-run release refuses the same checkpoint and preserves evidence after reset", %{issue: issue} do
     holder = "#{ProcessOwnership.current_host()}:999999:implementer"
     attrs = ownership_attrs("failed-run", holder)
     assert {:ok, ownership} = ProcessOwnership.acquire(issue, attrs)
@@ -129,7 +129,7 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
       process_ownership: ownership
     }
 
-    reason = {:max_turns_exhausted, %{turn: 3, max_turns: 3}}
+    reason = {:rate_limited, %{message: "provider retry window"}}
 
     assert {:retryable, _failure, observation} =
              Orchestrator.classify_task_exit_for_test(
@@ -151,29 +151,34 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
     assert {:ok, %{state: "cleaned", failure_observation: ^observation}} =
              ProcessOwnership.release(issue, identity)
 
-    replacement_attrs =
-      ownership_attrs("replacement-run", ProcessOwnership.holder_id())
+    equal_marker_attrs =
+      "equal-marker-run"
+      |> ownership_attrs(ProcessOwnership.holder_id())
+      |> Map.put(:reset_marker, observation.reset_marker)
+
+    assert {:error, :ownership_held} =
+             ProcessOwnership.acquire(issue, equal_marker_attrs)
+
+    assert %{state: "cleaned", failure_observation: ^observation} =
+             ProcessOwnership.status_for_issue(issue)
+
+    changed_marker = %{observation.reset_marker | execution_generation: "generation-b"}
+
+    changed_marker_attrs =
+      "changed-marker-run"
+      |> ownership_attrs(ProcessOwnership.holder_id())
+      |> Map.put(:reset_marker, changed_marker)
 
     assert {:ok, %{failure_observation: persisted_observation}} =
-             ProcessOwnership.acquire(issue, replacement_attrs)
+             ProcessOwnership.acquire(issue, changed_marker_attrs)
 
     assert persisted_observation == observation
 
     restarted_entry = %{
       running_entry
-      | run_id: "replacement-run",
+      | run_id: "changed-marker-run",
         process_ownership: ProcessOwnership.status_for_issue(issue)
     }
-
-    assert {:irrecoverable, repeated, _observation} =
-             Orchestrator.classify_task_exit_for_test(
-               reason,
-               restarted_entry,
-               issue.id,
-               %Orchestrator.State{execution_generation: "generation-a"}
-             )
-
-    assert repeated.family == :repeated_identical_no_progress_failure
 
     assert {:retryable, _failure, changed_observation} =
              Orchestrator.classify_task_exit_for_test(
@@ -187,7 +192,7 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
     assert changed_observation.reset_marker.execution_generation == "generation-b"
   end
 
-  test "successful completion release clears prior failure recurrence state", %{issue: issue} do
+  test "successful completion release preserves prior typed failure state", %{issue: issue} do
     attrs = ownership_attrs("successful-run", "successful-holder")
     assert {:ok, ownership} = ProcessOwnership.acquire(issue, attrs)
 
@@ -210,8 +215,565 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
                %{state: "retrying", failure_observation: observation}
              )
 
-    assert {:ok, %{state: "cleaned", failure_observation: nil}} =
+    assert {:ok, %{state: "cleaned", failure_observation: ^observation}} =
              ProcessOwnership.release_completed(issue, identity)
+  end
+
+  test "blocked ownership only reacquires when the current reset marker changes", %{
+    issue: issue
+  } do
+    holder = ProcessOwnership.holder_id()
+
+    initial_marker = %{
+      execution_generation: "generation-a",
+      input_fingerprint: "checkpoint-a"
+    }
+
+    attrs =
+      "blocked-run"
+      |> ownership_attrs(holder)
+      |> Map.put(:reset_marker, initial_marker)
+
+    assert {:ok, ownership} = ProcessOwnership.acquire(issue, attrs)
+
+    observation = %{
+      fingerprint: %{family: :unclassified_runtime_failure},
+      count: 1,
+      reset_marker: initial_marker
+    }
+
+    identity = %{
+      holder: ownership.holder,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path
+    }
+
+    assert {:ok, %{state: "blocked", failure_observation: ^observation}} =
+             ProcessOwnership.verify_and_update(issue, identity, %{
+               state: "blocked",
+               failure_observation: observation
+             })
+
+    unchanged_attrs =
+      "unchanged-run"
+      |> ownership_attrs(holder)
+      |> Map.put(:reset_marker, initial_marker)
+
+    assert {:error, :ownership_held} =
+             ProcessOwnership.acquire(issue, unchanged_attrs)
+
+    changed_attrs =
+      "changed-generation-run"
+      |> ownership_attrs(holder)
+      |> Map.put(:reset_marker, %{initial_marker | execution_generation: "generation-b"})
+
+    assert {:ok,
+            %{
+              state: "active",
+              run_id: "changed-generation-run",
+              failure_observation: ^observation
+            }} = ProcessOwnership.acquire(issue, changed_attrs)
+  end
+
+  test "dead-holder blocked ownership still requires changed reset evidence", %{
+    issue: issue
+  } do
+    dead_holder = "#{ProcessOwnership.current_host()}:999999:implementer"
+
+    initial_marker = %{
+      execution_generation: "generation-a",
+      input_fingerprint: "checkpoint-a"
+    }
+
+    initial_attrs =
+      "dead-blocked-run"
+      |> ownership_attrs(dead_holder)
+      |> Map.put(:reset_marker, initial_marker)
+
+    assert {:ok, ownership} = ProcessOwnership.acquire(issue, initial_attrs)
+
+    observation = %{
+      fingerprint: %{family: :unclassified_runtime_failure},
+      count: 1,
+      reset_marker: initial_marker
+    }
+
+    identity = %{
+      holder: ownership.holder,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path
+    }
+
+    assert {:ok, %{state: "blocked", failure_observation: ^observation}} =
+             ProcessOwnership.verify_and_update(issue, identity, %{
+               state: "blocked",
+               failure_observation: observation
+             })
+
+    unchanged_attrs =
+      "unchanged-after-restart"
+      |> ownership_attrs(ProcessOwnership.holder_id())
+      |> Map.put(:reset_marker, initial_marker)
+
+    assert {:error, :ownership_held} =
+             ProcessOwnership.acquire(issue, unchanged_attrs)
+
+    assert %{state: "blocked", failure_observation: ^observation} =
+             ProcessOwnership.status_for_issue(issue)
+
+    changed_attrs =
+      "changed-after-restart"
+      |> ownership_attrs(ProcessOwnership.holder_id())
+      |> Map.put(:reset_marker, %{initial_marker | execution_generation: "generation-b"})
+
+    assert {:ok,
+            %{
+              state: "active",
+              run_id: "changed-after-restart",
+              failure_observation: ^observation
+            }} = ProcessOwnership.acquire(issue, changed_attrs)
+  end
+
+  test "legacy dead-holder blocked ownership without failure evidence reacquires and archives", %{
+    issue: issue
+  } do
+    dead_holder = "#{ProcessOwnership.current_host()}:999999:implementer"
+
+    assert {:ok, ownership} =
+             ProcessOwnership.acquire(
+               issue,
+               ownership_attrs("legacy-blocked-run", dead_holder)
+             )
+
+    identity = %{
+      holder: ownership.holder,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path
+    }
+
+    assert {:ok, %{state: "blocked", failure_observation: nil}} =
+             ProcessOwnership.verify_and_update(issue, identity, %{state: "blocked"})
+
+    ownership_path = ProcessOwnership.registry_path(issue)
+    legacy_body = File.read!(ownership_path)
+    refute Map.has_key?(Jason.decode!(legacy_body), "failure_observation")
+
+    incoming_marker = %{
+      execution_generation: "generation-after-rollout",
+      input_fingerprint: "checkpoint-after-rollout"
+    }
+
+    replacement_attrs =
+      "replacement-after-rollout"
+      |> ownership_attrs(ProcessOwnership.holder_id())
+      |> Map.put(:reset_marker, incoming_marker)
+
+    assert {:ok,
+            %{
+              state: "active",
+              run_id: "replacement-after-rollout",
+              failure_observation: nil
+            }} = ProcessOwnership.acquire(issue, replacement_attrs)
+
+    assert [archive_path] = Path.wildcard(ownership_path <> ".stale-*")
+    assert File.read!(archive_path) == legacy_body
+    refute Map.has_key?(Jason.decode!(File.read!(archive_path)), "failure_observation")
+  end
+
+  test "blocked ownership with malformed present failure evidence fails closed", %{
+    issue: issue
+  } do
+    dead_holder = "#{ProcessOwnership.current_host()}:999999:implementer"
+
+    assert {:ok, ownership} =
+             ProcessOwnership.acquire(
+               issue,
+               ownership_attrs("malformed-observation-run", dead_holder)
+             )
+
+    identity = %{
+      holder: ownership.holder,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path
+    }
+
+    assert {:ok, %{state: "blocked"}} =
+             ProcessOwnership.verify_and_update(issue, identity, %{state: "blocked"})
+
+    ownership_path = ProcessOwnership.registry_path(issue)
+
+    incoming_attrs =
+      "must-not-replace-malformed"
+      |> ownership_attrs(ProcessOwnership.holder_id())
+      |> Map.put(:reset_marker, %{
+        execution_generation: "generation-b",
+        input_fingerprint: "checkpoint-b"
+      })
+
+    for malformed_observation <- [
+          nil,
+          %{"count" => 1, "fingerprint" => %{"family" => "network_error"}}
+        ] do
+      malformed_record =
+        ownership_path
+        |> File.read!()
+        |> Jason.decode!()
+        |> Map.put("failure_observation", malformed_observation)
+
+      File.write!(ownership_path, Jason.encode!(malformed_record) <> "\n")
+
+      assert {:error, :ownership_held} =
+               ProcessOwnership.acquire(issue, incoming_attrs)
+
+      assert %{"state" => "blocked", "failure_observation" => ^malformed_observation} =
+               ownership_path |> File.read!() |> Jason.decode!()
+    end
+  end
+
+  test "stale in-flight ownership with failure evidence requires a changed reset marker", %{
+    issue: base_issue
+  } do
+    dead_holder = "#{ProcessOwnership.current_host()}:999999:implementer"
+
+    initial_marker = %{
+      execution_generation: "generation-a",
+      input_fingerprint: "checkpoint-a"
+    }
+
+    for state <- ["active", "retrying", "quarantined"] do
+      issue = %{
+        base_issue
+        | id: "#{base_issue.id}-#{state}",
+          identifier: "#{base_issue.identifier}-#{state}"
+      }
+
+      initial_attrs =
+        "dead-#{state}-run"
+        |> ownership_attrs(dead_holder)
+        |> Map.put(:reset_marker, initial_marker)
+
+      assert {:ok, ownership} = ProcessOwnership.acquire(issue, initial_attrs)
+
+      observation = %{
+        fingerprint: %{family: :network_error, issue_id: issue.id},
+        count: 1,
+        reset_marker: initial_marker
+      }
+
+      identity = %{
+        holder: ownership.holder,
+        run_id: ownership.run_id,
+        workspace_path: ownership.workspace_path
+      }
+
+      assert {:ok, %{state: ^state, failure_observation: ^observation}} =
+               ProcessOwnership.verify_and_update(issue, identity, %{
+                 state: state,
+                 failure_observation: observation
+               })
+
+      equal_attrs =
+        "equal-marker-#{state}"
+        |> ownership_attrs(ProcessOwnership.holder_id())
+        |> Map.put(:reset_marker, initial_marker)
+
+      assert {:error, :ownership_held} =
+               ProcessOwnership.acquire(issue, equal_attrs)
+
+      assert %{state: ^state, failure_observation: ^observation} =
+               ProcessOwnership.status_for_issue(issue)
+
+      changed_attrs =
+        "changed-marker-#{state}"
+        |> ownership_attrs(ProcessOwnership.holder_id())
+        |> Map.put(:reset_marker, %{initial_marker | execution_generation: "generation-b"})
+
+      assert {:ok,
+              %{
+                state: "active",
+                run_id: "changed-marker-" <> ^state,
+                failure_observation: ^observation
+              }} = ProcessOwnership.acquire(issue, changed_attrs)
+    end
+  end
+
+  test "stale active ownership without failure evidence retains crash recovery", %{
+    issue: issue
+  } do
+    dead_holder = "#{ProcessOwnership.current_host()}:999999:implementer"
+
+    marker = %{
+      execution_generation: "generation-a",
+      input_fingerprint: "checkpoint-a"
+    }
+
+    initial_attrs =
+      "crashed-active-run"
+      |> ownership_attrs(dead_holder)
+      |> Map.put(:reset_marker, marker)
+
+    assert {:ok, %{state: "active", failure_observation: nil}} =
+             ProcessOwnership.acquire(issue, initial_attrs)
+
+    replacement_attrs =
+      "crash-recovery-run"
+      |> ownership_attrs(ProcessOwnership.holder_id())
+      |> Map.put(:reset_marker, marker)
+
+    assert {:ok,
+            %{
+              state: "active",
+              run_id: "crash-recovery-run",
+              failure_observation: nil
+            }} = ProcessOwnership.acquire(issue, replacement_attrs)
+  end
+
+  test "cleaned and released ownership with failure evidence require a changed reset marker", %{
+    issue: base_issue
+  } do
+    initial_marker = %{
+      execution_generation: "generation-a",
+      input_fingerprint: "checkpoint-a"
+    }
+
+    for state <- ["cleaned", "released"] do
+      issue = %{
+        base_issue
+        | id: "#{base_issue.id}-observed-#{state}",
+          identifier: "#{base_issue.identifier}-OBSERVED-#{state}"
+      }
+
+      assert {:ok, ownership} =
+               ProcessOwnership.acquire(
+                 issue,
+                 ownership_attrs("observed-#{state}-run", ProcessOwnership.holder_id())
+               )
+
+      observation = %{
+        fingerprint: %{family: :network_error, issue_id: issue.id},
+        count: 1,
+        reset_marker: initial_marker
+      }
+
+      identity = %{
+        holder: ownership.holder,
+        run_id: ownership.run_id,
+        workspace_path: ownership.workspace_path
+      }
+
+      assert {:ok, %{state: ^state, failure_observation: ^observation}} =
+               ProcessOwnership.verify_and_update(issue, identity, %{
+                 state: state,
+                 failure_observation: observation
+               })
+
+      equal_attrs =
+        "equal-marker-#{state}"
+        |> ownership_attrs(ProcessOwnership.holder_id())
+        |> Map.put(:reset_marker, initial_marker)
+
+      assert {:error, :ownership_held} =
+               ProcessOwnership.acquire(issue, equal_attrs)
+
+      assert %{state: ^state, failure_observation: ^observation} =
+               ProcessOwnership.status_for_issue(issue)
+
+      changed_attrs =
+        "changed-marker-#{state}"
+        |> ownership_attrs(ProcessOwnership.holder_id())
+        |> Map.put(:reset_marker, %{initial_marker | execution_generation: "generation-b"})
+
+      assert {:ok,
+              %{
+                state: "active",
+                run_id: "changed-marker-" <> ^state,
+                failure_observation: ^observation
+              }} = ProcessOwnership.acquire(issue, changed_attrs)
+    end
+  end
+
+  test "observation-free cleaned and released ownership reacquire on an equal reset marker", %{
+    issue: base_issue
+  } do
+    marker = %{
+      execution_generation: "generation-a",
+      input_fingerprint: "checkpoint-a"
+    }
+
+    for state <- ["cleaned", "released"] do
+      issue = %{
+        base_issue
+        | id: "#{base_issue.id}-unobserved-#{state}",
+          identifier: "#{base_issue.identifier}-UNOBSERVED-#{state}"
+      }
+
+      assert {:ok, ownership} =
+               ProcessOwnership.acquire(
+                 issue,
+                 ownership_attrs("unobserved-#{state}-run", ProcessOwnership.holder_id())
+               )
+
+      identity = %{
+        holder: ownership.holder,
+        run_id: ownership.run_id,
+        workspace_path: ownership.workspace_path
+      }
+
+      assert {:ok, %{state: ^state, failure_observation: nil}} =
+               ProcessOwnership.verify_and_update(issue, identity, %{state: state})
+
+      refute ProcessOwnership.registry_path(issue)
+             |> File.read!()
+             |> Jason.decode!()
+             |> Map.has_key?("failure_observation")
+
+      replacement_attrs =
+        "replacement-#{state}"
+        |> ownership_attrs(ProcessOwnership.holder_id())
+        |> Map.put(:reset_marker, marker)
+
+      assert {:ok,
+              %{
+                state: "active",
+                run_id: "replacement-" <> ^state,
+                failure_observation: nil
+              }} = ProcessOwnership.acquire(issue, replacement_attrs)
+    end
+  end
+
+  test "cleaned and released ownership with malformed present failure evidence fails closed", %{
+    issue: base_issue
+  } do
+    incoming_marker = %{
+      execution_generation: "generation-b",
+      input_fingerprint: "checkpoint-b"
+    }
+
+    for state <- ["cleaned", "released"],
+        {malformed_name, malformed_observation} <- [
+          {"null", nil},
+          {"incomplete", %{"count" => 1, "fingerprint" => %{"family" => "network_error"}}}
+        ] do
+      issue = %{
+        base_issue
+        | id: "#{base_issue.id}-malformed-#{state}-#{malformed_name}",
+          identifier: "#{base_issue.identifier}-MALFORMED-#{state}-#{malformed_name}"
+      }
+
+      assert {:ok, ownership} =
+               ProcessOwnership.acquire(
+                 issue,
+                 ownership_attrs("malformed-#{state}-run", ProcessOwnership.holder_id())
+               )
+
+      identity = %{
+        holder: ownership.holder,
+        run_id: ownership.run_id,
+        workspace_path: ownership.workspace_path
+      }
+
+      assert {:ok, %{state: ^state}} =
+               ProcessOwnership.verify_and_update(issue, identity, %{state: state})
+
+      ownership_path = ProcessOwnership.registry_path(issue)
+
+      malformed_record =
+        ownership_path
+        |> File.read!()
+        |> Jason.decode!()
+        |> Map.put("failure_observation", malformed_observation)
+
+      File.write!(ownership_path, Jason.encode!(malformed_record) <> "\n")
+
+      incoming_attrs =
+        "must-not-replace-#{state}-#{malformed_name}"
+        |> ownership_attrs(ProcessOwnership.holder_id())
+        |> Map.put(:reset_marker, incoming_marker)
+
+      assert {:error, :ownership_held} =
+               ProcessOwnership.acquire(issue, incoming_attrs)
+
+      assert %{"state" => ^state, "failure_observation" => ^malformed_observation} =
+               ownership_path |> File.read!() |> Jason.decode!()
+    end
+  end
+
+  test "stale owned-session recovery retains failure arbitration after relabeling cleaned", %{
+    issue: issue
+  } do
+    dead_holder = "#{ProcessOwnership.current_host()}:999999:implementer"
+
+    initial_marker = %{
+      execution_generation: "generation-a",
+      input_fingerprint: "checkpoint-a"
+    }
+
+    initial_attrs =
+      "quarantined-session-run"
+      |> ownership_attrs(dead_holder)
+      |> Map.put(:owned_session_ref, %{
+        kind: "herdr",
+        session_name: "octo-quarantined-session"
+      })
+
+    assert {:ok, ownership} = ProcessOwnership.acquire(issue, initial_attrs)
+
+    observation = %{
+      fingerprint: %{family: :network_error, issue_id: issue.id},
+      count: 1,
+      reset_marker: initial_marker
+    }
+
+    identity = %{
+      holder: ownership.holder,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path
+    }
+
+    assert {:ok, %{state: "quarantined", failure_observation: ^observation}} =
+             ProcessOwnership.verify_and_update(issue, identity, %{
+               state: "quarantined",
+               failure_observation: observation
+             })
+
+    test_pid = self()
+
+    assert {:ok, 1} =
+             ProcessOwnership.recover_stale_owned_sessions(fn ownership_ref ->
+               send(test_pid, {:recovered, ownership_ref})
+               :ok
+             end)
+
+    assert_receive {:recovered, %{session_name: "octo-quarantined-session"}}
+
+    assert %{
+             state: "cleaned",
+             run_id: "quarantined-session-run",
+             failure_observation: ^observation
+           } = ProcessOwnership.status_for_issue(issue)
+
+    equal_attrs =
+      "equal-after-recovery"
+      |> ownership_attrs(ProcessOwnership.holder_id())
+      |> Map.put(:reset_marker, initial_marker)
+
+    assert {:error, :ownership_held} =
+             ProcessOwnership.acquire(issue, equal_attrs)
+
+    assert %{state: "cleaned", failure_observation: ^observation} =
+             ProcessOwnership.status_for_issue(issue)
+
+    changed_attrs =
+      "changed-after-recovery"
+      |> ownership_attrs(ProcessOwnership.holder_id())
+      |> Map.put(:reset_marker, %{initial_marker | input_fingerprint: "checkpoint-b"})
+
+    assert {:ok,
+            %{
+              state: "active",
+              run_id: "changed-after-recovery",
+              failure_observation: ^observation
+            }} = ProcessOwnership.acquire(issue, changed_attrs)
   end
 
   test "verify-update cannot rewrite holder, run, role, or workspace scope", %{issue: issue} do

@@ -138,7 +138,7 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
           {:implementer_hard_budget_exhausted, %{checkpoint: {:ok, %{pane_tail: pane_secret}}, last_status: "working"}},
           {:implementer_agent_stalled, %{checkpoint: {:ok, %{pane_tail: pane_secret}}, recovery_history: []}},
           {:implementer_agent_unobservable, %{checkpoint: {:ok, %{pane_tail: pane_secret}}, recovery_history: []}},
-          {:implementer_status_reads_failed, %{checkpoint: {:ok, %{}}, last_error: :boom}}
+          {:implementer_status_reads_failed, %{checkpoint: {:ok, %{}}, last_error: {:network_error, :econnreset}}}
         ] do
       assert {:retryable, retryable} = AgentRuntime.classify_failure(reason, @context)
       refute retryable.retry_reason =~ "pane-secret"
@@ -280,6 +280,68 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     end
   end
 
+  test "fails closed for unknown failures and timeout-shaped prose outside the allowlist" do
+    for reason <- [
+          :unknown_runtime_failure,
+          {:future_provider_failure, %{message: "provider timed out"}},
+          {:herdr_agent_status_timeout, "implementer_orchestrator", ["working", "idle", "done"]}
+        ] do
+      assert {:irrecoverable, failure} = AgentRuntime.classify_failure(reason, @context)
+      assert failure.family in [:unclassified_runtime_failure, :invalid_workspace_or_runtime_protocol]
+      assert failure.retryable? == false
+      refute failure.retry_reason =~ "transient_runtime_failure"
+      refute failure.retry_reason =~ "retryable_runtime_failure"
+    end
+  end
+
+  test "retry classification uses the exact recoverable allowlist and rejects adjacent shapes" do
+    recoverable = [
+      :turn_timeout,
+      :network_error,
+      :service_unavailable,
+      :rate_limited,
+      :capacity_unavailable,
+      :operator_interrupted,
+      {:turn_timeout, :provider_deadline},
+      {:network_error, :econnreset},
+      {:service_unavailable, %{status: 503}},
+      {:rate_limited, %{status: 429}},
+      {:capacity_unavailable, :overloaded},
+      {:operator_interrupted, :shutdown},
+      {:empty_turn_completed, %{message: "no output"}},
+      {:turn_input_required, %{source: "provider"}},
+      {:approval_required, %{source: "provider"}},
+      {:implementer_hard_budget_exhausted, %{checkpoint: {:ok, %{}}}},
+      {:implementer_agent_stalled, %{checkpoint: {:ok, %{}}}},
+      {:implementer_agent_unobservable, %{checkpoint: {:ok, %{}}}},
+      {:implementer_status_reads_failed, %{last_error: :network_error}},
+      {:workspace_hook_timeout, "after_run", 30_000},
+      {:workspace_hook_failed, "after_run", 75, "temporary"},
+      {:post_turn_routing_failed, {:network_error, :econnreset}},
+      {:remote_command_failed, "worker.example", {:rate_limited, %{status: 429}}}
+    ]
+
+    irrecoverable = [
+      :timeout,
+      {:future_provider_failure, %{message: "network timeout"}},
+      {:herdr_agent_status_timeout, "implementer_orchestrator", ["working", "idle", "done"]},
+      {:implementer_status_reads_failed, %{last_error: :unknown_status_read_failure}},
+      {:workspace_hook_failed, "after_run", 74, "temporary-looking prose"},
+      {:post_turn_routing_failed, :timeout},
+      {:remote_command_failed, "worker.example", :timeout}
+    ]
+
+    for reason <- recoverable do
+      assert {:retryable, %{retryable?: true}} = AgentRuntime.classify_failure(reason, @context),
+             "expected exact allowlisted shape to retry: #{inspect(reason)}"
+    end
+
+    for reason <- irrecoverable do
+      assert {:irrecoverable, %{retryable?: false}} = AgentRuntime.classify_failure(reason, @context),
+             "expected non-allowlisted shape to fail closed: #{inspect(reason)}"
+    end
+  end
+
   test "suppresses the first equivalent redispatch at the same durable checkpoint" do
     reason = {:empty_turn_completed, %{message: "Codex completed without agent output token=secret"}}
 
@@ -340,7 +402,7 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
   end
 
   test "the same durable checkpoint and typed failure cannot authorize an equivalent redispatch for any role" do
-    reason = {:max_turns_exhausted, %{turn: 3, max_turns: 3}}
+    reason = {:rate_limited, %{message: "provider retry window"}}
 
     for role <- ["backlog-processor", "implementer", "reviewer", "qa", "landing"] do
       context =
@@ -363,7 +425,7 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
   end
 
   test "a changed durable checkpoint permits one new bounded attempt" do
-    reason = {:max_turns_exhausted, %{turn: 3, max_turns: 3}}
+    reason = {:rate_limited, %{message: "provider retry window"}}
     first_context = Map.put(@context, :input_fingerprint, "checkpoint-a")
     changed_context = Map.put(@context, :input_fingerprint, "checkpoint-b")
 

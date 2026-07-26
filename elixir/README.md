@@ -205,14 +205,19 @@ Notes:
 
 ### Irrecoverable runtime failures
 
-Symphony classifies runtime failures before ordinary retry scheduling. Transient
-network, timeout, service-unavailable, rate-limit, capacity, and operator
-interruption failures remain retryable. Deterministic failures that need human
-repair are treated as irrecoverable, including provider credential revocation,
-missing required runtime configuration, missing CLIs or tools, permission
-denials, invalid workspace/runtime protocol, unsupported app-server contracts,
-malformed provider event schemas, and three consecutive identical no-progress
-observations for the same issue/workspace/role/provider fingerprint.
+Symphony classifies runtime failures before ordinary retry scheduling. The
+exact recoverable shapes are atom or two-tuple `turn_timeout`, `network_error`,
+`service_unavailable`, `rate_limited`, `capacity_unavailable`, and
+`operator_interrupted`; two-tuple `empty_turn_completed`,
+`turn_input_required`, `approval_required`,
+`implementer_hard_budget_exhausted`, `implementer_agent_stalled`, and
+`implementer_agent_unobservable`; `workspace_hook_timeout/3`;
+`workspace_hook_failed/4` with status `75`; and routing, remote-command, or
+status-read wrappers only when their nested failure is one of those exact
+recoverable shapes. Unknown failures fail closed; error text or tuple names
+that merely contain words such as `timeout` do not widen the allowlist. In
+particular, bare or supervision-wrapped `herdr_agent_status_timeout` is an
+irrecoverable typed workspace/runtime-protocol failure.
 
 Irrecoverable failures do not consume the ordinary retry loop. The orchestrator
 verifies and marks same-scope process ownership `blocked`, records a compact
@@ -220,8 +225,40 @@ run-log event when run logging is configured, applies the `Human Escalation`
 label, and moves the issue to `Human Escalation` when that state exists. This
 path neither reads nor writes Linear comments. After repairing credentials,
 configuration, missing tools, permissions, workspace/protocol state, or
-provider event handling, move the issue back to the appropriate active role
-state to resume work.
+provider event handling, record the material issue/branch/workspace input
+change and move the issue back to the appropriate active role state, or deploy
+a new verified execution generation. Merely moving an unchanged issue back to
+an active state remains blocked.
+
+Before the first failure-driven redispatch, Symphony re-reads durable
+process-ownership evidence. An unchanged checkpoint with the identical failure
+fingerprint and no reset evidence is blocked before another run starts. If an
+already-started replacement run inherits that observation and later exits
+normally, that exit does not erase the prior typed failure or enter the
+normal-completion path when its reset marker is unchanged, regardless of
+reconstructed retry-attempt metadata. A verified successful retry after changed
+material issue/branch/workspace input or execution generation is a distinct run
+and clears the prior observation at terminal settlement. The orchestrator
+passes that current marker into ownership acquisition before worker launch.
+Dead-holder stale `active`, `retrying`, or `quarantined` ownership carrying a
+valid observation refuses an equal marker and may be archived and replaced on
+a changed marker with the observation preserved. Stale ownership without an
+observation retains ordinary crash recovery, while a present malformed
+observation fails closed. Blocked records with valid observations follow the
+same marker rule even after holder death or a role-service restart. As a
+rollout-only exception, a legacy blocked record with no `failure_observation`
+field may be archived and replaced when a nonempty produced marker arrives;
+Symphony neither fabricates nor backfills a marker, and a present malformed
+value remains fail-closed. The automatically applied `Human Escalation` label
+does not change the marker. Clean continuation checks do not carry or consult
+stale failure observations.
+
+The fail-closed default intentionally sends previously generic workspace/setup,
+maximum-turn, cleanup/settlement, supervisor, exception, and future adapter
+failures to the blocked Human Escalation path. Operators should repair the
+underlying condition and materially update durable issue/workspace input or
+deploy a new execution generation; infrastructure-sounding names and timeout
+prose do not authorize another run.
 
 ### Comment-independent role-run ownership
 

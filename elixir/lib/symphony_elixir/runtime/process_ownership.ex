@@ -151,7 +151,10 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     )
   end
 
-  @doc "Releases successful ownership and clears prior same-checkpoint failure recurrence state."
+  @doc """
+  Releases successful ownership, applying an explicit failure-observation
+  clear only when the orchestrator verified changed reset evidence.
+  """
   @spec release_completed(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
   @spec release_completed(Issue.t(), map(), map()) :: {:ok, map()} | {:error, term()}
   def release_completed(%Issue{} = issue, expected, extra_attrs \\ %{})
@@ -161,8 +164,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       expected,
       Map.merge(extra_attrs, %{
         state: "cleaned",
-        cleanup_status: "cleaned",
-        failure_observation: :clear
+        cleanup_status: "cleaned"
       })
     )
   end
@@ -376,8 +378,8 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
           same_owner?(record, attrs) ->
             refresh_owned_record(path, issue, record, attrs)
 
-          stale_record?(record) ->
-            replace_stale_record(path, record, issue, attrs)
+          reacquirable_record?(record, attrs) ->
+            replace_reacquirable_record(path, record, issue, attrs)
 
           true ->
             {:error, :ownership_held}
@@ -395,7 +397,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     end
   end
 
-  defp replace_stale_record(path, record, %Issue{} = issue, attrs) do
+  defp replace_reacquirable_record(path, record, %Issue{} = issue, attrs) do
     attrs =
       if Map.get(attrs, :failure_observation) do
         attrs
@@ -693,11 +695,68 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     do: true
 
   defp stale_record?(%{"state" => state} = record)
-       when state in ["active", "retrying", "quarantined", "blocked"] do
+       when state in ["active", "retrying", "quarantined"] do
     holder_has_dead_pid?(record["holder"]) and not local_process_live?(record)
   end
 
   defp stale_record?(_record), do: false
+
+  defp blocked_reacquisition_allowed?(
+         %{"state" => "blocked"} = record,
+         %{reset_marker: incoming_marker}
+       )
+       when is_map(incoming_marker) and map_size(incoming_marker) > 0 do
+    case failure_observation_value(record) do
+      %{reset_marker: stored_marker} when is_map(stored_marker) ->
+        incoming_marker != stored_marker
+
+      nil ->
+        not failure_observation_present?(record)
+
+      _ ->
+        false
+    end
+  end
+
+  defp blocked_reacquisition_allowed?(_record, _attrs), do: false
+
+  defp stale_in_flight_reacquisition_allowed?(record, attrs) do
+    stale_record?(record) and failure_observation_allows_reacquisition?(record, attrs)
+  end
+
+  defp failure_observation_allows_reacquisition?(record, attrs) do
+    case failure_observation_value(record) do
+      %{reset_marker: stored_marker} when is_map(stored_marker) ->
+        reset_marker_changed?(stored_marker, attrs)
+
+      nil ->
+        not failure_observation_present?(record)
+
+      _ ->
+        false
+    end
+  end
+
+  defp reset_marker_changed?(stored_marker, %{reset_marker: incoming_marker})
+       when is_map(incoming_marker) and map_size(incoming_marker) > 0,
+       do: incoming_marker != stored_marker
+
+  defp reset_marker_changed?(_stored_marker, _attrs), do: false
+
+  defp failure_observation_present?(record) when is_map(record) do
+    Map.has_key?(record, :failure_observation) or
+      Map.has_key?(record, "failure_observation")
+  end
+
+  defp reacquirable_record?(%{"state" => "blocked"} = record, attrs),
+    do: blocked_reacquisition_allowed?(record, attrs)
+
+  defp reacquirable_record?(%{"state" => state} = record, attrs)
+       when state in ["active", "retrying", "quarantined"],
+       do: stale_in_flight_reacquisition_allowed?(record, attrs)
+
+  defp reacquirable_record?(record, attrs),
+    do: stale_record?(record) and failure_observation_allows_reacquisition?(record, attrs)
 
   defp holder_has_dead_pid?(holder) when is_binary(holder) do
     case holder |> String.split(":") |> Enum.reverse() do
@@ -844,6 +903,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       quarantine_reason: attr_string(attrs, :quarantine_reason),
       cleanup_evidence: settlement_evidence_value(attrs),
       failure_observation: failure_observation_value(attrs),
+      reset_marker: reset_marker_value(attrs),
       worker_pid: attr_pid(attrs, :worker_pid),
       app_server_pid: attr_pid(attrs, :app_server_pid),
       app_server_pgid: attr_pid(attrs, :app_server_pgid),
@@ -891,6 +951,13 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   defp failure_observation_value(_attrs), do: nil
 
+  defp reset_marker_value(attrs) when is_map(attrs) do
+    case value_for(attrs, :reset_marker) do
+      %{} = reset_marker -> normalize_failure_reset_marker(reset_marker)
+      _ -> nil
+    end
+  end
+
   defp normalize_failure_fingerprint(fingerprint) do
     %{
       issue_id: value_for(fingerprint, :issue_id),
@@ -908,9 +975,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp normalize_failure_reset_marker(reset_marker) do
     %{
       execution_generation: value_for(reset_marker, :execution_generation),
-      retry_epoch: value_for(reset_marker, :retry_epoch),
-      input_fingerprint: value_for(reset_marker, :input_fingerprint),
-      operator_repair_id: value_for(reset_marker, :operator_repair_id)
+      input_fingerprint: value_for(reset_marker, :input_fingerprint)
     }
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()

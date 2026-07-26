@@ -195,8 +195,8 @@ defmodule SymphonyElixir.OrchestratorSettlementDispatchTest do
 
     status = ProcessOwnership.status_for_issue(issue)
 
-    assert status.state == "quarantined",
-           "a settlement timing out must still leave the record active, got #{inspect(status.state)}"
+    assert status.state == "blocked",
+           "an unclassified settlement timeout must fail closed, got #{inspect(status.state)}"
 
     assert %{evidence_status: :unavailable, verified: false} = status.cleanup_evidence,
            "a never-captured snapshot must degrade to typed-unavailable evidence, never a " <>

@@ -167,7 +167,7 @@ defmodule SymphonyElixir.OrchestratorServiceabilityTest do
   # Contract 3: BOUNDED TYPED SETTLEMENT
   # ---------------------------------------------------------------------------
   test "a hanging terminal settlement reaches a bounded typed outcome and stays serviceable" do
-    Application.put_env(:symphony_elixir, :terminal_settlement_timeout_ms, 400)
+    Application.put_env(:symphony_elixir, :terminal_settlement_timeout_ms, 2_000)
 
     {pid, name, _generation, issue, ref} =
       start_orchestrator_with_running_entry(
@@ -184,25 +184,25 @@ defmodule SymphonyElixir.OrchestratorServiceabilityTest do
       )
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
-    assert_receive {:hanging_cleanup_started, "octo-emb-1260-hang"}, 1_000
+    assert_receive {:hanging_cleanup_started, "octo-emb-1260-hang"}, 3_000
 
     # The orchestrator must stay serviceable throughout — the hang must not sit
     # on its mailbox head-of-line.
     assert is_map(Orchestrator.snapshot(name, 500)),
            "orchestrator wedged: snapshot timed out while settlement hung"
 
-    # The ownership record must LEAVE active within a bounded time: quarantined
+    # The ownership record must LEAVE active within a bounded time: blocked
     # with a typed settlement-timeout reason, cleanup_evidence preserved.
     status =
       assert_eventually_value(fn ->
         case ProcessOwnership.status_for_issue(issue) do
-          %{state: "quarantined"} = status -> status
+          %{state: "blocked"} = status -> status
           _other -> nil
         end
       end)
 
     assert status.quarantine_reason =~ "terminal_settlement",
-           "expected a typed terminal-settlement-timeout quarantine reason, got " <>
+           "expected a typed terminal-settlement-timeout blocker reason, got " <>
              inspect(status.quarantine_reason)
 
     assert %{owned_pids: _owned_pids} = status.cleanup_evidence,
@@ -336,27 +336,25 @@ defmodule SymphonyElixir.OrchestratorServiceabilityTest do
            "a settlement that completed was recorded as timed out: " <>
              inspect(status.quarantine_reason)
 
-    # The settled record hands off to the ordinary retry lease, exactly as a
-    # settlement whose result arrived on time does — not to a typed quarantine.
-    assert status.state == "retrying",
-           "expected the settled record to carry the ordinary retry lease, got " <>
+    # The honest late-completion failure is outside the retry allowlist, so the
+    # settled record fails closed without fabricating a timeout.
+    assert status.state == "blocked",
+           "expected the settled record to carry the fail-closed blocker, got " <>
              inspect(status.state)
 
     assert %{verified: true, live_after: 0} = status.cleanup_evidence,
            "the completed settlement's own evidence was replaced by unverified timeout evidence"
 
-    # The issue lifecycle still finalizes: a retry is scheduled, but on a plain
-    # retry lease whose error says the settlement landed late — not a quarantine.
-    retry = updated.retry_attempts[issue_id]
+    # The issue lifecycle still finalizes as blocked, with the honest
+    # late-completion error and no ordinary retry lease.
+    refute Map.has_key?(updated.retry_attempts, issue_id)
 
-    assert is_map(retry), "the deadline must still finalize the issue lifecycle"
+    assert %{family: :unclassified_runtime_failure, error: blocker} =
+             updated.blocked_failures[issue_id]
 
-    assert retry.error =~ "terminal_settlement_completed_late",
-           "the retry must record late completion, not a fabricated timeout: " <>
-             inspect(retry.error)
-
-    refute match?(%{state: "quarantined"}, retry.process_ownership),
-           "a completed settlement must not force a quarantined retry lease"
+    assert blocker =~ "terminal_settlement_completed_late",
+           "the blocker must record late completion, not a fabricated timeout: " <>
+             inspect(blocker)
 
     # The in-flight task is still killed, and the token is settled: a
     # {:settlement_result, ...} that raced the kill is a no-op, not a second

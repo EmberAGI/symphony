@@ -312,7 +312,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     # Terminal settlement runs off the serial path (EMB-1260): dispatch the DOWN
     # and drive the settlement-result message through handle_info so this direct
     # call observes the finalized state a live loop would. Assertions unchanged.
-    state = drive_down_settlement(state, ref, :timeout)
+    state = drive_down_settlement(state, ref, :turn_timeout)
     assert state.running == %{}
     assert MapSet.member?(state.claimed, issue_id)
     assert Map.has_key?(state.retry_attempts, issue_id)
@@ -321,7 +321,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert request[:json].text =~ "Symphony agent failed"
     assert request[:json].text =~ "Issue: EMB-99"
     assert request[:json].text =~ "State: In Progress"
-    assert request[:json].text =~ "Reason: :timeout"
+    assert request[:json].text =~ "Reason: :turn_timeout"
   end
 
   test "orchestrator snapshot tracks codex rate-limit payloads" do

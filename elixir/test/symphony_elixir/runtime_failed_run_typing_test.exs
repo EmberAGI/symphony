@@ -55,17 +55,26 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     def start_agent(_session, spec, _context),
       do: {:ok, %{name: spec.name, pane_id: "w1:p1", agent_status: "idle"}}
 
+    def begin_turn(_session, _agent, _prompt, _timeout_ms, %{turn_result: {:error, _reason} = turn_result}),
+      do: turn_result
+
     def begin_turn(_session, agent, prompt, _timeout_ms, context) do
       if test_pid = Map.get(context, :test_pid) do
         send(test_pid, {:worker_outcome_turn_started, prompt})
       end
 
+      phase = Map.get(context, :turn_phase) || :completed
+      agent_status = if phase == :working, do: "working", else: "idle"
+
       {:ok,
        %{
-         phase: :completed,
-         agent: %{name: agent.name, agent_status: "idle", agent_session: %{value: "sess"}}
+         phase: phase,
+         agent: %{name: agent.name, agent_status: agent_status, agent_session: %{value: "sess"}}
        }}
     end
+
+    def get_agent(_session, _agent, _timeout_ms, %{status_read_result: {:error, _reason} = result}),
+      do: result
 
     def get_agent(_session, agent, _timeout_ms, _context),
       do: {:ok, %{name: agent.name, agent_status: "idle"}}
@@ -148,6 +157,34 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
       )
 
     assert_typed_failed_run(reason)
+  end
+
+  test "a supervision status-read Herdr timeout exits as a typed failed run naming the timeout" do
+    timeout =
+      {:herdr_agent_status_timeout, "implementer_orchestrator", ["working", "idle", "done"]}
+
+    reason =
+      run_reason("herdr-status-timeout",
+        turn_phase: :working,
+        status_read_result: {:error, timeout},
+        max_indeterminate_reads: 1,
+        heartbeat_interval_ms: 1,
+        turn_timeout_ms: 1_000
+      )
+
+    assert_typed_failed_run(reason)
+
+    assert {:irrecoverable_runtime_failed,
+            %{
+              family: :invalid_workspace_or_runtime_protocol,
+              subtype: "herdr_agent_status_timeout",
+              retryable?: false,
+              retry_reason: retry_reason
+            }} = reason
+
+    assert retry_reason =~ "herdr_agent_status_timeout"
+    refute retry_reason =~ "transient_runtime_failure"
+    refute retry_reason =~ "retryable_runtime_failure"
   end
 
   test "max-turn exhaustion with the issue still active exits with a typed failure, not :normal" do
@@ -269,8 +306,12 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     {reason, before_marker, after_marker} =
       run_with_invalid_ownership("ownership-missing", nil)
 
-    assert reason ==
-             {:agent_runtime_failed, {:process_ownership_publication_failed, :ownership_missing}}
+    assert {:irrecoverable_runtime_failed,
+            %{
+              family: :unclassified_runtime_failure,
+              subtype: "process_ownership_publication_failed",
+              retryable?: false
+            }} = reason
 
     refute File.exists?(before_marker)
     refute File.exists?(after_marker)
@@ -292,8 +333,12 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     {reason, before_marker, after_marker} =
       run_with_invalid_ownership("ownership-mismatch", invalid_ownership)
 
-    assert reason ==
-             {:agent_runtime_failed, {:process_ownership_publication_failed, :ownership_mismatch}}
+    assert {:irrecoverable_runtime_failed,
+            %{
+              family: :unclassified_runtime_failure,
+              subtype: "process_ownership_publication_failed",
+              retryable?: false
+            }} = reason
 
     refute File.exists?(before_marker)
     refute File.exists?(after_marker)
@@ -358,9 +403,19 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
         delegation_transport_context: %{
           assignments: Keyword.get(opts, :assignments, []),
           stop_result: Keyword.get(opts, :stop_result, :ok),
-          test_pid: Keyword.get(opts, :test_pid)
+          test_pid: Keyword.get(opts, :test_pid),
+          turn_result: Keyword.get(opts, :turn_result),
+          turn_phase: Keyword.get(opts, :turn_phase),
+          status_read_result: Keyword.get(opts, :status_read_result)
         }
-      ] ++ Keyword.take(opts, [:max_turns, :issue_state_fetcher])
+      ] ++
+        Keyword.take(opts, [
+          :max_turns,
+          :issue_state_fetcher,
+          :max_indeterminate_reads,
+          :heartbeat_interval_ms,
+          :turn_timeout_ms
+        ])
 
     {reason, _log} =
       with_log(fn ->

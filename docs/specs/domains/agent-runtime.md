@@ -177,19 +177,37 @@ admission opens.
   agent failures, must not schedule or consume the ordinary issue retry loop,
   and must emit only redacted operator-visible blocked/status evidence on
   existing process-ownership and status surfaces. Non-auth
-  workspace hook failures remain ordinary workspace-hook failures. This
+  workspace hook failures remain typed workspace-hook failures and are subject
+  to the same fail-closed recoverable allowlist. This
   invariant is recorded for EMB-1123 and EMB-1128 and supports the wrapper
   readiness hardening in EMB-1121 while preserving ADR 0002: Claude Code
   continues to use operator-managed subscription OAuth, and no
   `ANTHROPIC_API_KEY` migration is introduced.
 - Runtime retry policy must be driven by a provider-neutral runtime failure
-  family, not by ad hoc process-exit text at each retry call site. Known
+  family, not by ad hoc process-exit text at each retry call site. Retryable
+  classifications are this exact structural allowlist:
+  `turn_timeout`, `network_error`, `service_unavailable`, `rate_limited`,
+  `capacity_unavailable`, and `operator_interrupted` as atoms or two-tuples;
+  two-tuples tagged `empty_turn_completed`, `turn_input_required`,
+  `approval_required`, `implementer_hard_budget_exhausted`,
+  `implementer_agent_stalled`, or `implementer_agent_unobservable`;
+  `workspace_hook_timeout/3`; `workspace_hook_failed/4` with status `75`; and
+  `post_turn_routing_failed/2` or `remote_command_failed/3` only when the nested
+  reason is itself allowlisted. `implementer_status_reads_failed/2` is
+  recoverable only when its `last_error` is itself allowlisted. The provider
+  rate-limit, capacity, service, network, and turn-timeout shapes represent
+  explicit transient contracts; the no-progress, approval/input, operator, and
+  preserved-checkpoint supervision shapes retain their existing bounded
+  recovery contracts. Substring matches never make arbitrary errors or
+  timeouts retryable. Known
   deterministic irrecoverable families are:
   `provider_authentication_or_revocation`,
   `missing_required_runtime_configuration`, `missing_required_tool_or_cli`,
   `permission_denied`, `invalid_workspace_or_runtime_protocol`,
   `unsupported_app_server_contract`, `malformed_provider_event_schema`,
-  `human_input_required`, and `repeated_identical_no_progress_failure`.
+  `human_input_required`, `unclassified_runtime_failure`, and
+  `repeated_identical_no_progress_failure`. Any failure outside the recoverable
+  allowlist is `unclassified_runtime_failure` and irrecoverable by default.
 - Deterministic single-shot irrecoverable failures must escalate immediately
   instead of scheduling or consuming an ordinary role retry. The classification
   must be preserved across adapter, workspace hook, runner, orchestrator,
@@ -197,28 +215,69 @@ admission opens.
 - Failed-run retry suppression must use a bounded fingerprint that
   includes at least issue id, workspace path, role, runtime provider, failure
   family, normalized provider/runtime subtype when known, and redacted stable
-  error summary. The first failed observation may authorize one bounded retry.
-  If the same fingerprint recurs at the same durable checkpoint without an
-  intervening reset condition, equivalent redispatch is suppressed immediately;
-  elapsed wall-clock time, process liveness, turns, and token use are activity,
+  error summary. Before the first failure-driven redispatch, the queued
+  observation is compared with the independently re-read process-ownership
+  observation and the current durable checkpoint. If the fingerprints and
+  checkpoints are identical and no intervening reset evidence exists,
+  redispatch is refused and surfaced as a typed blocker; a second failed
+  execution is not required. Elapsed wall-clock time, process liveness, turns,
+  and token use are activity,
   not checkpoint progress. This applies to every configured top-level role and
   to transient as well as deterministic retryable families.
-  Reset conditions include an intervening successful progress/completion event,
-  a different failure fingerprint, an intentionally reset retry epoch, a
-  material issue/branch/workspace input change, or an operator-recorded repair
-  action after the prior failure. A different verified execution generation is
-  also a reset because it identifies changed deployed runtime conditions. A
-  replacement role-run identifier by itself is not checkpoint progress.
+  The reset marker has exactly two produced dimensions: a material
+  issue/branch/workspace input fingerprint and the verified execution
+  generation. A replacement role-run identifier, elapsed time, or prose-only
+  claim of repair is not checkpoint progress.
 - The same scoped `Runtime.ProcessOwnership` claim durably carries the bounded
   failure observation while a failed run is released or retried. A role-service
   restart reloads that observation before classifying the next equivalent
-  failure. Only successful progress/completion or another observable reset
-  condition clears or replaces it; an ordinary failed-run claim release does
-  not. This is claim metadata, not a new storage or runtime authority.
+  failure. A later normal exit from any run that inherited that observation at
+  the same reset marker must not clear it or enter the ordinary completion
+  branch, regardless of reconstructed retry-attempt metadata; the prior typed
+  failure remains durable and the run is surfaced blocked. A verified
+  successful retry after the reset marker changes is a distinct run: it may
+  enter normal completion and clear the prior observation at that one
+  settlement seam.
+  Continuation checks after a clean run carry no failure observation and never
+  consult stale failure evidence. This is claim metadata, not a new storage or
+  runtime authority.
+- Poll dispatch computes the current reset marker and passes it into ownership
+  acquisition before any replacement worker starts. A stale `active`,
+  `retrying`, or `quarantined` record carrying a valid failure observation
+  remains non-reacquirable while that marker is unchanged, even when its holder
+  process is dead or the role service restarted. Acquisition may archive and
+  replace it only when the incoming produced marker differs, preserving the
+  observation for settlement. A stale in-flight record with no failure
+  observation retains ordinary crash-recovery takeover. A present but malformed
+  observation fails closed and is not treated as absent.
+- A blocked ownership record carrying a valid failure observation follows the
+  same marker rule. When an active issue presents changed material input,
+  candidate selection treats the dispatch as a retry; the changed incoming
+  marker may archive and replace the blocked record while preserving its
+  observation. For rollout compatibility only, a genuinely legacy blocked
+  record with no `failure_observation` field may be archived and replaced when
+  acquisition receives a nonempty produced marker. Symphony does not fabricate
+  or backfill a marker for that record, and a present malformed observation
+  remains fail-closed. Symphony's own `Human Escalation` control label is
+  excluded from the input fingerprint, so escalation cannot create its own
+  reset evidence. The public ownership rule accepts a changed verified
+  execution generation and rejects an unchanged generation; no role-service
+  restart is required to make changed evidence safe.
+- Fail-closed classification deliberately increases the Human Escalation blast
+  radius for previously generic operational exits, including unknown
+  workspace/setup, maximum-turn, cleanup/settlement, supervisor, exception, and
+  future adapter failures. Those failures remain blocked until they gain an
+  exact recoverable contract or their active issue/workspace input or verified
+  execution generation materially changes; infrastructure-sounding tuple names
+  and timeout prose are not exceptions.
 - Worker death, worker launch failure, missing or mismatched worker result,
   timeout, `agent.max_turns` exhaustion, and post-turn routing failure are typed
   failed runs. They must never use the normal task-completion branch. A
   successful runtime turn must contain a non-empty provider result or response.
+- A `herdr_agent_status_timeout` is a typed
+  `invalid_workspace_or_runtime_protocol` failed run with subtype
+  `herdr_agent_status_timeout`; it is never inferred to be transient merely
+  because its name contains `timeout`.
 - Every irrecoverable classification must clear or avoid ordinary retry
   scheduling, update the verified same-scope process ownership to a blocked
   state with redacted recovery evidence, apply or preserve the tracker issue's
@@ -947,9 +1006,12 @@ bare typed blocked outcome of a prompt or wait — classifies as
 work-preservation checkpoint failure (direct or embedded in a supervised
 outcome) and an out-of-enum protocol status classify as
 `invalid_workspace_or_runtime_protocol` — all irrecoverable, never ordinary
-retry — while hard-budget, stale, unknown, read-failure, and closed outcomes
-with preserved checkpoints keep ordinary bounded retry semantics. Failure
-summaries never include pane transcript content. This supervision layer is
+retry — while hard-budget, stale, unknown, and closed outcomes with preserved
+checkpoints keep ordinary bounded retry semantics. A status-read wrapper
+inherits retry eligibility only from its exact `last_error`; therefore a
+wrapped `herdr_agent_status_timeout` is the same irrecoverable protocol failure
+as the bare timeout. Failure summaries never include pane transcript content.
+This supervision layer is
 observation only: it
 emits typed outcomes and never grows lifecycle arbitration, teardown, or
 quarantine verdict semantics, which EMB-1217 owns over what this layer
