@@ -958,8 +958,6 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     end
   end
 
-  defp reset_marker_value(_attrs), do: nil
-
   defp normalize_failure_fingerprint(fingerprint) do
     %{
       issue_id: value_for(fingerprint, :issue_id),
