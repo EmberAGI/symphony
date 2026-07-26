@@ -123,6 +123,14 @@ defmodule SymphonyElixir.PostTurnGateRejectionTest do
     end
   end
 
+  test "the family is a first-class irrecoverable family, not only a wrapped hook shape" do
+    reason = {:post_turn_gate_rejected, %{subtype: "post_turn_gate_rejected", method: "after_run", message: "ERROR: rejected"}}
+
+    assert {:irrecoverable, failure} = AgentRuntime.classify_failure(reason, @context)
+    assert failure.family == :post_turn_gate_rejected
+    assert failure.retryable? == false
+  end
+
   test "a before_run hook failure is untouched by the post-turn classification" do
     reason = {:workspace_hook_failed, "before_run", 1, "ERROR: workspace not ready"}
 
