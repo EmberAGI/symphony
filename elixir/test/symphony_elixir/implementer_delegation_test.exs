@@ -686,21 +686,44 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     worker_events = Path.join(session.herdr_session.runtime_root, "worker-events")
 
-    File.write!(
-      Path.join(worker_events, "assignment.test"),
-      "OCTO_MSG/1 kind=assignment assignment=default-herdr-assignment deliverable=bounded\n"
-    )
+    on_message = fn
+      %{event: :session_started} ->
+        File.write!(
+          Path.join(worker_events, "assignment.test"),
+          "OCTO_MSG/1 kind=assignment assignment=default-herdr-assignment deliverable=bounded\n"
+        )
 
-    File.write!(
-      Path.join(worker_events, "result.test"),
-      "OCTO_MSG/1 kind=result assignment=default-herdr-assignment status=completed\n"
-    )
+        File.write!(
+          Path.join(worker_events, "result.test"),
+          "OCTO_MSG/1 kind=result assignment=default-herdr-assignment status=completed\n"
+        )
+
+      _message ->
+        :ok
+    end
 
     assert {:ok, {next_session, turn}} =
-             AgentRuntime.run_turn(session, "Complete the public native turn.", issue(), [])
+             AgentRuntime.run_turn(
+               session,
+               "Complete the public native turn.",
+               issue(),
+               on_message: on_message
+             )
 
     assert turn.response == HerdrReplayFixture.stdout!("agent-read-recent")
-    assert [%{assignment_id: "default-herdr-assignment", status: :completed}] = turn.worker_assignments
+
+    assert [
+             %{
+               assignment_id: "default-herdr-assignment",
+               status: :completed,
+               evidence: :envelope,
+               result: %{
+                 assignment_id: "default-herdr-assignment",
+                 status: "completed"
+               }
+             }
+           ] = turn.worker_assignments
+
     assert :ok = AgentRuntime.stop_session(next_session)
   end
 
