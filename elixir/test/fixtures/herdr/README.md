@@ -33,14 +33,23 @@ default server was never touched):
   pane); no live-agent envelope with `unknown` could be elicited.
 - Error envelopes from real missing-agent targets.
 
+The `agent-send-keys-enter` fixture was recorded separately on 2026-07-26 on
+Linux from the installed Herdr 0.7.5 binary
+`3dc83288073e4c2d3c679a30e7be97bcca9141c6fd17dbbb9219142e95c59253`.
+The command targeted a real Codex agent in the isolated `emb1312sendkeys`
+session under a private `XDG_CONFIG_HOME`; that session was stopped and its
+default Herdr server was never touched. Its success envelope is preserved
+verbatim and its exact command argv remains in the fixture.
+
 Committed fixtures are CI inputs. Re-recording is a CD-tier operation: run the
 same commands against the pinned real binary and re-wrap with full provenance.
 The replay-backed test double (`test/support/herdr_replay_fixture.exs`) keeps
-exactly four executable behaviors: the file-based server run loop, the
-status-stall knob, provider process execution for `agent start`, and the
-5000 ms prompt-effect stall scheduling (whose emitted envelopes are the
-recorded stall/timeout recordings). Provider execution and the stall/timeout
-boundary are differentially validated against the real binary by
+only non-recordable process and terminal timing behavior: the file-based
+server run loop, status-stall timing, provider process execution for
+`agent start`, the 5000 ms prompt-effect stall schedule, and the delayed
+revision transition caused only by a separate agent-scoped Enter. Every
+response emitted by those paths is a committed recording. Provider execution
+and the stall/timeout boundary are differentially validated against the real binary by
 `herdr_differential_test.exs` (runtime opt-in via
 `SYMPHONY_RUN_HERDR_DIFFERENTIAL=1`); the run loop and stall knob are
 test-only process scaffolding that emit no protocol responses. The double's
