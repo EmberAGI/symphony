@@ -691,13 +691,13 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     flush_candidate_fetch_events()
     completed_at = blocked.last_poll_completed_at
     send(pid, :run_poll_cycle)
-    assert_receive {:memory_tracker_fetch_candidate_issues, [^issue_id]}
 
     unchanged =
       wait_for_orchestrator_state(pid, fn state ->
         state.last_poll_completed_at != completed_at
       end)
 
+    assert_received {:memory_tracker_fetch_candidate_issues, [^issue_id]}
     refute Map.has_key?(unchanged.running, issue_id)
     assert Map.has_key?(unchanged.blocked_failures, issue_id)
     assert MapSet.member?(unchanged.claimed, issue_id)
@@ -710,13 +710,13 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [repaired_issue])
     flush_candidate_fetch_events()
     send(pid, :run_poll_cycle)
-    assert_receive {:memory_tracker_fetch_candidate_issues, [^issue_id]}
 
     redispatched =
       wait_for_orchestrator_state(pid, fn state ->
         match?(%{pid: runner_pid} when is_pid(runner_pid), state.running[issue_id])
       end)
 
+    assert_received {:memory_tracker_fetch_candidate_issues, [^issue_id]}
     running_retry = redispatched.running[issue_id]
     assert running_retry.retry_attempt == 1
     assert Process.alive?(running_retry.pid)
