@@ -13,8 +13,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @default_poll_interval_ms 50
   @default_stop_timeout_ms 5_000
   @default_agent_start_timeout_ms 120_000
-  @generated_prompt_timeout_ms 6_000
-  @prompt_recovery_attempts 2
+  # Reserve the fixed generated-prompt budget after Herdr's prompt-effect
+  # window for one Enter, a server-bounded transition wait, and one final get.
+  @generated_prompt_observation_timeout_ms 350
   @required_version "0.7.5"
   @required_protocol 17
   @launch_projection_sentinel "--symphony-launch-projection"
@@ -285,51 +286,162 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       when is_binary(agent_name) and agent_name != "" and
              is_binary(prompt) and prompt != "" and is_integer(timeout_ms) and timeout_ms >= 0 and
              is_map(context) do
-    with {:ok, output} <-
-           submit_prompt(
-             context,
-             session_name,
-             env,
-             agent_name,
-             prompt,
-             timeout_ms,
-             @prompt_recovery_attempts
-           ),
-         {:ok, observed} <- decode_agent_response(output),
-         {:ok, phase} <- prompt_outcome(observed, agent_name) do
-      {:ok, %{phase: phase, agent: preserve_provider(observed, agent)}}
-    else
-      {:error, reason} -> prompt_error(reason, agent_name)
+    effective_timeout_ms = max(timeout_ms, @prompt_effect_window_ms + 1)
+    deadline = System.monotonic_time(:millisecond) + effective_timeout_ms
+
+    case submit_prompt(context, session_name, env, agent_name, prompt, deadline) do
+      {:ok, output} ->
+        with {:ok, observed} <- decode_agent_response(output),
+             {:ok, phase} <- prompt_outcome(observed, agent_name) do
+          {:ok, %{phase: phase, agent: preserve_provider(observed, agent)}}
+        else
+          {:error, reason} -> prompt_error(reason, agent_name)
+        end
+
+      {:error, reason} ->
+        if cli_error_code(reason) == "agent_prompt_stalled" do
+          recover_stalled_prompt(context, session_name, env, agent, deadline)
+        else
+          prompt_error(reason, agent_name)
+        end
     end
   end
 
   def begin_turn(_session, _agent, _prompt, _timeout_ms, _context),
     do: {:error, :invalid_herdr_begin_turn}
 
-  defp submit_prompt(context, session_name, env, agent_name, prompt, timeout_ms, recoveries_left) do
+  defp submit_prompt(context, session_name, env, agent_name, prompt, deadline) do
     # The wait must exceed the 5000 ms prompt-effect window so an unchanged
     # state_change_seq is the typed agent_prompt_stalled result, never an
     # ordinary timeout. The until set is the upstream default settle set plus
     # working, so a started turn is observed without waiting for completion.
-    effective_timeout_ms = max(timeout_ms, @prompt_effect_window_ms + 1)
+    remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
+    native_timeout_ms = max(remaining_ms, @prompt_effect_window_ms + 1)
 
     args =
       ["--session", session_name, "agent", "prompt", agent_name, prompt, "--wait"] ++
         until_args(["working", "idle", "done", "blocked"]) ++
-        ["--timeout", to_string(effective_timeout_ms)]
+        ["--timeout", to_string(native_timeout_ms)]
 
-    case command(context, args, env) do
-      {:error, reason} when recoveries_left > 0 ->
-        if cli_error_code(reason) == "agent_prompt_stalled" do
-          submit_prompt(context, session_name, env, agent_name, " ", timeout_ms, recoveries_left - 1)
-        else
-          {:error, reason}
-        end
+    command_before_deadline(context, args, env, deadline)
+  end
 
-      result ->
-        result
+  defp recover_stalled_prompt(
+         context,
+         session_name,
+         env,
+         %{name: agent_name} = agent,
+         deadline
+       ) do
+    args = ["--session", session_name, "agent", "send-keys", agent_name, "enter"]
+
+    with {:ok, output} <- command_before_deadline(context, args, env, deadline),
+         :ok <- validate_send_keys_response(output) do
+      observe_prompt_transition(context, session_name, env, agent, agent, deadline)
+    else
+      {:error, reason} -> prompt_recovery_send_keys_error(reason, agent_name)
     end
   end
+
+  defp validate_send_keys_response(output) do
+    with {:ok, payload} <- Jason.decode(output),
+         "ok" <- get_in(payload, ["result", "type"]) do
+      :ok
+    else
+      _ ->
+        {:error, {:incompatible_herdr_runtime, %{error_code: "invalid_agent_send_keys_response", actual_response: String.trim(output)}}}
+    end
+  end
+
+  defp observe_prompt_transition(context, session_name, env, baseline, agent, deadline) do
+    if System.monotonic_time(:millisecond) >= deadline do
+      prompt_recovery_timeout(agent.name)
+    else
+      context
+      |> command_before_deadline(["--session", session_name, "agent", "get", agent.name], env, deadline)
+      |> get_agent_result(agent, agent.name)
+      |> prompt_transition_result(context, session_name, env, baseline, deadline)
+    end
+  end
+
+  defp prompt_transition_result({:ok, observed}, context, session_name, env, baseline, deadline) do
+    case observed.agent_status do
+      "working" ->
+        {:ok, %{phase: :working, agent: observed}}
+
+      "blocked" ->
+        {:error, {:herdr_agent_blocked, observed.name}}
+
+      "unknown" ->
+        {:error, {:herdr_agent_status_unknown, observed.name}}
+
+      settled when settled in ["idle", "done"] ->
+        if newer_agent_revision?(observed, baseline) do
+          {:ok, %{phase: :completed, agent: observed}}
+        else
+          continue_prompt_transition(context, session_name, env, baseline, observed, deadline)
+        end
+    end
+  end
+
+  defp prompt_transition_result(
+         {:error, {:herdr_agent_get_timeout, agent_name}},
+         _context,
+         _session_name,
+         _env,
+         _baseline,
+         _deadline
+       ),
+       do: prompt_recovery_timeout(agent_name)
+
+  defp prompt_transition_result(
+         {:error, reason},
+         _context,
+         _session_name,
+         _env,
+         _baseline,
+         _deadline
+       ),
+       do: {:error, reason}
+
+  defp continue_prompt_transition(context, session_name, env, baseline, agent, deadline) do
+    remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    if remaining_ms == 0 do
+      prompt_recovery_timeout(agent.name)
+    else
+      Process.sleep(min(Map.get(context, :poll_interval_ms, @default_poll_interval_ms), remaining_ms))
+      observe_prompt_transition(context, session_name, env, baseline, agent, deadline)
+    end
+  end
+
+  defp newer_agent_revision?(%{revision: observed}, %{revision: baseline})
+       when is_integer(observed) and is_integer(baseline),
+       do: observed > baseline
+
+  defp newer_agent_revision?(_observed, _baseline), do: false
+
+  defp prompt_recovery_send_keys_error(:command_timeout, agent_name),
+    do: prompt_recovery_timeout(agent_name)
+
+  defp prompt_recovery_send_keys_error(
+         {:incompatible_herdr_runtime, _details} = reason,
+         _agent_name
+       ),
+       do: {:error, reason}
+
+  defp prompt_recovery_send_keys_error(reason, agent_name) do
+    case cli_error_code(reason) do
+      code when code in ["agent_not_running", "agent_not_found", "agent_name_not_found"] ->
+        {:error, {:herdr_agent_closed, agent_name}}
+
+      _ ->
+        {:error, {:herdr_agent_send_keys_failed, agent_name, reason}}
+    end
+  end
+
+  defp prompt_recovery_timeout(agent_name),
+    do: {:error, {:herdr_agent_status_timeout, agent_name, ["working", "idle", "done"]}}
 
   @impl true
   def await_agent(%{name: session_name, env: env}, %{name: agent_name} = agent, statuses, timeout_ms, context)
@@ -469,6 +581,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp prompt_error({:herdr_agent_status_unknown, _name} = reason, _agent_name),
     do: {:error, reason}
+
+  defp prompt_error(:command_timeout, agent_name), do: prompt_recovery_timeout(agent_name)
 
   defp prompt_error(reason, agent_name) do
     case cli_error_code(reason) do
@@ -1707,7 +1821,14 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
           """
 
         :orchestrator ->
-          ""
+          """
+          case "$herdr_subcommand:$herdr_action" in
+            agent:send-keys|pane:send-keys)
+              printf '%s\n' "orchestrator Herdr authority denies: $*" >&2
+              exit 64
+              ;;
+          esac
+          """
       end
 
     """
@@ -1721,43 +1842,143 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     if [ "$herdr_prompt_parsed" -eq 1 ]; then
       agent_name=$herdr_prompt_target
       message=$herdr_prompt_message
-      recovery_attempt=0
-      while :; do
-        if [ "$recovery_attempt" -eq 0 ]; then
-          outbound=$message
-        else
-          outbound=' '
-        fi
+      prompt_timeout=#{@prompt_effect_window_ms + 1}
 
-        if [ -n "$herdr_prompt_session" ]; then
-          set -- --session "$herdr_prompt_session" agent prompt "$agent_name" "$outbound" --wait --until working --until idle --until done --until blocked --timeout #{@generated_prompt_timeout_ms}
-        else
-          set -- agent prompt "$agent_name" "$outbound" --wait --until working --until idle --until done --until blocked --timeout #{@generated_prompt_timeout_ms}
-        fi
+      if [ -n "$herdr_prompt_session" ]; then
+        set -- --session "$herdr_prompt_session" agent prompt "$agent_name" "$message" --wait --until working --until idle --until done --until blocked --timeout "$prompt_timeout"
+      else
+        set -- agent prompt "$agent_name" "$message" --wait --until working --until idle --until done --until blocked --timeout "$prompt_timeout"
+      fi
 
-        set +e
-        output=$(#{shell_escape(real_herdr)} "$@" 2>&1)
-        status=$?
-        set -e
+      set +e
+      output=$(#{shell_escape(real_herdr)} "$@" 2>&1)
+      status=$?
+      set -e
 
-        if [ "$status" -eq 0 ]; then
-          #{worker_message_recording(role, runtime_root)}
-          printf '%s' "$output"
-          exit 0
-        fi
+      if [ "$status" -eq 0 ]; then
+        #{worker_message_recording(role, runtime_root)}
+        printf '%s' "$output"
+        exit 0
+      fi
 
-        case "$output" in
-          *'"code":"agent_prompt_stalled"'*)
-            if [ "$recovery_attempt" -lt #{@prompt_recovery_attempts} ]; then
-              recovery_attempt=$((recovery_attempt + 1))
-              continue
-            fi
+      case "$output" in
+        *'"code":"agent_prompt_stalled"'*)
+          baseline_seq=$(printf '%s' "$output" | sed -n 's/.*state_change_seq remained \\([0-9][0-9]*\\).*/\\1/p')
+          ;;
+        *)
+          printf '%s\n' "$output" >&2
+          exit "$status"
+          ;;
+      esac
+
+      case "$baseline_seq" in
+        ''|*[!0-9]*)
+          printf '%s\n' "$output" >&2
+          exit "$status"
+          ;;
+      esac
+
+      if [ -n "$herdr_prompt_session" ]; then
+        set -- --session "$herdr_prompt_session" agent send-keys "$agent_name" enter
+      else
+        set -- agent send-keys "$agent_name" enter
+      fi
+
+      set +e
+      enter_output=$(#{shell_escape(real_herdr)} "$@" 2>&1)
+      enter_status=$?
+      set -e
+
+      case "$enter_output" in
+        *'"result":{"type":"ok"}'*) ;;
+        *)
+          printf '%s\n' "$enter_output" >&2
+          if [ "$enter_status" -eq 0 ]; then exit 1; else exit "$enter_status"; fi
+          ;;
+      esac
+
+      if [ "$enter_status" -ne 0 ]; then
+        printf '%s\n' "$enter_output" >&2
+        exit "$enter_status"
+      fi
+
+      if [ -n "$herdr_prompt_session" ]; then
+        set -- --session "$herdr_prompt_session" agent wait "$agent_name" --until working --until blocked --timeout #{@generated_prompt_observation_timeout_ms}
+      else
+        set -- agent wait "$agent_name" --until working --until blocked --timeout #{@generated_prompt_observation_timeout_ms}
+      fi
+
+      set +e
+      observation=$(#{shell_escape(real_herdr)} "$@" 2>&1)
+      observation_status=$?
+      set -e
+
+      if [ "$observation_status" -eq 0 ]; then
+        case "$observation" in
+          *'"agent_status":"working"'*)
+            #{worker_message_recording(role, runtime_root)}
+            printf '%s' "$observation"
+            exit 0
+            ;;
+          *'"agent_status":"blocked"'*)
+            printf '%s' "$observation"
+            exit 0
+            ;;
+          *)
+            printf '%s\n' "$observation" >&2
+            exit 1
             ;;
         esac
+      fi
 
-        printf '%s\n' "$output" >&2
-        exit "$status"
-      done
+      case "$observation" in
+        *'"code":"timeout"'*) ;;
+        *)
+          printf '%s\n' "$observation" >&2
+          exit "$observation_status"
+          ;;
+      esac
+
+      if [ -n "$herdr_prompt_session" ]; then
+        set -- --session "$herdr_prompt_session" agent get "$agent_name"
+      else
+        set -- agent get "$agent_name"
+      fi
+
+      set +e
+      observation=$(#{shell_escape(real_herdr)} "$@" 2>&1)
+      observation_status=$?
+      set -e
+
+      if [ "$observation_status" -ne 0 ]; then
+        printf '%s\n' "$observation" >&2
+        exit "$observation_status"
+      fi
+
+      observed_status=$(printf '%s' "$observation" | sed -n 's/.*"agent_status":"\\([^"]*\\)".*/\\1/p')
+      observed_seq=$(printf '%s' "$observation" | sed -n 's/.*"state_change_seq":\\([0-9][0-9]*\\).*/\\1/p')
+
+      case "$observed_status" in
+        working)
+          #{worker_message_recording(role, runtime_root)}
+          printf '%s' "$observation"
+          exit 0
+          ;;
+        idle|done)
+          if [ -n "$observed_seq" ] && [ "$observed_seq" -gt "$baseline_seq" ]; then
+            #{worker_message_recording(role, runtime_root)}
+            printf '%s' "$observation"
+            exit 0
+          fi
+          ;;
+        blocked|unknown)
+          printf '%s' "$observation"
+          exit 0
+          ;;
+      esac
+
+      printf '%s\n' "$output" >&2
+      exit "$status"
     fi
 
     if [ "$herdr_prompt_unrecordable" -eq 1 ]; then

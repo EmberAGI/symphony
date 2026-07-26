@@ -183,7 +183,10 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       replay status-server-running
     fi
 
-    session="${2:-default}"
+    session=default
+    if [ "${1:-}" = "--session" ]; then
+      session="$2"
+    fi
     state_root="$XDG_CONFIG_HOME/herdr/sessions/$session"
     running="$state_root/running"
     stopped="$state_root/stopped"
@@ -397,6 +400,16 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
     if [ "$1" = "agent" ] && [ "$2" = "wait" ]; then
       agent_name="$3"
       recall_revision
+      if [ -n "${HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS:-}" ] &&
+         [ -f "$state_root/prompt-enter-sent.$agent_name" ]; then
+        transition_file="$state_root/delayed-prompt-transition.$agent_name"
+        if [ ! -f "$transition_file" ]; then
+          sleep "$HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS"
+          agent_revision=$((agent_revision + 1))
+          printf '%s\\n' "$agent_revision" > "$state_root/revision.$agent_name"
+          : > "$transition_file"
+        fi
+      fi
       recall_kind wait
       replay "${HERDR_REPLAY_WAIT:-agent-wait-idle}"
     fi
