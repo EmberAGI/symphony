@@ -1502,6 +1502,64 @@ defmodule SymphonyElixir.HerdrTransportTest do
     end
   end
 
+  test "accepts a delayed Herdr revision transition inside the turn-start deadline", context do
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
+        {"HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS", "0.05"}
+      ],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 5
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{
+                 name: "octo-emb-1312-delayed-transition-#{System.unique_integer([:positive])}",
+                 isolated: true,
+                 workspace: "/tmp/selected-workspace"
+               },
+               adapter_context
+             )
+
+    on_exit(fn ->
+      if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
+    end)
+
+    assert {:ok, agent} =
+             HerdrTransport.start_agent(
+               session,
+               %{
+                 name: "implementer_orchestrator",
+                 provider: "codex",
+                 cwd: "/tmp/selected-workspace",
+                 argv: ["codex", "--model", "gpt-5.6-sol"]
+               },
+               adapter_context
+             )
+
+    assert {:ok, %{phase: :completed, agent: observed}} =
+             HerdrTransport.begin_turn(
+               session,
+               agent,
+               "Complete the assignment.",
+               1_000,
+               adapter_context
+             )
+
+    assert observed.agent_status == "idle"
+    assert observed.revision == agent.revision + 1
+    assert observed.provider == "codex"
+
+    commands = File.read!(context.log)
+    assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
+    assert length(:binary.matches(commands, "agent send-keys implementer_orchestrator enter")) == 1
+    assert length(:binary.matches(commands, "agent get implementer_orchestrator")) == 1
+    assert :ok = HerdrTransport.stop_session(session, adapter_context)
+  end
+
   test "prompt submissions settle on the upstream default set plus working and exceed the prompt-effect window",
        context do
     adapter_context = %{
