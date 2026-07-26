@@ -380,10 +380,11 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
-  test "the launched provider receives recorder-safe direct and Bash login environments", context do
+  test "each launched provider role receives recorder-safe direct and Bash login environments", context do
     root = Path.dirname(context.workspace)
     provider = Path.join([root, "provider-bin", "codex"])
-    provider_observation = Path.join(root, "provider-environment")
+    orchestrator_observation = Path.join(root, "provider-environment-orchestrator")
+    worker_observation = Path.join(root, "provider-environment-worker")
     login_home = Path.join(root, "login-home")
     login_bin = Path.join(root, "login-bin")
 
@@ -405,29 +406,58 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     File.write!(provider, """
     #!/bin/sh
     set -eu
-    if [ "${HERDR_FAKE_AGENT_NAME:-}" = implementer_orchestrator ]; then
-      direct=$(command -v herdr || :)
-      login=$(HOME=#{login_home} /bin/bash -lc 'command -v herdr' || :)
-      {
-        printf 'bash_env=%s\\n' "${BASH_ENV:-}"
-        printf 'direct=%s\\n' "$direct"
-        printf 'login=%s\\n' "$login"
-      } > #{provider_observation}
-    fi
+    case "${HERDR_FAKE_AGENT_NAME:-}" in
+      implementer_orchestrator) observation=#{orchestrator_observation} ;;
+      implementer_worker) observation=#{worker_observation} ;;
+      *) exit 0 ;;
+    esac
+    direct=$(command -v herdr || :)
+    login=$(HOME=#{login_home} /bin/bash -lc 'command -v herdr' || :)
+    {
+      printf 'bash_env=%s\\n' "${BASH_ENV:-}"
+      printf 'direct=%s\\n' "$direct"
+      printf 'login=%s\\n' "$login"
+    } > "$observation"
     exit 0
     """)
 
     File.chmod!(provider, 0o755)
 
     session = start_implementer_session(context, "evidence-provider-environment")
+    File.rm!(worker_observation)
+
+    assert {worker_launch_output, 0} =
+             System.cmd(
+               session.herdr_session.worker_launcher,
+               ["implementer_worker", session.herdr_session.worker_pane_id],
+               env: [
+                 {"HERDR_FAKE_LOG", context.herdr_log},
+                 {"PATH", session.herdr_session.orchestrator_bin <> ":" <> (System.get_env("PATH") || "")},
+                 {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
+               ],
+               stderr_to_stdout: true
+             )
+
+    assert worker_launch_output != ""
+
     expected_herdr = Path.join(session.herdr_session.orchestrator_bin, "herdr")
     expected_bash_env = Path.join(session.herdr_session.runtime_root, "orchestrator-bash-env")
 
-    assert File.read!(provider_observation) ==
+    assert File.read!(orchestrator_observation) ==
              """
              bash_env=#{expected_bash_env}
              direct=#{expected_herdr}
              login=#{expected_herdr}
+             """
+
+    expected_worker_herdr = Path.join(session.herdr_session.runtime_root, "worker-bin/herdr")
+    expected_worker_bash_env = Path.join(session.herdr_session.runtime_root, "worker-bash-env")
+
+    assert File.read!(worker_observation) ==
+             """
+             bash_env=#{expected_worker_bash_env}
+             direct=#{expected_worker_herdr}
+             login=#{expected_worker_herdr}
              """
 
     stop(session)
