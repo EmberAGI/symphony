@@ -807,7 +807,8 @@ defmodule SymphonyElixir.HerdrTransportTest do
         ] do
       File.write!(context.log, "")
       File.rm(Path.join(default_state_root, "prompt-attempts"))
-      replies_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "reply.*"]))
+      results_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"]))
+      assert results_before != []
 
       assert {non_success, 1} =
                System.cmd(
@@ -828,7 +829,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
                )
 
       assert non_success =~ ~s("agent_status":"#{expected_status}")
-      assert Path.wildcard(Path.join([session.runtime_root, "worker-events", "reply.*"])) == replies_before
+      assert Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"])) == results_before
       commands = File.read!(context.log)
       assert length(:binary.matches(commands, "agent send-keys implementer_orchestrator enter")) == 1
       refute commands =~ "agent get implementer_orchestrator"
