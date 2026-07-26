@@ -148,7 +148,7 @@ defmodule SymphonyElixir.ImplementerWorkerEventsPermissionTest do
       state: "In Progress",
       branch_name: "sebastianvarela/emb-1302-restore-worker-observation",
       url: "https://linear.app/emberai/issue/EMB-1302",
-      repository: "EmberAGI/scaling-octo-engine",
+      repository: "EmberAGI/symphony",
       repository_source: "linear_label",
       labels: ["implementation-effort:moderate"]
     }
