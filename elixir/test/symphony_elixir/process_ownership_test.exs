@@ -270,6 +270,65 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
             }} = ProcessOwnership.acquire(issue, changed_attrs)
   end
 
+  test "dead-holder blocked ownership still requires changed reset evidence", %{
+    issue: issue
+  } do
+    dead_holder = "#{ProcessOwnership.current_host()}:999999:implementer"
+
+    initial_marker = %{
+      execution_generation: "generation-a",
+      input_fingerprint: "checkpoint-a"
+    }
+
+    initial_attrs =
+      "dead-blocked-run"
+      |> ownership_attrs(dead_holder)
+      |> Map.put(:reset_marker, initial_marker)
+
+    assert {:ok, ownership} = ProcessOwnership.acquire(issue, initial_attrs)
+
+    observation = %{
+      fingerprint: %{family: :unclassified_runtime_failure},
+      count: 1,
+      reset_marker: initial_marker
+    }
+
+    identity = %{
+      holder: ownership.holder,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path
+    }
+
+    assert {:ok, %{state: "blocked", failure_observation: ^observation}} =
+             ProcessOwnership.verify_and_update(issue, identity, %{
+               state: "blocked",
+               failure_observation: observation
+             })
+
+    unchanged_attrs =
+      "unchanged-after-restart"
+      |> ownership_attrs(ProcessOwnership.holder_id())
+      |> Map.put(:reset_marker, initial_marker)
+
+    assert {:error, :ownership_held} =
+             ProcessOwnership.acquire(issue, unchanged_attrs)
+
+    assert %{state: "blocked", failure_observation: ^observation} =
+             ProcessOwnership.status_for_issue(issue)
+
+    changed_attrs =
+      "changed-after-restart"
+      |> ownership_attrs(ProcessOwnership.holder_id())
+      |> Map.put(:reset_marker, %{initial_marker | execution_generation: "generation-b"})
+
+    assert {:ok,
+            %{
+              state: "active",
+              run_id: "changed-after-restart",
+              failure_observation: ^observation
+            }} = ProcessOwnership.acquire(issue, changed_attrs)
+  end
+
   test "verify-update cannot rewrite holder, run, role, or workspace scope", %{issue: issue} do
     attrs = ownership_attrs("immutable-run", "immutable-holder")
     assert {:ok, ownership} = ProcessOwnership.acquire(issue, attrs)
