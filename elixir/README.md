@@ -225,24 +225,30 @@ run-log event when run logging is configured, applies the `Human Escalation`
 label, and moves the issue to `Human Escalation` when that state exists. This
 path neither reads nor writes Linear comments. After repairing credentials,
 configuration, missing tools, permissions, workspace/protocol state, or
-provider event handling, move the issue back to the appropriate active role
-state to resume work.
+provider event handling, record the material issue/branch/workspace input
+change and move the issue back to the appropriate active role state, or deploy
+a new verified execution generation. Merely moving an unchanged issue back to
+an active state remains blocked.
 
 Before the first failure-driven redispatch, Symphony re-reads durable
 process-ownership evidence. An unchanged checkpoint with the identical failure
 fingerprint and no reset evidence is blocked before another run starts. If an
 already-started retry later exits normally, that exit does not erase the prior
 typed failure or enter the normal-completion path when its reset marker is
-unchanged. A verified successful retry after changed issue, workspace,
-generation, retry-epoch, or operator-repair evidence is a distinct run and
-clears the prior observation at terminal settlement. Clean continuation checks
+unchanged. A verified successful retry after changed material
+issue/branch/workspace input or execution generation is a distinct run and
+clears the prior observation at terminal settlement. The orchestrator passes
+that current marker into ownership acquisition, which may replace a live
+blocked record only when the stored marker differs. The automatically applied
+`Human Escalation` label does not change that marker. Clean continuation checks
 do not carry or consult stale failure observations.
 
 The fail-closed default intentionally sends previously generic workspace/setup,
 maximum-turn, cleanup/settlement, supervisor, exception, and future adapter
 failures to the blocked Human Escalation path. Operators should repair the
-underlying condition or provide new durable input; infrastructure-sounding
-names and timeout prose do not authorize another run.
+underlying condition and materially update durable issue/workspace input or
+deploy a new execution generation; infrastructure-sounding names and timeout
+prose do not authorize another run.
 
 ### Comment-independent role-run ownership
 

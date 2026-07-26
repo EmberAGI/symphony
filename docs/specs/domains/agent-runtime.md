@@ -224,12 +224,10 @@ admission opens.
   and token use are activity,
   not checkpoint progress. This applies to every configured top-level role and
   to transient as well as deterministic retryable families.
-  Reset conditions include a different failure fingerprint, an intentionally
-  reset retry epoch, a material issue/branch/workspace input change, or an
-  operator-recorded repair action after the prior failure. A different verified
-  execution generation is also a reset because it identifies changed deployed
-  runtime conditions. A replacement role-run identifier by itself is not
-  checkpoint progress.
+  The reset marker has exactly two produced dimensions: a material
+  issue/branch/workspace input fingerprint and the verified execution
+  generation. A replacement role-run identifier, elapsed time, or prose-only
+  claim of repair is not checkpoint progress.
 - The same scoped `Runtime.ProcessOwnership` claim durably carries the bounded
   failure observation while a failed run is released or retried. A role-service
   restart reloads that observation before classifying the next equivalent
@@ -241,12 +239,23 @@ admission opens.
   Continuation checks after a clean run carry no failure observation and never
   consult stale failure evidence. This is claim metadata, not a new storage or
   runtime authority.
+- A live blocked ownership record remains non-reacquirable while its stored
+  reset marker equals the current marker. When an active issue presents changed
+  material input, candidate selection treats the dispatch as a retry and passes
+  the current marker into ownership acquisition. Acquisition may archive and
+  replace the blocked record only when that marker differs, preserving the old
+  failure observation for settlement. Symphony's own `Human Escalation` control
+  label is excluded from the input fingerprint, so escalation cannot create its
+  own reset evidence. The same public ownership rule accepts a changed verified
+  execution generation and rejects an unchanged generation; no role-service
+  restart is required to make changed evidence safe.
 - Fail-closed classification deliberately increases the Human Escalation blast
   radius for previously generic operational exits, including unknown
   workspace/setup, maximum-turn, cleanup/settlement, supervisor, exception, and
   future adapter failures. Those failures remain blocked until they gain an
-  exact recoverable contract or an operator records new repair/input evidence;
-  infrastructure-sounding tuple names and timeout prose are not exceptions.
+  exact recoverable contract or their active issue/workspace input or verified
+  execution generation materially changes; infrastructure-sounding tuple names
+  and timeout prose are not exceptions.
 - Worker death, worker launch failure, missing or mismatched worker result,
   timeout, `agent.max_turns` exhaustion, and post-turn routing failure are typed
   failed runs. They must never use the normal task-completion branch. A

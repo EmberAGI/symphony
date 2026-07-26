@@ -785,6 +785,13 @@ Retry entry creation:
   current checkpoint. Refuse redispatch and surface a typed blocker when the
   checkpoint and failure fingerprint are unchanged and there is no new reset
   evidence.
+- A blocked issue remains claimed and skipped while its current reset marker
+  equals the stored failure marker. If the active issue's material
+  issue/branch/workspace input or verified execution generation changes,
+  dispatch uses retry attempt `1` and passes the current marker to ownership
+  acquisition. The blocked record may be archived and replaced only on that
+  mismatch, with its failure observation preserved. The automatically applied
+  `Human Escalation` label is control metadata, not reset evidence.
 
 Backoff formula:
 
@@ -827,7 +834,8 @@ Note:
 - The fail-closed default means previously generic workspace/setup,
   maximum-turn, cleanup/settlement, supervisor, exception, and future adapter
   exits now block and enter Human Escalation unless their exact shape is added
-  to the allowlist or new repair/input evidence changes the reset marker.
+  to the allowlist or material issue/workspace input or the verified execution
+  generation changes the reset marker.
 
 ### 8.5 Active Run Reconciliation
 

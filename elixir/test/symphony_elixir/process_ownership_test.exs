@@ -214,6 +214,62 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
              ProcessOwnership.release_completed(issue, identity)
   end
 
+  test "blocked ownership only reacquires when the current reset marker changes", %{
+    issue: issue
+  } do
+    holder = ProcessOwnership.holder_id()
+
+    initial_marker = %{
+      execution_generation: "generation-a",
+      input_fingerprint: "checkpoint-a"
+    }
+
+    attrs =
+      "blocked-run"
+      |> ownership_attrs(holder)
+      |> Map.put(:reset_marker, initial_marker)
+
+    assert {:ok, ownership} = ProcessOwnership.acquire(issue, attrs)
+
+    observation = %{
+      fingerprint: %{family: :unclassified_runtime_failure},
+      count: 1,
+      reset_marker: initial_marker
+    }
+
+    identity = %{
+      holder: ownership.holder,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path
+    }
+
+    assert {:ok, %{state: "blocked", failure_observation: ^observation}} =
+             ProcessOwnership.verify_and_update(issue, identity, %{
+               state: "blocked",
+               failure_observation: observation
+             })
+
+    unchanged_attrs =
+      "unchanged-run"
+      |> ownership_attrs(holder)
+      |> Map.put(:reset_marker, initial_marker)
+
+    assert {:error, :ownership_held} =
+             ProcessOwnership.acquire(issue, unchanged_attrs)
+
+    changed_attrs =
+      "changed-generation-run"
+      |> ownership_attrs(holder)
+      |> Map.put(:reset_marker, %{initial_marker | execution_generation: "generation-b"})
+
+    assert {:ok,
+            %{
+              state: "active",
+              run_id: "changed-generation-run",
+              failure_observation: ^observation
+            }} = ProcessOwnership.acquire(issue, changed_attrs)
+  end
+
   test "verify-update cannot rewrite holder, run, role, or workspace scope", %{issue: issue} do
     attrs = ownership_attrs("immutable-run", "immutable-holder")
     assert {:ok, ownership} = ProcessOwnership.acquire(issue, attrs)

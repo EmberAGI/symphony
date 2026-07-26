@@ -454,7 +454,7 @@ defmodule SymphonyElixir.AgentRuntime do
   def retried_completion_failure(observation, context \\ %{}) when is_map(context) do
     cond do
       valid_failure_observation?(observation) and
-          Map.get(observation, :reset_marker) == reset_marker(context) ->
+          Map.get(observation, :reset_marker) == failure_reset_marker(context) ->
         {:block, repeated_failure_decision(observation, context)}
 
       valid_failure_observation?(observation) ->
@@ -1070,7 +1070,7 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   defp next_observation_count(previous_observation, failure, context) when is_map(previous_observation) do
-    reset_marker = reset_marker(context)
+    reset_marker = failure_reset_marker(context)
 
     if Map.get(previous_observation, :fingerprint) == failure.fingerprint and
          Map.get(previous_observation, :reset_marker) == reset_marker do
@@ -1086,16 +1086,22 @@ defmodule SymphonyElixir.AgentRuntime do
     %{
       fingerprint: Map.get(failure, :fingerprint),
       count: max(count, 0),
-      reset_marker: reset_marker(context)
+      reset_marker: failure_reset_marker(context)
     }
   end
 
-  defp reset_marker(context) do
+  @doc """
+  Build the durable reset marker used by failure observation and ownership
+  reacquisition.
+
+  Only deployed execution generation and material issue/workspace input have
+  production producers, so they are the complete marker contract.
+  """
+  @spec failure_reset_marker(map()) :: map()
+  def failure_reset_marker(context) when is_map(context) do
     %{
       execution_generation: context_string(context, :execution_generation),
-      retry_epoch: context_string(context, :retry_epoch),
-      input_fingerprint: context_string(context, :input_fingerprint),
-      operator_repair_id: context_string(context, :operator_repair_id)
+      input_fingerprint: context_string(context, :input_fingerprint)
     }
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
@@ -1106,7 +1112,7 @@ defmodule SymphonyElixir.AgentRuntime do
       valid_failure_observation?(durable_observation) and
       Map.get(queued_observation, :fingerprint) == Map.get(durable_observation, :fingerprint) and
       Map.get(queued_observation, :reset_marker) == Map.get(durable_observation, :reset_marker) and
-      Map.get(durable_observation, :reset_marker) == reset_marker(context)
+      Map.get(durable_observation, :reset_marker) == failure_reset_marker(context)
   end
 
   defp valid_failure_observation?(observation) when is_map(observation) do

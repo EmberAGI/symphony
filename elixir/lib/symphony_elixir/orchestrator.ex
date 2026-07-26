@@ -1748,25 +1748,32 @@ defmodule SymphonyElixir.Orchestrator do
     sorted_issues = sort_issues_for_dispatch(issues)
 
     result =
-      Enum.reduce(sorted_issues, %{state: state, skipped: [], dispatched: [], failed: [], attempted: 0}, fn issue, acc ->
-        case dispatch_skip_summary(issue, acc.state, active_states, terminal_states) do
-          nil ->
-            {next_state, dispatch_result} = dispatch_issue_with_result(acc.state, issue)
-
-            acc
-            |> Map.put(:state, next_state)
-            |> record_dispatch_result(issue, dispatch_result)
-
-          skip_summary ->
-            Map.update!(acc, :skipped, &[skip_summary | &1])
-        end
-      end)
+      Enum.reduce(
+        sorted_issues,
+        %{state: state, skipped: [], dispatched: [], failed: [], attempted: 0},
+        &choose_issue(&1, &2, active_states, terminal_states)
+      )
 
     summary =
       sorted_issues
       |> dispatch_cycle_summary(result.skipped, result.dispatched, result.failed, result.attempted)
 
     record_dispatch_summary(result.state, summary)
+  end
+
+  defp choose_issue(issue, acc, active_states, terminal_states) do
+    case dispatch_skip_summary(issue, acc.state, active_states, terminal_states) do
+      nil ->
+        attempt = if blocked_failure_reset_changed?(acc.state, issue), do: 1
+        {next_state, dispatch_result} = dispatch_issue_with_result(acc.state, issue, attempt)
+
+        acc
+        |> Map.put(:state, next_state)
+        |> record_dispatch_result(issue, dispatch_result)
+
+      skip_summary ->
+        Map.update!(acc, :skipped, &[skip_summary | &1])
+    end
   end
 
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
@@ -1845,7 +1852,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp dispatch_capacity_skip_summary(issue, state, running, claimed) do
     cond do
-      MapSet.member?(claimed, issue.id) ->
+      MapSet.member?(claimed, issue.id) and
+          !blocked_failure_reset_changed?(state, issue) ->
         skipped_candidate_summary(issue, "already_claimed")
 
       Map.has_key?(running, issue.id) ->
@@ -1973,7 +1981,7 @@ defmodule SymphonyElixir.Orchestrator do
     state
   end
 
-  defp dispatch_issue_with_result(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
+  defp dispatch_issue_with_result(%State{} = state, issue, attempt, preferred_worker_host \\ nil) do
     case revalidate_issue_for_dispatch(
            issue,
            &Tracker.fetch_issue_states_by_ids/1,
@@ -2012,7 +2020,14 @@ defmodule SymphonyElixir.Orchestrator do
 
       worker_host ->
         run_id = dispatch_run_id(issue, attempt)
-        ownership_attrs = dispatch_ownership_attrs(issue, run_id, worker_host)
+
+        ownership_attrs =
+          dispatch_ownership_attrs(
+            issue,
+            run_id,
+            worker_host,
+            current_failure_reset_marker(state, issue)
+          )
 
         case ProcessOwnership.acquire(issue, ownership_attrs) do
           {:ok, process_ownership} ->
@@ -2085,7 +2100,8 @@ defmodule SymphonyElixir.Orchestrator do
           state
           | running: running,
             claimed: MapSet.put(state.claimed, issue.id),
-            retry_attempts: Map.delete(state.retry_attempts, issue.id)
+            retry_attempts: Map.delete(state.retry_attempts, issue.id),
+            blocked_failures: Map.delete(state.blocked_failures, issue.id)
         }
         |> then(&{&1, :dispatched})
 
@@ -2469,10 +2485,36 @@ defmodule SymphonyElixir.Orchestrator do
       provider: AgentRuntime.provider(),
       run_id: Map.get(running_entry, :run_id),
       process_ownership_run_id: Map.get(running_entry, :run_id),
-      retry_epoch: Map.get(running_entry, :retry_epoch),
-      input_fingerprint: runtime_input_fingerprint(issue, workspace_path),
-      operator_repair_id: Map.get(running_entry, :operator_repair_id)
+      input_fingerprint: runtime_input_fingerprint(issue, workspace_path)
     }
+  end
+
+  defp current_failure_reset_marker(%State{} = state, %Issue{} = issue) do
+    blocked_failure = Map.get(state.blocked_failures, issue.id, %{})
+
+    running_entry = %{
+      issue: issue,
+      workspace_path: Map.get(blocked_failure, :workspace_path) || expected_workspace_path(issue),
+      process_ownership: Map.get(blocked_failure, :process_ownership)
+    }
+
+    issue.id
+    |> runtime_failure_context(running_entry, state.execution_generation)
+    |> AgentRuntime.failure_reset_marker()
+  end
+
+  defp blocked_failure_reset_changed?(%State{} = state, %Issue{} = issue) do
+    observation =
+      Map.get(state.failure_observations, issue.id) ||
+        get_in(state.blocked_failures, [issue.id, :process_ownership, :failure_observation])
+
+    case observation do
+      %{reset_marker: stored_marker} when is_map(stored_marker) ->
+        stored_marker != current_failure_reset_marker(state, issue)
+
+      _ ->
+        false
+    end
   end
 
   defp runtime_input_fingerprint(%Issue{} = issue, workspace_path) do
@@ -2482,7 +2524,11 @@ defmodule SymphonyElixir.Orchestrator do
       issue.title,
       issue.description,
       issue.branch_name,
-      issue.labels |> List.wrap() |> Enum.map(&to_string/1) |> Enum.sort(),
+      issue.labels
+      |> List.wrap()
+      |> Enum.map(&to_string/1)
+      |> Enum.reject(&(normalize_label(&1) == "human escalation"))
+      |> Enum.sort(),
       workspace_path
     ]
     |> :erlang.term_to_binary()
@@ -2662,6 +2708,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> Map.keys()
       |> MapSet.new()
       |> MapSet.union(MapSet.new(Map.keys(state.retry_attempts)))
+      |> MapSet.union(MapSet.new(Map.keys(state.blocked_failures)))
       |> MapSet.union(settling_issue_ids(state))
 
     state.claimed
@@ -2909,7 +2956,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp dispatch_run_id(%Issue{} = issue, _attempt), do: new_run_id(issue)
 
-  defp dispatch_ownership_attrs(%Issue{} = issue, run_id, worker_host) do
+  defp dispatch_ownership_attrs(%Issue{} = issue, run_id, worker_host, reset_marker) do
     %{
       issue_id: issue.id,
       issue_identifier: issue.identifier,
@@ -2917,7 +2964,8 @@ defmodule SymphonyElixir.Orchestrator do
       run_id: run_id,
       holder: ProcessOwnership.holder_id(),
       worker_host: worker_host,
-      workspace_path: expected_workspace_path(issue)
+      workspace_path: expected_workspace_path(issue),
+      reset_marker: reset_marker
     }
   end
 

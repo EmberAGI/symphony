@@ -290,7 +290,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
       id: issue_id,
       identifier: "MT-RESET-SUCCESS-#{unique}",
       title: "Reset retry may settle",
-      description: "checkpoint before operator repair",
+      description: "checkpoint before input repair",
       state: "In Progress"
     }
 
@@ -331,7 +331,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
                failure_observation: observation
              })
 
-    repaired_issue = %{failed_issue | description: "checkpoint after operator repair"}
+    repaired_issue = %{failed_issue | description: "checkpoint after input repair"}
     ref = make_ref()
 
     running_entry = %{
@@ -533,6 +533,136 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
 
     assert blocked.blocked_failures[issue_id].family ==
              :repeated_identical_no_progress_failure
+  end
+
+  test "changed issue evidence reacquires a live blocked record without a service restart" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    unique = System.unique_integer([:positive])
+    issue_id = "issue-blocked-reset-#{unique}"
+    workspace_root = Path.join(System.tmp_dir!(), "symphony-blocked-reset-#{unique}")
+    orchestrator_name = Module.concat(__MODULE__, :"BlockedReset#{unique}")
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-BLOCKED-RESET-#{unique}",
+      title: "Changed input releases blocked ownership",
+      description: "unchanged durable input",
+      state: "In Progress"
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 60_000,
+      hook_before_run: "sleep 30"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    {:ok, pid} =
+      Orchestrator.start_link(
+        name: orchestrator_name,
+        execution_generation: "generation-blocked-reset"
+      )
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      stop_orchestrator!(pid)
+      File.rm_rf(workspace_root)
+    end)
+
+    assert {:ok, ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: "run-blocked-reset",
+               holder: ProcessOwnership.holder_id()
+             })
+
+    ref = make_ref()
+
+    running_entry = %{
+      pid: nil,
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path,
+      process_ownership: ownership,
+      retry_attempt: 0,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | running: %{issue_id => running_entry},
+          claimed: MapSet.new([issue_id]),
+          codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+    end)
+
+    send(pid, {
+      :DOWN,
+      ref,
+      :process,
+      self(),
+      {:missing_required_tool_or_cli, %{tool: "provider-cli", message: "not installed"}}
+    })
+
+    blocked =
+      wait_for_orchestrator_state(pid, fn state ->
+        Map.has_key?(state.blocked_failures, issue_id)
+      end)
+
+    assert %{state: "blocked", failure_observation: blocked_observation} =
+             ProcessOwnership.status_for_issue(issue)
+
+    assert blocked.blocked_failures[issue_id].family == :missing_required_tool_or_cli
+
+    escalated_issue = %{issue | labels: ["Human Escalation"]}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [escalated_issue])
+    flush_candidate_fetch_events()
+    completed_at = blocked.last_poll_completed_at
+    send(pid, :run_poll_cycle)
+    assert_receive {:memory_tracker_fetch_candidate_issues, [^issue_id]}
+
+    unchanged =
+      wait_for_orchestrator_state(pid, fn state ->
+        state.last_poll_completed_at != completed_at
+      end)
+
+    refute Map.has_key?(unchanged.running, issue_id)
+    assert Map.has_key?(unchanged.blocked_failures, issue_id)
+    assert MapSet.member?(unchanged.claimed, issue_id)
+    assert unchanged.latest_dispatch_summary.skip_reason_families == ["already_claimed"]
+
+    assert %{state: "blocked", failure_observation: ^blocked_observation} =
+             ProcessOwnership.status_for_issue(issue)
+
+    repaired_issue = %{escalated_issue | description: "changed durable repair input"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [repaired_issue])
+    flush_candidate_fetch_events()
+    send(pid, :run_poll_cycle)
+    assert_receive {:memory_tracker_fetch_candidate_issues, [^issue_id]}
+
+    redispatched =
+      wait_for_orchestrator_state(pid, fn state ->
+        match?(%{pid: runner_pid} when is_pid(runner_pid), state.running[issue_id])
+      end)
+
+    running_retry = redispatched.running[issue_id]
+    assert running_retry.retry_attempt == 1
+    assert Process.alive?(running_retry.pid)
+    refute Map.has_key?(redispatched.blocked_failures, issue_id)
+
+    assert %{state: "active", failure_observation: ^blocked_observation} =
+             ProcessOwnership.status_for_issue(repaired_issue)
+
+    stop_orchestrator!(pid)
+    assert :ok = Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, running_retry.pid)
   end
 
   test "orchestrator restarts stalled workers with retry backoff" do
@@ -1089,6 +1219,15 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
   defp wait_for_orchestrator_state(pid, predicate, timeout_ms \\ 5_000) when is_function(predicate, 1) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_orchestrator_state(pid, predicate, deadline_ms)
+  end
+
+  defp flush_candidate_fetch_events do
+    receive do
+      {:memory_tracker_fetch_candidate_issues, _issue_ids} ->
+        flush_candidate_fetch_events()
+    after
+      0 -> :ok
+    end
   end
 
   defp do_wait_for_orchestrator_state(pid, predicate, deadline_ms) do

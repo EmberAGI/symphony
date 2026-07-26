@@ -378,8 +378,8 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
           same_owner?(record, attrs) ->
             refresh_owned_record(path, issue, record, attrs)
 
-          stale_record?(record) ->
-            replace_stale_record(path, record, issue, attrs)
+          reacquirable_record?(record, attrs) ->
+            replace_reacquirable_record(path, record, issue, attrs)
 
           true ->
             {:error, :ownership_held}
@@ -397,7 +397,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     end
   end
 
-  defp replace_stale_record(path, record, %Issue{} = issue, attrs) do
+  defp replace_reacquirable_record(path, record, %Issue{} = issue, attrs) do
     attrs =
       if Map.get(attrs, :failure_observation) do
         attrs
@@ -701,6 +701,26 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   defp stale_record?(_record), do: false
 
+  defp blocked_reset_marker_changed?(
+         %{"state" => "blocked"} = record,
+         %{reset_marker: incoming_marker}
+       )
+       when is_map(incoming_marker) and map_size(incoming_marker) > 0 do
+    case failure_observation_value(record) do
+      %{reset_marker: stored_marker} when is_map(stored_marker) ->
+        incoming_marker != stored_marker
+
+      _ ->
+        false
+    end
+  end
+
+  defp blocked_reset_marker_changed?(_record, _attrs), do: false
+
+  defp reacquirable_record?(record, attrs) do
+    blocked_reset_marker_changed?(record, attrs) or stale_record?(record)
+  end
+
   defp holder_has_dead_pid?(holder) when is_binary(holder) do
     case holder |> String.split(":") |> Enum.reverse() do
       [_role, pid | _host_parts] ->
@@ -846,6 +866,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       quarantine_reason: attr_string(attrs, :quarantine_reason),
       cleanup_evidence: settlement_evidence_value(attrs),
       failure_observation: failure_observation_value(attrs),
+      reset_marker: reset_marker_value(attrs),
       worker_pid: attr_pid(attrs, :worker_pid),
       app_server_pid: attr_pid(attrs, :app_server_pid),
       app_server_pgid: attr_pid(attrs, :app_server_pgid),
@@ -893,6 +914,15 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   defp failure_observation_value(_attrs), do: nil
 
+  defp reset_marker_value(attrs) when is_map(attrs) do
+    case value_for(attrs, :reset_marker) do
+      %{} = reset_marker -> normalize_failure_reset_marker(reset_marker)
+      _ -> nil
+    end
+  end
+
+  defp reset_marker_value(_attrs), do: nil
+
   defp normalize_failure_fingerprint(fingerprint) do
     %{
       issue_id: value_for(fingerprint, :issue_id),
@@ -910,9 +940,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   defp normalize_failure_reset_marker(reset_marker) do
     %{
       execution_generation: value_for(reset_marker, :execution_generation),
-      retry_epoch: value_for(reset_marker, :retry_epoch),
-      input_fingerprint: value_for(reset_marker, :input_fingerprint),
-      operator_repair_id: value_for(reset_marker, :operator_repair_id)
+      input_fingerprint: value_for(reset_marker, :input_fingerprint)
     }
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
