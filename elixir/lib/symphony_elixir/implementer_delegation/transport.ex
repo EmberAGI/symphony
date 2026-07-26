@@ -45,9 +45,25 @@ defmodule SymphonyElixir.ImplementerDelegation.Transport do
   @callback get_agent(session_ref(), agent_ref(), non_neg_integer(), context()) ::
               {:ok, agent_ref()} | {:error, term()}
   @callback read_agent(session_ref(), agent_ref(), map(), context()) :: {:ok, map()} | {:error, term()}
+  @doc """
+  Snapshot the authoritative worker state and recorder cursor before a turn.
+
+  A transport implementing this callback must pair it with
+  `worker_assignments/3`, which evaluates only evidence newer than the
+  returned observation.
+  """
+  @callback begin_worker_assignment_observation(
+              session_ref(),
+              non_neg_integer(),
+              context()
+            ) :: {:ok, term()} | {:error, term()}
   @callback worker_assignments(session_ref(), context()) ::
+              {:ok, [map()]} | {:error, term()}
+  @callback worker_assignments(session_ref(), term(), context()) ::
               {:ok, [map()]} | {:error, term()}
   @callback stop_session(session_ref(), context()) :: :ok | {:error, term()}
 
-  @optional_callbacks worker_assignments: 2
+  @optional_callbacks begin_worker_assignment_observation: 3,
+                      worker_assignments: 2,
+                      worker_assignments: 3
 end

@@ -537,6 +537,49 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   def read_agent(_session, _agent, _opts, _context), do: {:error, :invalid_herdr_agent_read}
 
+  @doc false
+  @impl true
+  def begin_worker_assignment_observation(
+        %{runtime_root: runtime_root, worker: worker} = session,
+        timeout_ms,
+        context
+      )
+      when is_binary(runtime_root) and is_map(worker) and
+             is_integer(timeout_ms) and timeout_ms > 0 and is_map(context) do
+    worker_events = worker_events_root(runtime_root)
+
+    if File.dir?(worker_events) do
+      with {:ok, observed_worker} <- get_agent(session, worker, timeout_ms, context),
+           revision when is_integer(revision) <- Map.get(observed_worker, :revision) do
+        {:ok,
+         %{
+           worker_revision: revision,
+           worker_event_paths: worker_event_paths(worker_events),
+           status_read_timeout_ms: timeout_ms
+         }}
+      else
+        {:error, reason} ->
+          {:error, {:worker_assignments_unobservable, %{reason: :worker_state_unobservable, stage: :turn_start, error: reason}}}
+
+        _missing_revision ->
+          {:error, {:worker_assignments_unobservable, %{reason: :worker_revision_missing, stage: :turn_start}}}
+      end
+    else
+      {:error, {:worker_assignments_unobservable, %{reason: :worker_events_root_missing, runtime_root: runtime_root}}}
+    end
+  end
+
+  def begin_worker_assignment_observation(%{worker: worker}, _timeout_ms, _context)
+      when not is_map(worker),
+      do: {:ok, :worker_absent}
+
+  def begin_worker_assignment_observation(session, _timeout_ms, _context)
+      when is_map(session) and not is_map_key(session, :worker),
+      do: {:ok, :worker_absent}
+
+  def begin_worker_assignment_observation(_session, _timeout_ms, _context),
+    do: {:error, {:worker_assignments_unobservable, %{reason: :session_runtime_root_missing}}}
+
   @doc """
   Report what this session can prove about its worker delegations.
 
@@ -585,6 +628,79 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   def worker_assignments(_session, _context),
     do: {:error, {:worker_assignments_unobservable, %{reason: :session_runtime_root_missing}}}
+
+  @doc false
+  @impl true
+  def worker_assignments(
+        %{runtime_root: runtime_root, worker: worker} = session,
+        %{
+          worker_revision: baseline_revision,
+          worker_event_paths: baseline_paths,
+          status_read_timeout_ms: timeout_ms
+        },
+        context
+      )
+      when is_binary(runtime_root) and is_map(worker) and
+             is_integer(baseline_revision) and is_struct(baseline_paths, MapSet) and
+             is_integer(timeout_ms) and timeout_ms > 0 and is_map(context) do
+    worker_events = worker_events_root(runtime_root)
+
+    if File.dir?(worker_events) do
+      turn_paths =
+        worker_events
+        |> worker_event_paths()
+        |> MapSet.difference(baseline_paths)
+
+      with :ok <- validate_recordable_command_paths(turn_paths),
+           {:ok, assignment_messages} <-
+             read_worker_message_paths(
+               worker_event_paths(turn_paths, "assignment."),
+               @worker_assignment_prefix
+             ),
+           {:ok, result_messages} <-
+             read_worker_message_paths(
+               worker_event_paths(turn_paths, "result."),
+               @worker_result_prefix
+             ),
+           assignments =
+             assignment_messages
+             |> Enum.map(&message_fields/1)
+             |> Enum.filter(&(is_binary(Map.get(&1, "assignment")) and Map.get(&1, "assignment") != "")),
+           results = Enum.map(result_messages, &message_fields/1),
+           observed_assignments =
+             observed_worker_assignments(
+               assignments,
+               results,
+               channel_records(turn_paths),
+               session,
+               worker,
+               context
+             ),
+           {:ok, observed_worker} <- get_agent(session, worker, timeout_ms, context),
+           :ok <-
+             validate_worker_revision_observation(
+               baseline_revision,
+               Map.get(observed_worker, :revision),
+               observed_assignments
+             ) do
+        {:ok, observed_assignments}
+      else
+        {:error, {:worker_assignments_unobservable, _details} = reason} ->
+          {:error, reason}
+
+        {:error, reason} ->
+          {:error, {:worker_assignments_unobservable, %{reason: :worker_state_unobservable, stage: :turn_completion, error: reason}}}
+      end
+    else
+      {:error, {:worker_assignments_unobservable, %{reason: :worker_events_root_missing, runtime_root: runtime_root}}}
+    end
+  end
+
+  def worker_assignments(session, :worker_absent, context),
+    do: worker_assignments(session, context)
+
+  def worker_assignments(_session, _observation, _context),
+    do: {:error, {:worker_assignments_unobservable, %{reason: :invalid_worker_assignment_observation}}}
 
   @impl true
   def stop_session(%{name: name, env: env, server_task: server_task, runtime_root: runtime_root}, context) do
@@ -1825,11 +1941,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   defp read_worker_messages(runtime_root, pattern, prefix) do
+    runtime_root
+    |> worker_events_root()
+    |> Path.join(pattern)
+    |> Path.wildcard()
+    |> read_worker_message_paths(prefix)
+  end
+
+  defp read_worker_message_paths(paths, prefix) do
     messages =
-      runtime_root
-      |> worker_events_root()
-      |> Path.join(pattern)
-      |> Path.wildcard()
+      paths
       |> Enum.sort()
       |> Enum.reduce_while([], &read_worker_message(&1, prefix, &2))
 
@@ -1871,7 +1992,15 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   # proof that a delegation happened and was not recorded, which is exactly the
   # observation this contract must never round down to "no worker assignments".
   defp validate_recordable_commands(worker_events) do
-    case worker_events |> Path.join("unparsed.*") |> Path.wildcard() |> length() do
+    worker_events
+    |> Path.join("unparsed.*")
+    |> Path.wildcard()
+    |> MapSet.new()
+    |> validate_recordable_command_paths()
+  end
+
+  defp validate_recordable_command_paths(paths) do
+    case paths |> worker_event_paths("unparsed.") |> length() do
       0 ->
         :ok
 
@@ -1880,20 +2009,59 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     end
   end
 
-  defp channel_records(worker_events) do
+  defp channel_records(worker_events) when is_binary(worker_events) do
     %{
       deliveries: sequenced_worker_events(worker_events, "delivery.*"),
       replies: sequenced_worker_events(worker_events, "reply.*")
     }
   end
 
-  defp sequenced_worker_events(worker_events, pattern) do
+  defp channel_records(%MapSet{} = paths) do
+    %{
+      deliveries: sequenced_worker_events(paths, "delivery."),
+      replies: sequenced_worker_events(paths, "reply.")
+    }
+  end
+
+  defp sequenced_worker_events(worker_events, pattern) when is_binary(worker_events) do
     worker_events
     |> Path.join(pattern)
     |> Path.wildcard()
     |> Enum.sort()
     |> Enum.map(&Path.basename/1)
   end
+
+  defp sequenced_worker_events(%MapSet{} = paths, prefix) do
+    paths
+    |> worker_event_paths(prefix)
+    |> Enum.sort()
+    |> Enum.map(&Path.basename/1)
+  end
+
+  defp worker_event_paths(worker_events) when is_binary(worker_events) do
+    worker_events
+    |> Path.join("*")
+    |> Path.wildcard()
+    |> MapSet.new()
+  end
+
+  defp worker_event_paths(%MapSet{} = paths, prefix) do
+    Enum.filter(paths, &(Path.basename(&1) |> String.starts_with?(prefix)))
+  end
+
+  defp validate_worker_revision_observation(_baseline_revision, _observed_revision, [_first | _rest]),
+    do: :ok
+
+  defp validate_worker_revision_observation(revision, revision, [])
+       when is_integer(revision),
+       do: :ok
+
+  defp validate_worker_revision_observation(baseline_revision, observed_revision, [])
+       when is_integer(baseline_revision) and is_integer(observed_revision),
+       do: {:error, {:worker_assignments_unobservable, %{reason: :worker_event_recorder_unattested}}}
+
+  defp validate_worker_revision_observation(_baseline_revision, _observed_revision, []),
+    do: {:error, {:worker_assignments_unobservable, %{reason: :worker_revision_missing, stage: :turn_completion}}}
 
   # The `OCTO_MSG` envelope is preferred where an agent used it, because it
   # carries the agent's own assignment id and status. Where it was not used the

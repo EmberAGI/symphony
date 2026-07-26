@@ -373,6 +373,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
 
       recall_revision
       agent_revision=$((agent_revision + 1))
+      mkdir -p "$state_root"
       printf '%s\\n' "$agent_revision" > "$state_root/revision.$agent_name"
       recall_kind prompt
       replay "${HERDR_REPLAY_PROMPT:-agent-prompt-working}"

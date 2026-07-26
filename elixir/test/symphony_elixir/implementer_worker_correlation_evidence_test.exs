@@ -135,15 +135,17 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     # Exactly what the EMB-1282 orchestrator did: it delegated bounded work to
     # the prestarted worker through its own Herdr authority. Here the worker
     # never answers, so there is a delegation and no result to correlate.
-    assert :ok =
-             orchestrator_prompt(
-               session,
-               context,
-               "implementer_worker",
-               "EMB1282-EVIDENCE-7F3A: produce the bounded deliverable"
-             )
+    action = fn ->
+      assert :ok =
+               orchestrator_prompt(
+                 session,
+                 context,
+                 "implementer_worker",
+                 "EMB1282-EVIDENCE-7F3A: produce the bounded deliverable"
+               )
+    end
 
-    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
 
     refute log =~ @correlation_event
 
@@ -166,25 +168,16 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     |> Path.wildcard()
     |> Enum.each(&File.rm!/1)
 
-    assert {_output, 0} =
-             System.cmd(
-               context.herdr_bin,
-               [
-                 "--session",
-                 session.name,
-                 "agent",
-                 "prompt",
-                 "implementer_worker",
+    action = fn ->
+      assert {_output, 0} =
+               native_worker_prompt(
+                 session,
+                 context,
                  "EMB1295-BYPASS: produce the bounded deliverable"
-               ],
-               env: [
-                 {"HERDR_FAKE_LOG", context.herdr_log},
-                 {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
-               ],
-               stderr_to_stdout: true
-             )
+               )
+    end
 
-    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
 
     refute log =~ @correlation_event
     refute log =~ @no_delegation_event
@@ -252,23 +245,25 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     # Neither side uses the `OCTO_MSG` envelope. The delegation is still fully
     # observable: the orchestrator's only authority over the worker is its own
     # Herdr shim, and the worker's only way back is the same channel.
-    assert :ok =
-             orchestrator_prompt(
-               session,
-               context,
-               "implementer_worker",
-               "EMB1282-EVIDENCE-7F3A: produce the bounded deliverable"
-             )
+    action = fn ->
+      assert :ok =
+               orchestrator_prompt(
+                 session,
+                 context,
+                 "implementer_worker",
+                 "EMB1282-EVIDENCE-7F3A: produce the bounded deliverable"
+               )
 
-    assert :ok =
-             worker_prompt(
-               session,
-               context,
-               "implementer_orchestrator",
-               "bounded deliverable finished; artifact written"
-             )
+      assert :ok =
+               worker_prompt(
+                 session,
+                 context,
+                 "implementer_orchestrator",
+                 "bounded deliverable finished; artifact written"
+               )
+    end
 
-    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
 
     assert {:ok, {_next_session, turn}} = result
 
@@ -296,27 +291,29 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
 
     # The spelling canary EMB-1284 used, and the one the generated
     # `launch-worker` script uses: the session is named before the subcommand.
-    assert :ok =
-             orchestrator_argv(session, context, [
-               "--session",
-               session.name,
-               "agent",
-               "prompt",
-               "implementer_worker",
-               "OCTO_MSG/1 kind=assignment assignment=EMB1284-EVIDENCE-9C21 deliverable=bounded"
-             ])
+    action = fn ->
+      assert :ok =
+               orchestrator_argv(session, context, [
+                 "--session",
+                 session.name,
+                 "agent",
+                 "prompt",
+                 "implementer_worker",
+                 "OCTO_MSG/1 kind=assignment assignment=EMB1284-EVIDENCE-9C21 deliverable=bounded"
+               ])
 
-    assert :ok =
-             worker_argv(session, context, [
-               "--session",
-               session.name,
-               "agent",
-               "prompt",
-               "implementer_orchestrator",
-               "OCTO_MSG/1 kind=result assignment=EMB1284-EVIDENCE-9C21 status=completed"
-             ])
+      assert :ok =
+               worker_argv(session, context, [
+                 "--session",
+                 session.name,
+                 "agent",
+                 "prompt",
+                 "implementer_orchestrator",
+                 "OCTO_MSG/1 kind=result assignment=EMB1284-EVIDENCE-9C21 status=completed"
+               ])
+    end
 
-    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
 
     assert {:ok, {_next_session, turn}} = result
 
@@ -381,22 +378,24 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
   test "a delegation the recorder could not classify fails the run instead of completing it", context do
     session = start_implementer_session(context, "evidence-unclassifiable")
 
-    assert :ok =
-             orchestrator_argv(
-               session,
-               context,
-               [
-                 "--unmodelled-global",
-                 "value",
-                 "agent",
-                 "prompt",
-                 "implementer_worker",
-                 "OCTO_MSG/1 kind=assignment assignment=EMB1284-EVIDENCE-9C21 deliverable=bounded"
-               ],
-               :any
-             )
+    action = fn ->
+      assert :ok =
+               orchestrator_argv(
+                 session,
+                 context,
+                 [
+                   "--unmodelled-global",
+                   "value",
+                   "agent",
+                   "prompt",
+                   "implementer_worker",
+                   "OCTO_MSG/1 kind=assignment assignment=EMB1284-EVIDENCE-9C21 deliverable=bounded"
+                 ],
+                 :any
+               )
+    end
 
-    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
 
     refute log =~ @correlation_event
 
@@ -411,20 +410,22 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
   test "a recorded worker result whose assignment record is missing is typed, not discarded", context do
     session = start_implementer_session(context, "evidence-orphan-result")
 
-    assert :ok =
-             worker_prompt(
-               session,
-               context,
-               "implementer_orchestrator",
-               "OCTO_MSG/1 kind=result assignment=EMB1282-EVIDENCE-7F3A status=completed"
-             )
+    action = fn ->
+      assert :ok =
+               worker_prompt(
+                 session,
+                 context,
+                 "implementer_orchestrator",
+                 "OCTO_MSG/1 kind=result assignment=EMB1282-EVIDENCE-7F3A status=completed"
+               )
+    end
 
     assert {:error,
             {:implementer_worker_assignment_unrecorded,
              %{
                assignment_id: "EMB1282-EVIDENCE-7F3A",
                result: %{assignment_id: "EMB1282-EVIDENCE-7F3A", status: "completed"}
-             }}} = AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), [])
+             }}} = run_runtime_turn(session, action)
 
     stop(session)
   end
@@ -432,23 +433,25 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
   test "a fully recorded delegation emits durable correlation evidence joinable to provider session and issue", context do
     session = start_implementer_session(context, "evidence-correlated")
 
-    assert :ok =
-             orchestrator_prompt(
-               session,
-               context,
-               "implementer_worker",
-               "OCTO_MSG/1 kind=assignment assignment=EMB1282-EVIDENCE-7F3A deliverable=bounded"
-             )
+    action = fn ->
+      assert :ok =
+               orchestrator_prompt(
+                 session,
+                 context,
+                 "implementer_worker",
+                 "OCTO_MSG/1 kind=assignment assignment=EMB1282-EVIDENCE-7F3A deliverable=bounded"
+               )
 
-    assert :ok =
-             worker_prompt(
-               session,
-               context,
-               "implementer_orchestrator",
-               "OCTO_MSG/1 kind=result assignment=EMB1282-EVIDENCE-7F3A status=completed"
-             )
+      assert :ok =
+               worker_prompt(
+                 session,
+                 context,
+                 "implementer_orchestrator",
+                 "OCTO_MSG/1 kind=result assignment=EMB1282-EVIDENCE-7F3A status=completed"
+               )
+    end
 
-    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
 
     assert {:ok, {_next_session, turn}} = result
 
@@ -471,7 +474,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
   test "a run that never delegated emits durable positive evidence instead of ambiguous silence", context do
     session = start_implementer_session(context, "evidence-direct-work")
 
-    {result, log} = with_log(fn -> AgentRuntime.run_turn(session, "Implement the bounded issue.", issue(), []) end)
+    {result, log} = with_log(fn -> run_runtime_turn(session, fn -> :ok end) end)
 
     assert {:ok, {_next_session, turn}} = result
     assert turn.worker_assignments == []
@@ -564,6 +567,37 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     session
   end
 
+  defp run_runtime_turn(session, action) when is_function(action, 0) do
+    AgentRuntime.run_turn(
+      session,
+      "Implement the bounded issue.",
+      issue(),
+      on_message: fn
+        %{event: :session_started} -> action.()
+        _message -> :ok
+      end
+    )
+  end
+
+  defp native_worker_prompt(session, context, message) do
+    System.cmd(
+      context.herdr_bin,
+      [
+        "--session",
+        session.name,
+        "agent",
+        "prompt",
+        "implementer_worker",
+        message
+      ],
+      env: [
+        {"HERDR_FAKE_LOG", context.herdr_log},
+        {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
+      ],
+      stderr_to_stdout: true
+    )
+  end
+
   defp orchestrator_prompt(session, context, agent, message),
     do: shim_prompt(Path.join(session.herdr_session.orchestrator_bin, "herdr"), session, context, agent, message)
 
@@ -594,7 +628,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
       )
 
   defp shim_argv(shim, session, context, argv, expected_status) do
-    assert {_output, status} =
+    assert {output, status} =
              System.cmd(shim, argv,
                env: [
                  {"HERDR_FAKE_LOG", context.herdr_log},
@@ -605,7 +639,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
 
     # The recorder runs before the command is handed to the real binary, so an
     # argv the binary itself rejects still leaves its evidence behind.
-    if expected_status != :any, do: assert(status == expected_status)
+    if expected_status != :any, do: assert(status == expected_status, output)
 
     :ok
   end

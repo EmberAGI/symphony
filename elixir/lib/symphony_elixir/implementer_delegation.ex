@@ -114,7 +114,14 @@ defmodule SymphonyElixir.ImplementerDelegation do
     status_read_timeout_ms = Keyword.get(opts, :status_read_timeout_ms, Supervision.default_status_read_timeout_ms())
     on_message = Keyword.get(opts, :on_message, fn _message -> :ok end)
 
-    with {:ok, turn_start} <-
+    with {:ok, worker_observation} <-
+           begin_worker_assignment_observation(
+             transport,
+             herdr_session,
+             status_read_timeout_ms,
+             transport_context
+           ),
+         {:ok, turn_start} <-
            begin_turn(
              transport,
              transport_context,
@@ -167,7 +174,12 @@ defmodule SymphonyElixir.ImplementerDelegation do
          response = Map.get(read, :text, ""),
          :ok <- terminal_turn_status(contract_provider(Map.get(session, :contract, %{}), :orchestrator), response),
          {:ok, worker_assignments} <-
-           worker_assignments(transport, herdr_session, transport_context),
+           worker_assignments(
+             transport,
+             herdr_session,
+             worker_observation,
+             transport_context
+           ),
          :ok <- validate_worker_assignments(worker_assignments, herdr_session) do
       # Herdr's terminal `agent get` response may omit `agent_session` even
       # though the acknowledged prompt response carried it. Preserve the
@@ -221,17 +233,51 @@ defmodule SymphonyElixir.ImplementerDelegation do
   # A transport that cannot report assignments has not reported "no
   # assignments"; it has reported nothing. The two are kept apart here so the
   # caller decides, rather than inheriting an empty list it cannot distinguish.
-  defp worker_assignments(transport, herdr_session, transport_context) do
-    if function_exported?(transport, :worker_assignments, 2) do
-      case transport.worker_assignments(herdr_session, transport_context) do
-        {:error, {:worker_assignments_unobservable, details}} ->
-          {:ok, {:unobservable, details}}
+  defp worker_assignments(transport, herdr_session, worker_observation, transport_context) do
+    result =
+      cond do
+        function_exported?(transport, :worker_assignments, 3) and
+            worker_observation != :legacy ->
+          transport.worker_assignments(
+            herdr_session,
+            worker_observation,
+            transport_context
+          )
 
-        result ->
-          result
+        function_exported?(transport, :worker_assignments, 2) ->
+          transport.worker_assignments(herdr_session, transport_context)
+
+        true ->
+          {:error, {:worker_assignments_unobservable, %{reason: :transport_capability_missing, transport: transport}}}
+      end
+
+    case result do
+      {:error, {:worker_assignments_unobservable, details}} ->
+        {:ok, {:unobservable, details}}
+
+      result ->
+        result
+    end
+  end
+
+  defp begin_worker_assignment_observation(transport, herdr_session, timeout_ms, transport_context) do
+    if function_exported?(transport, :begin_worker_assignment_observation, 3) do
+      case transport.begin_worker_assignment_observation(
+             herdr_session,
+             timeout_ms,
+             transport_context
+           ) do
+        {:ok, observation} ->
+          {:ok, observation}
+
+        {:error, {:worker_assignments_unobservable, details}} ->
+          {:error, {:implementer_worker_assignments_unobservable, details}}
+
+        {:error, reason} ->
+          {:error, {:implementer_worker_assignments_unobservable, %{reason: :worker_observation_failed, error: reason}}}
       end
     else
-      {:ok, {:unobservable, %{reason: :transport_capability_missing, transport: transport}}}
+      {:ok, :legacy}
     end
   end
 
