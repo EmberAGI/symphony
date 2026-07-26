@@ -239,6 +239,59 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
+  @tag timeout: 600_000
+  test "a later runtime turn cannot reuse an earlier turn's recorded delegation", context do
+    session = start_implementer_session(context, "evidence-turn-local-native-bypass")
+
+    turn_one_action = fn ->
+      assert :ok =
+               orchestrator_prompt(
+                 session,
+                 context,
+                 "implementer_worker",
+                 "OCTO_MSG/1 kind=assignment assignment=EMB1295-TURN-ONE deliverable=bounded"
+               )
+
+      assert :ok =
+               worker_prompt(
+                 session,
+                 context,
+                 "implementer_orchestrator",
+                 "OCTO_MSG/1 kind=result assignment=EMB1295-TURN-ONE status=completed"
+               )
+    end
+
+    {turn_one_result, turn_one_log} =
+      with_log(fn -> run_runtime_turn(session, turn_one_action) end)
+
+    assert {:ok, {next_session, turn_one}} = turn_one_result
+
+    assert [%{assignment_id: "EMB1295-TURN-ONE", status: :completed, evidence: :envelope}] =
+             turn_one.worker_assignments
+
+    assert turn_one_log =~ @correlation_event
+
+    turn_two_action = fn ->
+      assert {_output, 0} =
+               native_worker_prompt(
+                 next_session,
+                 context,
+                 "EMB1295-TURN-TWO-BYPASS: produce the bounded deliverable"
+               )
+    end
+
+    {turn_two_result, turn_two_log} =
+      with_log(fn -> run_runtime_turn(next_session, turn_two_action) end)
+
+    unattested = %{reason: :worker_event_recorder_unattested}
+    assert {:error, {:implementer_worker_assignments_unobservable, ^unattested}} = turn_two_result
+
+    refute turn_two_log =~ @correlation_event
+    refute turn_two_log =~ @no_delegation_event
+
+    stop(next_session)
+  end
+
   test "a delegation the worker answered is correlated from the channel itself, with no envelope", context do
     session = start_implementer_session(context, "evidence-structural")
 
