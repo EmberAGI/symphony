@@ -231,22 +231,25 @@ admission opens.
 - The same scoped `Runtime.ProcessOwnership` claim durably carries the bounded
   failure observation while a failed run is released or retried. A role-service
   restart reloads that observation before classifying the next equivalent
-  failure. A later normal exit from a retry at the same reset marker must not
-  clear it or enter the ordinary completion branch; the prior typed failure
-  remains durable and the run is surfaced blocked. A verified successful retry
-  after the reset marker changes is a distinct run: it may enter normal
-  completion and clear the prior observation at that one settlement seam.
+  failure. A later normal exit from any run that inherited that observation at
+  the same reset marker must not clear it or enter the ordinary completion
+  branch, regardless of reconstructed retry-attempt metadata; the prior typed
+  failure remains durable and the run is surfaced blocked. A verified
+  successful retry after the reset marker changes is a distinct run: it may
+  enter normal completion and clear the prior observation at that one
+  settlement seam.
   Continuation checks after a clean run carry no failure observation and never
   consult stale failure evidence. This is claim metadata, not a new storage or
   runtime authority.
-- A live blocked ownership record remains non-reacquirable while its stored
-  reset marker equals the current marker. When an active issue presents changed
-  material input, candidate selection treats the dispatch as a retry and passes
-  the current marker into ownership acquisition. Acquisition may archive and
-  replace the blocked record only when that marker differs, preserving the old
-  failure observation for settlement. Symphony's own `Human Escalation` control
-  label is excluded from the input fingerprint, so escalation cannot create its
-  own reset evidence. The same public ownership rule accepts a changed verified
+- A blocked ownership record remains non-reacquirable while its stored reset
+  marker equals the current marker, even when its holder process is dead or the
+  role service restarted. When an active issue presents changed material input,
+  candidate selection treats the dispatch as a retry and passes the current
+  marker into ownership acquisition. Acquisition may archive and replace the
+  blocked record only when that marker differs, preserving the old failure
+  observation for settlement. Symphony's own `Human Escalation` control label
+  is excluded from the input fingerprint, so escalation cannot create its own
+  reset evidence. The same public ownership rule accepts a changed verified
   execution generation and rejects an unchanged generation; no role-service
   restart is required to make changed evidence safe.
 - Fail-closed classification deliberately increases the Human Escalation blast

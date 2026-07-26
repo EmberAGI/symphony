@@ -786,12 +786,13 @@ Retry entry creation:
   checkpoint and failure fingerprint are unchanged and there is no new reset
   evidence.
 - A blocked issue remains claimed and skipped while its current reset marker
-  equals the stored failure marker. If the active issue's material
-  issue/branch/workspace input or verified execution generation changes,
-  dispatch uses retry attempt `1` and passes the current marker to ownership
-  acquisition. The blocked record may be archived and replaced only on that
-  mismatch, with its failure observation preserved. The automatically applied
-  `Human Escalation` label is control metadata, not reset evidence.
+  equals the stored failure marker. Holder death and role-service restart are
+  not reset evidence. If the active issue's material issue/branch/workspace
+  input or verified execution generation changes, dispatch uses retry attempt
+  `1` and passes the current marker to ownership acquisition. The blocked
+  record may be archived and replaced only on that mismatch, with its failure
+  observation preserved. The automatically applied `Human Escalation` label is
+  control metadata, not reset evidence.
 
 Backoff formula:
 

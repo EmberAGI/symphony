@@ -1183,21 +1183,17 @@ defmodule SymphonyElixir.Orchestrator do
   defp preserve_failed_retry_completion(:normal, running_entry, execution_generation) do
     observation = get_in(running_entry, [:process_ownership, :failure_observation])
 
-    if retry_dispatch?(Map.get(running_entry, :retry_attempt)) do
-      context =
-        runtime_failure_context(
-          running_entry_issue_id(running_entry),
-          running_entry,
-          execution_generation
-        )
+    context =
+      runtime_failure_context(
+        running_entry_issue_id(running_entry),
+        running_entry,
+        execution_generation
+      )
 
-      case AgentRuntime.retried_completion_failure(observation, context) do
-        {:block, failure} -> {{:irrecoverable_runtime_failed, failure}, %{}}
-        :clear -> {:normal, %{failure_observation: :clear}}
-        :none -> {:normal, %{}}
-      end
-    else
-      {:normal, %{}}
+    case AgentRuntime.retried_completion_failure(observation, context) do
+      {:block, failure} -> {{:irrecoverable_runtime_failed, failure}, %{}}
+      :clear -> {:normal, %{failure_observation: :clear}}
+      :none -> {:normal, %{}}
     end
   end
 

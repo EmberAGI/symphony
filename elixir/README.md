@@ -233,15 +233,17 @@ an active state remains blocked.
 Before the first failure-driven redispatch, Symphony re-reads durable
 process-ownership evidence. An unchanged checkpoint with the identical failure
 fingerprint and no reset evidence is blocked before another run starts. If an
-already-started retry later exits normally, that exit does not erase the prior
-typed failure or enter the normal-completion path when its reset marker is
-unchanged. A verified successful retry after changed material
-issue/branch/workspace input or execution generation is a distinct run and
-clears the prior observation at terminal settlement. The orchestrator passes
-that current marker into ownership acquisition, which may replace a live
-blocked record only when the stored marker differs. The automatically applied
-`Human Escalation` label does not change that marker. Clean continuation checks
-do not carry or consult stale failure observations.
+already-started replacement run inherits that observation and later exits
+normally, that exit does not erase the prior typed failure or enter the
+normal-completion path when its reset marker is unchanged, regardless of
+reconstructed retry-attempt metadata. A verified successful retry after changed
+material issue/branch/workspace input or execution generation is a distinct run
+and clears the prior observation at terminal settlement. The orchestrator
+passes that current marker into ownership acquisition, which may replace a
+blocked record only when the stored marker differs, even after holder death or
+a role-service restart. The automatically applied `Human Escalation` label does
+not change that marker. Clean continuation checks do not carry or consult stale
+failure observations.
 
 The fail-closed default intentionally sends previously generic workspace/setup,
 maximum-turn, cleanup/settlement, supervisor, exception, and future adapter

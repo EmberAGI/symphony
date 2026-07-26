@@ -695,7 +695,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     do: true
 
   defp stale_record?(%{"state" => state} = record)
-       when state in ["active", "retrying", "quarantined", "blocked"] do
+       when state in ["active", "retrying", "quarantined"] do
     holder_has_dead_pid?(record["holder"]) and not local_process_live?(record)
   end
 
@@ -717,9 +717,10 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   defp blocked_reset_marker_changed?(_record, _attrs), do: false
 
-  defp reacquirable_record?(record, attrs) do
-    blocked_reset_marker_changed?(record, attrs) or stale_record?(record)
-  end
+  defp reacquirable_record?(%{"state" => "blocked"} = record, attrs),
+    do: blocked_reset_marker_changed?(record, attrs)
+
+  defp reacquirable_record?(record, _attrs), do: stale_record?(record)
 
   defp holder_has_dead_pid?(holder) when is_binary(holder) do
     case holder |> String.split(":") |> Enum.reverse() do
