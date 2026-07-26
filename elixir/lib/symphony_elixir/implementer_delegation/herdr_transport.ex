@@ -1160,30 +1160,40 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   defp herdr_injected_launch_flag(_provider_command), do: nil
 
   defp ensure_provider_wrapper(runtime_root, provider_command, session_env, _context) do
+    case ensure_role_bash_environments(runtime_root) do
+      :ok ->
+        ensure_provider_wrapper_file(runtime_root, provider_command, session_env)
+
+      {:error, reason} ->
+        {:error, {:herdr_wrapper_resolution_failed, %{reason: {:bash_env_materialization_failed, reason}}}}
+    end
+  end
+
+  defp ensure_provider_wrapper_file(runtime_root, provider_command, session_env) do
     orchestrator_bin = Path.join(runtime_root, "orchestrator-bin")
     provider_wrapper = Path.join(orchestrator_bin, provider_command)
 
-    with :ok <- ensure_role_bash_environments(runtime_root) do
-      if File.exists?(provider_wrapper) or File.lstat(provider_wrapper) != {:error, :enoent} do
-        case validate_launch_artifact(runtime_root, orchestrator_bin, provider_wrapper) do
-          :ok -> :ok
-          {:error, details} -> {:error, {:herdr_wrapper_resolution_failed, details}}
-        end
-      else
-        inherited_path = inherited_provider_path(session_env, orchestrator_bin)
-        body = provider_wrapper_body(runtime_root, provider_command, inherited_path, %{})
-
-        with :ok <- File.mkdir_p(orchestrator_bin),
-             :ok <- write_executable(provider_wrapper, body) do
-          :ok
-        else
-          {:error, reason} ->
-            {:error, {:herdr_wrapper_resolution_failed, %{reason: {:materialization_failed, reason}}}}
-        end
+    if File.exists?(provider_wrapper) or File.lstat(provider_wrapper) != {:error, :enoent} do
+      case validate_launch_artifact(runtime_root, orchestrator_bin, provider_wrapper) do
+        :ok -> :ok
+        {:error, details} -> {:error, {:herdr_wrapper_resolution_failed, details}}
       end
     else
+      materialize_provider_wrapper(runtime_root, provider_wrapper, provider_command, session_env)
+    end
+  end
+
+  defp materialize_provider_wrapper(runtime_root, provider_wrapper, provider_command, session_env) do
+    orchestrator_bin = Path.join(runtime_root, "orchestrator-bin")
+    inherited_path = inherited_provider_path(session_env, orchestrator_bin)
+    body = provider_wrapper_body(runtime_root, provider_command, inherited_path, %{})
+
+    with :ok <- File.mkdir_p(orchestrator_bin),
+         :ok <- write_executable(provider_wrapper, body) do
+      :ok
+    else
       {:error, reason} ->
-        {:error, {:herdr_wrapper_resolution_failed, %{reason: {:bash_env_materialization_failed, reason}}}}
+        {:error, {:herdr_wrapper_resolution_failed, %{reason: {:materialization_failed, reason}}}}
     end
   end
 

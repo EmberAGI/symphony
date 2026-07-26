@@ -189,7 +189,8 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     refute log =~ @correlation_event
     refute log =~ @no_delegation_event
 
-    assert {:error, {:implementer_worker_assignments_unobservable, %{reason: :worker_event_recorder_unattested}}} = result
+    unattested = %{reason: :worker_event_recorder_unattested}
+    assert {:error, {:implementer_worker_assignments_unobservable, ^unattested}} = result
 
     stop(session)
   end
@@ -348,7 +349,9 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
 
     refute log =~ @correlation_event
 
-    assert {:error, {:implementer_worker_assignments_unobservable, %{reason: :unrecognized_herdr_command_form, unparsed: 1}}} =
+    unrecognized = %{reason: :unrecognized_herdr_command_form, unparsed: 1}
+
+    assert {:error, {:implementer_worker_assignments_unobservable, ^unrecognized}} =
              result
 
     stop(session)
