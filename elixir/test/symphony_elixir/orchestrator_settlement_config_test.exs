@@ -59,12 +59,14 @@ defmodule SymphonyElixir.OrchestratorSettlementConfigTest do
       assert %{verified: true, evidence_status: :captured} = status.cleanup_evidence,
              "the settlement's own evidence was replaced by unverified timeout evidence"
 
-      retry = updated.retry_attempts[issue.id]
+      refute Map.has_key?(updated.retry_attempts, issue.id)
 
-      assert is_map(retry), "the deadline must still finalize the issue lifecycle"
+      assert %{family: :unclassified_runtime_failure, error: blocker} =
+               updated.blocked_failures[issue.id]
 
-      assert retry.error =~ "terminal_settlement_completed_late",
-             "the retry must record late completion, not a fabricated timeout: " <> inspect(retry.error)
+      assert blocker =~ "terminal_settlement_completed_late",
+             "the blocker must record late completion, not a fabricated timeout: " <>
+               inspect(blocker)
     end
 
     test "a quarantine carrying unavailable evidence is still a terminal typed write" do
@@ -100,10 +102,14 @@ defmodule SymphonyElixir.OrchestratorSettlementConfigTest do
       assert %{evidence_status: :unavailable} = status.cleanup_evidence,
              "the settlement's unavailable-evidence marker was overwritten"
 
-      retry = updated.retry_attempts[issue.id]
+      refute Map.has_key?(updated.retry_attempts, issue.id)
 
-      assert is_map(retry) and retry.error =~ "terminal_settlement_completed_late",
-             "the retry must record late completion, not a fabricated timeout: " <> inspect(retry)
+      assert %{family: :unclassified_runtime_failure, error: blocker} =
+               updated.blocked_failures[issue.id]
+
+      assert blocker =~ "terminal_settlement_completed_late",
+             "the blocker must record late completion, not a fabricated timeout: " <>
+               inspect(blocker)
     end
   end
 

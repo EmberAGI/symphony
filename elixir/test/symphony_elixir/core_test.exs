@@ -640,12 +640,17 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
-    send(pid, {:DOWN, ref, :process, self(), :boom})
+    send(
+      pid,
+      {:DOWN, ref, :process, self(), {:agent_runtime_failed, {:network_error, :econnreset}}}
+    )
+
     state = settled_state_after_down(pid, issue_id)
 
-    assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
+    assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: error} =
              state.retry_attempts[issue_id]
 
+    assert error =~ "transient_runtime_failure"
     assert_due_in_range(due_at_ms, 38_000, 40_500)
   end
 
@@ -723,7 +728,10 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
-    send(pid, {:DOWN, ref, :process, self(), :boom})
+    send(
+      pid,
+      {:DOWN, ref, :process, self(), {:agent_runtime_failed, {:network_error, :econnreset}}}
+    )
 
     state = settled_state_after_down(pid, issue_id)
     refute Map.has_key?(state.running, issue_id)
@@ -761,12 +769,17 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
-    send(pid, {:DOWN, ref, :process, self(), :boom})
+    send(
+      pid,
+      {:DOWN, ref, :process, self(), {:agent_runtime_failed, {:network_error, :econnreset}}}
+    )
+
     state = settled_state_after_down(pid, issue_id)
 
-    assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
+    assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: error} =
              state.retry_attempts[issue_id]
 
+    assert error =~ "transient_runtime_failure"
     assert_due_in_range(due_at_ms, 8_000, 10_500)
   end
 
@@ -1464,8 +1477,12 @@ defmodule SymphonyElixir.CoreTest do
         state: "In Progress"
       }
 
-      assert catch_exit(AgentRunner.run(issue, nil, worker_host: "worker-a")) ==
-               {:agent_runtime_failed, {:workspace_prepare_failed, "worker-a", 75, "worker-a prepare failed\n"}}
+      assert {:irrecoverable_runtime_failed,
+              %{
+                family: :unclassified_runtime_failure,
+                subtype: "workspace_prepare_failed",
+                retryable?: false
+              }} = catch_exit(AgentRunner.run(issue, nil, worker_host: "worker-a"))
 
       trace = File.read!(trace_file)
       assert trace =~ "worker-a bash -lc"
@@ -1775,13 +1792,18 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert catch_exit(
-               run_agent_with_ownership(issue, nil,
-                 role: "reviewer",
-                 issue_state_fetcher: state_fetcher
+      assert {:irrecoverable_runtime_failed,
+              %{
+                family: :unclassified_runtime_failure,
+                subtype: "max_turns_exhausted",
+                retryable?: false
+              }} =
+               catch_exit(
+                 run_agent_with_ownership(issue, nil,
+                   role: "reviewer",
+                   issue_state_fetcher: state_fetcher
+                 )
                )
-             ) ==
-               {:agent_runtime_failed, {:max_turns_exhausted, %{issue_id: "issue-max-turns", turn: 2, max_turns: 2}}}
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1

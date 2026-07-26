@@ -120,7 +120,7 @@ defmodule SymphonyElixir.WorkAdmissionTest do
       tracker_kind: "memory",
       workspace_root: Path.join(test_root, "workspaces"),
       poll_interval_ms: 60_000,
-      max_retry_backoff_ms: 300,
+      max_retry_backoff_ms: 1_000,
       hook_before_run: "sleep 30"
     )
 
@@ -136,12 +136,16 @@ defmodule SymphonyElixir.WorkAdmissionTest do
     on_exit(fn -> stop_orchestrator!(pid) end)
 
     open_and_poll!(orchestrator_name, retry_issue)
-    Process.exit(wait_for_running_pid(pid, retry_issue.id), :kill)
+
+    Process.exit(
+      wait_for_running_pid(pid, retry_issue.id),
+      {:agent_runtime_failed, {:network_error, :test_disconnect}}
+    )
 
     %{retrying: [%{issue_id: ^retry_issue_id, due_in_ms: due_before_close}]} =
       wait_for_retry(orchestrator_name, retry_issue.id)
 
-    assert due_before_close > 100
+    assert due_before_close > 500
     drain_retry_refreshes(retry_issue.id)
 
     assert {:ok, %{status: "closed"}} = Orchestrator.close_work_admission(orchestrator_name, "generation-old")
@@ -186,13 +190,24 @@ defmodule SymphonyElixir.WorkAdmissionTest do
     on_exit(fn -> stop_orchestrator!(pid) end)
 
     open_and_poll!(orchestrator_name, retry_issue)
-    Process.exit(wait_for_running_pid(pid, retry_issue.id), :kill)
+
+    Process.exit(
+      wait_for_running_pid(pid, retry_issue.id),
+      {:agent_runtime_failed, {:network_error, :test_disconnect}}
+    )
+
     _retry = wait_for_retry(orchestrator_name, retry_issue.id)
     drain_retry_refreshes(retry_issue.id)
 
     assert {:ok, %{status: "closed"}} = Orchestrator.close_work_admission(orchestrator_name, "generation-old")
     Process.sleep(1_100)
     refute_receive {:memory_tracker_fetch_issue_states_by_ids, [^retry_issue_id]}, 20
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_issues,
+      [%{retry_issue | description: "new durable retry evidence"}]
+    )
 
     assert {:ok, %{status: "open"}} =
              Orchestrator.open_work_admission(orchestrator_name, "generation-old")
@@ -655,7 +670,7 @@ defmodule SymphonyElixir.WorkAdmissionTest do
     end
   end
 
-  defp wait_for_retry(orchestrator_name, issue_id, attempts \\ 100)
+  defp wait_for_retry(orchestrator_name, issue_id, attempts \\ 500)
 
   defp wait_for_retry(_orchestrator_name, _issue_id, 0), do: flunk("retry lifecycle retry was not scheduled")
 
