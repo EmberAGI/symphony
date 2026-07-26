@@ -655,9 +655,13 @@ launch token, and only then execs the projection. The projection writes its own
 receives `developer_instructions` and Claude receives `--append-system-prompt`
 unchanged from their provider contracts. Each provider wrapper also exports a
 role-specific, run-owned `BASH_ENV` file that re-prepends the orchestrator or
-restricted-worker Herdr projection after a provider tool's login shell reads
-system and user profiles. A profile that replaces `PATH` therefore cannot
-route inter-agent commands to a user-installed Herdr outside the recorder.
+restricted-worker Herdr projection. Non-interactive Bash outside POSIX mode
+sources that file after its login profiles, so a Bash profile that replaces
+`PATH` cannot route inter-agent commands to a user-installed Herdr outside the
+recorder. This mechanism does not claim PATH repair for POSIX-mode Bash,
+interactive Bash, or non-Bash shells; the turn-local worker-state observation
+below makes a delegation through any such residual bypass fail typed instead
+of being reported as no delegation.
 The files live only beneath the isolated runtime root; provider `HOME` and
 provider-auth environment values remain unchanged. The transport mirrors the
 projection validation before launching and requires both acknowledgements,
@@ -745,9 +749,16 @@ The run-owned transport projection records only those messages as ephemeral
 per-session evidence beneath the existing isolated runtime root. The records
 are not runtime authority, are never Linear comments, and are removed with the
 runtime root. Every invocation of either role's Herdr projection first records
-a bounded attestation. A session with a live worker and no attestation fails
-typed as `worker_event_recorder_unattested`; the single launch probe makes an
-otherwise-empty recording positive evidence that no delegation occurred.
+a bounded attestation. The launch probe proves startup reachability only; it is
+never accepted as evidence that a later turn did not delegate. Immediately
+before prompting the orchestrator, the transport snapshots the worker's
+Herdr-owned revision and the exact set of existing worker-event files. Turn
+completion considers only files absent from that opening set. No turn-local
+assignment plus an unchanged worker revision is positive, falsifiable
+no-delegation evidence; no turn-local assignment plus a changed worker
+revision fails typed as `worker_event_recorder_unattested`. Exact file
+identities, rather than shared-prefix counts or sequence high-water marks,
+define the turn cursor.
 At turn completion, the Transport Interface reports bounded
 assignment entries containing `assignment_id`, lifecycle `status`, and a
 result with the observed `assignment_id`; the Implementer runtime accepts only
