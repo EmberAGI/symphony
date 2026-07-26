@@ -1491,7 +1491,8 @@ defmodule SymphonyElixir.HerdrTransportTest do
         extra_env: [
           {"HERDR_FAKE_LOG", context.log},
           {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
-          {"HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS", "0.01"}
+          {"HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS", "0.01"},
+          {"HERDR_REPLAY_WAIT", "agent-wait-working"}
         ],
         start_timeout_ms: 2_000,
         poll_interval_ms: 5
@@ -1525,7 +1526,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
                  adapter_context
                )
 
-      assert {:ok, %{phase: :completed, agent: observed}} =
+      assert {:ok, %{phase: :working, agent: observed}} =
                HerdrTransport.begin_turn(
                  session,
                  agent,
@@ -1534,7 +1535,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
                  adapter_context
                )
 
-      assert observed.agent_status == "idle"
+      assert observed.agent_status == "working"
 
       prompt_commands =
         context.log
@@ -1547,6 +1548,9 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
       commands = File.read!(context.log)
       assert length(:binary.matches(commands, "agent send-keys implementer_orchestrator enter")) == 1
+      assert length(:binary.matches(commands, "agent wait implementer_orchestrator")) == 1
+      assert commands =~ "--until working --until blocked --timeout 750"
+      refute commands =~ "agent get implementer_orchestrator"
       refute commands =~ "agent prompt implementer_orchestrator   --wait"
       assert :ok = HerdrTransport.stop_session(session, adapter_context)
       File.write!(context.log, "")
@@ -1615,7 +1619,8 @@ defmodule SymphonyElixir.HerdrTransportTest do
       extra_env: [
         {"HERDR_FAKE_LOG", context.log},
         {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
-        {"HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS", "0.05"}
+        {"HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS", "0.05"},
+        {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
       ],
       start_timeout_ms: 2_000,
       poll_interval_ms: 5
@@ -1663,6 +1668,8 @@ defmodule SymphonyElixir.HerdrTransportTest do
     commands = File.read!(context.log)
     assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
     assert length(:binary.matches(commands, "agent send-keys implementer_orchestrator enter")) == 1
+    assert length(:binary.matches(commands, "agent wait implementer_orchestrator")) == 1
+    assert commands =~ "--until working --until blocked --timeout 750"
     assert length(:binary.matches(commands, "agent get implementer_orchestrator")) == 1
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
