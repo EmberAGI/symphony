@@ -675,9 +675,14 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Remove running entry.
   - Update aggregate runtime totals.
   - Classify the runtime failure before ordinary retry scheduling.
-  - Schedule exponential-backoff retry only for retryable or unknown failures.
+  - Schedule exponential-backoff retry only for failures on the explicit
+    recoverable allowlist. Unknown failures are irrecoverable by default.
   - For irrecoverable runtime failures, avoid ordinary retry scheduling and
     drive the configured tracker escalation path instead.
+- `Retried Worker Exit (normal)`
+  - Do not enter the ordinary completion branch or clear the prior failure.
+  - Preserve the typed failed-run observation durably and surface the run as
+    blocked.
 
 - `Codex Update Event`
   - Update live session fields, token counters, and rate limits.
@@ -770,6 +775,11 @@ Retry entry creation:
 - Store `attempt`, `identifier`, `error`, `due_at_ms`, and new timer handle.
 - Do not create or preserve a retry entry after the runtime failure classifier
   marks the failure as irrecoverable.
+- Before the first failure-driven redispatch, compare the queued failure
+  observation with an independent read of durable process ownership and the
+  current checkpoint. Refuse redispatch and surface a typed blocker when the
+  checkpoint and failure fingerprint are unchanged and there is no new reset
+  evidence.
 
 Backoff formula:
 
@@ -798,6 +808,10 @@ Note:
   not retries. The tracker escalation path records the redacted failure family,
   affected provider/runtime when known, and required human action; it must not
   log raw provider payloads, secret values, or full issue bodies.
+- Retry classification is an exact structural allowlist. Provider rate-limit,
+  capacity, service-availability, and network classifications remain
+  recoverable; unknown errors and arbitrary names or prose containing
+  `timeout` are not recoverable.
 
 ### 8.5 Active Run Reconciliation
 

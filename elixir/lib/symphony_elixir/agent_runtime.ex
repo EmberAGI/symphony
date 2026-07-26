@@ -28,10 +28,11 @@ defmodule SymphonyElixir.AgentRuntime do
           | :malformed_provider_event_schema
           | :human_input_required
           | :post_turn_gate_rejected
+          | :unclassified_runtime_failure
           | :repeated_identical_no_progress_failure
 
   @type failure_decision :: %{
-          required(:family) => failure_family() | :retryable_runtime_failure,
+          required(:family) => failure_family() | :transient_runtime_failure,
           required(:summary) => String.t(),
           required(:retry_reason) => String.t(),
           required(:recovery_reason) => String.t() | nil,
@@ -57,6 +58,7 @@ defmodule SymphonyElixir.AgentRuntime do
     :malformed_provider_event_schema,
     :human_input_required,
     :post_turn_gate_rejected,
+    :unclassified_runtime_failure,
     :repeated_identical_no_progress_failure
   ]
 
@@ -65,20 +67,6 @@ defmodule SymphonyElixir.AgentRuntime do
   # way a completed hook can ask to be retried. Every other non-zero exit is
   # read as a verdict on the run.
   @hook_temporary_failure_status 75
-
-  @transient_markers [
-    "transient",
-    "network",
-    "service_unavailable",
-    "service unavailable",
-    "rate_limit",
-    "rate limit",
-    "rate_limited",
-    "timeout",
-    "capacity",
-    "operator_interrupted",
-    "operator interrupted"
-  ]
 
   @doc """
   Resolve the configured runtime adapter module.
@@ -400,20 +388,24 @@ defmodule SymphonyElixir.AgentRuntime do
         {family, details} = irrecoverable_family_reason(reason)
         {:irrecoverable, irrecoverable_decision(family, details, context)}
 
-      transient_failure?(reason) ->
+      recoverable_failure?(reason) ->
         {:retryable, retryable_decision(reason, context, :transient_runtime_failure)}
 
       true ->
-        {:retryable, retryable_decision(reason, context, :retryable_runtime_failure)}
+        {:irrecoverable,
+         reason
+         |> unclassified_failure_details()
+         |> then(&irrecoverable_decision(:unclassified_runtime_failure, &1, context))}
     end
   end
 
   @doc """
   Record a failed runtime observation and apply the persistent no-progress rule.
 
-  The third consecutive identical no-progress fingerprint escalates immediately.
-  Transient failures, different fingerprints, and changed reset markers restart
-  the sequence.
+  A second observed identical failure is an irrecoverable safety net. The
+  orchestrator normally blocks the first equivalent redispatch before that
+  second execution. Different fingerprints and changed reset markers restart
+  the observation sequence.
   """
   @spec record_failure_observation(failure_observation() | nil, term(), map()) ::
           {failure_observation(), {:irrecoverable, failure_decision()} | {:retryable, failure_decision()}}
@@ -426,6 +418,43 @@ defmodule SymphonyElixir.AgentRuntime do
 
       {:retryable, failure} ->
         record_retryable_failure_observation(previous_observation, observed_reason, failure, context)
+    end
+  end
+
+  @doc """
+  Refuse a queued redispatch when its durable failure and checkpoint evidence
+  are unchanged.
+
+  The queued and ownership observations are separate inputs so an in-memory
+  retry entry cannot authorize work after its durable ownership evidence has
+  changed. A changed reset marker is new evidence and permits policy to
+  reconsider the queued attempt.
+  """
+  @spec equivalent_redispatch_failure(failure_observation() | nil, failure_observation() | nil, map()) ::
+          :allow | {:block, failure_decision()}
+  def equivalent_redispatch_failure(queued_observation, durable_observation, context \\ %{})
+      when is_map(context) do
+    if equivalent_failure_observation?(queued_observation, durable_observation, context) do
+      {:block, repeated_failure_decision(durable_observation, context)}
+    else
+      :allow
+    end
+  end
+
+  @doc """
+  Preserve a prior typed failed-run observation if a retried task later exits
+  normally.
+
+  A normal task exit cannot erase the durable fact that this top-level run is a
+  retry of a failed checkpoint.
+  """
+  @spec retried_completion_failure(failure_observation() | nil, map()) ::
+          :none | {:block, failure_decision()}
+  def retried_completion_failure(observation, context \\ %{}) when is_map(context) do
+    if valid_failure_observation?(observation) do
+      {:block, repeated_failure_decision(observation, context)}
+    else
+      :none
     end
   end
 
@@ -951,6 +980,15 @@ defmodule SymphonyElixir.AgentRuntime do
     real_irrecoverable_runtime_reason({:unexpected_herdr_agent_status, status})
   end
 
+  defp real_irrecoverable_runtime_reason({:herdr_agent_status_timeout, agent_name, expected_statuses})
+       when is_binary(agent_name) and is_list(expected_statuses) do
+    {:invalid_workspace_or_runtime_protocol,
+     %{
+       subtype: "herdr_agent_status_timeout",
+       message: "herdr_agent_status_timeout: Herdr agent #{safe_detail_fragment(agent_name)} did not reach an expected status"
+     }}
+  end
+
   # A post-turn gate that ran to completion and exited non-zero inspected this
   # run and rejected it. The same durable checkpoint replayed through the same
   # gate produces the same rejection, so redispatching it is repetition rather
@@ -1010,8 +1048,8 @@ defmodule SymphonyElixir.AgentRuntime do
         context
       )
 
-    count = next_observation_count(previous_observation, repeated_failure, context)
-    observation = observation_for(repeated_failure, context, count)
+    count = next_observation_count(previous_observation, failure, context)
+    observation = observation_for(failure, context, count)
 
     if count >= 2 do
       {observation, {:irrecoverable, repeated_failure}}
@@ -1050,6 +1088,37 @@ defmodule SymphonyElixir.AgentRuntime do
     }
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
+  end
+
+  defp equivalent_failure_observation?(queued_observation, durable_observation, context) do
+    valid_failure_observation?(queued_observation) and
+      valid_failure_observation?(durable_observation) and
+      Map.get(queued_observation, :fingerprint) == Map.get(durable_observation, :fingerprint) and
+      Map.get(queued_observation, :reset_marker) == Map.get(durable_observation, :reset_marker) and
+      Map.get(durable_observation, :reset_marker) == reset_marker(context)
+  end
+
+  defp valid_failure_observation?(observation) when is_map(observation) do
+    is_map(Map.get(observation, :fingerprint)) and
+      is_map(Map.get(observation, :reset_marker)) and
+      is_integer(Map.get(observation, :count)) and Map.get(observation, :count) > 0
+  end
+
+  defp valid_failure_observation?(_observation), do: false
+
+  defp repeated_failure_decision(observation, context) do
+    fingerprint = Map.get(observation, :fingerprint, %{})
+
+    irrecoverable_decision(
+      :repeated_identical_no_progress_failure,
+      %{
+        subtype: Map.get(fingerprint, :subtype) || "equivalent_redispatch",
+        summary:
+          "unchanged durable checkpoint and identical failure fingerprint: " <>
+            (Map.get(fingerprint, :summary) || "typed runtime failure")
+      },
+      context
+    )
   end
 
   defp decision(family, summary, context, opts) do
@@ -1163,20 +1232,67 @@ defmodule SymphonyElixir.AgentRuntime do
   defp safe_detail_fragment(value) when is_integer(value), do: Integer.to_string(value)
   defp safe_detail_fragment(_value), do: nil
 
-  defp transient_failure?(:turn_timeout), do: true
-  defp transient_failure?({:turn_timeout, _details}), do: true
-  defp transient_failure?({:network_error, _details}), do: true
-  defp transient_failure?({:service_unavailable, _details}), do: true
-  defp transient_failure?({:rate_limited, _details}), do: true
-  defp transient_failure?({:capacity_unavailable, _details}), do: true
-  defp transient_failure?({:operator_interrupted, _details}), do: true
+  # Retry is opt-in by exact runtime shape. In particular, prose and arbitrary
+  # tuple names containing "timeout", "network", or similar words never widen
+  # this policy.
+  defp recoverable_failure?(reason)
+       when reason in [
+              :turn_timeout,
+              :network_error,
+              :service_unavailable,
+              :rate_limited,
+              :capacity_unavailable,
+              :operator_interrupted
+            ],
+       do: true
 
-  defp transient_failure?(reason) do
-    reason
-    |> detail_summary()
-    |> String.downcase()
-    |> then(fn summary -> Enum.any?(@transient_markers, &String.contains?(summary, &1)) end)
+  defp recoverable_failure?({reason, _details})
+       when reason in [
+              :turn_timeout,
+              :network_error,
+              :service_unavailable,
+              :rate_limited,
+              :capacity_unavailable,
+              :operator_interrupted,
+              :empty_turn_completed,
+              :turn_input_required,
+              :approval_required,
+              :implementer_hard_budget_exhausted,
+              :implementer_agent_stalled,
+              :implementer_agent_unobservable,
+              :implementer_status_reads_failed
+            ],
+       do: true
+
+  defp recoverable_failure?({:workspace_hook_timeout, _hook, _timeout_ms}), do: true
+
+  defp recoverable_failure?({:workspace_hook_failed, _hook, @hook_temporary_failure_status, _output}),
+    do: true
+
+  defp recoverable_failure?({:post_turn_routing_failed, reason}), do: recoverable_failure?(reason)
+
+  defp recoverable_failure?({:remote_command_failed, _worker_host, reason}),
+    do: recoverable_failure?(reason)
+
+  defp recoverable_failure?(_reason), do: false
+
+  defp unclassified_failure_details(reason) do
+    %{
+      subtype: failure_reason_subtype(reason),
+      message: detail_summary(reason)
+    }
   end
+
+  defp failure_reason_subtype(reason) when is_atom(reason), do: Atom.to_string(reason)
+
+  defp failure_reason_subtype(reason) when is_tuple(reason) and tuple_size(reason) > 0 do
+    case elem(reason, 0) do
+      subtype when is_atom(subtype) -> Atom.to_string(subtype)
+      _ -> "unclassified_runtime_failure"
+    end
+  end
+
+  defp failure_reason_subtype(_reason), do: "unclassified_runtime_failure"
 
   defp no_progress_details({subtype, details}) when is_atom(subtype) and is_map(details) do
     Map.put(details, :subtype, Atom.to_string(subtype))

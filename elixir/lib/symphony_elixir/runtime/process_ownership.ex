@@ -151,7 +151,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     )
   end
 
-  @doc "Releases successful ownership and clears prior same-checkpoint failure recurrence state."
+  @doc "Releases successful ownership without erasing any prior typed failed-run observation."
   @spec release_completed(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
   @spec release_completed(Issue.t(), map(), map()) :: {:ok, map()} | {:error, term()}
   def release_completed(%Issue{} = issue, expected, extra_attrs \\ %{})
@@ -161,8 +161,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       expected,
       Map.merge(extra_attrs, %{
         state: "cleaned",
-        cleanup_status: "cleaned",
-        failure_observation: :clear
+        cleanup_status: "cleaned"
       })
     )
   end

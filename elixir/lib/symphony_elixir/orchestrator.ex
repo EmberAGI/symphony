@@ -1133,7 +1133,12 @@ defmodule SymphonyElixir.Orchestrator do
   # the pre-teardown snapshot, and the terminal ownership record write.
   defp run_terminal_settlement(running_entry, reason, snapshot \\ nil) do
     {cleanup_result, cleanup_evidence} = cleanup_terminal_owned_runtime(running_entry, false, snapshot)
-    adjusted_reason = cleanup_task_exit_reason(reason, cleanup_result)
+
+    adjusted_reason =
+      reason
+      |> cleanup_task_exit_reason(cleanup_result)
+      |> preserve_failed_retry_reason(running_entry)
+
     process_completion_status = record_process_completion(running_entry, adjusted_reason, cleanup_evidence)
     ownership = ProcessOwnership.status_for_issue(Map.get(running_entry, :issue))
 
@@ -1145,6 +1150,31 @@ defmodule SymphonyElixir.Orchestrator do
       process_ownership: ownership
     }
   end
+
+  defp preserve_failed_retry_reason(:normal, running_entry) do
+    observation = get_in(running_entry, [:process_ownership, :failure_observation])
+
+    if retry_dispatch?(Map.get(running_entry, :retry_attempt)) do
+      context =
+        runtime_failure_context(
+          running_entry_issue_id(running_entry),
+          running_entry,
+          nil
+        )
+
+      case AgentRuntime.retried_completion_failure(observation, context) do
+        {:block, failure} -> {:irrecoverable_runtime_failed, failure}
+        :none -> :normal
+      end
+    else
+      :normal
+    end
+  end
+
+  defp preserve_failed_retry_reason(reason, _running_entry), do: reason
+
+  defp running_entry_issue_id(%{issue: %Issue{id: issue_id}}), do: issue_id
+  defp running_entry_issue_id(_running_entry), do: nil
 
   defp finalize_terminal_settlement(%State{} = state, token, result) do
     case Map.pop(state.settlements, token) do
@@ -2142,7 +2172,8 @@ defmodule SymphonyElixir.Orchestrator do
           workspace_path: Map.get(retry_entry, :workspace_path),
           issue: Map.get(retry_entry, :issue),
           run_id: Map.get(retry_entry, :run_id),
-          process_ownership: Map.get(retry_entry, :process_ownership)
+          process_ownership: Map.get(retry_entry, :process_ownership),
+          failure_observation: Map.get(retry_entry, :failure_observation)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -2278,26 +2309,78 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
-    if retry_candidate_issue?(issue, terminal_state_set()) and
-         dispatch_slots_available?(issue, state) and
-         worker_slots_available?(state, metadata[:worker_host]) do
-      {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
-    else
-      Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
+    case equivalent_retry_blocker(state, issue, metadata) do
+      {:block, failure, observation, durable_ownership} ->
+        running_entry =
+          metadata
+          |> Map.put(:issue, issue)
+          |> Map.put(:identifier, issue.identifier)
+          |> Map.put(:process_ownership, durable_ownership)
 
-      {:noreply,
-       schedule_issue_retry(
-         state,
-         issue.id,
-         attempt + 1,
-         Map.merge(metadata, %{
-           issue: issue,
-           identifier: issue.identifier,
-           error: "no available orchestrator slots",
-           retry_reason: "no available orchestrator slots",
-           lease_state: "retrying"
-         })
-       )}
+        blocked_state =
+          state
+          |> put_failure_observation(issue.id, observation)
+          |> block_irrecoverable_runtime_failure(issue.id, running_entry, failure)
+
+        {:noreply, blocked_state}
+
+      :allow ->
+        if retry_candidate_issue?(issue, terminal_state_set()) and
+             dispatch_slots_available?(issue, state) and
+             worker_slots_available?(state, metadata[:worker_host]) do
+          {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
+        else
+          Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
+
+          {:noreply,
+           schedule_issue_retry(
+             state,
+             issue.id,
+             attempt + 1,
+             Map.merge(metadata, %{
+               issue: issue,
+               identifier: issue.identifier,
+               error: "no available orchestrator slots",
+               retry_reason: "no available orchestrator slots",
+               lease_state: "retrying"
+             })
+           )}
+        end
+    end
+  end
+
+  defp equivalent_retry_blocker(%State{} = state, %Issue{} = issue, metadata) do
+    durable_ownership = ProcessOwnership.status_for_issue(issue) || metadata[:process_ownership]
+
+    queued_observation =
+      metadata[:failure_observation] ||
+        Map.get(state.failure_observations, issue.id) ||
+        get_in(metadata, [:process_ownership, :failure_observation])
+
+    durable_observation = get_in(durable_ownership || %{}, [:failure_observation])
+
+    running_entry =
+      metadata
+      |> Map.put(:issue, issue)
+      |> Map.put(:workspace_path, metadata[:workspace_path] || Map.get(durable_ownership || %{}, :workspace_path))
+
+    context = runtime_failure_context(issue.id, running_entry, state.execution_generation)
+
+    case AgentRuntime.equivalent_redispatch_failure(
+           queued_observation,
+           durable_observation,
+           context
+         ) do
+      {:block, failure} ->
+        Logger.error(
+          "Equivalent retry dispatch blocked for #{issue_context(issue)}; " <>
+            "durable checkpoint and failure fingerprint are unchanged"
+        )
+
+        {:block, failure, durable_observation, durable_ownership}
+
+      :allow ->
+        :allow
     end
   end
 
@@ -2399,7 +2482,18 @@ defmodule SymphonyElixir.Orchestrator do
     identifier = Map.get(running_entry, :identifier, issue_id)
     issue = Map.get(running_entry, :issue)
 
-    blocked_ownership = update_irrecoverable_blocked_ownership(issue, running_entry, failure)
+    failure_observation =
+      Map.get(state.failure_observations, issue_id) ||
+        get_in(running_entry, [:process_ownership, :failure_observation])
+
+    blocked_ownership =
+      update_irrecoverable_blocked_ownership(
+        issue,
+        running_entry,
+        failure,
+        failure_observation
+      )
+
     RunLog.record_irrecoverable_runtime_failure(issue_id, running_entry, blocked_ownership, failure)
     maybe_escalate_irrecoverable_runtime_failure(issue_id, issue, failure)
 
@@ -2423,10 +2517,16 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp update_irrecoverable_blocked_ownership(%Issue{} = issue, running_entry, failure) do
+  defp update_irrecoverable_blocked_ownership(
+         %Issue{} = issue,
+         running_entry,
+         failure,
+         failure_observation
+       ) do
     update_owned_state(issue, running_entry, "blocked", %{
       quarantine_reason: Map.fetch!(failure, :retry_reason),
-      session_id: running_entry_session_id(running_entry)
+      session_id: running_entry_session_id(running_entry),
+      failure_observation: failure_observation
     })
   end
 
@@ -2631,7 +2731,10 @@ defmodule SymphonyElixir.Orchestrator do
       workspace_path: retry_context.workspace_path,
       issue: retry_context.issue,
       run_id: retry_context.run_id || (process_ownership && process_ownership.run_id),
-      process_ownership: process_ownership || retry_context.process_ownership
+      process_ownership: process_ownership || retry_context.process_ownership,
+      failure_observation:
+        (process_ownership && Map.get(process_ownership, :failure_observation)) ||
+          get_in(retry_context, [:process_ownership, :failure_observation])
     }
   end
 

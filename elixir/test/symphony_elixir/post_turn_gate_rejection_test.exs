@@ -131,9 +131,11 @@ defmodule SymphonyElixir.PostTurnGateRejectionTest do
     assert failure.retryable? == false
   end
 
-  test "a before_run hook failure is untouched by the post-turn classification" do
+  test "a before_run hook failure outside the allowlist fails closed" do
     reason = {:workspace_hook_failed, "before_run", 1, "ERROR: workspace not ready"}
 
-    assert {:retryable, _failure} = AgentRuntime.classify_failure(reason, @context)
+    assert {:irrecoverable, failure} = AgentRuntime.classify_failure(reason, @context)
+    assert failure.family == :unclassified_runtime_failure
+    assert failure.subtype == "workspace_hook_failed"
   end
 end

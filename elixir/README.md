@@ -205,14 +205,13 @@ Notes:
 
 ### Irrecoverable runtime failures
 
-Symphony classifies runtime failures before ordinary retry scheduling. Transient
-network, timeout, service-unavailable, rate-limit, capacity, and operator
-interruption failures remain retryable. Deterministic failures that need human
-repair are treated as irrecoverable, including provider credential revocation,
-missing required runtime configuration, missing CLIs or tools, permission
-denials, invalid workspace/runtime protocol, unsupported app-server contracts,
-malformed provider event schemas, and three consecutive identical no-progress
-observations for the same issue/workspace/role/provider fingerprint.
+Symphony classifies runtime failures before ordinary retry scheduling. Only
+explicit recoverable shapes such as provider network interruption,
+service-unavailable, rate-limit, capacity, and the runtime's typed turn timeout
+remain retryable. Unknown failures fail closed; error text or tuple names that
+merely contain words such as `timeout` do not widen the allowlist. In
+particular, `herdr_agent_status_timeout` is an irrecoverable typed
+workspace/runtime-protocol failure.
 
 Irrecoverable failures do not consume the ordinary retry loop. The orchestrator
 verifies and marks same-scope process ownership `blocked`, records a compact
@@ -222,6 +221,12 @@ path neither reads nor writes Linear comments. After repairing credentials,
 configuration, missing tools, permissions, workspace/protocol state, or
 provider event handling, move the issue back to the appropriate active role
 state to resume work.
+
+Before the first failure-driven redispatch, Symphony re-reads durable
+process-ownership evidence. An unchanged checkpoint with the identical failure
+fingerprint and no reset evidence is blocked before another run starts. If an
+already-started retry later exits normally, that exit does not erase the prior
+typed failure or enter the normal-completion path.
 
 ### Comment-independent role-run ownership
 

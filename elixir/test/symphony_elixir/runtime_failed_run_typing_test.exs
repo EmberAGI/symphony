@@ -293,8 +293,12 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     {reason, before_marker, after_marker} =
       run_with_invalid_ownership("ownership-missing", nil)
 
-    assert reason ==
-             {:agent_runtime_failed, {:process_ownership_publication_failed, :ownership_missing}}
+    assert {:irrecoverable_runtime_failed,
+            %{
+              family: :unclassified_runtime_failure,
+              subtype: "process_ownership_publication_failed",
+              retryable?: false
+            }} = reason
 
     refute File.exists?(before_marker)
     refute File.exists?(after_marker)
@@ -316,8 +320,12 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     {reason, before_marker, after_marker} =
       run_with_invalid_ownership("ownership-mismatch", invalid_ownership)
 
-    assert reason ==
-             {:agent_runtime_failed, {:process_ownership_publication_failed, :ownership_mismatch}}
+    assert {:irrecoverable_runtime_failed,
+            %{
+              family: :unclassified_runtime_failure,
+              subtype: "process_ownership_publication_failed",
+              retryable?: false
+            }} = reason
 
     refute File.exists?(before_marker)
     refute File.exists?(after_marker)

@@ -68,7 +68,7 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
     end
   end
 
-  test "agent runner keeps non-auth before_run hook failures ordinary with redacted retryable output" do
+  test "agent runner fails closed for non-allowlisted before_run hook failures with redacted output" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -99,11 +99,22 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
 
       log =
         capture_log(fn ->
-          assert catch_exit(run_agent_with_ownership(issue, nil, run_id: "run-before-run-ordinary")) ==
-                   {:agent_runtime_failed, {:workspace_hook_failed, "before_run", 19, "ordinary setup failure token=ordinary-hook-secret\n"}}
+          assert {:irrecoverable_runtime_failed,
+                  %{
+                    family: :unclassified_runtime_failure,
+                    subtype: "workspace_hook_failed",
+                    retryable?: false
+                  }} =
+                   catch_exit(
+                     run_agent_with_ownership(
+                       issue,
+                       nil,
+                       run_id: "run-before-run-ordinary"
+                     )
+                   )
         end)
 
-      assert log =~ "retryable_runtime_failure"
+      assert log =~ "unclassified_runtime_failure"
       refute log =~ "ordinary-hook-secret"
       refute log =~ "token="
     after
@@ -205,14 +216,19 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
       }
 
       capture_log(fn ->
-        assert catch_exit(
-                 run_agent_with_ownership(
-                   issue,
-                   nil,
-                   run_id: "run-non-live-delegation-seal"
+        assert {:irrecoverable_runtime_failed,
+                %{
+                  family: :unclassified_runtime_failure,
+                  subtype: "non_live_delegation_transport",
+                  retryable?: false
+                }} =
+                 catch_exit(
+                   run_agent_with_ownership(
+                     issue,
+                     nil,
+                     run_id: "run-non-live-delegation-seal"
+                   )
                  )
-               ) ==
-                 {:agent_runtime_failed, {:non_live_delegation_transport, :default_server_snapshot}}
       end)
     after
       File.rm_rf(test_root)

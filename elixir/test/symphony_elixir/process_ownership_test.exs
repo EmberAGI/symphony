@@ -129,7 +129,7 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
       process_ownership: ownership
     }
 
-    reason = {:max_turns_exhausted, %{turn: 3, max_turns: 3}}
+    reason = {:rate_limited, %{message: "provider retry window"}}
 
     assert {:retryable, _failure, observation} =
              Orchestrator.classify_task_exit_for_test(
@@ -187,7 +187,7 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
     assert changed_observation.reset_marker.execution_generation == "generation-b"
   end
 
-  test "successful completion release clears prior failure recurrence state", %{issue: issue} do
+  test "successful completion release preserves prior typed failure state", %{issue: issue} do
     attrs = ownership_attrs("successful-run", "successful-holder")
     assert {:ok, ownership} = ProcessOwnership.acquire(issue, attrs)
 
@@ -210,7 +210,7 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
                %{state: "retrying", failure_observation: observation}
              )
 
-    assert {:ok, %{state: "cleaned", failure_observation: nil}} =
+    assert {:ok, %{state: "cleaned", failure_observation: ^observation}} =
              ProcessOwnership.release_completed(issue, identity)
   end
 

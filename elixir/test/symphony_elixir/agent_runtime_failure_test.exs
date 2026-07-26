@@ -280,6 +280,20 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     end
   end
 
+  test "fails closed for unknown failures and timeout-shaped prose outside the allowlist" do
+    for reason <- [
+          :unknown_runtime_failure,
+          {:future_provider_failure, %{message: "provider timed out"}},
+          {:herdr_agent_status_timeout, "implementer_orchestrator", ["working", "idle", "done"]}
+        ] do
+      assert {:irrecoverable, failure} = AgentRuntime.classify_failure(reason, @context)
+      assert failure.family in [:unclassified_runtime_failure, :invalid_workspace_or_runtime_protocol]
+      assert failure.retryable? == false
+      refute failure.retry_reason =~ "transient_runtime_failure"
+      refute failure.retry_reason =~ "retryable_runtime_failure"
+    end
+  end
+
   test "suppresses the first equivalent redispatch at the same durable checkpoint" do
     reason = {:empty_turn_completed, %{message: "Codex completed without agent output token=secret"}}
 
@@ -340,7 +354,7 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
   end
 
   test "the same durable checkpoint and typed failure cannot authorize an equivalent redispatch for any role" do
-    reason = {:max_turns_exhausted, %{turn: 3, max_turns: 3}}
+    reason = {:rate_limited, %{message: "provider retry window"}}
 
     for role <- ["backlog-processor", "implementer", "reviewer", "qa", "landing"] do
       context =
@@ -363,7 +377,7 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
   end
 
   test "a changed durable checkpoint permits one new bounded attempt" do
-    reason = {:max_turns_exhausted, %{turn: 3, max_turns: 3}}
+    reason = {:rate_limited, %{message: "provider retry window"}}
     first_context = Map.put(@context, :input_fingerprint, "checkpoint-a")
     changed_context = Map.put(@context, :input_fingerprint, "checkpoint-b")
 
