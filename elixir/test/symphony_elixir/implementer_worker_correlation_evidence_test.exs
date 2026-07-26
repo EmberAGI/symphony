@@ -327,50 +327,55 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
-  test "a login-shell PATH reset cannot route delegation around the run-owned recorder", context do
-    session = start_implementer_session(context, "evidence-login-path-reset")
-    login_bin = Path.join(Path.dirname(context.workspace), "login-bin")
-    File.mkdir_p!(login_bin)
+  test "the launched provider receives recorder-safe direct and Bash login environments", context do
+    root = Path.dirname(context.workspace)
+    provider = Path.join([root, "provider-bin", "codex"])
+    provider_observation = Path.join(root, "provider-environment")
+    login_home = Path.join(root, "login-home")
+    login_bin = Path.join(root, "login-bin")
 
-    launch_commands = File.read!(context.herdr_log)
-    assert launch_commands =~ "/bin/bash -lc"
-    assert launch_commands =~ "command -v herdr"
+    File.mkdir_p!(login_home)
+    File.mkdir_p!(login_bin)
 
     # Model the post-/etc/profile state seen in production: bare `herdr`
     # resolves successfully, but to the user installation rather than the
-    # run-owned recorder. The symlink keeps delivery behavior identical while
-    # making recorder traversal the only distinction.
+    # run-owned recorder. The provider itself records the environment produced
+    # by the materialized wrapper and projection; the test does not supply its
+    # own BASH_ENV or corrected PATH.
     File.ln_s!(context.herdr_bin, Path.join(login_bin, "herdr"))
 
-    bash_env = Path.join(session.herdr_session.runtime_root, "orchestrator-bash-env")
-    assignment_id = "EMB1295-LOGIN-PATH-RESET"
+    File.write!(
+      Path.join(login_home, ".bash_profile"),
+      "export PATH=#{login_bin}:/usr/bin:/bin\n"
+    )
 
-    {output, status} =
-      System.cmd(
-        "/bin/bash",
-        [
-          "--noprofile",
-          "--norc",
-          "-lc",
-          "herdr --session #{session.name} agent prompt implementer_worker " <>
-            "'OCTO_MSG/1 kind=assignment assignment=#{assignment_id} deliverable=bounded'"
-        ],
-        env: [
-          {"BASH_ENV", bash_env},
-          {"HERDR_FAKE_LOG", context.herdr_log},
-          {"PATH", login_bin <> ":/usr/bin:/bin"},
-          {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
-        ],
-        stderr_to_stdout: true
-      )
+    File.write!(provider, """
+    #!/bin/sh
+    set -eu
+    if [ "${HERDR_FAKE_AGENT_NAME:-}" = implementer_orchestrator ]; then
+      direct=$(command -v herdr || :)
+      login=$(HOME=#{login_home} /bin/bash -lc 'command -v herdr' || :)
+      {
+        printf 'bash_env=%s\\n' "${BASH_ENV:-}"
+        printf 'direct=%s\\n' "$direct"
+        printf 'login=%s\\n' "$login"
+      } > #{provider_observation}
+    fi
+    exit 0
+    """)
 
-    assert status == 0, output
+    File.chmod!(provider, 0o755)
 
-    assert {:ok, [%{assignment_id: ^assignment_id, status: :launched, evidence: :envelope}]} =
-             HerdrTransport.worker_assignments(
-               session.herdr_session,
-               session.transport_context
-             )
+    session = start_implementer_session(context, "evidence-provider-environment")
+    expected_herdr = Path.join(session.herdr_session.orchestrator_bin, "herdr")
+    expected_bash_env = Path.join(session.herdr_session.runtime_root, "orchestrator-bash-env")
+
+    assert File.read!(provider_observation) ==
+             """
+             bash_env=#{expected_bash_env}
+             direct=#{expected_herdr}
+             login=#{expected_herdr}
+             """
 
     stop(session)
   end
