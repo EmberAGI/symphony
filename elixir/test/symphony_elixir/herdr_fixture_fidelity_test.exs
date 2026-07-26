@@ -15,6 +15,10 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
   @required_provenance_keys ~w(argv stdout stderr exit_status recorded_at herdr_version herdr_binary_sha256 provenance derivation redaction name)
   @declared_placeholders ~w({{AGENT_NAME}} {{AGENT_KIND}} {{SOCKET_PATH}} {{WORKSPACE_CWD}} {{PANE_ID}})
   @known_error_codes ~w(agent_not_found agent_pane_busy agent_prompt_stalled timeout)
+  @recorded_binary_sha256s ~w(
+    37350546b0012555943b92eaf962665de4e264395baeb44227b8015e8ff5b0d6
+    3dc83288073e4c2d3c679a30e7be97bcca9141c6fd17dbbb9219142e95c59253
+  )
 
   test "every fixture is a pure recording with complete raw provenance" do
     names = HerdrReplayFixture.fixture_names()
@@ -38,8 +42,14 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
       assert {:ok, _timestamp, _offset} = DateTime.from_iso8601(fixture["recorded_at"])
     end
 
-    shas = names |> Enum.map(&HerdrReplayFixture.load!(&1)["herdr_binary_sha256"]) |> Enum.uniq()
-    assert length(shas) == 1, "fixtures were recorded from more than one herdr binary"
+    shas =
+      names
+      |> Enum.map(&HerdrReplayFixture.load!(&1)["herdr_binary_sha256"])
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    assert shas == Enum.sort(@recorded_binary_sha256s),
+           "fixtures did not come from the exact audited Herdr 0.7.5 binaries"
   end
 
   test "every agent status claimed by any fixture is inside the five-state enum" do
@@ -76,6 +86,18 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
            "agent-start must not pin the recording's pane: workers start on other panes"
 
     assert HerdrReplayFixture.load!("agent-start")["redaction"] =~ "{{PANE_ID}}"
+  end
+
+  test "the agent-scoped Enter acknowledgement is a required real recording" do
+    fixture = HerdrReplayFixture.load!("agent-send-keys-enter")
+
+    assert fixture["argv"] |> Enum.take(-4) ==
+             ["agent", "send-keys", "emb1312probe", "enter"]
+
+    assert fixture["provenance"] == "recorded"
+    assert fixture["derivation"] == nil
+    assert fixture["herdr_binary_sha256"] == "3dc83288073e4c2d3c679a30e7be97bcca9141c6fd17dbbb9219142e95c59253"
+    assert Jason.decode!(fixture["stdout"]) == %{"id" => "cli:agent:send-keys", "result" => %{"type" => "ok"}}
   end
 
   test "fixtures use only the declared run-varying placeholders" do

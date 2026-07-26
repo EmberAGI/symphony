@@ -820,12 +820,25 @@ if a caller asks for anything narrower or wider. The submission wait must
 exceed Herdr 0.7.5's 5000 ms prompt-effect window so an unchanged
 `state_change_seq` is classified as the typed `agent_prompt_stalled` result
 rather than an ordinary timeout; the transport deliberately raises any smaller
-caller budget to a 5001 ms floor. On a stall, the transport re-drives
-submission with a follow-up submit input at most twice.
-Only an observed state change succeeds; exhausting the recovery bound preserves
-the typed prompt-stall failure. This provider-neutral recovery applies to
-orchestrator turns and both generated inter-agent prompt projections for Codex
-and Claude.
+caller budget to a 5001 ms floor. That effective budget is derived once for
+`begin_turn/5`; prompt submission, compatibility recovery, and lifecycle
+observation never restart it. On the first typed stall, the transport sends
+exactly one logical Enter through Herdr's agent-scoped `agent send-keys`
+Interface, then observes `agent get` inside the remaining deadline. `working`
+proves turn start; `idle` or `done` proves a fast completion only with a newer
+Herdr revision; `blocked`, `unknown`, closed agents, command failures,
+protocol mismatches, and deadline exhaustion remain distinct typed outcomes.
+Same-revision settled status never proves delivery.
+
+The generated orchestrator/worker prompt projections apply the same causal
+Herdr 0.7.5 compatibility recovery to assignments and results: one native
+5001 ms prompt-effect wait, one internal agent-scoped Enter, one 750 ms
+server-bounded `working|blocked` observation, and at most one final `agent get`
+for a fast-settled newer revision. They never submit a blank or replayed
+prompt. Caller-supplied semantic `agent send-keys` and all pane-key input stay
+denied; the Enter is available only inside Adapter-owned recovery. Remove this
+compatibility path when the pinned stable Herdr release contains upstream
+commit `bb29eedb7209a0d5e91052458ce76bc7e4259d18`.
 
 The orchestrator's machine-readable assignment message is
 `OCTO_MSG/1 kind=assignment assignment=<token>` followed by bounded
@@ -1057,26 +1070,29 @@ emits.
 Completed terminal output is consumed from native `agent read` text; Symphony
 does not expect a JSON response envelope from that command.
 
-Native `agent_prompt_stalled` remains a typed prompt-stall failure after bounded
-recovery is exhausted. A prompt or wait whose named live agent has closed is a
-typed closed-agent failure. Native timeouts remain bounded status-timeout
-results and protocol mismatch remains a machine-readable incompatible-runtime
-failure. Symphony does not retain the 0.7.4 `pane run` prompt-submission,
+Native prompt-stall compatibility recovery never makes the failure ordinarily
+retryable. A failed Enter is a typed transport failure; unchanged lifecycle
+evidence expires as a bounded status-timeout result; and a prompt or wait whose
+named live agent has closed remains a typed closed-agent failure. Protocol
+mismatch remains a machine-readable incompatible-runtime failure. Symphony
+does not retain the 0.7.4 `pane run` prompt-submission,
 manual confirmation, revision-acknowledgement choreography, top-level wait,
 provider-specific multiline handling, translation, dual-version, or
-compatibility machinery; `pane run` survives only as the launch PATH
-preparation and preflight primitive described above, and read-only
-observation of the reported agent `revision` (for example the
-prompt-transition settle guard) is not acknowledgement choreography and
-remains permitted.
+other legacy compatibility machinery. The temporary Herdr 0.7.5 one-Enter
+path above is the sole exception until the pinned stable release contains the
+named upstream fix. `pane run` survives only as the launch PATH preparation
+and preflight primitive described above, and read-only observation of the
+reported agent `revision` (for example the prompt-transition settle guard) is
+not acknowledgement choreography and remains permitted.
 
 Inter-agent messaging uses the same `agent prompt` command for Codex and Claude.
 The runtime-owned orchestrator and restricted worker projections add the same
-verified-submission wait and bounded prompt-stall recovery before forwarding to
-the native Herdr Interface. The restricted worker projection permits only agent
-list/get/read, prompt, and wait operations; it denies agent start, raw pane
-input, logical key injection, topology mutation, server control, and descendant
-delegation.
+verified-submission wait and one-Enter prompt-stall compatibility recovery
+before forwarding to the native Herdr Interface. The restricted worker
+projection permits only agent
+list/get/read, prompt, and wait operations; it denies caller-supplied agent
+start, raw pane input, logical key injection, topology mutation, server
+control, and descendant delegation.
 
 Managed isolated sessions write private Herdr update configuration with both
 version and remote manifest background checks disabled. This prevents a
