@@ -43,10 +43,10 @@ defmodule SymphonyElixir.Orchestrator do
   # The window only has to outlive one silent stretch of a healthy turn: one
   # normal observation cycle (a 30s heartbeat interval plus a 5s bounded status
   # read) plus the terminal evidence path the turn still owes after supervision
-  # returns. 90s leaves ample headroom over that ~45s worst case while staying
-  # a finite escape hatch if terminal evidence collection itself hangs — the
-  # real Herdr transport's `read_agent` shells out through an unbounded
-  # `System.cmd`, so nothing inside the turn bounds that case.
+  # returns. 90s gives a practical margin over the normal cycle while staying a
+  # finite escape hatch if terminal evidence collection itself hangs — the real
+  # Herdr transport's `read_agent` shells out through an unbounded `System.cmd`,
+  # so the normal-cycle estimate is deliberately not a total-turn bound.
   @default_implementer_handoff_settlement_inactivity_ms 90_000
   # Ownership states that mean settlement already reached its terminal write.
   # A record in one of these has LEFT active on its own observed evidence, so
