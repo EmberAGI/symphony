@@ -15,7 +15,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @default_agent_start_timeout_ms 120_000
   # Reserve the fixed generated-prompt budget after Herdr's prompt-effect
   # window for one Enter, a server-bounded transition wait, and one final get.
-  @generated_prompt_observation_timeout_ms 350
+  @generated_prompt_observation_timeout_ms 750
   @required_version "0.7.5"
   @required_protocol 17
   @launch_projection_sentinel "--symphony-launch-projection"
@@ -1921,8 +1921,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
             exit 0
             ;;
           *'"agent_status":"blocked"'*)
-            printf '%s' "$observation"
-            exit 0
+            printf '%s\n' "$observation" >&2
+            exit 1
             ;;
           *)
             printf '%s\n' "$observation" >&2
@@ -1972,8 +1972,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
           fi
           ;;
         blocked|unknown)
-          printf '%s' "$observation"
-          exit 0
+          printf '%s\n' "$observation" >&2
+          exit 1
           ;;
       esac
 

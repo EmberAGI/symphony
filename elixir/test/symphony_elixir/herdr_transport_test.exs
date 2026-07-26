@@ -504,6 +504,15 @@ defmodule SymphonyElixir.HerdrTransportTest do
     orchestrator_herdr = Path.join(session.orchestrator_bin, "herdr")
     claude_projection = Path.join(session.orchestrator_bin, "claude")
     base_env = [{"HERDR_FAKE_LOG", context.log}, {"XDG_CONFIG_HOME", session.runtime_root}]
+    default_state_root = Path.join([session.runtime_root, "herdr", "sessions", "default"])
+
+    generated_unknown_fixture =
+      HerdrReplayFixture.write_replay_mutation!(
+        context.replay_dir,
+        "agent-wait-working",
+        "agent-wait-unknown-generated",
+        &String.replace(&1, ~s("agent_status":"working"), ~s("agent_status":"unknown"))
+      )
 
     # The wrapper fails closed for any invocation other than the exact
     # sentinel plus one projection path: no default-bootstrap escape hatch.
@@ -728,7 +737,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       commands = File.read!(context.log)
       assert length(:binary.matches(commands, "agent send-keys #{target} enter")) == 1
       assert length(:binary.matches(commands, "agent wait #{target}")) == 1
-      assert commands =~ "--until working --until blocked --timeout 350"
+      assert commands =~ "--until working --until blocked --timeout 750"
 
       [correlation] =
         Path.wildcard(Path.join([session.runtime_root, "worker-events", correlation_glob])) --
@@ -757,6 +766,72 @@ defmodule SymphonyElixir.HerdrTransportTest do
       commands = File.read!(context.log)
       assert length(:binary.matches(commands, "agent prompt #{target}")) == 1
       assert length(:binary.matches(commands, "agent send-keys #{target} enter")) == 1
+    end
+
+    File.write!(context.log, "")
+    File.rm(Path.join(default_state_root, "prompt-attempts"))
+    File.rm(Path.join(default_state_root, "delayed-prompt-transition.implementer_worker"))
+    fast_message = "OCTO_MSG/1 kind=assignment assignment=emb1312-fast"
+    assignments_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "assignment.*"]))
+
+    assert {fast_settled, 0} =
+             System.cmd(
+               orchestrator_herdr,
+               ["agent", "prompt", "implementer_worker", fast_message],
+               env:
+                 base_env ++
+                   [
+                     {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
+                     {"HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS", "0.05"},
+                     {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
+                   ],
+               stderr_to_stdout: true
+             )
+
+    assert fast_settled =~ ~s("agent_status":"idle")
+    commands = File.read!(context.log)
+    assert length(:binary.matches(commands, "agent prompt implementer_worker")) == 1
+    assert length(:binary.matches(commands, "agent send-keys implementer_worker enter")) == 1
+    assert length(:binary.matches(commands, "agent wait implementer_worker")) == 1
+    assert length(:binary.matches(commands, "agent get implementer_worker")) == 1
+
+    [fast_assignment] =
+      Path.wildcard(Path.join([session.runtime_root, "worker-events", "assignment.*"])) --
+        assignments_before
+
+    assert File.read!(fast_assignment) == fast_message <> "\n"
+
+    for {fixture, expected_status} <- [
+          {"agent-wait-blocked", "blocked"},
+          {generated_unknown_fixture, "unknown"}
+        ] do
+      File.write!(context.log, "")
+      File.rm(Path.join(default_state_root, "prompt-attempts"))
+      replies_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "reply.*"]))
+
+      assert {non_success, 1} =
+               System.cmd(
+                 worker_herdr,
+                 [
+                   "agent",
+                   "prompt",
+                   "implementer_orchestrator",
+                   "OCTO_MSG/1 kind=result assignment=emb1312-#{expected_status} status=failed"
+                 ],
+                 env:
+                   base_env ++
+                     [
+                       {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
+                       {"HERDR_REPLAY_WAIT", fixture}
+                     ],
+                 stderr_to_stdout: true
+               )
+
+      assert non_success =~ ~s("agent_status":"#{expected_status}")
+      assert Path.wildcard(Path.join([session.runtime_root, "worker-events", "reply.*"])) == replies_before
+      commands = File.read!(context.log)
+      assert length(:binary.matches(commands, "agent send-keys implementer_orchestrator enter")) == 1
+      refute commands =~ "agent get implementer_orchestrator"
     end
 
     for args <- [

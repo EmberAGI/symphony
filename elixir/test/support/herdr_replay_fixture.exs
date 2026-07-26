@@ -141,6 +141,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
     workspace_cwd=
     pane_id=
     agent_revision=
+    agent_state_change_seq=
 
     recall_kind() {
       if [ -f "$state_root/kind.$agent_name" ]; then
@@ -150,8 +151,12 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
 
     recall_revision() {
       agent_revision=0
+      agent_state_change_seq=1
       if [ -f "$state_root/revision.$agent_name" ]; then
         IFS= read -r agent_revision < "$state_root/revision.$agent_name"
+      fi
+      if [ -f "$state_root/state-change-seq.$agent_name" ]; then
+        IFS= read -r agent_state_change_seq < "$state_root/state-change-seq.$agent_name"
       fi
     }
 
@@ -168,12 +173,18 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       fixture=$1
       if [ -n "$agent_revision" ]; then
         replay_stdout "$fixture" |
-          sed "s|\\\"revision\\\":[0-9][0-9]*|\\\"revision\\\":$agent_revision|g"
+          sed -e "s|\\\"revision\\\":[0-9][0-9]*|\\\"revision\\\":$agent_revision|g" \\
+              -e "s|\\\"state_change_seq\\\":[0-9][0-9]*|\\\"state_change_seq\\\":$agent_state_change_seq|g"
       else
         replay_stdout "$fixture"
       fi
       if [ -s "$REPLAY/$fixture.stderr" ]; then
-        cat "$REPLAY/$fixture.stderr" >&2
+        if [ -n "$agent_state_change_seq" ]; then
+          sed "s|state_change_seq remained [0-9][0-9]*|state_change_seq remained $agent_state_change_seq|g" \\
+            "$REPLAY/$fixture.stderr" >&2
+        else
+          cat "$REPLAY/$fixture.stderr" >&2
+        fi
       fi
       exit "$(cat "$REPLAY/$fixture.exit")"
     }
@@ -273,6 +284,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       mkdir -p "$state_root"
       printf '%s\\n' "$agent_kind" > "$state_root/kind.$agent_name"
       printf '0\\n' > "$state_root/revision.$agent_name"
+      printf '1\\n' > "$state_root/state-change-seq.$agent_name"
       recall_revision
 
       if [ "${HERDR_FAKE_AGENT_START_ERROR:-}" = "1" ]; then
@@ -379,8 +391,10 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
 
       recall_revision
       agent_revision=$((agent_revision + 1))
+      agent_state_change_seq=$((agent_state_change_seq + 1))
       mkdir -p "$state_root"
       printf '%s\\n' "$agent_revision" > "$state_root/revision.$agent_name"
+      printf '%s\\n' "$agent_state_change_seq" > "$state_root/state-change-seq.$agent_name"
       recall_kind prompt
       replay "${HERDR_REPLAY_PROMPT:-agent-prompt-working}"
     fi
@@ -406,7 +420,9 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
         if [ ! -f "$transition_file" ]; then
           sleep "$HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS"
           agent_revision=$((agent_revision + 1))
+          agent_state_change_seq=$((agent_state_change_seq + 1))
           printf '%s\\n' "$agent_revision" > "$state_root/revision.$agent_name"
+          printf '%s\\n' "$agent_state_change_seq" > "$state_root/state-change-seq.$agent_name"
           : > "$transition_file"
         fi
       fi
@@ -423,7 +439,9 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
         if [ ! -f "$transition_file" ]; then
           sleep "$HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS"
           agent_revision=$((agent_revision + 1))
+          agent_state_change_seq=$((agent_state_change_seq + 1))
           printf '%s\\n' "$agent_revision" > "$state_root/revision.$agent_name"
+          printf '%s\\n' "$agent_state_change_seq" > "$state_root/state-change-seq.$agent_name"
           : > "$transition_file"
         fi
       fi
