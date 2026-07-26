@@ -1545,6 +1545,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
       assert Enum.any?(prompt_commands, &String.contains?(&1, "Complete the assignment."))
       assert length(prompt_commands) == 1
+      assert Enum.all?(prompt_commands, &String.contains?(&1, "--timeout 5001"))
 
       commands = File.read!(context.log)
       assert length(:binary.matches(commands, "agent send-keys implementer_orchestrator enter")) == 1
@@ -1724,12 +1725,15 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
-  test "the 5001ms effective deadline bounds unchanged idle observation", context do
+  test "one 5001ms deadline bounds prompt and recovery without restarting", context do
     adapter_context = %{
       herdr_bin: context.bin,
       extra_env: [
         {"HERDR_FAKE_LOG", context.log},
-        {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"}
+        {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
+        {"HERDR_FAKE_PROMPT_STALL_DELAY_SECONDS", "4.2"},
+        {"HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS", "1"},
+        {"HERDR_REPLAY_WAIT", "agent-wait-working"}
       ],
       start_timeout_ms: 2_000,
       poll_interval_ms: 5
@@ -1770,6 +1774,8 @@ defmodule SymphonyElixir.HerdrTransportTest do
     commands = File.read!(context.log)
     assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
     assert length(:binary.matches(commands, "agent send-keys implementer_orchestrator enter")) == 1
+    assert length(:binary.matches(commands, "agent wait implementer_orchestrator")) == 1
+    refute commands =~ "agent get implementer_orchestrator"
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 

@@ -319,13 +319,10 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     # state_change_seq is the typed agent_prompt_stalled result, never an
     # ordinary timeout. The until set is the upstream default settle set plus
     # working, so a started turn is observed without waiting for completion.
-    remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
-    native_timeout_ms = max(remaining_ms, @prompt_effect_window_ms + 1)
-
     args =
       ["--session", session_name, "agent", "prompt", agent_name, prompt, "--wait"] ++
         until_args(["working", "idle", "done", "blocked"]) ++
-        ["--timeout", to_string(native_timeout_ms)]
+        ["--timeout", to_string(@prompt_effect_window_ms + 1)]
 
     command_before_deadline(context, args, env, deadline)
   end
@@ -341,7 +338,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
     with {:ok, output} <- command_before_deadline(context, args, env, deadline),
          :ok <- validate_send_keys_response(output) do
-      observe_prompt_transition(context, session_name, env, agent, agent, deadline)
+      observe_prompt_transition(context, session_name, env, agent, deadline)
     else
       {:error, reason} -> prompt_recovery_send_keys_error(reason, agent_name)
     end
@@ -357,18 +354,66 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     end
   end
 
-  defp observe_prompt_transition(context, session_name, env, baseline, agent, deadline) do
-    if System.monotonic_time(:millisecond) >= deadline do
-      prompt_recovery_timeout(agent.name)
+  defp observe_prompt_transition(context, session_name, env, %{name: agent_name} = baseline, deadline) do
+    remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    if remaining_ms == 0 do
+      prompt_recovery_timeout(agent_name)
     else
-      context
-      |> command_before_deadline(["--session", session_name, "agent", "get", agent.name], env, deadline)
-      |> get_agent_result(agent, agent.name)
-      |> prompt_transition_result(context, session_name, env, baseline, deadline)
+      native_timeout_ms = min(@generated_prompt_observation_timeout_ms, remaining_ms)
+
+      args =
+        ["--session", session_name, "agent", "wait", agent_name] ++
+          until_args(["working", "blocked"]) ++
+          ["--timeout", to_string(native_timeout_ms)]
+
+      case command_before_deadline(context, args, env, deadline) do
+        {:ok, output} ->
+          prompt_recovery_wait_result(output, baseline)
+
+        {:error, reason} ->
+          prompt_recovery_wait_error(reason, context, session_name, env, baseline, deadline)
+      end
     end
   end
 
-  defp prompt_transition_result({:ok, observed}, context, session_name, env, baseline, deadline) do
+  defp prompt_recovery_wait_result(output, baseline) do
+    with {:ok, observed} <- decode_agent_response(output),
+         {:ok, _status} <- classify_agent_status(observed.agent_status) do
+      prompt_recovery_wait_observation(preserve_provider(observed, baseline))
+    else
+      {:error, {:incompatible_herdr_runtime, _details} = reason} -> {:error, reason}
+      {:error, reason} -> {:error, {:herdr_agent_wait_failed, reason}}
+    end
+  end
+
+  defp prompt_recovery_wait_observation(%{agent_status: "working"} = observed),
+    do: {:ok, %{phase: :working, agent: observed}}
+
+  defp prompt_recovery_wait_observation(%{agent_status: "blocked", name: agent_name}),
+    do: {:error, {:herdr_agent_blocked, agent_name}}
+
+  defp prompt_recovery_wait_observation(%{agent_status: "unknown", name: agent_name}),
+    do: {:error, {:herdr_agent_status_unknown, agent_name}}
+
+  defp prompt_recovery_wait_observation(%{agent_status: status, name: agent_name}),
+    do: {:error, {:herdr_agent_wait_unsettled, agent_name, status}}
+
+  defp prompt_recovery_wait_error(:command_timeout, _context, _session_name, _env, baseline, _deadline),
+    do: prompt_recovery_timeout(baseline.name)
+
+  defp prompt_recovery_wait_error(reason, context, session_name, env, baseline, deadline) do
+    if cli_error_code(reason) == "timeout" do
+      context
+      |> command_before_deadline(["--session", session_name, "agent", "get", baseline.name], env, deadline)
+      |> get_agent_result(baseline, baseline.name)
+      |> prompt_final_observation(baseline)
+    else
+      wait_error(reason, baseline.name, ["working", "blocked"])
+    end
+  end
+
+  defp prompt_final_observation({:ok, observed}, baseline) do
     case observed.agent_status do
       "working" ->
         {:ok, %{phase: :working, agent: observed}}
@@ -383,47 +428,34 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         if newer_agent_revision?(observed, baseline) do
           {:ok, %{phase: :completed, agent: observed}}
         else
-          continue_prompt_transition(context, session_name, env, baseline, observed, deadline)
+          prompt_recovery_timeout(observed.name)
         end
     end
   end
 
-  defp prompt_transition_result(
+  defp prompt_final_observation(
          {:error, {:herdr_agent_get_timeout, agent_name}},
-         _context,
-         _session_name,
-         _env,
-         _baseline,
-         _deadline
+         _baseline
        ),
        do: prompt_recovery_timeout(agent_name)
 
-  defp prompt_transition_result(
+  defp prompt_final_observation(
          {:error, reason},
-         _context,
-         _session_name,
-         _env,
-         _baseline,
-         _deadline
+         _baseline
        ),
        do: {:error, reason}
 
-  defp continue_prompt_transition(context, session_name, env, baseline, agent, deadline) do
-    remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
-
-    if remaining_ms == 0 do
-      prompt_recovery_timeout(agent.name)
-    else
-      Process.sleep(min(Map.get(context, :poll_interval_ms, @default_poll_interval_ms), remaining_ms))
-      observe_prompt_transition(context, session_name, env, baseline, agent, deadline)
-    end
+  defp newer_agent_revision?(observed, baseline) do
+    newer_agent_field?(observed, baseline, :revision) or
+      newer_agent_field?(observed, baseline, :state_change_seq)
   end
 
-  defp newer_agent_revision?(%{revision: observed}, %{revision: baseline})
-       when is_integer(observed) and is_integer(baseline),
-       do: observed > baseline
+  defp newer_agent_field?(observed, baseline, field) do
+    observed_value = Map.get(observed, field)
+    baseline_value = Map.get(baseline, field)
 
-  defp newer_agent_revision?(_observed, _baseline), do: false
+    is_integer(observed_value) and is_integer(baseline_value) and observed_value > baseline_value
+  end
 
   defp prompt_recovery_send_keys_error(:command_timeout, agent_name),
     do: prompt_recovery_timeout(agent_name)
@@ -2458,7 +2490,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       agent_status: Map.get(agent, "agent_status"),
       agent: Map.get(agent, "agent"),
       agent_session: Map.get(agent, "agent_session"),
-      revision: Map.get(agent, "revision")
+      revision: Map.get(agent, "revision"),
+      state_change_seq: Map.get(agent, "state_change_seq")
     }
   end
 end

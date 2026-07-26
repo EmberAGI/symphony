@@ -119,6 +119,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
   plain stderr and exit codes only. Other timing knobs:
   `HERDR_FAKE_PROMPT_STALL_COUNT` (stall scheduling; the emitted envelopes are
   the recorded stall/timeout recordings),
+  `HERDR_FAKE_PROMPT_STALL_DELAY_SECONDS` (delay before the recorded stall),
   `HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS` (delayed revision timing
   after a separate Enter submission), and `HERDR_FAKE_STATUS_STALL*`.
   """
@@ -385,6 +386,9 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
         printf '%s\\n' "$prompt_attempts" > "$prompt_attempt_file"
         if [ "$prompt_attempts" -le "$HERDR_FAKE_PROMPT_STALL_COUNT" ]; then
           : > "$state_root/pending-prompt.$agent_name"
+          if [ -n "${HERDR_FAKE_PROMPT_STALL_DELAY_SECONDS:-}" ]; then
+            sleep "$HERDR_FAKE_PROMPT_STALL_DELAY_SECONDS"
+          fi
           replay error-agent-prompt-stalled
         fi
       fi
