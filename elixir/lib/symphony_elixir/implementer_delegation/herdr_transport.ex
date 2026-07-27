@@ -1261,7 +1261,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         printf '%s\n' 'usage: launch-worker <name> <pane-id>' >&2
         exit 64
       fi
-      if [ "$1" != #{@canonical_worker_agent} ]; then
+      if [ "$1" != "#{@canonical_worker_agent}" ]; then
         printf '%s\n' 'worker name must be implementer_worker' >&2
         exit 64
       fi
