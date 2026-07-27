@@ -967,6 +967,15 @@ defmodule SymphonyElixir.AgentRuntime do
      }}
   end
 
+  defp real_irrecoverable_runtime_reason({:implementer_provider_session_missing, details})
+       when is_map(details) do
+    {:invalid_workspace_or_runtime_protocol,
+     %{
+       subtype: "implementer_provider_session_missing",
+       message: "Implementer provider session identity was absent or blank at turn completion"
+     }}
+  end
+
   defp real_irrecoverable_runtime_reason({_tag, %{checkpoint: {:error, {:implementer_checkpoint_failed, _} = inner}}}) do
     real_irrecoverable_runtime_reason(inner)
   end

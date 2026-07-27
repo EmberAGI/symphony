@@ -136,6 +136,57 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     def stop_session(_session, _context), do: :ok
   end
 
+  defmodule IntermediateSessionTransport do
+    @moduledoc false
+
+    def default_server_snapshot(_context),
+      do: {:ok, %{status: "running", version: "0.7.5", protocol: 17, socket: "/tmp/default.sock"}}
+
+    def start_session(spec, _context),
+      do:
+        {:ok,
+         %{
+           name: spec.name,
+           socket: "/tmp/#{spec.name}/herdr.sock",
+           runtime_root: "/tmp/#{spec.name}",
+           workspace: spec.workspace
+         }}
+
+    def prepare_worker(session, _spec, _context) do
+      {:ok,
+       session
+       |> Map.put(:worker_launcher, "/tmp/#{session.name}/launch-worker")
+       |> Map.put(:orchestrator_bin, "/tmp/#{session.name}/orchestrator-bin")}
+    end
+
+    def start_agent(_session, spec, _context),
+      do: {:ok, %{name: spec.name, pane_id: "w1:p1", agent_status: "idle"}}
+
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context),
+      do: {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working"}}}
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      case Process.get({__MODULE__, :status_reads}, 0) do
+        0 ->
+          Process.put({__MODULE__, :status_reads}, 1)
+
+          {:ok,
+           %{
+             name: agent.name,
+             agent_status: "working",
+             agent_session: %{value: "intermediate-provider-session"}
+           }}
+
+        _ ->
+          {:ok, %{name: agent.name, agent_status: "idle", agent_session: nil}}
+      end
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "orchestrator turn finished"}}
+
+    def stop_session(_session, _context), do: :ok
+  end
+
   test "a worker that really received an assignment never settles as a silent no-evidence completion", context do
     session = start_implementer_session(context, "evidence-unrecorded")
 
@@ -834,6 +885,64 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
+  test "a direct-work turn without a provider session identity fails closed before either success outcome", context do
+    for {shape, mutate_identity} <- [
+          {:missing, &remove_provider_session_identity/1},
+          {:blank, &blank_provider_session_identity/1}
+        ] do
+      mutate_identity.(context)
+
+      session =
+        start_implementer_session(
+          context,
+          "evidence-direct-work-#{shape}-provider-session",
+          [{"HERDR_REPLAY_PROMPT", "agent-prompt-idle"}]
+        )
+
+      {result, log} = with_log(fn -> run_runtime_turn(session, fn -> :ok end) end)
+
+      assert {:error, {:implementer_provider_session_missing, %{agent: "implementer_orchestrator", provider: "codex"}}} = result
+
+      assert {:irrecoverable, %{family: :invalid_workspace_or_runtime_protocol, retryable?: false}} =
+               AgentRuntime.classify_failure(elem(result, 1), %{provider: :codex, role: "implementer"})
+
+      refute log =~ @correlation_event
+      refute log =~ @no_delegation_event
+
+      stop(session)
+      HerdrReplayFixture.materialize_replay_dir!(context.replay_dir)
+    end
+  end
+
+  test "an identity first observed during supervision survives terminal omission and keeps direct work joinable" do
+    Process.delete({IntermediateSessionTransport, :status_reads})
+
+    assert {:ok, session} =
+             ImplementerDelegation.start_session(
+               "/tmp/symphony-correlation-evidence-ws",
+               valid_contract(),
+               issue_identifier: "EMB-1318",
+               run_id: "run-intermediate-provider-session",
+               transport: IntermediateSessionTransport,
+               transport_context: %{}
+             )
+
+    {result, log} =
+      with_log(fn ->
+        ImplementerDelegation.run_turn(
+          session,
+          "Implement the bounded issue.",
+          issue(),
+          heartbeat_interval_ms: 1,
+          settle_window_ms: 0
+        )
+      end)
+
+    assert {:ok, %{session_id: "intermediate-provider-session", worker_assignments: []}} = result
+    assert log =~ @no_delegation_event
+    refute log =~ @correlation_event
+  end
+
   describe "step 2 — the transport separates an unobservable session from an empty one" do
     test "a session carrying no runtime root is unobservable, not assignment-free" do
       assert {:error, {:worker_assignments_unobservable, %{reason: :session_runtime_root_missing}}} =
@@ -887,7 +996,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     ImplementerDelegation.run_turn(session, "Implement the bounded issue.", issue(), [])
   end
 
-  defp start_implementer_session(context, run_id) do
+  defp start_implementer_session(context, run_id, extra_env \\ []) do
     assert {:ok, session} =
              AgentRuntime.start_session(context.workspace,
                issue: issue(),
@@ -895,7 +1004,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
                run_id: run_id,
                delegation_transport_context: %{
                  herdr_bin: context.herdr_bin,
-                 extra_env: [{"HERDR_FAKE_LOG", context.herdr_log}],
+                 extra_env: [{"HERDR_FAKE_LOG", context.herdr_log} | extra_env],
                  socket_root: context.runtime_root,
                  poll_interval_ms: 5,
                  start_timeout_ms: 2_000
@@ -934,6 +1043,21 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     assert {output, 0} = native_argv(session, context, ["--session", session.name, "agent", "list"])
     Jason.decode!(output)
   end
+
+  defp remove_provider_session_identity(context) do
+    mutate_provider_session_replay(context, "agent-prompt-idle", fn replay ->
+      Regex.replace(~r/"agent_session":\{.*?\},"agent_status"/, replay, ~S("agent_status"))
+    end)
+  end
+
+  defp blank_provider_session_identity(context) do
+    mutate_provider_session_replay(context, "agent-prompt-idle", fn replay ->
+      Regex.replace(~r/"value":"[^"]*"/, replay, ~S("value":" "))
+    end)
+  end
+
+  defp mutate_provider_session_replay(context, replay, mutate),
+    do: HerdrReplayFixture.write_replay_mutation!(context.replay_dir, replay, replay, mutate)
 
   defp mutate_agent_list(context, transform),
     do: HerdrReplayFixture.write_replay_mutation!(context.replay_dir, "agent-list", "agent-list", transform)
