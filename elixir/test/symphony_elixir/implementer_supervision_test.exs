@@ -225,7 +225,7 @@ defmodule SymphonyElixir.ImplementerSupervisionTest do
       reads = Process.get({__MODULE__, :reads}, 0) + 1
       Process.put({__MODULE__, :reads}, reads)
       status = if reads < 6, do: "working", else: "done"
-      {:ok, %{name: agent.name, agent_status: status, agent_session: nil}}
+      {:ok, %{name: agent.name, agent_status: status, agent_session: %{value: "progress-session"}}}
     end
 
     def await_agent(_session, _agent, _statuses, _timeout_ms, %{owner: owner}) do
