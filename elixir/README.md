@@ -147,8 +147,9 @@ Notes:
 - `tracker.request_timeout_ms` is the total deadline for a single tracker request, covering the whole
   request transport rather than only connection setup. Default: `30000`. It must be positive.
   A request that overruns it is terminated and reported as a typed Linear request timeout, so a
-  tracker call that is accepted but never completed cannot block terminal settlement, cleanup, or
-  role state and work-admission responses.
+  tracker call that is accepted but never completed cannot block a role's pre-terminal refresh,
+  terminal settlement, or cleanup, and can delay role state and work-admission responses by at most
+  `request_timeout_ms` rather than indefinitely.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the

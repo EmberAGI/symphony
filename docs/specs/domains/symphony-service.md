@@ -1287,10 +1287,14 @@ Bounded tracker I/O (REQUIRED):
   carrying the operation context). Callers MUST NOT observe an unclassified exit or a false success.
 - Any tracker read a role performs before terminal settlement — in particular the pre-terminal
   issue-state refresh a completed provider run performs to decide continuation — is therefore
-  time-bounded. Terminal settlement, cleanup, and role serviceability (role state and
-  work-admission responses) MUST NOT depend on a tracker request completing: a stalled request MUST
-  still produce a typed failed terminal outcome within the configured bound, after which the normal
-  settlement and cleanup path runs.
+  time-bounded. That refresh is worker-owned, so terminal settlement, cleanup, and role
+  serviceability (role state and work-admission responses) MUST NOT depend on it completing: a
+  stalled request MUST still produce a typed failed terminal outcome within the configured bound,
+  after which the normal settlement and cleanup path runs.
+- Tracker reads the orchestrator itself performs synchronously (running-state reconciliation, retry
+  polling) are bounded by the same deadline rather than made independent of it. Role responses MAY
+  therefore be delayed by at most `tracker.request_timeout_ms` while one is in flight, and MUST NOT
+  be delayed indefinitely.
 
 ### 11.5 Tracker Writes (Important Boundary)
 
