@@ -20,6 +20,10 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @required_protocol 17
   @launch_projection_sentinel "--symphony-launch-projection"
   @default_launch_handshake_timeout_ms 5_000
+  # The two agents a run owns: the orchestrator it starts and the one canonical
+  # worker it prestarts and records.
+  @orchestrator_agent "implementer_orchestrator"
+  @canonical_worker_agent "implementer_worker"
   @worker_assignment_prefix "OCTO_MSG/1 kind=assignment "
   @worker_result_prefix "OCTO_MSG/1 kind=result "
   @launch_stage_failures [
@@ -699,15 +703,20 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     worker_events = worker_events_root(runtime_root)
 
     if File.dir?(worker_events) do
-      with {:ok, observed_worker} <- get_agent(session, worker, timeout_ms, context),
+      with {:ok, agent_inventory} <- observe_agent_inventory(session, :turn_start, context),
+           {:ok, observed_worker} <- get_agent(session, worker, timeout_ms, context),
            revision when is_integer(revision) <- Map.get(observed_worker, :revision) do
         {:ok,
          %{
            worker_revision: revision,
            worker_event_paths: worker_event_paths(worker_events),
+           agent_inventory: agent_inventory,
            status_read_timeout_ms: timeout_ms
          }}
       else
+        {:error, {:worker_assignments_unobservable, _details} = reason} ->
+          {:error, reason}
+
         {:error, reason} ->
           worker_state_unobservable(:turn_start, reason)
 
@@ -746,7 +755,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     worker_events = worker_events_root(runtime_root)
 
     if File.dir?(worker_events) do
-      worker = Map.get(session, :worker, %{name: "implementer_worker"})
+      worker = Map.get(session, :worker, %{name: @canonical_worker_agent})
 
       with :ok <- validate_recordable_commands(worker_events),
            :ok <- validate_worker_event_recorder_attestation(worker_events, session),
@@ -786,6 +795,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         %{
           worker_revision: baseline_revision,
           worker_event_paths: baseline_paths,
+          agent_inventory: baseline_inventory,
           status_read_timeout_ms: timeout_ms
         },
         context
@@ -826,12 +836,17 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
                worker,
                context
              ),
-           {:ok, observed_worker} <- get_agent(session, worker, timeout_ms, context),
            :ok <-
-             validate_worker_revision_observation(
-               baseline_revision,
-               Map.get(observed_worker, :revision),
-               observed_assignments
+             validate_settled_worker_observation(
+               session,
+               worker,
+               %{
+                 baseline_revision: baseline_revision,
+                 baseline_inventory: baseline_inventory,
+                 status_read_timeout_ms: timeout_ms
+               },
+               observed_assignments,
+               context
              ) do
         {:ok, observed_assignments}
       else
@@ -1212,7 +1227,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
          {:ok, worker_token, worker_projection_path} <-
            materialize_launch_projection(
              runtime_root,
-             "implementer_worker",
+             @canonical_worker_agent,
              kind,
              hd(argv),
              native_args,
@@ -1246,7 +1261,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         printf '%s\n' 'usage: launch-worker <name> <pane-id>' >&2
         exit 64
       fi
-      if [ "$1" != "implementer_worker" ]; then
+      if [ "$1" != "#{@canonical_worker_agent}" ]; then
         printf '%s\n' 'worker name must be implementer_worker' >&2
         exit 64
       fi
@@ -1856,12 +1871,36 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
           esac
           """
 
+        # The orchestrator's authority over workers reaches exactly one agent:
+        # the canonical worker this run prestarted and records. Creating any
+        # other agent, or prompting one, is a delegation surface no recording
+        # covers, so it is refused here — and the refusal is itself recorded,
+        # because an orchestrator that ignores a denial must not be able to buy
+        # positive no-delegation evidence with it.
         :orchestrator ->
           """
+          deny_untracked_agent() {
+            record_worker_event denied "$*"
+            printf '%s\n' "orchestrator Herdr authority denies untracked worker agent: $*" >&2
+            exit 64
+          }
+
           case "$herdr_subcommand:$herdr_action" in
             agent:send-keys|pane:send-keys)
               printf '%s\n' "orchestrator Herdr authority denies: $*" >&2
               exit 64
+              ;;
+            agent:start)
+              case "$herdr_prompt_target" in
+                #{@canonical_worker_agent}) ;;
+                *) deny_untracked_agent "$@" ;;
+              esac
+              ;;
+            agent:prompt)
+              case "$herdr_prompt_target" in
+                #{@canonical_worker_agent}|#{@orchestrator_agent}) ;;
+                *) deny_untracked_agent "$@" ;;
+              esac
               ;;
           esac
           """
@@ -2035,8 +2074,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   defp herdr_command_parser(role) do
     counterpart =
       case role do
-        :orchestrator -> "implementer_worker"
-        :worker -> "implementer_orchestrator"
+        :orchestrator -> @canonical_worker_agent
+        :worker -> @orchestrator_agent
       end
 
     """
@@ -2140,12 +2179,12 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   defp worker_message_recording(:orchestrator, _runtime_root) do
     """
     case "$agent_name" in
-      implementer_worker)
+      #{@canonical_worker_agent})
         record_worker_event delivery "$message"
         ;;
     esac
     case "$agent_name:$message" in
-      implementer_worker:'#{@worker_assignment_prefix}'*)
+      #{@canonical_worker_agent}:'#{@worker_assignment_prefix}'*)
         record_worker_event assignment "$message"
         ;;
     esac
@@ -2155,12 +2194,12 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   defp worker_message_recording(:worker, _runtime_root) do
     """
     case "$agent_name" in
-      implementer_orchestrator)
+      #{@orchestrator_agent})
         record_worker_event reply "$message"
         ;;
     esac
     case "$agent_name:$message" in
-      implementer_orchestrator:'#{@worker_result_prefix}'*)
+      #{@orchestrator_agent}:'#{@worker_result_prefix}'*)
         record_worker_event result "$message"
         ;;
     esac
@@ -2250,19 +2289,25 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   # observation this contract must never round down to "no worker assignments".
   defp validate_recordable_commands(worker_events) do
     worker_events
-    |> Path.join("unparsed.*")
+    |> Path.join("*")
     |> Path.wildcard()
     |> MapSet.new()
     |> validate_recordable_command_paths()
   end
 
   defp validate_recordable_command_paths(paths) do
-    case paths |> worker_event_paths("unparsed.") |> length() do
-      0 ->
-        :ok
+    with :ok <- validate_marker_absent(paths, "unparsed.", :unrecognized_herdr_command_form, :unparsed) do
+      validate_marker_absent(paths, "denied.", :orchestrator_authority_denied, :denied)
+    end
+  end
 
-      unparsed ->
-        {:error, {:worker_assignments_unobservable, %{reason: :unrecognized_herdr_command_form, unparsed: unparsed}}}
+  # A refused command is evidence in its own right: the role tried to reach a
+  # worker agent outside this run's authority, so the turn cannot be read back
+  # as one that never delegated.
+  defp validate_marker_absent(paths, prefix, reason, count_key) do
+    case paths |> worker_event_paths(prefix) |> length() do
+      0 -> :ok
+      count -> {:error, {:worker_assignments_unobservable, %{count_key => count, :reason => reason}}}
     end
   end
 
@@ -2305,6 +2350,132 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   defp worker_event_paths(%MapSet{} = paths, prefix) do
     Enum.filter(paths, &(Path.basename(&1) |> String.starts_with?(prefix)))
   end
+
+  # What the session itself must still prove once the turn's records are read:
+  # the canonical worker is the same agent, at the same revision, the turn
+  # opened with, and the session holds exactly the agents this run owns.
+  defp validate_settled_worker_observation(
+         session,
+         worker,
+         %{
+           baseline_revision: baseline_revision,
+           baseline_inventory: baseline_inventory,
+           status_read_timeout_ms: timeout_ms
+         },
+         observed_assignments,
+         context
+       ) do
+    with {:ok, observed_worker} <- get_agent(session, worker, timeout_ms, context),
+         :ok <-
+           validate_worker_revision_observation(
+             baseline_revision,
+             Map.get(observed_worker, :revision),
+             observed_assignments
+           ),
+         {:ok, observed_inventory} <- observe_agent_inventory(session, :turn_completion, context) do
+      validate_stable_agent_inventory(baseline_inventory, observed_inventory)
+    end
+  end
+
+  # A run owns exactly two live agents: the orchestrator it started and the
+  # canonical worker it prestarted. Any other agent in the session is a
+  # delegation surface the worker-event recording does not cover, and a
+  # canonical name is not identity — the agent answering to it at completion
+  # must be the same one the turn started with. The inventory is read through
+  # the transport-owned real binary, so a role that bypasses its generated
+  # shim entirely is still observed.
+  defp observe_agent_inventory(%{name: session_name, env: env} = session, stage, context) do
+    with {:ok, expected} <- expected_agent_names(session, stage),
+         {:ok, output} <- command(context, ["--session", session_name, "agent", "list"], env),
+         {:ok, %{"result" => %{"agents" => agents}}} when is_list(agents) <- Jason.decode(output),
+         observed = Enum.map(agents, &agent_identity/1),
+         :ok <- validate_usable_agent_identities(observed, stage),
+         :ok <- validate_expected_agent_inventory(expected, observed, stage) do
+      {:ok, observed}
+    else
+      {:error, {:worker_assignments_unobservable, _details} = reason} ->
+        {:error, reason}
+
+      {:error, reason} ->
+        agent_inventory_unobservable(stage, reason)
+
+      _invalid ->
+        agent_inventory_unobservable(stage, :invalid_herdr_agent_list_response)
+    end
+  end
+
+  defp observe_agent_inventory(_session, stage, _context),
+    do: agent_inventory_unobservable(stage, :session_identity_missing)
+
+  defp expected_agent_names(session, stage) do
+    orchestrator = run_owned_agent_name(Map.get(session, :orchestrator))
+    worker = run_owned_agent_name(Map.get(session, :worker))
+
+    if is_binary(orchestrator) and is_binary(worker),
+      do: {:ok, Enum.sort([orchestrator, worker])},
+      else: {:error, {:worker_assignments_unobservable, %{reason: :run_owned_agents_unknown, stage: stage}}}
+  end
+
+  defp run_owned_agent_name(%{name: name}) when is_binary(name) and name != "", do: name
+  defp run_owned_agent_name(_agent), do: nil
+
+  # Identity is the pair Herdr 0.7.5 reports for every listed agent: the name
+  # it answers to and the pane it occupies. `agent_session` is deliberately not
+  # part of it — the provider session does not exist until the agent has been
+  # prompted, so binding identity to it would fail every first turn closed. An
+  # entry the transport cannot project at all still yields an identity, so a
+  # malformed inventory fails typed rather than raising.
+  defp agent_identity(agent) when is_map(agent), do: %{name: Map.get(agent, "name"), pane_id: Map.get(agent, "pane_id")}
+  defp agent_identity(_agent), do: %{name: nil, pane_id: nil}
+
+  defp validate_usable_agent_identities(observed, stage) do
+    if Enum.all?(observed, &usable_agent_identity?/1) do
+      :ok
+    else
+      {:error, {:worker_assignments_unobservable, %{reason: :agent_identity_incomplete, stage: stage}}}
+    end
+  end
+
+  defp usable_agent_identity?(%{name: name, pane_id: pane_id}),
+    do: is_binary(name) and name != "" and is_binary(pane_id) and pane_id != ""
+
+  defp validate_expected_agent_inventory(expected, observed, stage) do
+    observed_names = observed |> Enum.map(& &1.name) |> Enum.sort()
+
+    if observed_names == expected do
+      :ok
+    else
+      {:error,
+       {:worker_assignments_unobservable,
+        %{
+          reason: :worker_agent_inventory_unexpected,
+          stage: stage,
+          expected: expected,
+          observed: observed_names
+        }}}
+    end
+  end
+
+  defp validate_stable_agent_inventory(baseline, observed) when is_list(baseline) and is_list(observed) do
+    if Enum.sort(baseline) == Enum.sort(observed) do
+      :ok
+    else
+      {:error,
+       {:worker_assignments_unobservable,
+        %{
+          reason: :worker_agent_inventory_changed,
+          stage: :turn_completion,
+          expected: Enum.sort(baseline),
+          observed: Enum.sort(observed)
+        }}}
+    end
+  end
+
+  defp validate_stable_agent_inventory(_baseline, _observed),
+    do: {:error, {:worker_assignments_unobservable, %{reason: :invalid_worker_assignment_observation}}}
+
+  defp agent_inventory_unobservable(stage, error),
+    do: {:error, {:worker_assignments_unobservable, %{reason: :agent_inventory_unreadable, stage: stage, error: error}}}
 
   defp validate_worker_revision_observation(_baseline_revision, _observed_revision, [_first | _rest]),
     do: :ok

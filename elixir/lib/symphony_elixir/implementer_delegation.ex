@@ -114,10 +114,15 @@ defmodule SymphonyElixir.ImplementerDelegation do
     status_read_timeout_ms = Keyword.get(opts, :status_read_timeout_ms, Supervision.default_status_read_timeout_ms())
     on_message = Keyword.get(opts, :on_message, fn _message -> :ok end)
 
+    # The transport owns the assignment truth, and the agents this run owns are
+    # part of it: the orchestrator identity travels with the session so the
+    # transport can hold the live agent inventory to exactly them.
+    observed_session = Map.put(herdr_session, :orchestrator, orchestrator)
+
     with {:ok, worker_observation} <-
            begin_worker_assignment_observation(
              transport,
-             herdr_session,
+             observed_session,
              status_read_timeout_ms,
              transport_context
            ),
@@ -176,7 +181,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
          {:ok, worker_assignments} <-
            worker_assignments(
              transport,
-             herdr_session,
+             observed_session,
              worker_observation,
              transport_context
            ),
