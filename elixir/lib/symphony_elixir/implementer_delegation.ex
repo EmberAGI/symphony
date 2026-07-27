@@ -300,11 +300,6 @@ defmodule SymphonyElixir.ImplementerDelegation do
             _ -> retry_provider_session_receipt(transport, herdr_session, orchestrator, status_read_timeout_ms, deadline, interval_ms, context)
           end
 
-        # A read bounded by the receipt window reports no receipt when its
-        # deadline expires. Preserve other transport failures verbatim.
-        {:error, {:herdr_agent_get_timeout, _agent_name}} ->
-          retry_provider_session_receipt(transport, herdr_session, orchestrator, status_read_timeout_ms, deadline, interval_ms, context)
-
         {:error, reason} ->
           {:error, reason}
       end
