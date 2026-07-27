@@ -364,6 +364,11 @@ Fields:
   - Default: `Todo`, `In Progress`
 - `terminal_states` (list of strings)
   - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
+- `request_timeout_ms` (integer)
+  - Default: `30000`
+  - MUST be positive; invalid values MUST fail configuration validation.
+  - Total deadline for one tracker request, covering the whole configured or injected request
+    transport rather than only connection setup.
 
 #### 5.3.2 `polling` (object)
 
@@ -579,6 +584,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear`
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
+- `tracker.request_timeout_ms`: positive integer, default `30000` (total per-request tracker deadline)
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null
@@ -1230,7 +1236,7 @@ Linear-specific requirements for `tracker.kind == "linear"`:
 - Issue-state refresh query uses GraphQL issue IDs with variable type `[ID!]`
 - Pagination REQUIRED for candidate issues
 - Page size default: `50`
-- Network timeout: `30000 ms`
+- Total request deadline: `tracker.request_timeout_ms`, default `30000 ms`
 
 Important:
 
@@ -1259,7 +1265,7 @@ RECOMMENDED error categories:
 - `unsupported_tracker_kind`
 - `missing_tracker_api_key`
 - `missing_tracker_project_slug`
-- `linear_api_request` (transport failures)
+- `linear_api_request` (transport failures, including the total request deadline)
 - `linear_api_status` (non-200 HTTP)
 - `linear_graphql_errors`
 - `linear_unknown_payload`
@@ -1270,6 +1276,21 @@ Orchestrator behavior on tracker errors:
 - Candidate fetch failure: log and skip dispatch for this tick.
 - Running-state refresh failure: log and keep active workers running.
 - Startup terminal cleanup failure: log warning and continue startup.
+
+Bounded tracker I/O (REQUIRED):
+
+- Every tracker request MUST be bound by the total `tracker.request_timeout_ms` deadline. The bound
+  MUST cover the request transport itself, so a peer that accepts a request and then never completes
+  it — or that keeps a connection or response trickling — cannot extend it.
+- A request that overruns the deadline MUST be terminated, MUST leave no request task or monitor
+  behind, and MUST surface as a typed request failure (`linear_api_request` with a timeout reason
+  carrying the operation context). Callers MUST NOT observe an unclassified exit or a false success.
+- Any tracker read a role performs before terminal settlement — in particular the pre-terminal
+  issue-state refresh a completed provider run performs to decide continuation — is therefore
+  time-bounded. Terminal settlement, cleanup, and role serviceability (role state and
+  work-admission responses) MUST NOT depend on a tracker request completing: a stalled request MUST
+  still produce a typed failed terminal outcome within the configured bound, after which the normal
+  settlement and cleanup path runs.
 
 ### 11.5 Tracker Writes (Important Boundary)
 
