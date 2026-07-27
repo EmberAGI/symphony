@@ -76,7 +76,14 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
       File.rm_rf(runtime_root)
     end)
 
-    {:ok, workspace: workspace, herdr_bin: herdr_bin, herdr_log: herdr_log, replay_dir: replay_dir, runtime_root: runtime_root}
+    {:ok,
+     %{
+       workspace: workspace,
+       herdr_bin: herdr_bin,
+       herdr_log: herdr_log,
+       replay_dir: replay_dir,
+       runtime_root: runtime_root
+     }}
   end
 
   defmodule BlindTransport do

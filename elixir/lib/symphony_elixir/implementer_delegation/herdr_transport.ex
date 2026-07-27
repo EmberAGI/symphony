@@ -802,7 +802,6 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       )
       when is_binary(runtime_root) and is_map(worker) and
              is_integer(baseline_revision) and is_struct(baseline_paths, MapSet) and
-             is_list(baseline_inventory) and
              is_integer(timeout_ms) and timeout_ms > 0 and is_map(context) do
     worker_events = worker_events_root(runtime_root)
 
@@ -837,15 +836,18 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
                worker,
                context
              ),
-           {:ok, observed_worker} <- get_agent(session, worker, timeout_ms, context),
            :ok <-
-             validate_worker_revision_observation(
-               baseline_revision,
-               Map.get(observed_worker, :revision),
-               observed_assignments
-             ),
-           {:ok, observed_inventory} <- observe_agent_inventory(session, :turn_completion, context),
-           :ok <- validate_stable_agent_inventory(baseline_inventory, observed_inventory) do
+             validate_settled_worker_observation(
+               session,
+               worker,
+               %{
+                 baseline_revision: baseline_revision,
+                 baseline_inventory: baseline_inventory,
+                 status_read_timeout_ms: timeout_ms
+               },
+               observed_assignments,
+               context
+             ) do
         {:ok, observed_assignments}
       else
         {:error, {:worker_assignments_unobservable, _details} = reason} ->
@@ -2349,6 +2351,32 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     Enum.filter(paths, &(Path.basename(&1) |> String.starts_with?(prefix)))
   end
 
+  # What the session itself must still prove once the turn's records are read:
+  # the canonical worker is the same agent, at the same revision, the turn
+  # opened with, and the session holds exactly the agents this run owns.
+  defp validate_settled_worker_observation(
+         session,
+         worker,
+         %{
+           baseline_revision: baseline_revision,
+           baseline_inventory: baseline_inventory,
+           status_read_timeout_ms: timeout_ms
+         },
+         observed_assignments,
+         context
+       ) do
+    with {:ok, observed_worker} <- get_agent(session, worker, timeout_ms, context),
+         :ok <-
+           validate_worker_revision_observation(
+             baseline_revision,
+             Map.get(observed_worker, :revision),
+             observed_assignments
+           ),
+         {:ok, observed_inventory} <- observe_agent_inventory(session, :turn_completion, context) do
+      validate_stable_agent_inventory(baseline_inventory, observed_inventory)
+    end
+  end
+
   # A run owns exactly two live agents: the orchestrator it started and the
   # canonical worker it prestarted. Any other agent in the session is a
   # delegation surface the worker-event recording does not cover, and a
@@ -2416,7 +2444,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     end
   end
 
-  defp validate_stable_agent_inventory(baseline, observed) do
+  defp validate_stable_agent_inventory(baseline, observed) when is_list(baseline) and is_list(observed) do
     if Enum.sort(baseline) == Enum.sort(observed) do
       :ok
     else
@@ -2430,6 +2458,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         }}}
     end
   end
+
+  defp validate_stable_agent_inventory(_baseline, _observed),
+    do: {:error, {:worker_assignments_unobservable, %{reason: :invalid_worker_assignment_observation}}}
 
   defp agent_inventory_unobservable(stage, error),
     do: {:error, {:worker_assignments_unobservable, %{reason: :agent_inventory_unreadable, stage: stage, error: error}}}
