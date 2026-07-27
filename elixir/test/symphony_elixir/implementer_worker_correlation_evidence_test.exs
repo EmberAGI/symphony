@@ -418,6 +418,130 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
+  test "a provider session that only appears after prompting is not agent identity", context do
+    session = start_implementer_session(context, "evidence-first-turn-provider-session")
+
+    # Herdr 0.7.5 first-turn physics: `agent_session` is the provider session
+    # and does not exist until the agent has been prompted. On the first turn
+    # the inventory is read before the orchestrator is prompted and again after
+    # it answered, so this optional field is absent at turn start and present
+    # at turn completion for the very run the canary must get through. Binding
+    # identity to it would fail every untouched first turn closed.
+    assert %{"result" => %{"agents" => unprompted}} = native_agent_list(session, context)
+    assert unprompted != []
+    assert Enum.all?(unprompted, &(not Map.has_key?(&1, "agent_session")))
+
+    {result, log} = with_log(fn -> run_runtime_turn(session, fn -> :ok end) end)
+
+    assert {:ok, {_next_session, turn}} = result
+    assert turn.worker_assignments == []
+
+    assert %{"result" => %{"agents" => settled}} = native_agent_list(session, context)
+    assert Enum.any?(settled, &match?(%{"name" => "implementer_orchestrator", "agent_session" => %{}}, &1))
+
+    refute log =~ @correlation_event
+    assert log =~ @no_delegation_event
+    assert occurrences(log, "outcome=no_delegation") == 1, "a settled turn must emit its outcome exactly once"
+
+    stop(session)
+  end
+
+  test "a canonical delegation still correlates once the worker gains a provider session", context do
+    session = start_implementer_session(context, "evidence-first-turn-correlated")
+
+    # The same first-turn physics on the success path: prompting the canonical
+    # worker is what gives it an `agent_session`, so a correlated delegation is
+    # exactly the turn during which the field appears.
+    action = fn ->
+      assert :ok =
+               orchestrator_prompt(
+                 session,
+                 context,
+                 "implementer_worker",
+                 "OCTO_MSG/1 kind=assignment assignment=EMB1314-FIRST-TURN deliverable=bounded"
+               )
+
+      assert :ok =
+               worker_prompt(
+                 session,
+                 context,
+                 "implementer_orchestrator",
+                 "OCTO_MSG/1 kind=result assignment=EMB1314-FIRST-TURN status=completed"
+               )
+    end
+
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
+
+    assert {:ok, {_next_session, turn}} = result
+
+    assert [%{assignment_id: "EMB1314-FIRST-TURN", status: :completed}] = turn.worker_assignments
+
+    assert %{"result" => %{"agents" => settled}} = native_agent_list(session, context)
+    assert Enum.all?(settled, &match?(%{"agent_session" => %{}}, &1))
+
+    assert log =~ @correlation_event
+    assert occurrences(log, "outcome=correlated") == 1, "a settled turn must emit its outcome exactly once"
+    assert occurrences(log, "outcome=no_delegation") == 0
+
+    stop(session)
+  end
+
+  test "an agent list entry that is not an object fails the turn typed instead of raising", context do
+    session = start_implementer_session(context, "evidence-nonmap-inventory-entry")
+
+    # A shape the transport cannot project is an unobservable inventory, not a
+    # crash: the operator must still receive the typed stage and reason.
+    mutate_agent_list(context, &Regex.replace(~r/"agents":\[.*?\],"type"/, &1, ~S("agents":[null],"type")))
+
+    {result, log} = with_log(fn -> run_runtime_turn(session, fn -> :ok end) end)
+
+    refute log =~ @correlation_event
+    refute log =~ @no_delegation_event
+
+    assert {:error,
+            {:implementer_worker_assignments_unobservable,
+             %{reason: :agent_identity_incomplete, stage: :turn_start}}} = result
+
+    stop(session)
+  end
+
+  test "an agent list entry with no name fails the turn typed", context do
+    session = start_implementer_session(context, "evidence-nameless-inventory-entry")
+
+    mutate_agent_list(context, &String.replace(&1, ~S("name":"{{AGENT_NAME}}",), ""))
+
+    {result, log} = with_log(fn -> run_runtime_turn(session, fn -> :ok end) end)
+
+    refute log =~ @correlation_event
+    refute log =~ @no_delegation_event
+
+    assert {:error,
+            {:implementer_worker_assignments_unobservable,
+             %{reason: :agent_identity_incomplete, stage: :turn_start}}} = result
+
+    stop(session)
+  end
+
+  test "an agent list entry with an empty pane id fails the turn typed", context do
+    session = start_implementer_session(context, "evidence-paneless-inventory-entry")
+
+    # Without a pane the identity degenerates to the canonical name, which the
+    # inventory layer exists to distrust: both reads would agree and the turn
+    # would settle as positive no-delegation.
+    mutate_agent_list(context, &Regex.replace(~r/"pane_id":"[^"]*"/, &1, ~S("pane_id":"")))
+
+    {result, log} = with_log(fn -> run_runtime_turn(session, fn -> :ok end) end)
+
+    refute log =~ @correlation_event
+    refute log =~ @no_delegation_event
+
+    assert {:error,
+            {:implementer_worker_assignments_unobservable,
+             %{reason: :agent_identity_incomplete, stage: :turn_start}}} = result
+
+    stop(session)
+  end
+
   test "a delegation the worker answered is correlated from the channel itself, with no envelope", context do
     session = start_implementer_session(context, "evidence-structural")
 
@@ -804,6 +928,16 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
       message
     ])
   end
+
+  # The live inventory as the real binary reports it, read outside the runtime
+  # so a test can pin the field physics the transport must tolerate.
+  defp native_agent_list(session, context) do
+    assert {output, 0} = native_argv(session, context, ["--session", session.name, "agent", "list"])
+    Jason.decode!(output)
+  end
+
+  defp mutate_agent_list(context, transform),
+    do: HerdrReplayFixture.write_replay_mutation!(context.replay_dir, "agent-list", "agent-list", transform)
 
   defp native_argv(session, context, argv, extra_env \\ []) do
     System.cmd(context.herdr_bin, argv,

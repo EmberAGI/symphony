@@ -458,13 +458,29 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       # The envelope stays the recording — its recorded entries are selected in
       # order and only the declared {{AGENT_NAME}}/{{AGENT_KIND}} placeholders
       # are filled, one entry per agent this session actually started.
+      #
+      # First-turn physics (0.7.5, visible in the recorded envelopes):
+      # `agent_session` is the provider session and does not exist until the
+      # agent has been prompted — `agent-start` and `agent-get-idle` carry no
+      # such field, `agent-prompt-working` does. The recorded `agent list`
+      # entries were captured after both agents had been prompted, so the
+      # third emitted field replays that prompt state and an unprompted agent
+      # is listed without the recorded `agent_session` object.
       started=$( (set -- "$state_root"/kind.*
         if [ -e "$1" ]; then
           for kind_file in "$@"; do
             started_name=$(basename "$kind_file")
             started_name=${started_name#kind.}
             IFS= read -r started_kind < "$kind_file"
-            printf '%s %s\\n' "$started_name" "$started_kind"
+            started_revision=0
+            if [ -f "$state_root/revision.$started_name" ]; then
+              IFS= read -r started_revision < "$state_root/revision.$started_name"
+            fi
+            started_prompted=0
+            if [ "$started_revision" -gt 0 ]; then
+              started_prompted=1
+            fi
+            printf '%s %s %s\\n' "$started_name" "$started_kind" "$started_prompted"
           done
         fi) | sort)
       agent_name='{{AGENT_NAME}}'
@@ -488,6 +504,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
             if (j < recorded_count) entry = entry "}"
             gsub(/\\{\\{AGENT_NAME\\}\\}/, field[1], entry)
             gsub(/\\{\\{AGENT_KIND\\}\\}/, field[2], entry)
+            if (field[3] == "0") sub(/"agent_session":\\{[^}]*\\},/, "", entry)
             if (i > 1) out = out ","
             out = out entry
           }
