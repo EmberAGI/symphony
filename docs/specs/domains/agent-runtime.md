@@ -849,9 +849,23 @@ per-session evidence beneath the existing isolated runtime root. The records
 are not runtime authority, are never Linear comments, and are removed with the
 runtime root. Every invocation of either role's Herdr projection first records
 a bounded attestation. The launch probe proves startup reachability only; it is
-never accepted as evidence that a later turn did not delegate. Immediately
+never accepted as evidence that a later turn did not delegate. A run owns exactly two live Herdr agents: the orchestrator it started and the
+one canonical prestarted worker its recording covers. The generated
+orchestrator projection therefore denies direct worker lifecycle creation
+(`agent start` for any agent other than the canonical worker) and any
+`agent prompt` to a noncanonical worker agent, and records each refusal as
+turn-local evidence, so an orchestrator that ignores a denial cannot convert it
+into positive no-delegation evidence. Immediately
 before prompting the orchestrator, the transport snapshots the worker's
-Herdr-owned revision and the exact set of existing worker-event files. Turn
+Herdr-owned revision, the exact set of existing worker-event files, and the
+live agent inventory read through the transport-owned real Herdr binary; the
+inventory is read again at turn completion. The expected inventory at both ends
+is exactly the run-owned orchestrator and the canonical prestarted worker, held
+by agent identity rather than name alone: an added, missing, or replaced agent
+fails typed as `worker_agent_inventory_unexpected` or
+`worker_agent_inventory_changed`. Because that read never passes through a
+generated projection, an agent that bypasses its shim and drives the real
+binary directly is still observed. Turn
 completion considers only files absent from that opening set. No turn-local
 assignment plus an unchanged worker revision is positive, falsifiable
 no-delegation evidence; no turn-local assignment plus a changed worker
