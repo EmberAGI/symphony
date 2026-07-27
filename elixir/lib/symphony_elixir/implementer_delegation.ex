@@ -185,12 +185,21 @@ defmodule SymphonyElixir.ImplementerDelegation do
              worker_observation,
              transport_context
            ),
-         :ok <- validate_worker_assignments(worker_assignments, herdr_session) do
+         :ok <- validate_worker_assignments(worker_assignments, herdr_session),
+         # The correlation event is only durable evidence when its provider
+         # session identity is joinable. An absent or blank identity must not
+         # turn direct work into either positive success outcome.
+         session_id = agent_session_id(completed) || agent_session_id(observed),
+         :ok <-
+           validate_provider_session_identity(
+             session_id,
+             orchestrator,
+             contract_provider(Map.get(session, :contract, %{}), :orchestrator)
+           ) do
       # Herdr's terminal `agent get` response may omit `agent_session` even
       # though the acknowledged prompt response carried it. Preserve the
       # provider session identity from that first observation so the durable
       # correlation outcome remains joinable after supervision settles.
-      session_id = agent_session_id(completed) || agent_session_id(observed)
       worker_assignments = observed_assignments(worker_assignments)
       worker_evidence = bounded_worker_evidence(worker_assignments)
 
@@ -307,6 +316,19 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
   defp validate_worker_assignments(_assignments, _herdr_session),
     do: {:error, {:implementer_worker_result_missing, %{assignment_id: nil}}}
+
+  defp validate_provider_session_identity(session_id, orchestrator, provider) when is_binary(session_id) do
+    if byte_size(String.trim(session_id)) > 0,
+      do: :ok,
+      else: provider_session_identity_missing(orchestrator, provider)
+  end
+
+  defp validate_provider_session_identity(_session_id, orchestrator, provider),
+    do: provider_session_identity_missing(orchestrator, provider)
+
+  defp provider_session_identity_missing(orchestrator, provider) do
+    {:error, {:implementer_provider_session_missing, %{agent: Map.get(orchestrator, :name), provider: provider}}}
+  end
 
   defp observed_assignments({:unobservable, _details}), do: []
   defp observed_assignments(assignments) when is_list(assignments), do: assignments

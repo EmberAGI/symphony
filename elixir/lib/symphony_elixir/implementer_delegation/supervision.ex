@@ -74,8 +74,11 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
       else: classify(state, observation, now_ms)
   end
 
-  defp remember_agent(state, {:ok, %{agent_session: session}}) when not is_nil(session),
-    do: Map.put(state, :last_agent_session, session)
+  defp remember_agent(state, {:ok, %{agent_session: session}}) do
+    if provider_session_identity?(session),
+      do: Map.put(state, :last_agent_session, session),
+      else: state
+  end
 
   defp remember_agent(state, _observation), do: state
 
@@ -197,8 +200,8 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
     now = System.monotonic_time(:millisecond)
 
     case step(state, annotate_progress(config, observation), now) do
-      {{:completed, agent}, _state} ->
-        {:ok, agent}
+      {{:completed, agent}, state} ->
+        {:ok, restore_provider_session_identity(agent, state)}
 
       {:continue, state} ->
         heartbeat(config, state)
@@ -263,7 +266,8 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
 
     case result do
       {:ok, %{agent_status: status} = agent} when status in ["idle", "done"] ->
-        {:ok, agent}
+        state = remember_agent(state, {:ok, agent})
+        {:ok, restore_provider_session_identity(agent, state)}
 
       {:error, {:herdr_agent_blocked, _name}} ->
         halt(config, record_recovery(state, :observed_blocked, now), :blocked)
@@ -277,6 +281,26 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
 
   defp recovery_result_evidence({:error, reason}), do: {:failed, reason}
   defp recovery_result_evidence({:ok, agent}), do: {:non_terminal, Map.get(agent, :agent_status)}
+
+  defp restore_provider_session_identity(agent, %{last_agent_session: session})
+       when is_map(session) or is_binary(session) do
+    if provider_session_identity?(Map.get(agent, :agent_session)),
+      do: agent,
+      else: Map.put(agent, :agent_session, session)
+  end
+
+  defp restore_provider_session_identity(agent, _state), do: agent
+
+  defp provider_session_identity?(%{value: value}) when is_binary(value),
+    do: byte_size(String.trim(value)) > 0
+
+  defp provider_session_identity?(%{"value" => value}) when is_binary(value),
+    do: byte_size(String.trim(value)) > 0
+
+  defp provider_session_identity?(value) when is_binary(value),
+    do: byte_size(String.trim(value)) > 0
+
+  defp provider_session_identity?(_session), do: false
 
   defp halt(config, state, :hard_budget_exhausted) do
     case checkpoint(config, state, :hard_budget_exhausted) do
