@@ -175,6 +175,60 @@ defmodule SymphonyElixir.ImplementerWorkerChannelRecordingTest do
     end
   end
 
+  describe "orchestrator authority denies the worker agents it cannot record" do
+    test "creating a suffixed worker agent is denied and records its own evidence", context do
+      assert {64, %{denied: 1, delivery: 0}} =
+               orchestrator(context, [
+                 "--session",
+                 context.session.name,
+                 "agent",
+                 "start",
+                 "implementer_worker_1",
+                 "--kind",
+                 "codex",
+                 "--pane",
+                 "w1:p2"
+               ])
+    end
+
+    test "prompting a noncanonical worker agent is denied and records its own evidence", context do
+      assert {64, %{denied: 1, delivery: 0, assignment: 0}} =
+               orchestrator(context, [
+                 "--session",
+                 context.session.name,
+                 "agent",
+                 "prompt",
+                 "implementer_worker_1",
+                 @assignment
+               ])
+    end
+
+    test "a denial the orchestrator ignores still makes the assignment set unobservable", context do
+      assert {64, %{denied: 1}} =
+               orchestrator(context, ["agent", "prompt", "implementer_worker_1", @assignment])
+
+      assert {:error, {:worker_assignments_unobservable, %{reason: :orchestrator_authority_denied, denied: 1}}} =
+               HerdrTransport.worker_assignments(context.session, %{})
+    end
+
+    test "the canonical worker launch the run itself owns stays authorized", context do
+      assert {_status, %{denied: 0}} =
+               orchestrator(context, [
+                 "--session",
+                 context.session.name,
+                 "agent",
+                 "start",
+                 "implementer_worker",
+                 "--kind",
+                 "codex",
+                 "--pane",
+                 "w1:p2",
+                 "--",
+                 "codex"
+               ])
+    end
+  end
+
   describe "a command form the recorder cannot classify is reported, not ignored" do
     test "an unmodelled global option before a worker prompt records an unparsed marker", context do
       assert {_status, %{delivery: 0, unparsed: 1}} =
@@ -229,7 +283,7 @@ defmodule SymphonyElixir.ImplementerWorkerChannelRecordingTest do
     {_output, status} = System.cmd(shim, argv, env: context.shim_env, stderr_to_stdout: true)
 
     counts =
-      Map.new(~w(delivery assignment reply result unparsed), fn prefix ->
+      Map.new(~w(delivery assignment reply result unparsed denied), fn prefix ->
         {String.to_atom(prefix), events |> Path.join(prefix <> ".*") |> Path.wildcard() |> length()}
       end)
 

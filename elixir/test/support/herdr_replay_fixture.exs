@@ -454,7 +454,46 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
     fi
 
     if [ "$1" = "agent" ] && [ "$2" = "list" ]; then
-      replay agent-list
+      # Live-inventory physics: a session lists exactly the agents it started.
+      # The envelope stays the recording — its recorded entries are selected in
+      # order and only the declared {{AGENT_NAME}}/{{AGENT_KIND}} placeholders
+      # are filled, one entry per agent this session actually started.
+      started=$( (set -- "$state_root"/kind.*
+        if [ -e "$1" ]; then
+          for kind_file in "$@"; do
+            started_name=$(basename "$kind_file")
+            started_name=${started_name#kind.}
+            IFS= read -r started_kind < "$kind_file"
+            printf '%s %s\\n' "$started_name" "$started_kind"
+          done
+        fi) | sort)
+      agent_name='{{AGENT_NAME}}'
+      agent_kind='{{AGENT_KIND}}'
+      replay_stdout agent-list | awk -v pairs="$started" '
+        {
+          head_end = index($0, "\\"agents\\":[") + 9
+          head = substr($0, 1, head_end)
+          rest = substr($0, head_end + 1)
+          body_end = index(rest, "],\\"type\\"")
+          body = substr(rest, 1, body_end - 1)
+          tail = substr(rest, body_end)
+          recorded_count = split(body, recorded, "},{")
+          listed = split(pairs, rows, "\\n")
+          out = ""
+          for (i = 1; i <= listed; i++) {
+            split(rows[i], field, " ")
+            j = ((i - 1) % recorded_count) + 1
+            entry = recorded[j]
+            if (j > 1) entry = "{" entry
+            if (j < recorded_count) entry = entry "}"
+            gsub(/\\{\\{AGENT_NAME\\}\\}/, field[1], entry)
+            gsub(/\\{\\{AGENT_KIND\\}\\}/, field[2], entry)
+            if (i > 1) out = out ","
+            out = out entry
+          }
+          printf "%s%s%s\\n", head, out, tail
+        }'
+      exit "$(cat "$REPLAY/agent-list.exit")"
     fi
 
     if [ "$1" = "agent" ] && [ "$2" = "read" ]; then

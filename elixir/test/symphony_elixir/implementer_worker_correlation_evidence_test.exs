@@ -76,7 +76,12 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
       File.rm_rf(runtime_root)
     end)
 
-    {:ok, workspace: workspace, herdr_bin: herdr_bin, herdr_log: herdr_log, runtime_root: runtime_root}
+    {:ok,
+     workspace: workspace,
+     herdr_bin: herdr_bin,
+     herdr_log: herdr_log,
+     replay_dir: replay_dir,
+     runtime_root: runtime_root}
   end
 
   defmodule BlindTransport do
@@ -290,6 +295,125 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     refute turn_two_log =~ @no_delegation_event
 
     stop(next_session)
+  end
+
+  test "an orchestrator-created suffixed worker is denied and cannot settle as no delegation", context do
+    session = start_implementer_session(context, "evidence-suffixed-worker-authority")
+
+    # Exactly the EMB-1314 production shape: the orchestrator created its own
+    # `implementer_worker_1` through its Herdr authority and delegated to it.
+    # The run's recording only ever covered the canonical worker, so the turn
+    # settled as a positive `no_delegation` while a real worker was doing the
+    # work. The orchestrator here also ignores both refusals, because an agent
+    # that ignores a denial must not be able to buy silence with it.
+    action = fn ->
+      assert :ok = orchestrator_start_agent(session, context, "implementer_worker_1")
+
+      assert :ok =
+               orchestrator_argv(
+                 session,
+                 context,
+                 [
+                   "--session",
+                   session.name,
+                   "agent",
+                   "prompt",
+                   "implementer_worker_1",
+                   "EMB1314-SUFFIXED-WORKER: produce the bounded deliverable"
+                 ],
+                 :any
+               )
+    end
+
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
+
+    refute log =~ @correlation_event
+    refute log =~ @no_delegation_event
+
+    denied = %{reason: :orchestrator_authority_denied, denied: 2}
+    assert {:error, {:implementer_worker_assignments_unobservable, ^denied}} = result
+
+    stop(session)
+  end
+
+  test "a worker agent created outside the run's authority fails the turn typed", context do
+    session = start_implementer_session(context, "evidence-untracked-worker-inventory")
+
+    # The same delegation, issued straight to the absolute real binary. No
+    # generated shim is involved, so only the run-owned agent inventory can
+    # still see that the session grew a worker agent Symphony never launched.
+    action = fn ->
+      assert {_output, 0} =
+               native_argv(
+                 session,
+                 context,
+                 [
+                   "--session",
+                   session.name,
+                   "agent",
+                   "start",
+                   "implementer_worker_1",
+                   "--kind",
+                   "codex",
+                   "--pane",
+                   session.herdr_session.worker_pane_id,
+                   "--",
+                   "codex"
+                 ],
+                 [{"HERDR_FAKE_SKIP_LAUNCH", "1"}]
+               )
+
+      assert {_output, 0} =
+               native_argv(session, context, [
+                 "--session",
+                 session.name,
+                 "agent",
+                 "prompt",
+                 "implementer_worker_1",
+                 "EMB1314-NATIVE-UNTRACKED: produce the bounded deliverable"
+               ])
+    end
+
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
+
+    refute log =~ @correlation_event
+    refute log =~ @no_delegation_event
+
+    assert {:error,
+            {:implementer_worker_assignments_unobservable,
+             %{
+               reason: :worker_agent_inventory_unexpected,
+               stage: :turn_completion,
+               expected: ["implementer_orchestrator", "implementer_worker"],
+               observed: ["implementer_orchestrator", "implementer_worker", "implementer_worker_1"]
+             }}} = result
+
+    stop(session)
+  end
+
+  test "a worker agent replaced under the canonical name fails the turn typed", context do
+    session = start_implementer_session(context, "evidence-replaced-worker-inventory")
+
+    # A canonical name proves nothing on its own: the live agent answering to
+    # `implementer_worker` at completion must be the same one the run started.
+    action = fn ->
+      HerdrReplayFixture.write_replay_mutation!(
+        context.replay_dir,
+        "agent-list",
+        "agent-list",
+        &String.replace(&1, "w3:p1", "w9:p1")
+      )
+    end
+
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
+
+    refute log =~ @correlation_event
+    refute log =~ @no_delegation_event
+
+    assert {:error, {:implementer_worker_assignments_unobservable, %{reason: :worker_agent_inventory_changed}}} =
+             result
+
+    stop(session)
   end
 
   test "a delegation the worker answered is correlated from the channel itself, with no envelope", context do
@@ -669,21 +793,49 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
   end
 
   defp native_worker_prompt(session, context, message) do
-    System.cmd(
-      context.herdr_bin,
+    native_argv(session, context, [
+      "--session",
+      session.name,
+      "agent",
+      "prompt",
+      "implementer_worker",
+      message
+    ])
+  end
+
+  defp native_argv(session, context, argv, extra_env \\ []) do
+    System.cmd(context.herdr_bin, argv,
+      env:
+        [
+          {"HERDR_FAKE_LOG", context.herdr_log},
+          {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
+        ] ++ extra_env,
+      stderr_to_stdout: true
+    )
+  end
+
+  # The launch physics of a bypass are not the subject: only the agent it adds
+  # to the session is, so the provider chain stays out of the way.
+  defp orchestrator_start_agent(session, context, agent) do
+    shim_argv(
+      Path.join(session.herdr_session.orchestrator_bin, "herdr"),
+      session,
+      context,
       [
         "--session",
         session.name,
         "agent",
-        "prompt",
-        "implementer_worker",
-        message
+        "start",
+        agent,
+        "--kind",
+        "codex",
+        "--pane",
+        session.herdr_session.worker_pane_id,
+        "--",
+        "codex"
       ],
-      env: [
-        {"HERDR_FAKE_LOG", context.herdr_log},
-        {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
-      ],
-      stderr_to_stdout: true
+      :any,
+      [{"HERDR_FAKE_SKIP_LAUNCH", "1"}]
     )
   end
 
@@ -716,13 +868,14 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
         0
       )
 
-  defp shim_argv(shim, session, context, argv, expected_status) do
+  defp shim_argv(shim, session, context, argv, expected_status, extra_env \\ []) do
     assert {output, status} =
              System.cmd(shim, argv,
-               env: [
-                 {"HERDR_FAKE_LOG", context.herdr_log},
-                 {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
-               ],
+               env:
+                 [
+                   {"HERDR_FAKE_LOG", context.herdr_log},
+                   {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
+                 ] ++ extra_env,
                stderr_to_stdout: true
              )
 
