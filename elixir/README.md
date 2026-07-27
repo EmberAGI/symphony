@@ -144,6 +144,12 @@ Notes:
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- `tracker.request_timeout_ms` is the total deadline for a single tracker request, covering the whole
+  request transport rather than only connection setup. Default: `30000`. It must be positive.
+  A request that overruns it is terminated and reported as a typed Linear request timeout, so a
+  tracker call that is accepted but never completed cannot block a role's pre-terminal refresh,
+  terminal settlement, or cleanup, and can delay role state and work-admission responses by at most
+  `request_timeout_ms` rather than indefinitely.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the

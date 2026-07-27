@@ -52,6 +52,9 @@ defmodule SymphonyElixir.Config.Schema do
       field(:assignee, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
+      # Total deadline for one tracker request, covering the configured or
+      # injected request transport itself and not merely socket setup.
+      field(:request_timeout_ms, :integer, default: 30_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -59,9 +62,10 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states],
+        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states, :request_timeout_ms],
         empty_values: []
       )
+      |> validate_number(:request_timeout_ms, greater_than: 0)
     end
   end
 

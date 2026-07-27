@@ -1,6 +1,10 @@
 ---
 tracker:
   kind: linear
+  # Total deadline for one tracker request, covering the request transport
+  # itself. A tracker request that is accepted but never completed must never
+  # hold up terminal settlement or role serviceability.
+  request_timeout_ms: 30000
   project_slug: "symphony-0c79b11b75ea"
   active_states:
     - Todo
