@@ -469,6 +469,49 @@ defmodule SymphonyElixir.ImplementerSupervisionTest do
     assert Process.get({DefaultSettleTransport, :reads}) == 3
   end
 
+  defmodule SettlePauseTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", revision: 4, agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      reads = Process.get({__MODULE__, :reads}, 0) + 1
+      Process.put({__MODULE__, :reads}, reads)
+
+      if reads < 2 do
+        {:ok, %{name: agent.name, agent_status: "idle", revision: 4, agent_session: nil}}
+      else
+        {:ok, %{name: agent.name, agent_status: "done", revision: 5, agent_session: %{value: "settle-paused"}}}
+      end
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "SETTLE_PAUSE_COMPLETE"}}
+  end
+
+  test "a transitional idle read pauses only to the settle deadline, not a full heartbeat interval" do
+    Process.delete({SettlePauseTransport, :reads})
+    session = supervised_session(SettlePauseTransport)
+    started = System.monotonic_time(:millisecond)
+
+    assert {:ok, %{agent_status: "done", session_id: "settle-paused"}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Do bounded work.",
+               %{},
+               turn_timeout_ms: 60_000,
+               heartbeat_interval_ms: 30_000,
+               status_read_timeout_ms: 250,
+               settle_window_ms: 200
+             )
+
+    elapsed_ms = System.monotonic_time(:millisecond) - started
+
+    # The only nearer deadline is the 200 ms settle window: the pause after the
+    # transitional read must be bounded by it, never by the 30 s heartbeat.
+    assert elapsed_ms < 2_000,
+           "transitional pause exceeded the settle deadline: took #{elapsed_ms}ms"
+  end
+
   describe "pure supervision step" do
     alias SymphonyElixir.ImplementerDelegation.Supervision
 
