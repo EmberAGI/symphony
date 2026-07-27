@@ -227,8 +227,7 @@ defmodule SymphonyElixir.Linear.Client do
         {:error, {:linear_request_exited, reason}}
 
       nil ->
-        {:error,
-         {:linear_request_timeout, %{operation: request_operation(payload), timeout_ms: timeout_ms}}}
+        {:error, {:linear_request_timeout, %{operation: request_operation(payload), timeout_ms: timeout_ms}}}
     end
   end
 

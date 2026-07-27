@@ -57,10 +57,11 @@ defmodule SymphonyElixir.LinearRequestDeadlineTest do
       %{result: result, elapsed_ms: elapsed_ms, request_pid: request_pid} =
         bounded_call(request_fun, "query SymphonyLinearPoll { issues { nodes { id } } }", [])
 
-      assert {:error,
-              {:linear_api_request,
-               {:linear_request_timeout, %{operation: "SymphonyLinearPoll", timeout_ms: @deadline_ms}}}} = result,
-             "expected an exact typed Linear request timeout carrying operation context, got #{inspect(result)}"
+      assert {:error, {:linear_api_request, {:linear_request_timeout, context}}} = result,
+             "expected a typed Linear request timeout through the existing error boundary, got #{inspect(result)}"
+
+      assert context == %{operation: "SymphonyLinearPoll", timeout_ms: @deadline_ms},
+             "the timeout must carry exact operation context and the configured deadline, got #{inspect(context)}"
 
       assert elapsed_ms < 2_000,
              "the request returned after #{elapsed_ms}ms; the configured #{@deadline_ms}ms total deadline did not bound it"
@@ -81,15 +82,12 @@ defmodule SymphonyElixir.LinearRequestDeadlineTest do
       end
 
       %{result: result, elapsed_ms: elapsed_ms} =
-        bounded_call(request_fun, "query SymphonyLinearIssuesById { issues { nodes { id } } }",
-          operation_name: "SymphonyLinearIssuesById"
-        )
+        bounded_call(request_fun, "query SymphonyLinearIssuesById { issues { nodes { id } } }", operation_name: "SymphonyLinearIssuesById")
 
-      assert {:error,
-              {:linear_api_request,
-               {:linear_request_timeout,
-                %{operation: "SymphonyLinearIssuesById", timeout_ms: @deadline_ms}}}} = result,
+      assert {:error, {:linear_api_request, {:linear_request_timeout, context}}} = result,
              "a dribbling peer must still hit the total deadline, got #{inspect(result)}"
+
+      assert context == %{operation: "SymphonyLinearIssuesById", timeout_ms: @deadline_ms}
 
       assert_receive {:dribble, 1}, 100
       assert_receive {:dribble, 2}, 100
@@ -161,17 +159,13 @@ defmodule SymphonyElixir.LinearRequestDeadlineTest do
       body = %{"data" => %{"viewer" => %{"id" => "user-1315"}}}
 
       assert {:ok, ^body} =
-               Client.graphql("query SymphonyLinearViewer { viewer { id } }", %{},
-                 request_fun: fn _payload, _headers -> {:ok, %{status: 200, body: body}} end
-               )
+               Client.graphql("query SymphonyLinearViewer { viewer { id } }", %{}, request_fun: fn _payload, _headers -> {:ok, %{status: 200, body: body}} end)
     end
 
     test "a non-200 status and a GraphQL error payload keep their existing typed contracts" do
       capture_log(fn ->
         assert {:error, {:linear_api_status, 503}} =
-                 Client.graphql("query SymphonyLinearViewer { viewer { id } }", %{},
-                   request_fun: fn _payload, _headers -> {:ok, %{status: 503, body: "unavailable"}} end
-                 )
+                 Client.graphql("query SymphonyLinearViewer { viewer { id } }", %{}, request_fun: fn _payload, _headers -> {:ok, %{status: 503, body: "unavailable"}} end)
       end)
 
       errors = [%{"message" => "Argument Validation Error"}]
@@ -185,9 +179,7 @@ defmodule SymphonyElixir.LinearRequestDeadlineTest do
     test "a transport error reason is still reported unclassified through the request boundary" do
       capture_log(fn ->
         assert {:error, {:linear_api_request, :econnrefused}} =
-                 Client.graphql("query SymphonyLinearViewer { viewer { id } }", %{},
-                   request_fun: fn _payload, _headers -> {:error, :econnrefused} end
-                 )
+                 Client.graphql("query SymphonyLinearViewer { viewer { id } }", %{}, request_fun: fn _payload, _headers -> {:error, :econnrefused} end)
       end)
     end
   end
