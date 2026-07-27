@@ -184,7 +184,7 @@ defmodule SymphonyElixir.Linear.Client do
     request_fun = Keyword.get(opts, :request_fun, &post_graphql_request/2)
 
     with {:ok, headers} <- graphql_headers(),
-         {:ok, %{status: 200, body: body}} <- request_fun.(payload, headers) do
+         {:ok, %{status: 200, body: body}} <- bounded_request(request_fun, payload, headers) do
       {:ok, body}
     else
       {:ok, response} ->
@@ -200,6 +200,61 @@ defmodule SymphonyElixir.Linear.Client do
         {:error, {:linear_api_request, reason}}
     end
   end
+
+  # EMB-1313/EMB-1315: a tracker request that is accepted but never completed
+  # used to block its caller forever. The pre-terminal refresh in
+  # `AgentRunner.continue_with_issue?/1` runs on that caller, so an unbounded
+  # request meant no terminal `DOWN`, no settlement, no cleanup, and an
+  # unserviceable role. The deadline lives here because this is the narrowest
+  # boundary shared by production HTTP and every injected request transport:
+  # the request runs as an owned `async_nolink` task under the existing
+  # `SymphonyElixir.TaskSupervisor`, so the caller is never linked to it and a
+  # request that overruns the total deadline is `:brutal_kill`ed with its
+  # monitor flushed.
+  defp bounded_request(request_fun, payload, headers) do
+    timeout_ms = Config.settings!().tracker.request_timeout_ms
+
+    task =
+      Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
+        request_fun.(payload, headers)
+      end)
+
+    case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, response} ->
+        response
+
+      {:exit, reason} ->
+        {:error, {:linear_request_exited, reason}}
+
+      nil ->
+        {:error,
+         {:linear_request_timeout, %{operation: request_operation(payload), timeout_ms: timeout_ms}}}
+    end
+  end
+
+  # Operation context survives into the typed timeout: the explicit
+  # `operationName` when a caller sent one, otherwise the operation the query
+  # document itself declares.
+  defp request_operation(payload) when is_map(payload) do
+    case Map.get(payload, "operationName") do
+      name when is_binary(name) and name != "" ->
+        name
+
+      _ ->
+        payload
+        |> Map.get("query")
+        |> query_operation_name()
+    end
+  end
+
+  defp query_operation_name(query) when is_binary(query) do
+    case Regex.run(~r/^\s*(?:query|mutation|subscription)\s+([A-Za-z0-9_]+)/, query) do
+      [_match, operation_name] -> operation_name
+      _ -> nil
+    end
+  end
+
+  defp query_operation_name(_query), do: nil
 
   @doc false
   @spec normalize_issue_for_test(map()) :: Issue.t() | nil
