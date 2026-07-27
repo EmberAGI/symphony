@@ -1054,6 +1054,10 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
       end)
 
     assert {:error, {:implementer_provider_session_missing, %{agent: "implementer_orchestrator", provider: "codex"}}} = result
+
+    assert {:irrecoverable, %{family: :invalid_workspace_or_runtime_protocol, retryable?: false}} =
+             AgentRuntime.classify_failure(elem(result, 1), %{provider: :codex, role: "implementer"})
+
     refute log =~ @no_delegation_event
     refute log =~ @correlation_event
   end

@@ -178,15 +178,17 @@ defmodule SymphonyElixir.ImplementerDelegation do
             end),
          {:ok, session_id} <-
            await_provider_session_receipt(
-             transport,
-             herdr_session,
-             orchestrator,
+             %{
+               transport: transport,
+               herdr_session: herdr_session,
+               orchestrator: orchestrator,
+               status_read_timeout_ms: status_read_timeout_ms,
+               receipt_timeout_ms: provider_session_receipt_timeout_ms,
+               receipt_interval_ms: provider_session_receipt_interval_ms,
+               context: transport_context
+             },
              completed,
-             observed,
-             status_read_timeout_ms,
-             provider_session_receipt_timeout_ms,
-             provider_session_receipt_interval_ms,
-             transport_context
+             observed
            ),
          {:ok, read} <-
            transport.read_agent(
@@ -249,56 +251,33 @@ defmodule SymphonyElixir.ImplementerDelegation do
   # successful no-delegation record: read the same live agent through the
   # existing transport seam for a bounded receipt window, then let the
   # established nonblank validator fail closed if it never arrives.
-  defp await_provider_session_receipt(
-         transport,
-         herdr_session,
-         orchestrator,
-         completed,
-         observed,
-         status_read_timeout_ms,
-         receipt_timeout_ms,
-         receipt_interval_ms,
-         context
-       ) do
+  defp await_provider_session_receipt(receipt, completed, observed) do
     case provider_session_id(completed) || provider_session_id(observed) do
       session_id when is_binary(session_id) ->
         {:ok, session_id}
 
       _ ->
-        await_provider_session_receipt_from_adapter(
-          transport,
-          herdr_session,
-          orchestrator,
-          status_read_timeout_ms,
-          System.monotonic_time(:millisecond) + max(0, receipt_timeout_ms),
-          max(1, receipt_interval_ms),
-          context
-        )
+        deadline = System.monotonic_time(:millisecond) + max(0, receipt.receipt_timeout_ms)
+
+        await_provider_session_receipt_from_adapter(%{
+          receipt
+          | deadline: deadline,
+            receipt_interval_ms: max(1, receipt.receipt_interval_ms)
+        })
     end
   end
 
-  defp await_provider_session_receipt_from_adapter(
-         transport,
-         herdr_session,
-         orchestrator,
-         status_read_timeout_ms,
-         deadline,
-         interval_ms,
-         context
-       ) do
-    remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
+  defp await_provider_session_receipt_from_adapter(receipt) do
+    remaining_ms = max(receipt.deadline - System.monotonic_time(:millisecond), 0)
 
     if remaining_ms == 0 do
       {:ok, nil}
     else
-      read_timeout_ms = min(status_read_timeout_ms, remaining_ms)
+      read_timeout_ms = min(receipt.status_read_timeout_ms, remaining_ms)
 
-      case transport.get_agent(herdr_session, orchestrator, read_timeout_ms, context) do
+      case receipt.transport.get_agent(receipt.herdr_session, receipt.orchestrator, read_timeout_ms, receipt.context) do
         {:ok, agent} ->
-          case provider_session_id(agent) do
-            session_id when is_binary(session_id) -> {:ok, session_id}
-            _ -> retry_provider_session_receipt(transport, herdr_session, orchestrator, status_read_timeout_ms, deadline, interval_ms, context)
-          end
+          provider_session_receipt_or_retry(agent, receipt)
 
         {:error, reason} ->
           {:error, reason}
@@ -306,31 +285,21 @@ defmodule SymphonyElixir.ImplementerDelegation do
     end
   end
 
-  defp retry_provider_session_receipt(
-         transport,
-         herdr_session,
-         orchestrator,
-         status_read_timeout_ms,
-         deadline,
-         interval_ms,
-         context
-       ) do
-    remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
+  defp provider_session_receipt_or_retry(agent, receipt) do
+    case provider_session_id(agent) do
+      session_id when is_binary(session_id) -> {:ok, session_id}
+      _ -> retry_provider_session_receipt(receipt)
+    end
+  end
+
+  defp retry_provider_session_receipt(receipt) do
+    remaining_ms = max(receipt.deadline - System.monotonic_time(:millisecond), 0)
 
     if remaining_ms == 0 do
       {:ok, nil}
     else
-      Process.sleep(min(interval_ms, remaining_ms))
-
-      await_provider_session_receipt_from_adapter(
-        transport,
-        herdr_session,
-        orchestrator,
-        status_read_timeout_ms,
-        deadline,
-        interval_ms,
-        context
-      )
+      Process.sleep(min(receipt.receipt_interval_ms, remaining_ms))
+      await_provider_session_receipt_from_adapter(receipt)
     end
   end
 
