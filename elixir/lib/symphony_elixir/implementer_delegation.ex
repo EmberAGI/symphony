@@ -280,10 +280,19 @@ defmodule SymphonyElixir.ImplementerDelegation do
         {:ok, agent} ->
           provider_session_receipt_or_retry(agent, receipt)
 
+        {:error, {:herdr_agent_get_timeout, _agent} = reason} ->
+          provider_session_receipt_timeout_result(receipt, reason)
+
         {:error, reason} ->
           {:error, reason}
       end
     end
+  end
+
+  defp provider_session_receipt_timeout_result(receipt, reason) do
+    if System.monotonic_time(:millisecond) >= receipt.deadline,
+      do: {:ok, nil},
+      else: {:error, reason}
   end
 
   defp provider_session_receipt_or_retry(agent, receipt) do

@@ -957,7 +957,13 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
           [{"HERDR_REPLAY_PROMPT", "agent-prompt-idle"}]
         )
 
-      {result, log} = with_log(fn -> run_runtime_turn(session, fn -> :ok end) end)
+      {result, log} =
+        with_log(fn ->
+          run_runtime_turn(session, fn -> :ok end,
+            provider_session_receipt_timeout_ms: 1_000,
+            provider_session_receipt_interval_ms: 10
+          )
+        end)
 
       assert {:error, {:implementer_provider_session_missing, %{agent: "implementer_orchestrator", provider: "codex"}}} = result
 
@@ -1160,15 +1166,18 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     session
   end
 
-  defp run_runtime_turn(session, action) when is_function(action, 0) do
+  defp run_runtime_turn(session, action, opts \\ []) when is_function(action, 0) do
+    opts =
+      Keyword.put(opts, :on_message, fn
+        %{event: :session_started} -> action.()
+        _message -> :ok
+      end)
+
     AgentRuntime.run_turn(
       session,
       "Implement the bounded issue.",
       issue(),
-      on_message: fn
-        %{event: :session_started} -> action.()
-        _message -> :ok
-      end
+      opts
     )
   end
 
