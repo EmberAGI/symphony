@@ -259,11 +259,12 @@ defmodule SymphonyElixir.ImplementerDelegation do
       _ ->
         deadline = System.monotonic_time(:millisecond) + max(0, receipt.receipt_timeout_ms)
 
-        await_provider_session_receipt_from_adapter(%{
-          receipt
-          | deadline: deadline,
+        await_provider_session_receipt_from_adapter(
+          Map.merge(receipt, %{
+            deadline: deadline,
             receipt_interval_ms: max(1, receipt.receipt_interval_ms)
-        })
+          })
+        )
     end
   end
 
