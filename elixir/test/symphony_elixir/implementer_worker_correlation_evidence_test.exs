@@ -449,9 +449,10 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
   test "a canonical delegation still correlates once the worker gains a provider session", context do
     session = start_implementer_session(context, "evidence-first-turn-correlated")
 
-    # The same first-turn physics on the success path: prompting the canonical
-    # worker is what gives it an `agent_session`, so a correlated delegation is
-    # exactly the turn during which the field appears.
+    # The same first-turn physics on the success path. The inventory is
+    # heterogeneous while the run settles: the orchestrator gains a provider
+    # session from the turn that prompted it, and an agent still lists without
+    # one. A correlated delegation must survive both shapes.
     action = fn ->
       assert :ok =
                orchestrator_prompt(
@@ -477,7 +478,8 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     assert [%{assignment_id: "EMB1314-FIRST-TURN", status: :completed}] = turn.worker_assignments
 
     assert %{"result" => %{"agents" => settled}} = native_agent_list(session, context)
-    assert Enum.all?(settled, &match?(%{"agent_session" => %{}}, &1))
+    assert Enum.any?(settled, &match?(%{"name" => "implementer_orchestrator", "agent_session" => %{}}, &1))
+    assert Enum.any?(settled, &(not Map.has_key?(&1, "agent_session")))
 
     assert log =~ @correlation_event
     assert occurrences(log, "outcome=correlated") == 1, "a settled turn must emit its outcome exactly once"
@@ -498,9 +500,8 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     refute log =~ @correlation_event
     refute log =~ @no_delegation_event
 
-    assert {:error,
-            {:implementer_worker_assignments_unobservable,
-             %{reason: :agent_identity_incomplete, stage: :turn_start}}} = result
+    incomplete = %{reason: :agent_identity_incomplete, stage: :turn_start}
+    assert {:error, {:implementer_worker_assignments_unobservable, ^incomplete}} = result
 
     stop(session)
   end
@@ -515,9 +516,8 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     refute log =~ @correlation_event
     refute log =~ @no_delegation_event
 
-    assert {:error,
-            {:implementer_worker_assignments_unobservable,
-             %{reason: :agent_identity_incomplete, stage: :turn_start}}} = result
+    incomplete = %{reason: :agent_identity_incomplete, stage: :turn_start}
+    assert {:error, {:implementer_worker_assignments_unobservable, ^incomplete}} = result
 
     stop(session)
   end
@@ -535,9 +535,8 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     refute log =~ @correlation_event
     refute log =~ @no_delegation_event
 
-    assert {:error,
-            {:implementer_worker_assignments_unobservable,
-             %{reason: :agent_identity_incomplete, stage: :turn_start}}} = result
+    incomplete = %{reason: :agent_identity_incomplete, stage: :turn_start}
+    assert {:error, {:implementer_worker_assignments_unobservable, ^incomplete}} = result
 
     stop(session)
   end

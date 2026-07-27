@@ -2387,9 +2387,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   defp observe_agent_inventory(%{name: session_name, env: env} = session, stage, context) do
     with {:ok, expected} <- expected_agent_names(session, stage),
          {:ok, output} <- command(context, ["--session", session_name, "agent", "list"], env),
-         {:ok, payload} <- Jason.decode(output),
-         agents when is_list(agents) <- get_in(payload, ["result", "agents"]),
+         {:ok, %{"result" => %{"agents" => agents}}} when is_list(agents) <- Jason.decode(output),
          observed = Enum.map(agents, &agent_identity/1),
+         :ok <- validate_usable_agent_identities(observed, stage),
          :ok <- validate_expected_agent_inventory(expected, observed, stage) do
       {:ok, observed}
     else
@@ -2419,13 +2419,25 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   defp run_owned_agent_name(%{name: name}) when is_binary(name) and name != "", do: name
   defp run_owned_agent_name(_agent), do: nil
 
-  defp agent_identity(agent) when is_map(agent) do
-    %{
-      name: Map.get(agent, "name"),
-      pane_id: Map.get(agent, "pane_id"),
-      agent_session: get_in(agent, ["agent_session", "value"])
-    }
+  # Identity is the pair Herdr 0.7.5 reports for every listed agent: the name
+  # it answers to and the pane it occupies. `agent_session` is deliberately not
+  # part of it — the provider session does not exist until the agent has been
+  # prompted, so binding identity to it would fail every first turn closed. An
+  # entry the transport cannot project at all still yields an identity, so a
+  # malformed inventory fails typed rather than raising.
+  defp agent_identity(agent) when is_map(agent), do: %{name: Map.get(agent, "name"), pane_id: Map.get(agent, "pane_id")}
+  defp agent_identity(_agent), do: %{name: nil, pane_id: nil}
+
+  defp validate_usable_agent_identities(observed, stage) do
+    if Enum.all?(observed, &usable_agent_identity?/1) do
+      :ok
+    else
+      {:error, {:worker_assignments_unobservable, %{reason: :agent_identity_incomplete, stage: stage}}}
+    end
   end
+
+  defp usable_agent_identity?(%{name: name, pane_id: pane_id}),
+    do: is_binary(name) and name != "" and is_binary(pane_id) and pane_id != ""
 
   defp validate_expected_agent_inventory(expected, observed, stage) do
     observed_names = observed |> Enum.map(& &1.name) |> Enum.sort()
