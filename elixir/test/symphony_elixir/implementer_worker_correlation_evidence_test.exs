@@ -187,6 +187,64 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     def stop_session(_session, _context), do: :ok
   end
 
+  defmodule DelayedProviderSessionReceiptTransport do
+    @moduledoc false
+
+    def default_server_snapshot(_context),
+      do: {:ok, %{status: "running", version: "0.7.5", protocol: 17, socket: "/tmp/default.sock"}}
+
+    def start_session(spec, _context),
+      do:
+        {:ok,
+         %{
+           name: spec.name,
+           socket: "/tmp/#{spec.name}/herdr.sock",
+           runtime_root: "/tmp/#{spec.name}",
+           workspace: spec.workspace
+         }}
+
+    def prepare_worker(session, _spec, _context),
+      do:
+        {:ok,
+         session
+         |> Map.put(:worker_launcher, "/tmp/#{session.name}/launch-worker")
+         |> Map.put(:orchestrator_bin, "/tmp/#{session.name}/orchestrator-bin")}
+
+    # Herdr's start acknowledgement is intentionally identity-free: Codex has
+    # not yet produced its native session receipt.
+    def start_agent(_session, spec, _context),
+      do: {:ok, %{name: spec.name, pane_id: "w1:p1", agent_status: "idle", agent_session: nil}}
+
+    # The prompt itself settles before that receipt is visible.
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context),
+      do: {:ok, %{phase: :completed, agent: %{name: agent.name, agent_status: "idle", agent_session: nil}}}
+
+    # A later Adapter observation is the only source that contains the native
+    # provider identity. This models the EMB-1320 production ordering.
+    def get_agent(_session, agent, _timeout_ms, %{provider_session_receipt: :never}) do
+      {:ok, %{name: agent.name, agent_status: "idle", agent_session: nil}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, %{provider_session_receipt: :timeout}) do
+      {:error, {:herdr_agent_get_timeout, agent.name}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      case Process.get({__MODULE__, :receipt_reads}, 0) do
+        0 ->
+          Process.put({__MODULE__, :receipt_reads}, 1)
+          {:ok, %{name: agent.name, agent_status: "idle", agent_session: nil}}
+
+        reads ->
+          Process.put({__MODULE__, :receipt_reads}, reads + 1)
+          {:ok, %{name: agent.name, agent_status: "idle", agent_session: %{value: "adapter-uuid"}}}
+      end
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "orchestrator turn finished"}}
+    def stop_session(_session, _context), do: :ok
+  end
+
   test "a worker that really received an assignment never settles as a silent no-evidence completion", context do
     session = start_implementer_session(context, "evidence-unrecorded")
 
@@ -899,7 +957,13 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
           [{"HERDR_REPLAY_PROMPT", "agent-prompt-idle"}]
         )
 
-      {result, log} = with_log(fn -> run_runtime_turn(session, fn -> :ok end) end)
+      {result, log} =
+        with_log(fn ->
+          run_runtime_turn(session, fn -> :ok end,
+            provider_session_receipt_timeout_ms: 1_000,
+            provider_session_receipt_interval_ms: 10
+          )
+        end)
 
       assert {:error, {:implementer_provider_session_missing, %{agent: "implementer_orchestrator", provider: "codex"}}} = result
 
@@ -940,6 +1004,94 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
 
     assert {:ok, %{session_id: "intermediate-provider-session", worker_assignments: []}} = result
     assert log =~ @no_delegation_event
+    refute log =~ @correlation_event
+  end
+
+  test "a fast terminal turn waits for the Adapter's provider-session receipt before recording direct-work evidence" do
+    Process.delete({DelayedProviderSessionReceiptTransport, :receipt_reads})
+
+    assert {:ok, session} =
+             ImplementerDelegation.start_session(
+               "/tmp/symphony-correlation-evidence-ws",
+               valid_contract(),
+               issue_identifier: "EMB-1321",
+               run_id: "run-delayed-provider-session-receipt",
+               transport: DelayedProviderSessionReceiptTransport,
+               transport_context: %{}
+             )
+
+    {result, log} =
+      with_log(fn ->
+        ImplementerDelegation.run_turn(
+          session,
+          "Implement the bounded issue.",
+          issue(),
+          provider_session_receipt_timeout_ms: 50,
+          provider_session_receipt_interval_ms: 1
+        )
+      end)
+
+    assert {:ok, %{session_id: "adapter-uuid", worker_assignments: []}} = result
+    assert Process.get({DelayedProviderSessionReceiptTransport, :receipt_reads}) >= 2
+    assert log =~ @no_delegation_event
+    refute log =~ @correlation_event
+  end
+
+  test "a missing provider-session receipt reaches the existing fail-closed verdict without either positive outcome" do
+    assert {:ok, session} =
+             ImplementerDelegation.start_session(
+               "/tmp/symphony-correlation-evidence-ws",
+               valid_contract(),
+               issue_identifier: "EMB-1321",
+               run_id: "run-missing-provider-session-receipt",
+               transport: DelayedProviderSessionReceiptTransport,
+               transport_context: %{provider_session_receipt: :never}
+             )
+
+    {result, log} =
+      with_log(fn ->
+        ImplementerDelegation.run_turn(
+          session,
+          "Implement the bounded issue.",
+          issue(),
+          provider_session_receipt_timeout_ms: 3,
+          provider_session_receipt_interval_ms: 1
+        )
+      end)
+
+    assert {:error, {:implementer_provider_session_missing, %{agent: "implementer_orchestrator", provider: "codex"}}} = result
+
+    assert {:irrecoverable, %{family: :invalid_workspace_or_runtime_protocol, retryable?: false}} =
+             AgentRuntime.classify_failure(elem(result, 1), %{provider: :codex, role: "implementer"})
+
+    refute log =~ @no_delegation_event
+    refute log =~ @correlation_event
+  end
+
+  test "a provider-session receipt read timeout remains typed instead of becoming a missing receipt" do
+    assert {:ok, session} =
+             ImplementerDelegation.start_session(
+               "/tmp/symphony-correlation-evidence-ws",
+               valid_contract(),
+               issue_identifier: "EMB-1321",
+               run_id: "run-provider-session-receipt-timeout",
+               transport: DelayedProviderSessionReceiptTransport,
+               transport_context: %{provider_session_receipt: :timeout}
+             )
+
+    {result, log} =
+      with_log(fn ->
+        ImplementerDelegation.run_turn(
+          session,
+          "Implement the bounded issue.",
+          issue(),
+          provider_session_receipt_timeout_ms: 3,
+          provider_session_receipt_interval_ms: 1
+        )
+      end)
+
+    assert {:error, {:herdr_agent_get_timeout, "implementer_orchestrator"}} = result
+    refute log =~ @no_delegation_event
     refute log =~ @correlation_event
   end
 
@@ -1014,15 +1166,18 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     session
   end
 
-  defp run_runtime_turn(session, action) when is_function(action, 0) do
+  defp run_runtime_turn(session, action, opts \\ []) when is_function(action, 0) do
+    opts =
+      Keyword.put(opts, :on_message, fn
+        %{event: :session_started} -> action.()
+        _message -> :ok
+      end)
+
     AgentRuntime.run_turn(
       session,
       "Implement the bounded issue.",
       issue(),
-      on_message: fn
-        %{event: :session_started} -> action.()
-        _message -> :ok
-      end
+      opts
     )
   end
 

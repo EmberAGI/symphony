@@ -246,9 +246,18 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
   defp heartbeat(_config, _state), do: :ok
 
   defp pause(config, state) do
-    remaining_ms = state.budget_deadline - System.monotonic_time(:millisecond)
+    now_ms = System.monotonic_time(:millisecond)
+    remaining_ms = nearest_deadline(state, now_ms) - now_ms
     Process.sleep(min(config.interval_ms, max(remaining_ms, 1)))
   end
+
+  # A still-open settle window is a nearer wake-up than the budget: sleeping a
+  # full heartbeat past it turns a transitional idle into a stall.
+  defp nearest_deadline(%{settle_deadline: settle_deadline} = state, now_ms)
+       when is_integer(settle_deadline) and settle_deadline > now_ms,
+       do: min(settle_deadline, state.budget_deadline)
+
+  defp nearest_deadline(state, _now_ms), do: state.budget_deadline
 
   defp recover(config, state) do
     recovery_timeout_ms = Map.get(config, :recovery_timeout_ms, config.status_read_timeout_ms)
