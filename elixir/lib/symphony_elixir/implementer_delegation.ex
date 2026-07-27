@@ -176,6 +176,15 @@ defmodule SymphonyElixir.ImplementerDelegation do
                   observed
                 )
             end),
+         {:ok, read} <-
+           transport.read_agent(
+             herdr_session,
+             orchestrator,
+             %{source: :recent_unwrapped, lines: 240},
+             transport_context
+           ),
+         response = Map.get(read, :text, ""),
+         :ok <- terminal_turn_status(contract_provider(Map.get(session, :contract, %{}), :orchestrator), response),
          {:ok, session_id} <-
            await_provider_session_receipt(
              %{
@@ -190,15 +199,6 @@ defmodule SymphonyElixir.ImplementerDelegation do
              completed,
              observed
            ),
-         {:ok, read} <-
-           transport.read_agent(
-             herdr_session,
-             orchestrator,
-             %{source: :recent_unwrapped, lines: 240},
-             transport_context
-           ),
-         response = Map.get(read, :text, ""),
-         :ok <- terminal_turn_status(contract_provider(Map.get(session, :contract, %{}), :orchestrator), response),
          {:ok, worker_assignments} <-
            worker_assignments(
              transport,
