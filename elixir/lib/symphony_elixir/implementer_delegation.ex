@@ -112,6 +112,13 @@ defmodule SymphonyElixir.ImplementerDelegation do
     start_timeout_ms = Keyword.get(opts, :start_timeout_ms, 120_000)
     heartbeat_interval_ms = Keyword.get(opts, :heartbeat_interval_ms, 30_000)
     status_read_timeout_ms = Keyword.get(opts, :status_read_timeout_ms, Supervision.default_status_read_timeout_ms())
+
+    provider_session_receipt_timeout_ms =
+      Keyword.get(opts, :provider_session_receipt_timeout_ms, 60_000)
+
+    provider_session_receipt_interval_ms =
+      Keyword.get(opts, :provider_session_receipt_interval_ms, 100)
+
     on_message = Keyword.get(opts, :on_message, fn _message -> :ok end)
 
     # The transport owns the assignment truth, and the agents this run owns are
@@ -169,6 +176,18 @@ defmodule SymphonyElixir.ImplementerDelegation do
                   observed
                 )
             end),
+         {:ok, session_id} <-
+           await_provider_session_receipt(
+             transport,
+             herdr_session,
+             orchestrator,
+             completed,
+             observed,
+             status_read_timeout_ms,
+             provider_session_receipt_timeout_ms,
+             provider_session_receipt_interval_ms,
+             transport_context
+           ),
          {:ok, read} <-
            transport.read_agent(
              herdr_session,
@@ -189,7 +208,6 @@ defmodule SymphonyElixir.ImplementerDelegation do
          # The correlation event is only durable evidence when its provider
          # session identity is joinable. An absent or blank identity must not
          # turn direct work into either positive success outcome.
-         session_id = agent_session_id(completed) || agent_session_id(observed),
          :ok <-
            validate_provider_session_identity(
              session_id,
@@ -225,6 +243,101 @@ defmodule SymphonyElixir.ImplementerDelegation do
   end
 
   def run_turn(_session, _prompt, _issue, _opts), do: {:error, :invalid_implementer_delegation_turn}
+
+  # Herdr can report a terminal prompt result before its provider adapter has
+  # received Codex's native session identity. Do not turn that race into a
+  # successful no-delegation record: read the same live agent through the
+  # existing transport seam for a bounded receipt window, then let the
+  # established nonblank validator fail closed if it never arrives.
+  defp await_provider_session_receipt(
+         transport,
+         herdr_session,
+         orchestrator,
+         completed,
+         observed,
+         status_read_timeout_ms,
+         receipt_timeout_ms,
+         receipt_interval_ms,
+         context
+       ) do
+    case provider_session_id(completed) || provider_session_id(observed) do
+      session_id when is_binary(session_id) ->
+        {:ok, session_id}
+
+      _ ->
+        await_provider_session_receipt_from_adapter(
+          transport,
+          herdr_session,
+          orchestrator,
+          status_read_timeout_ms,
+          System.monotonic_time(:millisecond) + max(0, receipt_timeout_ms),
+          max(1, receipt_interval_ms),
+          context
+        )
+    end
+  end
+
+  defp await_provider_session_receipt_from_adapter(
+         transport,
+         herdr_session,
+         orchestrator,
+         status_read_timeout_ms,
+         deadline,
+         interval_ms,
+         context
+       ) do
+    remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    if remaining_ms == 0 do
+      {:ok, nil}
+    else
+      read_timeout_ms = min(status_read_timeout_ms, remaining_ms)
+
+      case transport.get_agent(herdr_session, orchestrator, read_timeout_ms, context) do
+        {:ok, agent} ->
+          case provider_session_id(agent) do
+            session_id when is_binary(session_id) -> {:ok, session_id}
+            _ -> retry_provider_session_receipt(transport, herdr_session, orchestrator, status_read_timeout_ms, deadline, interval_ms, context)
+          end
+
+        # A read bounded by the receipt window reports no receipt when its
+        # deadline expires. Preserve other transport failures verbatim.
+        {:error, {:herdr_agent_get_timeout, _agent_name}} ->
+          retry_provider_session_receipt(transport, herdr_session, orchestrator, status_read_timeout_ms, deadline, interval_ms, context)
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp retry_provider_session_receipt(
+         transport,
+         herdr_session,
+         orchestrator,
+         status_read_timeout_ms,
+         deadline,
+         interval_ms,
+         context
+       ) do
+    remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    if remaining_ms == 0 do
+      {:ok, nil}
+    else
+      Process.sleep(min(interval_ms, remaining_ms))
+
+      await_provider_session_receipt_from_adapter(
+        transport,
+        herdr_session,
+        orchestrator,
+        status_read_timeout_ms,
+        deadline,
+        interval_ms,
+        context
+      )
+    end
+  end
 
   defp begin_turn(transport, context, session, orchestrator, prompt, timeout_ms) do
     case transport.begin_turn(session, orchestrator, prompt, timeout_ms, context) do
@@ -838,4 +951,11 @@ defmodule SymphonyElixir.ImplementerDelegation do
   defp agent_session_id(%{agent_session: %{value: value}}) when is_binary(value), do: value
   defp agent_session_id(%{agent_session: %{"value" => value}}) when is_binary(value), do: value
   defp agent_session_id(_agent), do: nil
+
+  defp provider_session_id(agent) do
+    case agent_session_id(agent) do
+      value when is_binary(value) -> if byte_size(String.trim(value)) > 0, do: value
+      _ -> nil
+    end
+  end
 end
