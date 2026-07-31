@@ -76,6 +76,9 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     def get_agent(_session, _agent, _timeout_ms, %{status_read_result: {:error, _reason} = result}),
       do: result
 
+    def get_agent(_session, agent, _timeout_ms, %{status_read_status: status}),
+      do: {:ok, %{name: agent.name, agent_status: status}}
+
     def get_agent(_session, agent, _timeout_ms, _context),
       do: {:ok, %{name: agent.name, agent_status: "idle"}}
 
@@ -185,6 +188,20 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
     assert retry_reason =~ "herdr_agent_status_timeout"
     refute retry_reason =~ "transient_runtime_failure"
     refute retry_reason =~ "retryable_runtime_failure"
+  end
+
+  test "the configured Codex turn timeout governs the Implementer delegation hard budget" do
+    reason =
+      run_reason("configured-hard-budget",
+        codex_turn_timeout_ms: 25,
+        turn_phase: :working,
+        status_read_status: "working",
+        heartbeat_interval_ms: 1,
+        runner_wait_ms: 1_000
+      )
+
+    assert {:agent_runtime_failed, {:implementer_hard_budget_exhausted, details}} = reason
+    assert %{checkpoint: {:ok, %{shutdown_reason: :hard_budget_exhausted}}} = details
   end
 
   test "max-turn exhaustion with the issue still active exits with a typed failure, not :normal" do
@@ -371,7 +388,8 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
 
     write_workflow_file!(
       Workflow.workflow_file_path(),
-      [workspace_root: workspace_root] ++ Keyword.take(opts, [:hook_after_run])
+      [workspace_root: workspace_root] ++
+        Keyword.take(opts, [:hook_after_run, :codex_turn_timeout_ms])
     )
 
     on_exit(fn -> File.rm_rf(test_root) end)
@@ -406,7 +424,8 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
           test_pid: Keyword.get(opts, :test_pid),
           turn_result: Keyword.get(opts, :turn_result),
           turn_phase: Keyword.get(opts, :turn_phase),
-          status_read_result: Keyword.get(opts, :status_read_result)
+          status_read_result: Keyword.get(opts, :status_read_result),
+          status_read_status: Keyword.get(opts, :status_read_status)
         }
       ] ++
         Keyword.take(opts, [
@@ -429,7 +448,9 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
         receive do
           {:DOWN, ^ref, :process, ^pid, reason} -> reason
         after
-          15_000 -> flunk("runner task for #{label} did not finish")
+          Keyword.get(opts, :runner_wait_ms, 15_000) ->
+            :ok = Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid)
+            flunk("runner task for #{label} did not finish")
         end
       end)
 
