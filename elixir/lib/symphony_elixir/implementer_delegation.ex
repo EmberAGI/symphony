@@ -109,8 +109,10 @@ defmodule SymphonyElixir.ImplementerDelegation do
       )
       when is_binary(prompt) and prompt != "" and is_list(opts) do
     turn_timeout_ms = Keyword.get(opts, :turn_timeout_ms, 3_600_000)
+    turn_deadline_ms = System.monotonic_time(:millisecond) + max(0, turn_timeout_ms)
     start_timeout_ms = Keyword.get(opts, :start_timeout_ms, 120_000)
     heartbeat_interval_ms = Keyword.get(opts, :heartbeat_interval_ms, 30_000)
+    worker_result_poll_interval_ms = Keyword.get(opts, :worker_result_poll_interval_ms, 1_000)
     status_read_timeout_ms = Keyword.get(opts, :status_read_timeout_ms, Supervision.default_status_read_timeout_ms())
 
     provider_session_receipt_timeout_ms =
@@ -200,11 +202,18 @@ defmodule SymphonyElixir.ImplementerDelegation do
              observed
            ),
          {:ok, worker_assignments} <-
-           worker_assignments(
-             transport,
-             observed_session,
-             worker_observation,
-             transport_context
+           settle_worker_assignments(
+             %{
+               transport: transport,
+               herdr_session: observed_session,
+               worker_observation: worker_observation,
+               transport_context: transport_context,
+               deadline_ms: turn_deadline_ms,
+               poll_interval_ms: max(1, worker_result_poll_interval_ms),
+               on_message: on_message,
+               contract: Map.get(session, :contract, %{})
+             },
+             nil
            ),
          :ok <- validate_worker_assignments(worker_assignments, herdr_session),
          # The correlation event is only durable evidence when its provider
@@ -380,6 +389,76 @@ defmodule SymphonyElixir.ImplementerDelegation do
     else
       {:ok, :legacy}
     end
+  end
+
+  # The orchestrator may finish its own turn before a run-owned worker has
+  # delivered the correlated result. Keep the same turn alive while that
+  # recorded assignment is still working, but refresh outer handoff settlement
+  # only when its bounded activity fingerprint advances. The turn's original
+  # hard deadline remains the terminal timeout authority.
+  defp settle_worker_assignments(state, previous_activity) do
+    with {:ok, assignments} <-
+           worker_assignments(
+             state.transport,
+             state.herdr_session,
+             state.worker_observation,
+             state.transport_context
+           ) do
+      case assignments do
+        assignments when is_list(assignments) ->
+          settle_observed_worker_assignments(state, assignments, previous_activity)
+
+        unobservable ->
+          {:ok, unobservable}
+      end
+    end
+  end
+
+  defp settle_observed_worker_assignments(state, assignments, previous_activity) do
+    working = Enum.filter(assignments, &(Map.get(&1, :status) == :working))
+    settled = Enum.reject(assignments, &(Map.get(&1, :status) == :working))
+
+    case validate_worker_assignments(settled, state.herdr_session) do
+      {:error, reason} ->
+        {:error, reason}
+
+      :ok when working == [] ->
+        {:ok, assignments}
+
+      :ok ->
+        settle_working_worker_assignments(state, working, previous_activity)
+    end
+  end
+
+  defp settle_working_worker_assignments(state, working, previous_activity) do
+    if System.monotonic_time(:millisecond) >= state.deadline_ms do
+      [%{assignment_id: assignment_id} | _] = working
+      {:error, {:implementer_worker_timed_out, %{assignment_id: assignment_id}}}
+    else
+      activity = worker_activity_fingerprint(working)
+
+      if activity != previous_activity do
+        worker = Map.get(state.herdr_session, :worker, %{name: "implementer_worker"})
+
+        emit_message(state.on_message, :turn_heartbeat, %{
+          provider: contract_provider(state.contract, :worker),
+          herdr_session: Map.get(state.herdr_session, :name),
+          agent: Map.get(worker, :name, "implementer_worker"),
+          agent_status: "working",
+          session_id: nil
+        })
+      end
+
+      remaining_ms = max(state.deadline_ms - System.monotonic_time(:millisecond), 0)
+      Process.sleep(min(state.poll_interval_ms, remaining_ms))
+      settle_worker_assignments(state, activity)
+    end
+  end
+
+  defp worker_activity_fingerprint(assignments) do
+    assignments
+    |> Enum.map(&{Map.get(&1, :assignment_id), Map.get(&1, :activity_revision)})
+    |> Enum.sort()
   end
 
   # Unobservable is only benign where there is provably nothing to observe: a

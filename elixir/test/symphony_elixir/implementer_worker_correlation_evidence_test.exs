@@ -697,6 +697,48 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
+  test "a recorded assignment whose run-owned worker is still working remains pending with an activity revision", context do
+    session =
+      start_implementer_session(
+        context,
+        "worker-pending",
+        [{"HERDR_REPLAY_GET", "agent-prompt-working"}]
+      )
+
+    assert {:ok, observation} =
+             HerdrTransport.begin_worker_assignment_observation(
+               Map.put(session.herdr_session, :orchestrator, session.orchestrator),
+               1_000,
+               session.transport_context
+             )
+
+    assert :ok =
+             orchestrator_prompt(
+               session,
+               context,
+               "implementer_worker",
+               "OCTO_MSG/1 kind=assignment assignment=EMB1334-DELAYED deliverable=bounded"
+             )
+
+    assert {:ok,
+            [
+              %{
+                assignment_id: "EMB1334-DELAYED",
+                status: :working,
+                activity_revision: {revision, state_change_seq}
+              }
+            ]} =
+             HerdrTransport.worker_assignments(
+               Map.put(session.herdr_session, :orchestrator, session.orchestrator),
+               observation,
+               session.transport_context
+             )
+
+    assert is_integer(revision)
+    assert is_integer(state_change_seq)
+    stop(session)
+  end
+
   test "a delegation spelled with Herdr's global --session option is correlated end to end", context do
     session = start_implementer_session(context, "evidence-global-session")
 
