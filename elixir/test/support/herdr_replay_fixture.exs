@@ -123,6 +123,9 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
   scheduled stall),
   `HERDR_FAKE_MIN_PROMPT_TIMEOUT_MS` (a busy-target timing boundary below
   which the recorded ordinary prompt timeout is emitted),
+  `HERDR_FAKE_WORKING_PROMPT_WAIT_TIMEOUT` (an already-working target whose
+  accepted waited prompt emits the recorded ordinary timeout because no
+  lifecycle edge follows),
   `HERDR_FAKE_PROMPT_STALL_DELAY_SECONDS` (delay before the recorded stall),
   `HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS` (delayed revision timing
   after a separate Enter submission),
@@ -380,6 +383,12 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       if [ -n "${HERDR_FAKE_MIN_PROMPT_TIMEOUT_MS:-}" ] &&
          [ "$prompt_timeout" -lt "$HERDR_FAKE_MIN_PROMPT_TIMEOUT_MS" ]; then
         replay error-agent-prompt-timeout-under-window
+      fi
+
+      if [ "${HERDR_FAKE_WORKING_PROMPT_WAIT_TIMEOUT:-}" = "1" ]; then
+        case " $* " in
+          *' --wait '*) replay error-agent-prompt-timeout-under-window ;;
+        esac
       fi
 
       # 5000 ms prompt-effect window: timing physics that cannot be a

@@ -772,31 +772,70 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
     File.write!(context.log, "")
     File.rm(Path.join([session.runtime_root, "herdr", "sessions", "default", "prompt-attempts"]))
-    busy_target_result = "OCTO_MSG/1 kind=result assignment=emb1342 status=completed"
+    busy_target_result = "OCTO_MSG/1 kind=result assignment=emb1344 status=completed"
     results_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"]))
 
-    assert {_native_response, 0} =
+    assert {native_receipt, 0} =
              System.cmd(
                worker_herdr,
-               ["agent", "prompt", "implementer_orchestrator", busy_target_result, "--timeout", "60000"],
+               ["agent", "prompt", "implementer_orchestrator", busy_target_result],
                env:
                  base_env ++
                    [
-                     {"HERDR_FAKE_MIN_PROMPT_TIMEOUT_MS", "6000"}
+                     {"HERDR_REPLAY_GET", "agent-wait-working"},
+                     {"HERDR_FAKE_WORKING_PROMPT_WAIT_TIMEOUT", "1"}
                    ],
                stderr_to_stdout: true
              )
 
-    commands = File.read!(context.log)
-    assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
-    assert commands =~ "--timeout 60000"
-    refute commands =~ "agent send-keys implementer_orchestrator enter"
+    assert native_receipt =~ ~s("type":"agent_prompted")
+
+    commands = context.log |> File.read!() |> String.split("\n", trim: true)
+    assert Enum.count(commands, &String.contains?(&1, "agent get implementer_orchestrator")) == 1
+
+    assert [busy_prompt] =
+             Enum.filter(commands, &String.contains?(&1, "agent prompt implementer_orchestrator"))
+
+    assert busy_prompt =~ busy_target_result
+    refute busy_prompt =~ "--wait"
+    refute Enum.any?(commands, &String.contains?(&1, "agent send-keys implementer_orchestrator enter"))
 
     [correlated_result] =
       Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"])) --
         results_before
 
     assert File.read!(correlated_result) == busy_target_result <> "\n"
+
+    File.write!(context.log, "")
+    replies_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "reply.*"]))
+    results_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"]))
+    failed_result = "OCTO_MSG/1 kind=result assignment=emb1344-no-ack status=completed"
+
+    assert {no_ack, 1} =
+             System.cmd(
+               worker_herdr,
+               ["agent", "prompt", "implementer_orchestrator", failed_result],
+               env:
+                 base_env ++
+                   [
+                     {"HERDR_REPLAY_GET", "agent-wait-working"},
+                     {"HERDR_REPLAY_PROMPT", "error-agent-prompt-not-found"}
+                   ],
+               stderr_to_stdout: true
+             )
+
+    assert no_ack =~ ~s("code":"agent_not_found")
+    assert Path.wildcard(Path.join([session.runtime_root, "worker-events", "reply.*"])) == replies_before
+    assert Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"])) == results_before
+
+    commands = context.log |> File.read!() |> String.split("\n", trim: true)
+    assert Enum.count(commands, &String.contains?(&1, "agent get implementer_orchestrator")) == 1
+
+    assert [failed_prompt] =
+             Enum.filter(commands, &String.contains?(&1, "agent prompt implementer_orchestrator"))
+
+    refute failed_prompt =~ "--wait"
+    refute Enum.any?(commands, &String.contains?(&1, "agent send-keys implementer_orchestrator enter"))
 
     File.write!(context.log, "")
     File.rm(Path.join([session.runtime_root, "herdr", "sessions", "default", "prompt-attempts"]))
