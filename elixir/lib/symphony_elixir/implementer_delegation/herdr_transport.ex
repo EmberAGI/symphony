@@ -1928,6 +1928,74 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       prompt_timeout=#{@prompt_recovery_observation_timeout_ms}
 
       if [ -n "$herdr_prompt_session" ]; then
+        set -- --session "$herdr_prompt_session" agent get "$agent_name"
+      else
+        set -- agent get "$agent_name"
+      fi
+
+      set +e
+      target_before=$(#{shell_escape(real_herdr)} "$@" 2>&1)
+      target_before_status=$?
+      set -e
+
+      if [ "$target_before_status" -ne 0 ]; then
+        printf '%s\n' "$target_before" >&2
+        exit "$target_before_status"
+      fi
+
+      case "$target_before" in
+        '{"id":"cli:agent:get","result":{"agent":'*',"type":"agent_info"}}') ;;
+        *)
+          printf '%s\n' "$target_before" >&2
+          exit 1
+          ;;
+      esac
+
+      target_status=$(printf '%s' "$target_before" | sed -n 's/.*"agent_status":"\\([^"]*\\)".*/\\1/p')
+
+      case "$target_status" in
+        working)
+          if [ -n "$herdr_prompt_session" ]; then
+            set -- --session "$herdr_prompt_session" agent prompt "$agent_name" "$message"
+          else
+            set -- agent prompt "$agent_name" "$message"
+          fi
+
+          set +e
+          output=$(#{shell_escape(real_herdr)} "$@" 2>&1)
+          status=$?
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            printf '%s\n' "$output" >&2
+            exit "$status"
+          fi
+
+          case "$output" in
+            '{"id":"cli:agent:prompt","result":{"agent":'*',"type":"agent_prompted"}}')
+              #{worker_message_recording(role, runtime_root)}
+              printf '%s' "$output"
+              exit 0
+              ;;
+            *)
+              printf '%s\n' "$output" >&2
+              exit 1
+              ;;
+          esac
+          ;;
+        idle|done)
+          ;;
+        blocked|unknown)
+          printf '%s\n' "$target_before" >&2
+          exit 1
+          ;;
+        *)
+          printf '%s\n' "$target_before" >&2
+          exit 1
+          ;;
+      esac
+
+      if [ -n "$herdr_prompt_session" ]; then
         set -- --session "$herdr_prompt_session" agent prompt "$agent_name" "$message" --wait --until working --until idle --until done --until blocked --timeout "$prompt_timeout"
       else
         set -- agent prompt "$agent_name" "$message" --wait --until working --until idle --until done --until blocked --timeout "$prompt_timeout"
