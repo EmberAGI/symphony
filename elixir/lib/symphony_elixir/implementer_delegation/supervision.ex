@@ -196,31 +196,39 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
   end
 
   defp loop(config, state) do
-    observation = read_status(config)
     now = System.monotonic_time(:millisecond)
 
-    case step(state, annotate_progress(config, observation), now) do
-      {{:completed, agent}, state} ->
-        {:ok, restore_provider_session_identity(agent, state)}
+    if now >= state.budget_deadline do
+      halt(config, state, :hard_budget_exhausted)
+    else
+      observation = read_status(config, state, now)
+      now = System.monotonic_time(:millisecond)
 
-      {:continue, state} ->
-        heartbeat(config, state)
-        pause(config, state)
-        loop(config, state)
+      case step(state, annotate_progress(config, observation), now) do
+        {{:completed, agent}, state} ->
+          {:ok, restore_provider_session_identity(agent, state)}
 
-      {:recover, state} ->
-        recover(config, state)
+        {:continue, state} ->
+          heartbeat(config, state)
+          pause(config, state)
+          loop(config, state)
 
-      {{:halt, halt_reason}, state} ->
-        halt(config, state, halt_reason)
+        {:recover, state} ->
+          recover(config, state)
+
+        {{:halt, halt_reason}, state} ->
+          halt(config, state, halt_reason)
+      end
     end
   end
 
-  defp read_status(config) do
+  defp read_status(config, state, now_ms) do
+    timeout_ms = min(config.status_read_timeout_ms, state.budget_deadline - now_ms)
+
     config.transport.get_agent(
       config.session,
       config.orchestrator,
-      config.status_read_timeout_ms,
+      timeout_ms,
       config.context
     )
   end
