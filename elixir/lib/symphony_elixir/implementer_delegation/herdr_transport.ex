@@ -2352,17 +2352,23 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     message
     |> String.split(~r/\s+/, trim: true)
     |> Enum.drop(1)
-    |> Enum.reduce_while(%{}, fn field, fields ->
-      case String.split(field, "=", parts: 2) do
-        [key, value] when key in ["kind", "assignment", "status"] ->
-          fields = Map.put_new(fields, key, String.replace_suffix(value, ";", ""))
+    |> Enum.reduce_while(%{}, &collect_message_field/2)
+  end
 
-          if String.ends_with?(value, ";"), do: {:halt, fields}, else: {:cont, fields}
+  defp collect_message_field(field, fields) do
+    case String.split(field, "=", parts: 2) do
+      [key, value] when key in ["kind", "assignment", "status"] ->
+        collect_control_field(fields, key, value)
 
-        _payload ->
-          {:halt, fields}
-      end
-    end)
+      _payload ->
+        {:halt, fields}
+    end
+  end
+
+  defp collect_control_field(fields, key, value) do
+    fields = Map.put_new(fields, key, String.replace_suffix(value, ";", ""))
+
+    if String.ends_with?(value, ";"), do: {:halt, fields}, else: {:cont, fields}
   end
 
   # The shim reports the argv shapes it could not classify. One of those is
