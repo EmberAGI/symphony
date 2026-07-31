@@ -1925,7 +1925,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     if [ "$herdr_prompt_parsed" -eq 1 ]; then
       agent_name=$herdr_prompt_target
       message=$herdr_prompt_message
-      prompt_timeout=#{@prompt_effect_window_ms + 1}
+      prompt_timeout=#{@prompt_recovery_observation_timeout_ms}
 
       if [ -n "$herdr_prompt_session" ]; then
         set -- --session "$herdr_prompt_session" agent prompt "$agent_name" "$message" --wait --until working --until idle --until done --until blocked --timeout "$prompt_timeout"
