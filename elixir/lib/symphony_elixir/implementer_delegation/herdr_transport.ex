@@ -2351,11 +2351,14 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   defp message_fields(message) do
     message
     |> String.split(~r/\s+/, trim: true)
-    |> Enum.drop(2)
-    |> Enum.reduce(%{}, fn field, fields ->
+    |> Enum.drop(1)
+    |> Enum.reduce_while(%{}, fn field, fields ->
       case String.split(field, "=", parts: 2) do
-        [key, value] -> Map.put(fields, key, value)
-        _ -> fields
+        [key, value] when key in ["kind", "assignment", "status"] ->
+          {:cont, Map.put_new(fields, key, value)}
+
+        _payload ->
+          {:halt, fields}
       end
     end)
   end

@@ -859,6 +859,11 @@ The orchestrator's machine-readable assignment message is
 `OCTO_MSG/1 kind=assignment assignment=<token>` followed by bounded
 assignment-specific fields. A worker result is
 `OCTO_MSG/1 kind=result assignment=<token> status=completed|failed`.
+The initial contiguous envelope control segment is authoritative: `kind`,
+`assignment`, and `status` are read there exactly once. Payload text that
+follows it cannot supply or override those fields, so a malformed or missing
+control field remains fail-closed even when later evidence contains
+control-looking `key=value` text.
 The run-owned transport projection records only those messages as ephemeral
 per-session evidence beneath the existing isolated runtime root. The records
 are not runtime authority, are never Linear comments, and are removed with the
