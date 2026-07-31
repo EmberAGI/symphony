@@ -824,15 +824,17 @@ caller budget to a 5001 ms floor. That effective budget is derived once for
 `begin_turn/5`; prompt submission, compatibility recovery, and lifecycle
 observation never restart it. On the first typed stall, the transport sends
 exactly one logical Enter through Herdr's agent-scoped `agent send-keys`
-Interface, then observes `agent get` inside the remaining deadline. `working`
+Interface, then gives Herdr up to 60 seconds, capped by the remaining caller
+deadline, to expose the authoritative state/revision transition. `working`
 proves turn start; `idle` or `done` proves a fast completion only with a newer
 Herdr revision; `blocked`, `unknown`, closed agents, command failures,
 protocol mismatches, and deadline exhaustion remain distinct typed outcomes.
-Same-revision settled status never proves delivery.
+Same-revision settled status never proves delivery. Provider transcript output
+is diagnostic evidence only and never substitutes for this observation.
 
 The generated orchestrator/worker prompt projections apply the same causal
 Herdr 0.7.5 compatibility recovery to assignments and results: one native
-5001 ms prompt-effect wait, one internal agent-scoped Enter, one 750 ms
+5001 ms prompt-effect wait, one internal agent-scoped Enter, one 60-second
 server-bounded `working|blocked` observation, and at most one final `agent get`
 for a fast-settled newer revision. They never submit a blank or replayed
 prompt. Caller-supplied semantic `agent send-keys` and all pane-key input stay

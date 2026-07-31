@@ -13,9 +13,11 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @default_poll_interval_ms 50
   @default_stop_timeout_ms 5_000
   @default_agent_start_timeout_ms 120_000
-  # Reserve the fixed generated-prompt budget after Herdr's prompt-effect
-  # window for one Enter, a server-bounded transition wait, and one final get.
-  @generated_prompt_observation_timeout_ms 750
+  # Provider output can precede Herdr's authoritative state/revision update on
+  # a loaded host. Give the one-Enter compatibility recovery the same bounded
+  # grace as the production provider handshake, for both direct turns and the
+  # generated worker assignment/result channel.
+  @prompt_recovery_observation_timeout_ms 60_000
   @required_version "0.7.5"
   @required_protocol 17
   @launch_projection_sentinel "--symphony-launch-projection"
@@ -367,7 +369,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     if remaining_ms == 0 do
       prompt_recovery_timeout(agent_name)
     else
-      native_timeout_ms = min(@generated_prompt_observation_timeout_ms, remaining_ms)
+      native_timeout_ms = min(@prompt_recovery_observation_timeout_ms, remaining_ms)
 
       args =
         ["--session", session_name, "agent", "wait", agent_name] ++
@@ -1984,9 +1986,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       fi
 
       if [ -n "$herdr_prompt_session" ]; then
-        set -- --session "$herdr_prompt_session" agent wait "$agent_name" --until working --until blocked --timeout #{@generated_prompt_observation_timeout_ms}
+        set -- --session "$herdr_prompt_session" agent wait "$agent_name" --until working --until blocked --timeout #{@prompt_recovery_observation_timeout_ms}
       else
-        set -- agent wait "$agent_name" --until working --until blocked --timeout #{@generated_prompt_observation_timeout_ms}
+        set -- agent wait "$agent_name" --until working --until blocked --timeout #{@prompt_recovery_observation_timeout_ms}
       fi
 
       set +e
