@@ -1017,6 +1017,48 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
+  test "a semicolon-delimited completed result keeps its envelope controls authoritative", context do
+    session = start_implementer_session(context, "evidence-result-semicolon-delimiter")
+
+    action = fn ->
+      assert :ok =
+               orchestrator_prompt(
+                 session,
+                 context,
+                 "implementer_worker",
+                 "OCTO_MSG/1 kind=assignment assignment=EMB1350-RESULT-1 deliverable=bounded"
+               )
+
+      assert :ok =
+               worker_prompt(
+                 session,
+                 context,
+                 "implementer_orchestrator",
+                 "OCTO_MSG/1 kind=result assignment=EMB1350-RESULT-1 status=completed; " <>
+                   "payload status=available assignment=other kind=annotation"
+               )
+    end
+
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
+
+    assert {:ok, {_next_session, turn}} = result
+
+    assert [
+             %{
+               assignment_id: "EMB1350-RESULT-1",
+               status: :completed,
+               evidence: :envelope,
+               result: %{
+                 assignment_id: "EMB1350-RESULT-1",
+                 status: "completed"
+               }
+             }
+           ] = turn.worker_assignments
+
+    assert log =~ @correlation_event
+    stop(session)
+  end
+
   test "a payload status cannot repair a result missing its envelope status", context do
     session = start_implementer_session(context, "evidence-result-payload-missing-status")
 
