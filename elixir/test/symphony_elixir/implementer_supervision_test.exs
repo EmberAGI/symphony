@@ -119,6 +119,47 @@ defmodule SymphonyElixir.ImplementerSupervisionTest do
     refute_receive {:status_read_budget, _another_timeout}, 20
   end
 
+  defmodule BudgetCappedRecoveryTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      {:ok, %{name: agent.name, agent_status: "working", agent_session: %{value: "recovery-budget"}}}
+    end
+
+    def await_agent(_session, agent, _statuses, timeout_ms, %{owner: owner}) do
+      send(owner, {:recovery_budget, timeout_ms})
+      {:ok, %{name: agent.name, agent_status: "done", agent_session: %{value: "recovery-budget"}}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "RECOVERY_BUDGET_COMPLETE"}}
+  end
+
+  test "a recovery wait cannot extend the supervision hard budget" do
+    session = %{
+      transport: BudgetCappedRecoveryTransport,
+      transport_context: %{owner: self()},
+      contract: %{provider: "codex"},
+      herdr_session: %{name: "octo-emb-1346-recovery-budget"},
+      orchestrator: %{name: "implementer_orchestrator", pane_id: "w1:p1"}
+    }
+
+    assert {:ok, %{response: "RECOVERY_BUDGET_COMPLETE", agent_status: "done"}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Recover only inside the remaining turn budget.",
+               %{identifier: "EMB-1346"},
+               turn_timeout_ms: 100,
+               heartbeat_interval_ms: 1,
+               stale_working_ms: 0
+             )
+
+    assert_receive {:recovery_budget, recovery_timeout_ms}
+    assert recovery_timeout_ms > 0
+    assert recovery_timeout_ms <= 100
+  end
+
   defmodule BlockedTransport do
     def begin_turn(_session, agent, prompt, _timeout_ms, %{owner: owner}) do
       send(owner, {:prompt_submitted, prompt})
