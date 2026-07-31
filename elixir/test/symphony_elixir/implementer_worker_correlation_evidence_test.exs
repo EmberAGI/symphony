@@ -975,6 +975,80 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
+  test "a completed result keeps its envelope control fields when later evidence uses the same keys", context do
+    session = start_implementer_session(context, "evidence-result-payload-control-fields")
+
+    action = fn ->
+      assert :ok =
+               orchestrator_prompt(
+                 session,
+                 context,
+                 "implementer_worker",
+                 "OCTO_MSG/1 kind=assignment assignment=EMB1145-AUDIT-1 deliverable=bounded"
+               )
+
+      assert :ok =
+               worker_prompt(
+                 session,
+                 context,
+                 "implementer_orchestrator",
+                 "OCTO_MSG/1 kind=result assignment=EMB1145-AUDIT-1 status=completed " <>
+                   "evidence=status=available assignment=other kind=annotation"
+               )
+    end
+
+    {result, log} = with_log(fn -> run_runtime_turn(session, action) end)
+
+    assert {:ok, {_next_session, turn}} = result
+
+    assert [
+             %{
+               assignment_id: "EMB1145-AUDIT-1",
+               status: :completed,
+               evidence: :envelope,
+               result: %{
+                 assignment_id: "EMB1145-AUDIT-1",
+                 status: "completed"
+               }
+             }
+           ] = turn.worker_assignments
+
+    assert log =~ @correlation_event
+    stop(session)
+  end
+
+  test "a payload status cannot repair a result missing its envelope status", context do
+    session = start_implementer_session(context, "evidence-result-payload-missing-status")
+
+    action = fn ->
+      assert :ok =
+               orchestrator_prompt(
+                 session,
+                 context,
+                 "implementer_worker",
+                 "OCTO_MSG/1 kind=assignment assignment=EMB1145-AUDIT-2 deliverable=bounded"
+               )
+
+      assert :ok =
+               worker_prompt(
+                 session,
+                 context,
+                 "implementer_orchestrator",
+                 "OCTO_MSG/1 kind=result assignment=EMB1145-AUDIT-2 " <>
+                   "evidence=status=completed"
+               )
+    end
+
+    assert {:error,
+            {:implementer_worker_result_failed,
+             %{
+               assignment_id: "EMB1145-AUDIT-2",
+               result: %{assignment_id: "EMB1145-AUDIT-2", status: nil}
+             }}} = run_runtime_turn(session, action)
+
+    stop(session)
+  end
+
   test "a run that never delegated emits durable positive evidence instead of ambiguous silence", context do
     session = start_implementer_session(context, "evidence-direct-work")
 
