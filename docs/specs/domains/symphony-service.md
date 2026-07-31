@@ -1178,7 +1178,8 @@ User-input-required policy:
 Timeouts:
 
 - `codex.read_timeout_ms`: request/response timeout during startup and sync requests
-- `codex.turn_timeout_ms`: total turn stream timeout
+- `codex.turn_timeout_ms`: total turn stream timeout; the same parsed value
+  governs the Implementer delegation supervisor's hard turn budget
 - `codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
 
 Error mapping (RECOMMENDED normalized categories):
