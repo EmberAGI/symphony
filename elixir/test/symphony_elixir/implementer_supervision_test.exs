@@ -81,6 +81,44 @@ defmodule SymphonyElixir.ImplementerSupervisionTest do
     refute_received :budget_length_wait_used
   end
 
+  defmodule BudgetCappedReadTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, timeout_ms, %{owner: owner}) do
+      send(owner, {:status_read_budget, timeout_ms})
+      {:ok, %{name: agent.name, agent_status: "working", agent_session: %{value: "budget-capped"}}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "provider remains working"}}
+  end
+
+  test "the status read cannot extend the supervision hard budget" do
+    session = %{
+      transport: BudgetCappedReadTransport,
+      transport_context: %{owner: self()},
+      contract: %{provider: "codex"},
+      herdr_session: %{name: "octo-emb-1346-budget", runtime_root: "/tmp/octo-emb-1346-budget"},
+      orchestrator: %{name: "implementer_orchestrator", pane_id: "w1:p1"}
+    }
+
+    assert {:error, {:implementer_hard_budget_exhausted, evidence}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Continue only inside the remaining turn budget.",
+               %{identifier: "EMB-1346"},
+               turn_timeout_ms: 100,
+               heartbeat_interval_ms: 1_000
+             )
+
+    assert {:ok, _checkpoint} = evidence.checkpoint
+    assert_receive {:status_read_budget, read_timeout_ms}
+    assert read_timeout_ms > 0
+    assert read_timeout_ms <= 100
+    refute_receive {:status_read_budget, _another_timeout}, 20
+  end
+
   defmodule BlockedTransport do
     def begin_turn(_session, agent, prompt, _timeout_ms, %{owner: owner}) do
       send(owner, {:prompt_submitted, prompt})
