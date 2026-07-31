@@ -833,14 +833,18 @@ Same-revision settled status never proves delivery. Provider transcript output
 is diagnostic evidence only and never substitutes for this observation.
 
 The generated orchestrator/worker prompt projections apply the same causal
-Herdr 0.7.5 compatibility recovery to assignments and results: one native
-5001 ms prompt-effect wait, one internal agent-scoped Enter, one 60-second
-server-bounded `working|blocked` observation, and at most one final `agent get`
-for a fast-settled newer revision. They never submit a blank or replayed
-prompt. Caller-supplied semantic `agent send-keys` and all pane-key input stay
-denied; the Enter is available only inside Adapter-owned recovery. Remove this
-compatibility path when the pinned stable Herdr release contains upstream
-commit `bb29eedb7209a0d5e91052458ce76bc7e4259d18`.
+Herdr 0.7.5 compatibility recovery to assignments and results. Their native
+prompt has a 60-second budget because a result can steer an orchestrator that
+is already `working` and Herdr may settle that prompt only at the next
+authoritative lifecycle transition. A typed prompt stall permits one internal
+agent-scoped Enter followed by one 60-second server-bounded `working|blocked`
+observation and at most one final `agent get` for a fast-settled newer
+revision. An ordinary timeout remains a failure and writes no correlation
+record. They never submit a blank or replayed prompt. Caller-supplied semantic
+`agent send-keys` and all pane-key input stay denied; the Enter is available
+only inside Adapter-owned recovery. Remove this compatibility path when the
+pinned stable Herdr release contains upstream commit
+`bb29eedb7209a0d5e91052458ce76bc7e4259d18`.
 
 The orchestrator's machine-readable assignment message is
 `OCTO_MSG/1 kind=assignment assignment=<token>` followed by bounded

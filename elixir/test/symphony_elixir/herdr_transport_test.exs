@@ -734,7 +734,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
       assert length(prompt_commands) == 1
       assert Enum.any?(prompt_commands, &String.contains?(&1, "#{message} --wait"))
-      assert Enum.all?(prompt_commands, &String.contains?(&1, "--timeout 5001"))
+      assert Enum.all?(prompt_commands, &String.contains?(&1, "--timeout 60000"))
 
       commands = File.read!(context.log)
       assert length(:binary.matches(commands, "agent send-keys #{target} enter")) == 1
@@ -769,6 +769,62 @@ defmodule SymphonyElixir.HerdrTransportTest do
       assert length(:binary.matches(commands, "agent prompt #{target}")) == 1
       assert length(:binary.matches(commands, "agent send-keys #{target} enter")) == 1
     end
+
+    File.write!(context.log, "")
+    File.rm(Path.join([session.runtime_root, "herdr", "sessions", "default", "prompt-attempts"]))
+    busy_target_result = "OCTO_MSG/1 kind=result assignment=emb1342 status=completed"
+    results_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"]))
+
+    assert {_native_response, 0} =
+             System.cmd(
+               worker_herdr,
+               ["agent", "prompt", "implementer_orchestrator", busy_target_result, "--timeout", "60000"],
+               env:
+                 base_env ++
+                   [
+                     {"HERDR_FAKE_MIN_PROMPT_TIMEOUT_MS", "6000"}
+                   ],
+               stderr_to_stdout: true
+             )
+
+    commands = File.read!(context.log)
+    assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
+    assert commands =~ "--timeout 60000"
+    refute commands =~ "agent send-keys implementer_orchestrator enter"
+
+    [correlated_result] =
+      Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"])) --
+        results_before
+
+    assert File.read!(correlated_result) == busy_target_result <> "\n"
+
+    File.write!(context.log, "")
+    File.rm(Path.join([session.runtime_root, "herdr", "sessions", "default", "prompt-attempts"]))
+    results_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"]))
+
+    assert {generic_timeout, 1} =
+             System.cmd(
+               worker_herdr,
+               [
+                 "agent",
+                 "prompt",
+                 "implementer_orchestrator",
+                 "OCTO_MSG/1 kind=result assignment=emb1342-timeout status=completed"
+               ],
+               env:
+                 base_env ++
+                   [
+                     {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
+                     {"HERDR_REPLAY_PROMPT_STALL", "error-agent-prompt-timeout-under-window"}
+                   ],
+               stderr_to_stdout: true
+             )
+
+    assert generic_timeout =~ ~s("code":"timeout")
+    assert Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"])) == results_before
+    commands = File.read!(context.log)
+    assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
+    refute commands =~ "agent send-keys implementer_orchestrator enter"
 
     File.write!(context.log, "")
     File.rm(Path.join(default_state_root, "prompt-attempts"))

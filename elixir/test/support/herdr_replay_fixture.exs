@@ -119,6 +119,10 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
   plain stderr and exit codes only. Other timing knobs:
   `HERDR_FAKE_PROMPT_STALL_COUNT` (stall scheduling; the emitted envelopes are
   the recorded stall/timeout recordings),
+  `HERDR_REPLAY_PROMPT_STALL` (the recorded prompt error emitted by a
+  scheduled stall),
+  `HERDR_FAKE_MIN_PROMPT_TIMEOUT_MS` (a busy-target timing boundary below
+  which the recorded ordinary prompt timeout is emitted),
   `HERDR_FAKE_PROMPT_STALL_DELAY_SECONDS` (delay before the recorded stall),
   `HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS` (delayed revision timing
   after a separate Enter submission),
@@ -363,20 +367,25 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
 
     if [ "$1" = "agent" ] && [ "$2" = "prompt" ]; then
       agent_name="$3"
+      prompt_timeout=0
+      previous_arg=
+      for arg in "$@"; do
+        if [ "$previous_arg" = "--timeout" ]; then
+          prompt_timeout=$arg
+          break
+        fi
+        previous_arg=$arg
+      done
+
+      if [ -n "${HERDR_FAKE_MIN_PROMPT_TIMEOUT_MS:-}" ] &&
+         [ "$prompt_timeout" -lt "$HERDR_FAKE_MIN_PROMPT_TIMEOUT_MS" ]; then
+        replay error-agent-prompt-timeout-under-window
+      fi
 
       # 5000 ms prompt-effect window: timing physics that cannot be a
       # recording; behavior contract recorded in agent-prompt-help and
       # differentially validated by the CD-tier harness.
       if [ -n "${HERDR_FAKE_PROMPT_STALL_COUNT:-}" ]; then
-        prompt_timeout=0
-        previous_arg=
-        for arg in "$@"; do
-          if [ "$previous_arg" = "--timeout" ]; then
-            prompt_timeout=$arg
-            break
-          fi
-          previous_arg=$arg
-        done
         if [ "$prompt_timeout" -le 5000 ]; then
           replay error-agent-prompt-timeout-under-window
         fi
@@ -393,7 +402,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
           if [ -n "${HERDR_FAKE_PROMPT_STALL_DELAY_SECONDS:-}" ]; then
             sleep "$HERDR_FAKE_PROMPT_STALL_DELAY_SECONDS"
           fi
-          replay error-agent-prompt-stalled
+          replay "${HERDR_REPLAY_PROMPT_STALL:-error-agent-prompt-stalled}"
         fi
       fi
 
