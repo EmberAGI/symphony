@@ -55,6 +55,32 @@ defmodule SymphonyElixir.ImplementerSupervisionTest do
     assert_receive {:runtime_message, %{event: :turn_completed, agent_status: "done"}}
   end
 
+  test "the production status-read default accommodates provider continuation scheduling" do
+    Process.delete({CadenceReadTransport, :reads})
+
+    session = %{
+      transport: CadenceReadTransport,
+      transport_context: %{owner: self()},
+      contract: %{provider: "codex"},
+      herdr_session: %{name: "octo-emb-1346-continuation"},
+      orchestrator: %{name: "implementer_orchestrator", pane_id: "w1:p1"}
+    }
+
+    assert {:ok, %{response: "CADENCE_COMPLETE", agent_status: "done"}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Continue the existing provider session.",
+               %{identifier: "EMB-1346"},
+               turn_timeout_ms: 120_000,
+               heartbeat_interval_ms: 1
+             )
+
+    assert_receive {:status_read, 1, 60_000}
+    assert_receive {:status_read, 2, 60_000}
+    assert_receive {:status_read, 3, 60_000}
+    refute_received :budget_length_wait_used
+  end
+
   defmodule BlockedTransport do
     def begin_turn(_session, agent, prompt, _timeout_ms, %{owner: owner}) do
       send(owner, {:prompt_submitted, prompt})
