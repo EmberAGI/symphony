@@ -121,7 +121,11 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
   the recorded stall/timeout recordings),
   `HERDR_FAKE_PROMPT_STALL_DELAY_SECONDS` (delay before the recorded stall),
   `HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS` (delayed revision timing
-  after a separate Enter submission), and `HERDR_FAKE_STATUS_STALL*`.
+  after a separate Enter submission),
+  `HERDR_FAKE_MIN_PROMPT_TRANSITION_WAIT_MS` plus
+  `HERDR_FAKE_GET_BEFORE_PROMPT_TRANSITION` (a server-bounded wait and
+  immediate get that both precede that delayed revision), and
+  `HERDR_FAKE_STATUS_STALL*`.
   """
   def write_fake_herdr!(path, replay_dir) do
     File.write!(path, fake_herdr_body(replay_dir))
@@ -418,6 +422,21 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
     if [ "$1" = "agent" ] && [ "$2" = "wait" ]; then
       agent_name="$3"
       recall_revision
+      if [ -n "${HERDR_FAKE_MIN_PROMPT_TRANSITION_WAIT_MS:-}" ] &&
+         [ -f "$state_root/prompt-enter-sent.$agent_name" ]; then
+        wait_timeout=0
+        previous_arg=
+        for arg in "$@"; do
+          if [ "$previous_arg" = "--timeout" ]; then
+            wait_timeout=$arg
+            break
+          fi
+          previous_arg=$arg
+        done
+        if [ "$wait_timeout" -lt "$HERDR_FAKE_MIN_PROMPT_TRANSITION_WAIT_MS" ]; then
+          replay error-agent-wait-timeout
+        fi
+      fi
       if [ -n "${HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS:-}" ] &&
          [ -f "$state_root/prompt-enter-sent.$agent_name" ]; then
         transition_file="$state_root/delayed-prompt-transition.$agent_name"
@@ -437,6 +456,12 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
     if [ "$1" = "agent" ] && [ "$2" = "get" ]; then
       agent_name="$3"
       recall_revision
+      if [ "${HERDR_FAKE_GET_BEFORE_PROMPT_TRANSITION:-}" = "1" ] &&
+         [ -f "$state_root/prompt-enter-sent.$agent_name" ] &&
+         [ ! -f "$state_root/delayed-prompt-transition.$agent_name" ]; then
+        recall_kind get
+        replay "${HERDR_REPLAY_GET:-agent-get-idle}"
+      fi
       if [ -n "${HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS:-}" ] &&
          [ -f "$state_root/prompt-enter-sent.$agent_name" ]; then
         transition_file="$state_root/delayed-prompt-transition.$agent_name"
