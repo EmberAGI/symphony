@@ -2596,7 +2596,14 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp worker_assignment_status(assignment_id, nil, session, worker, context) do
     case get_agent(session, worker, @default_poll_interval_ms * 20, context) do
-      {:ok, %{agent_status: status}} when status in ["working", "unknown"] ->
+      {:ok, %{agent_status: "working"} = observed_worker} ->
+        %{
+          assignment_id: assignment_id,
+          status: :working,
+          activity_revision: {Map.get(observed_worker, :revision), Map.get(observed_worker, :state_change_seq)}
+        }
+
+      {:ok, %{agent_status: "unknown"}} ->
         %{assignment_id: assignment_id, status: :timed_out}
 
       {:ok, _worker} ->

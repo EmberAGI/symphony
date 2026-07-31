@@ -75,6 +75,14 @@ defmodule SymphonyElixir.ImplementerWorkerAssignmentTest do
     def stop_session(_session, _context), do: :ok
 
     def worker_assignments(_session, %{assignments: assignments}), do: {:ok, assignments}
+
+    def worker_assignments(_session, %{assignment_snapshots: snapshots}) do
+      Agent.get_and_update(snapshots, fn
+        [current, next | rest] -> {{:ok, current}, [next | rest]}
+        [current] -> {{:ok, current}, [current]}
+      end)
+    end
+
     def worker_assignments(_session, _context), do: {:ok, []}
   end
 
@@ -187,9 +195,72 @@ defmodule SymphonyElixir.ImplementerWorkerAssignmentTest do
              run_turn_with(assignments)
   end
 
-  defp run_turn_with(assignments) do
-    context = %{assignments: assignments}
+  test "a worker still making progress after the orchestrator settles remains alive until its result correlates" do
+    {:ok, snapshots} =
+      Agent.start_link(fn ->
+        [
+          [%{assignment_id: "assign-delayed", status: :working, activity_revision: {2, 2}}],
+          [%{assignment_id: "assign-delayed", status: :working, activity_revision: {2, 2}}],
+          [%{assignment_id: "assign-delayed", status: :working, activity_revision: {3, 2}}],
+          [
+            %{
+              assignment_id: "assign-delayed",
+              status: :completed,
+              result: %{assignment_id: "assign-delayed", status: "completed"}
+            }
+          ]
+        ]
+      end)
 
+    assert {:ok, %{worker_assignments: [%{assignment_id: "assign-delayed", status: :completed}]}} =
+             run_turn_with_context(
+               %{assignment_snapshots: snapshots},
+               worker_result_poll_interval_ms: 1,
+               turn_timeout_ms: 100,
+               on_message: fn message -> send(self(), {:runtime_message, message}) end
+             )
+
+    assert_receive {:runtime_message,
+                    %{
+                      event: :turn_heartbeat,
+                      agent: "implementer_worker",
+                      agent_status: "working"
+                    }}
+
+    assert_receive {:runtime_message,
+                    %{
+                      event: :turn_heartbeat,
+                      agent: "implementer_worker",
+                      agent_status: "working"
+                    }}
+
+    refute_receive {:runtime_message,
+                    %{
+                      event: :turn_heartbeat,
+                      agent: "implementer_worker",
+                      agent_status: "working"
+                    }}
+  end
+
+  test "a worker still working at the turn hard deadline is a typed timeout" do
+    {:ok, snapshots} =
+      Agent.start_link(fn ->
+        [[%{assignment_id: "assign-still-working", status: :working, activity_revision: {2, 2}}]]
+      end)
+
+    assert {:error, {:implementer_worker_timed_out, %{assignment_id: "assign-still-working"}}} =
+             run_turn_with_context(
+               %{assignment_snapshots: snapshots},
+               worker_result_poll_interval_ms: 1,
+               turn_timeout_ms: 10
+             )
+  end
+
+  defp run_turn_with(assignments) do
+    run_turn_with_context(%{assignments: assignments}, [])
+  end
+
+  defp run_turn_with_context(context, opts) do
     assert {:ok, session} =
              ImplementerDelegation.start_session(
                "/tmp/symphony-worker-assignment-ws",
@@ -200,7 +271,7 @@ defmodule SymphonyElixir.ImplementerWorkerAssignmentTest do
                transport_context: context
              )
 
-    ImplementerDelegation.run_turn(session, "do the bounded implementer work", issue(), [])
+    ImplementerDelegation.run_turn(session, "do the bounded implementer work", issue(), opts)
   end
 
   defp valid_contract do
