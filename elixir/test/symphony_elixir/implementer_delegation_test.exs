@@ -273,7 +273,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     assert_receive {:transport, :begin_turn, %{name: "octo-emb-1141-run-7"}, %{name: "implementer_orchestrator"}, "Implement the bounded tracer task.", 120_000}
 
-    assert_receive {:transport, :get_agent, _, _, 5_000}
+    assert_receive {:transport, :get_agent, _, _, 60_000}
     assert_receive {:transport, :read_agent, _, _, %{lines: 240, source: :recent_unwrapped}}
 
     assert turn_result.session_id == "codex-session-7"
