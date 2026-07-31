@@ -182,7 +182,10 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     timeout_ms = Map.get(context, :agent_start_timeout_ms, @default_agent_start_timeout_ms)
 
     orchestrator_bin = Path.join(runtime_root, "orchestrator-bin")
-    orchestrator_path = orchestrator_bin <> ":" <> inherited_provider_path(env, orchestrator_bin)
+    launch_role = if Map.get(spec, :role) == :worker, do: :worker, else: :orchestrator
+    launch_bin = Path.join(runtime_root, "#{launch_role}-bin")
+    launch_path = launch_bin <> ":" <> inherited_provider_path(env, orchestrator_bin)
+    launch_bash_env = role_bash_environment_path(runtime_root, launch_role)
 
     with {:ok, kind, native_args} <- native_agent_launch(spec, argv),
          :ok <- ensure_provider_wrapper(runtime_root, hd(argv), env, context),
@@ -193,7 +196,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
              kind,
              hd(argv),
              native_args,
-             %{"PATH" => orchestrator_path},
+             %{"BASH_ENV" => launch_bash_env, "PATH" => launch_path},
              %{"PATH" => inherited_provider_path(env, orchestrator_bin)}
            ),
          :ok <- validate_launch_projection(runtime_root, projection_path),

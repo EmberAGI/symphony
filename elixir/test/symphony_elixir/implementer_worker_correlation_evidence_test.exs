@@ -824,6 +824,17 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     File.chmod!(provider, 0o755)
 
     session = start_implementer_session(context, "evidence-provider-environment")
+
+    expected_worker_herdr = Path.join(session.herdr_session.runtime_root, "worker-bin/herdr")
+    expected_worker_bash_env = Path.join(session.herdr_session.runtime_root, "worker-bash-env")
+
+    assert File.read!(worker_observation) ==
+             """
+             bash_env=#{expected_worker_bash_env}
+             direct=#{expected_worker_herdr}
+             login=#{expected_worker_herdr}
+             """
+
     File.rm!(worker_observation)
 
     assert {worker_launch_output, 0} =
@@ -849,9 +860,6 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
              direct=#{expected_herdr}
              login=#{expected_herdr}
              """
-
-    expected_worker_herdr = Path.join(session.herdr_session.runtime_root, "worker-bin/herdr")
-    expected_worker_bash_env = Path.join(session.herdr_session.runtime_root, "worker-bash-env")
 
     assert File.read!(worker_observation) ==
              """
