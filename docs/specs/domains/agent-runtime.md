@@ -863,7 +863,9 @@ The initial contiguous envelope control segment is authoritative: `kind`,
 `assignment`, and `status` are read there exactly once. Payload text that
 follows it cannot supply or override those fields, so a malformed or missing
 control field remains fail-closed even when later evidence contains
-control-looking `key=value` text.
+control-looking `key=value` text. A single trailing semicolon on an initial
+control value is the envelope/payload delimiter; it is not part of that value,
+and all following payload text remains non-authoritative.
 The run-owned transport projection records only those messages as ephemeral
 per-session evidence beneath the existing isolated runtime root. The records
 are not runtime authority, are never Linear comments, and are removed with the

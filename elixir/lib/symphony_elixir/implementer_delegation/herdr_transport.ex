@@ -2355,7 +2355,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     |> Enum.reduce_while(%{}, fn field, fields ->
       case String.split(field, "=", parts: 2) do
         [key, value] when key in ["kind", "assignment", "status"] ->
-          {:cont, Map.put_new(fields, key, value)}
+          fields = Map.put_new(fields, key, String.replace_suffix(value, ";", ""))
+
+          if String.ends_with?(value, ";"), do: {:halt, fields}, else: {:cont, fields}
 
         _payload ->
           {:halt, fields}
