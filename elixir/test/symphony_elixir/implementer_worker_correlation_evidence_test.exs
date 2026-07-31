@@ -918,10 +918,17 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
-  test "a fully recorded delegation emits durable correlation evidence joinable to provider session and issue", context do
+  test "help discovery before a fully recorded delegation preserves durable correlation evidence", context do
     session = start_implementer_session(context, "evidence-correlated")
 
     action = fn ->
+      assert :ok =
+               orchestrator_argv(
+                 session,
+                 context,
+                 ["agent", "prompt", "--help"]
+               )
+
       assert :ok =
                orchestrator_prompt(
                  session,
