@@ -55,6 +55,111 @@ defmodule SymphonyElixir.ImplementerSupervisionTest do
     assert_receive {:runtime_message, %{event: :turn_completed, agent_status: "done"}}
   end
 
+  test "the production status-read default accommodates provider continuation scheduling" do
+    Process.delete({CadenceReadTransport, :reads})
+
+    session = %{
+      transport: CadenceReadTransport,
+      transport_context: %{owner: self()},
+      contract: %{provider: "codex"},
+      herdr_session: %{name: "octo-emb-1346-continuation"},
+      orchestrator: %{name: "implementer_orchestrator", pane_id: "w1:p1"}
+    }
+
+    assert {:ok, %{response: "CADENCE_COMPLETE", agent_status: "done"}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Continue the existing provider session.",
+               %{identifier: "EMB-1346"},
+               turn_timeout_ms: 120_000,
+               heartbeat_interval_ms: 1
+             )
+
+    assert_receive {:status_read, 1, 60_000}
+    assert_receive {:status_read, 2, 60_000}
+    assert_receive {:status_read, 3, 60_000}
+    refute_received :budget_length_wait_used
+  end
+
+  defmodule BudgetCappedReadTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, timeout_ms, %{owner: owner}) do
+      send(owner, {:status_read_budget, timeout_ms})
+      {:ok, %{name: agent.name, agent_status: "working", agent_session: %{value: "budget-capped"}}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "provider remains working"}}
+  end
+
+  test "the status read cannot extend the supervision hard budget" do
+    session = %{
+      transport: BudgetCappedReadTransport,
+      transport_context: %{owner: self()},
+      contract: %{provider: "codex"},
+      herdr_session: %{name: "octo-emb-1346-budget", runtime_root: "/tmp/octo-emb-1346-budget"},
+      orchestrator: %{name: "implementer_orchestrator", pane_id: "w1:p1"}
+    }
+
+    assert {:error, {:implementer_hard_budget_exhausted, evidence}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Continue only inside the remaining turn budget.",
+               %{identifier: "EMB-1346"},
+               turn_timeout_ms: 100,
+               heartbeat_interval_ms: 1_000
+             )
+
+    assert {:ok, _checkpoint} = evidence.checkpoint
+    assert_receive {:status_read_budget, read_timeout_ms}
+    assert read_timeout_ms > 0
+    assert read_timeout_ms <= 100
+    refute_receive {:status_read_budget, _another_timeout}, 20
+  end
+
+  defmodule BudgetCappedRecoveryTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      {:ok, %{name: agent.name, agent_status: "working", agent_session: %{value: "recovery-budget"}}}
+    end
+
+    def await_agent(_session, agent, _statuses, timeout_ms, %{owner: owner}) do
+      send(owner, {:recovery_budget, timeout_ms})
+      {:ok, %{name: agent.name, agent_status: "done", agent_session: %{value: "recovery-budget"}}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "RECOVERY_BUDGET_COMPLETE"}}
+  end
+
+  test "a recovery wait cannot extend the supervision hard budget" do
+    session = %{
+      transport: BudgetCappedRecoveryTransport,
+      transport_context: %{owner: self()},
+      contract: %{provider: "codex"},
+      herdr_session: %{name: "octo-emb-1346-recovery-budget"},
+      orchestrator: %{name: "implementer_orchestrator", pane_id: "w1:p1"}
+    }
+
+    assert {:ok, %{response: "RECOVERY_BUDGET_COMPLETE", agent_status: "done"}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Recover only inside the remaining turn budget.",
+               %{identifier: "EMB-1346"},
+               turn_timeout_ms: 100,
+               heartbeat_interval_ms: 1,
+               stale_working_ms: 0
+             )
+
+    assert_receive {:recovery_budget, recovery_timeout_ms}
+    assert recovery_timeout_ms > 0
+    assert recovery_timeout_ms <= 100
+  end
+
   defmodule BlockedTransport do
     def begin_turn(_session, agent, prompt, _timeout_ms, %{owner: owner}) do
       send(owner, {:prompt_submitted, prompt})

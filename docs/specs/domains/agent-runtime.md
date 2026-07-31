@@ -920,8 +920,9 @@ owns only the no-activity expiry and forced cleanup.
 After submission, turn lifecycle observation is a bounded, idempotent
 supervision state machine (EMB-1244 Stage 2), not a single budget-length
 server wait. The transport reads the typed agent status (`agent get`) on a
-bounded cadence: a 30-second observation interval, a 5-second per-read
-timeout, and 0 ms jitter (deterministic cadence; no randomization surface). A
+bounded cadence: a 30-second observation interval, a 60-second per-read
+timeout capped by the remaining hard turn budget, and 0 ms jitter
+(deterministic cadence; no randomization surface). A
 `blocked` status must therefore surface within one observation interval plus
 one read timeout. All five Herdr 0.7.5 statuses (`idle`, `working`,
 `blocked`, `done`, `unknown`) are first-class typed observations; an
@@ -943,7 +944,8 @@ incompatible-runtime protocol error halts immediately with a checkpoint —
 a deterministic protocol failure is never retried as indeterminate; stale working (no cursor movement past the stale threshold,
 default fifteen minutes) gets bounded recovery through the server-owned
 terminal wait (at most two attempts) before a typed stalled escalation; the
-hard turn budget triggers checkpoint-and-preserve, then shutdown. A read
+recovery wait is also capped by the remaining hard turn budget. The hard turn
+budget triggers checkpoint-and-preserve, then shutdown. A read
 that observes `idle`/`done` with an unchanged agent revision inside the
 prompt-transition settle window (default 5000 ms, matching Herdr's
 prompt-effect window) is transitional, not completion; this is read-only

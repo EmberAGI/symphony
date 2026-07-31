@@ -18,7 +18,7 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
 
   @statuses ~w(idle working blocked done unknown)
 
-  @default_status_read_timeout_ms 5_000
+  @default_status_read_timeout_ms 60_000
   @default_max_indeterminate_reads 4
   @default_stale_working_ms 900_000
   @default_max_recovery_attempts 2
@@ -196,31 +196,39 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
   end
 
   defp loop(config, state) do
-    observation = read_status(config)
     now = System.monotonic_time(:millisecond)
 
-    case step(state, annotate_progress(config, observation), now) do
-      {{:completed, agent}, state} ->
-        {:ok, restore_provider_session_identity(agent, state)}
+    if now >= state.budget_deadline do
+      halt(config, state, :hard_budget_exhausted)
+    else
+      observation = read_status(config, state, now)
+      now = System.monotonic_time(:millisecond)
 
-      {:continue, state} ->
-        heartbeat(config, state)
-        pause(config, state)
-        loop(config, state)
+      case step(state, annotate_progress(config, observation), now) do
+        {{:completed, agent}, state} ->
+          {:ok, restore_provider_session_identity(agent, state)}
 
-      {:recover, state} ->
-        recover(config, state)
+        {:continue, state} ->
+          heartbeat(config, state)
+          pause(config, state)
+          loop(config, state)
 
-      {{:halt, halt_reason}, state} ->
-        halt(config, state, halt_reason)
+        {:recover, state} ->
+          recover(config, state)
+
+        {{:halt, halt_reason}, state} ->
+          halt(config, state, halt_reason)
+      end
     end
   end
 
-  defp read_status(config) do
+  defp read_status(config, state, now_ms) do
+    timeout_ms = min(config.status_read_timeout_ms, state.budget_deadline - now_ms)
+
     config.transport.get_agent(
       config.session,
       config.orchestrator,
-      config.status_read_timeout_ms,
+      timeout_ms,
       config.context
     )
   end
@@ -260,7 +268,21 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
   defp nearest_deadline(state, _now_ms), do: state.budget_deadline
 
   defp recover(config, state) do
-    recovery_timeout_ms = Map.get(config, :recovery_timeout_ms, config.status_read_timeout_ms)
+    remaining_ms = max(state.budget_deadline - System.monotonic_time(:millisecond), 0)
+
+    if remaining_ms == 0 do
+      halt(config, state, :hard_budget_exhausted)
+    else
+      await_recovery(config, state, remaining_ms)
+    end
+  end
+
+  defp await_recovery(config, state, remaining_ms) do
+    recovery_timeout_ms =
+      min(
+        Map.get(config, :recovery_timeout_ms, config.status_read_timeout_ms),
+        remaining_ms
+      )
 
     result =
       config.transport.await_agent(
@@ -273,19 +295,24 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
 
     now = System.monotonic_time(:millisecond)
 
-    case result do
-      {:ok, %{agent_status: status} = agent} when status in ["idle", "done"] ->
-        state = remember_agent(state, {:ok, agent})
-        {:ok, restore_provider_session_identity(agent, state)}
+    if now >= state.budget_deadline,
+      do: halt(config, state, :hard_budget_exhausted),
+      else: handle_recovery_result(config, state, result, now)
+  end
 
-      {:error, {:herdr_agent_blocked, _name}} ->
-        halt(config, record_recovery(state, :observed_blocked, now), :blocked)
+  defp handle_recovery_result(_config, state, {:ok, %{agent_status: status} = agent}, _now)
+       when status in ["idle", "done"] do
+    state = remember_agent(state, {:ok, agent})
+    {:ok, restore_provider_session_identity(agent, state)}
+  end
 
-      other ->
-        state = record_recovery(state, recovery_result_evidence(other), now)
-        pause(config, state)
-        loop(config, state)
-    end
+  defp handle_recovery_result(config, state, {:error, {:herdr_agent_blocked, _name}}, now),
+    do: halt(config, record_recovery(state, :observed_blocked, now), :blocked)
+
+  defp handle_recovery_result(config, state, other, now) do
+    state = record_recovery(state, recovery_result_evidence(other), now)
+    pause(config, state)
+    loop(config, state)
   end
 
   defp recovery_result_evidence({:error, reason}), do: {:failed, reason}
