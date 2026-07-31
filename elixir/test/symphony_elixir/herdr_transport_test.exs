@@ -514,6 +514,38 @@ defmodule SymphonyElixir.HerdrTransportTest do
         &String.replace(&1, ~s("agent_status":"working"), ~s("agent_status":"unknown"))
       )
 
+    generated_working_get_fixture =
+      HerdrReplayFixture.write_replay_mutation!(
+        context.replay_dir,
+        "agent-get-idle",
+        "agent-get-working-generated",
+        &String.replace(&1, ~s("agent_status":"idle"), ~s("agent_status":"working"))
+      )
+
+    generated_unknown_get_fixture =
+      HerdrReplayFixture.write_replay_mutation!(
+        context.replay_dir,
+        "agent-get-idle",
+        "agent-get-unknown-generated",
+        &String.replace(&1, ~s("agent_status":"idle"), ~s("agent_status":"unknown"))
+      )
+
+    malformed_get_receipt_fixture =
+      HerdrReplayFixture.write_replay_mutation!(
+        context.replay_dir,
+        "agent-get-idle",
+        "agent-get-wrong-id-generated",
+        &String.replace(&1, ~s("id":"cli:agent:get"), ~s("id":"cli:agent:wait"))
+      )
+
+    malformed_prompt_receipt_fixture =
+      HerdrReplayFixture.write_replay_mutation!(
+        context.replay_dir,
+        "agent-prompt-working",
+        "agent-prompted-wrong-id-generated",
+        &String.replace(&1, ~s("id":"cli:agent:prompt"), ~s("id":"cli:agent:get"))
+      )
+
     # The wrapper fails closed for any invocation other than the exact
     # sentinel plus one projection path: no default-bootstrap escape hatch.
     assert {wrapper_denial, 64} =
@@ -772,31 +804,135 @@ defmodule SymphonyElixir.HerdrTransportTest do
 
     File.write!(context.log, "")
     File.rm(Path.join([session.runtime_root, "herdr", "sessions", "default", "prompt-attempts"]))
-    busy_target_result = "OCTO_MSG/1 kind=result assignment=emb1342 status=completed"
+    busy_target_result = "OCTO_MSG/1 kind=result assignment=emb1344 status=completed"
+    replies_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "reply.*"]))
     results_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"]))
 
-    assert {_native_response, 0} =
+    assert {native_receipt, 0} =
              System.cmd(
                worker_herdr,
-               ["agent", "prompt", "implementer_orchestrator", busy_target_result, "--timeout", "60000"],
+               ["agent", "prompt", "implementer_orchestrator", busy_target_result],
                env:
                  base_env ++
                    [
-                     {"HERDR_FAKE_MIN_PROMPT_TIMEOUT_MS", "6000"}
+                     {"HERDR_REPLAY_GET", generated_working_get_fixture},
+                     {"HERDR_FAKE_WORKING_PROMPT_WAIT_TIMEOUT", "1"}
                    ],
                stderr_to_stdout: true
              )
 
-    commands = File.read!(context.log)
-    assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
-    assert commands =~ "--timeout 60000"
-    refute commands =~ "agent send-keys implementer_orchestrator enter"
+    assert native_receipt =~ ~s("type":"agent_prompted")
+
+    commands = context.log |> File.read!() |> String.split("\n", trim: true)
+    assert Enum.count(commands, &String.contains?(&1, "agent get implementer_orchestrator")) == 1
+
+    assert [busy_prompt] =
+             Enum.filter(commands, &String.contains?(&1, "agent prompt implementer_orchestrator"))
+
+    assert busy_prompt =~ busy_target_result
+    refute busy_prompt =~ "--wait"
+    refute Enum.any?(commands, &String.contains?(&1, "agent send-keys implementer_orchestrator enter"))
+
+    [correlated_reply] =
+      Path.wildcard(Path.join([session.runtime_root, "worker-events", "reply.*"])) --
+        replies_before
 
     [correlated_result] =
       Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"])) --
         results_before
 
+    assert File.read!(correlated_reply) == busy_target_result <> "\n"
     assert File.read!(correlated_result) == busy_target_result <> "\n"
+
+    File.write!(context.log, "")
+    replies_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "reply.*"]))
+    results_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"]))
+    failed_result = "OCTO_MSG/1 kind=result assignment=emb1344-no-ack status=completed"
+
+    assert {no_ack, 1} =
+             System.cmd(
+               worker_herdr,
+               ["agent", "prompt", "implementer_orchestrator", failed_result],
+               env:
+                 base_env ++
+                   [
+                     {"HERDR_REPLAY_GET", generated_working_get_fixture},
+                     {"HERDR_REPLAY_PROMPT", malformed_prompt_receipt_fixture}
+                   ],
+               stderr_to_stdout: true
+             )
+
+    assert no_ack =~ ~s("id":"cli:agent:get")
+    assert no_ack =~ ~s("type":"agent_prompted")
+    assert Path.wildcard(Path.join([session.runtime_root, "worker-events", "reply.*"])) == replies_before
+    assert Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"])) == results_before
+
+    commands = context.log |> File.read!() |> String.split("\n", trim: true)
+    assert Enum.count(commands, &String.contains?(&1, "agent get implementer_orchestrator")) == 1
+
+    assert [failed_prompt] =
+             Enum.filter(commands, &String.contains?(&1, "agent prompt implementer_orchestrator"))
+
+    refute failed_prompt =~ "--wait"
+    refute Enum.any?(commands, &String.contains?(&1, "agent send-keys implementer_orchestrator enter"))
+
+    for {fixture, expected_status} <- [
+          {"agent-get-blocked", "blocked"},
+          {generated_unknown_get_fixture, "unknown"}
+        ] do
+      File.write!(context.log, "")
+      replies_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "reply.*"]))
+      results_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"]))
+
+      assert {preflight_refusal, 1} =
+               System.cmd(
+                 worker_herdr,
+                 [
+                   "agent",
+                   "prompt",
+                   "implementer_orchestrator",
+                   "OCTO_MSG/1 kind=result assignment=emb1344-#{expected_status} status=failed"
+                 ],
+                 env: base_env ++ [{"HERDR_REPLAY_GET", fixture}],
+                 stderr_to_stdout: true
+               )
+
+      assert preflight_refusal =~ ~s("agent_status":"#{expected_status}")
+      assert Path.wildcard(Path.join([session.runtime_root, "worker-events", "reply.*"])) == replies_before
+      assert Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"])) == results_before
+
+      commands = context.log |> File.read!() |> String.split("\n", trim: true)
+      assert Enum.count(commands, &String.contains?(&1, "agent get implementer_orchestrator")) == 1
+      refute Enum.any?(commands, &String.contains?(&1, "agent prompt implementer_orchestrator"))
+      refute Enum.any?(commands, &String.contains?(&1, "agent send-keys implementer_orchestrator enter"))
+    end
+
+    File.write!(context.log, "")
+    replies_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "reply.*"]))
+    results_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"]))
+
+    assert {malformed_get, 1} =
+             System.cmd(
+               worker_herdr,
+               [
+                 "agent",
+                 "prompt",
+                 "implementer_orchestrator",
+                 "OCTO_MSG/1 kind=result assignment=emb1344-malformed-get status=failed"
+               ],
+               env: base_env ++ [{"HERDR_REPLAY_GET", malformed_get_receipt_fixture}],
+               stderr_to_stdout: true
+             )
+
+    assert malformed_get =~ ~s("id":"cli:agent:wait")
+    assert malformed_get =~ ~s("type":"agent_info")
+    assert Path.wildcard(Path.join([session.runtime_root, "worker-events", "reply.*"])) == replies_before
+    assert Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"])) == results_before
+
+    commands = context.log |> File.read!() |> String.split("\n", trim: true)
+    assert Enum.count(commands, &String.contains?(&1, "agent get implementer_orchestrator")) == 1
+    refute Enum.any?(commands, &String.contains?(&1, "agent prompt implementer_orchestrator"))
+    refute Enum.any?(commands, &String.contains?(&1, "agent send-keys implementer_orchestrator enter"))
 
     File.write!(context.log, "")
     File.rm(Path.join([session.runtime_root, "herdr", "sessions", "default", "prompt-attempts"]))
@@ -851,7 +987,9 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert length(:binary.matches(commands, "agent prompt implementer_worker")) == 1
     assert length(:binary.matches(commands, "agent send-keys implementer_worker enter")) == 1
     assert length(:binary.matches(commands, "agent wait implementer_worker")) == 1
-    assert length(:binary.matches(commands, "agent get implementer_worker")) == 1
+    # One preflight read selected the waited path; the final read proves the
+    # post-stall fast-settled revision.
+    assert length(:binary.matches(commands, "agent get implementer_worker")) == 2
 
     [fast_assignment] =
       Path.wildcard(Path.join([session.runtime_root, "worker-events", "assignment.*"])) --
@@ -890,7 +1028,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       assert Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"])) == results_before
       commands = File.read!(context.log)
       assert length(:binary.matches(commands, "agent send-keys implementer_orchestrator enter")) == 1
-      refute commands =~ "agent get implementer_orchestrator"
+      assert length(:binary.matches(commands, "agent get implementer_orchestrator")) == 1
     end
 
     for args <- [

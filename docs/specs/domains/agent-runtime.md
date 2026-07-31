@@ -833,17 +833,26 @@ Same-revision settled status never proves delivery. Provider transcript output
 is diagnostic evidence only and never substitutes for this observation.
 
 The generated orchestrator/worker prompt projections apply the same causal
-Herdr 0.7.5 compatibility recovery to assignments and results. Their native
-prompt has a 60-second budget because a result can steer an orchestrator that
-is already `working` and Herdr may settle that prompt only at the next
-authoritative lifecycle transition. A typed prompt stall permits one internal
-agent-scoped Enter followed by one 60-second server-bounded `working|blocked`
-observation and at most one final `agent get` for a fast-settled newer
-revision. An ordinary timeout remains a failure and writes no correlation
-record. They never submit a blank or replayed prompt. Caller-supplied semantic
-`agent send-keys` and all pane-key input stay denied; the Enter is available
-only inside Adapter-owned recovery. Remove this compatibility path when the
-pinned stable Herdr release contains upstream commit
+Herdr 0.7.5 compatibility recovery to assignments and results. Before
+submission, the generated projection reads the named target through native
+`agent get`; a failed or malformed native read fails without semantic
+submission or correlation. When that target is already `working`, it submits the exact
+semantic prompt exactly once without lifecycle waiting and accepts only the
+successful native `AgentPrompted` acknowledgement that Herdr wrote those bytes
+to the target PTY. That acknowledgement writes exactly one matching
+correlation record; a missing, malformed, or failed acknowledgement writes
+none. This already-working path sends no Enter and does not infer delivery from
+transcript output, later status, or timeout. A preflight `blocked` or `unknown`
+status fails without semantic submission or correlation. For `idle` and `done`
+targets, the native prompt retains its 60-second waited lifecycle contract. A
+typed prompt stall permits one internal agent-scoped Enter followed by one 60-second
+server-bounded `working|blocked` observation and at most one final `agent get`
+for a fast-settled newer revision. An ordinary timeout remains a failure and
+writes no correlation record. Generated projections never submit a blank or
+replayed prompt. Caller-supplied semantic `agent send-keys` and all pane-key
+input stay denied; the Enter is available only inside Adapter-owned recovery.
+Remove this compatibility path when the pinned stable Herdr release contains
+upstream commit
 `bb29eedb7209a0d5e91052458ce76bc7e4259d18`.
 
 The orchestrator's machine-readable assignment message is
