@@ -920,7 +920,7 @@ owns only the no-activity expiry and forced cleanup.
 After submission, turn lifecycle observation is a bounded, idempotent
 supervision state machine (EMB-1244 Stage 2), not a single budget-length
 server wait. The transport reads the typed agent status (`agent get`) on a
-bounded cadence: a 30-second observation interval, a 5-second per-read
+bounded cadence: a 30-second observation interval, a 60-second per-read
 timeout, and 0 ms jitter (deterministic cadence; no randomization surface). A
 `blocked` status must therefore surface within one observation interval plus
 one read timeout. All five Herdr 0.7.5 statuses (`idle`, `working`,

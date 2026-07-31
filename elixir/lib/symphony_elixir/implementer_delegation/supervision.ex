@@ -18,7 +18,7 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
 
   @statuses ~w(idle working blocked done unknown)
 
-  @default_status_read_timeout_ms 5_000
+  @default_status_read_timeout_ms 60_000
   @default_max_indeterminate_reads 4
   @default_stale_working_ms 900_000
   @default_max_recovery_attempts 2
