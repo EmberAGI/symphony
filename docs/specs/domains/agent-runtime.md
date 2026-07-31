@@ -944,7 +944,8 @@ incompatible-runtime protocol error halts immediately with a checkpoint —
 a deterministic protocol failure is never retried as indeterminate; stale working (no cursor movement past the stale threshold,
 default fifteen minutes) gets bounded recovery through the server-owned
 terminal wait (at most two attempts) before a typed stalled escalation; the
-hard turn budget triggers checkpoint-and-preserve, then shutdown. A read
+recovery wait is also capped by the remaining hard turn budget. The hard turn
+budget triggers checkpoint-and-preserve, then shutdown. A read
 that observes `idle`/`done` with an unchanged agent revision inside the
 prompt-transition settle window (default 5000 ms, matching Herdr's
 prompt-effect window) is transitional, not completion; this is read-only
