@@ -273,41 +273,46 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
     if remaining_ms == 0 do
       halt(config, state, :hard_budget_exhausted)
     else
-      recovery_timeout_ms =
-        min(
-          Map.get(config, :recovery_timeout_ms, config.status_read_timeout_ms),
-          remaining_ms
-        )
-
-      result =
-        config.transport.await_agent(
-          config.session,
-          config.orchestrator,
-          ["idle", "done", "blocked"],
-          recovery_timeout_ms,
-          config.context
-        )
-
-      now = System.monotonic_time(:millisecond)
-
-      if now >= state.budget_deadline do
-        halt(config, state, :hard_budget_exhausted)
-      else
-        case result do
-          {:ok, %{agent_status: status} = agent} when status in ["idle", "done"] ->
-            state = remember_agent(state, {:ok, agent})
-            {:ok, restore_provider_session_identity(agent, state)}
-
-          {:error, {:herdr_agent_blocked, _name}} ->
-            halt(config, record_recovery(state, :observed_blocked, now), :blocked)
-
-          other ->
-            state = record_recovery(state, recovery_result_evidence(other), now)
-            pause(config, state)
-            loop(config, state)
-        end
-      end
+      await_recovery(config, state, remaining_ms)
     end
+  end
+
+  defp await_recovery(config, state, remaining_ms) do
+    recovery_timeout_ms =
+      min(
+        Map.get(config, :recovery_timeout_ms, config.status_read_timeout_ms),
+        remaining_ms
+      )
+
+    result =
+      config.transport.await_agent(
+        config.session,
+        config.orchestrator,
+        ["idle", "done", "blocked"],
+        recovery_timeout_ms,
+        config.context
+      )
+
+    now = System.monotonic_time(:millisecond)
+
+    if now >= state.budget_deadline,
+      do: halt(config, state, :hard_budget_exhausted),
+      else: handle_recovery_result(config, state, result, now)
+  end
+
+  defp handle_recovery_result(_config, state, {:ok, %{agent_status: status} = agent}, _now)
+       when status in ["idle", "done"] do
+    state = remember_agent(state, {:ok, agent})
+    {:ok, restore_provider_session_identity(agent, state)}
+  end
+
+  defp handle_recovery_result(config, state, {:error, {:herdr_agent_blocked, _name}}, now),
+    do: halt(config, record_recovery(state, :observed_blocked, now), :blocked)
+
+  defp handle_recovery_result(config, state, other, now) do
+    state = record_recovery(state, recovery_result_evidence(other), now)
+    pause(config, state)
+    loop(config, state)
   end
 
   defp recovery_result_evidence({:error, reason}), do: {:failed, reason}
