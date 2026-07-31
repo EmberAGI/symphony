@@ -176,6 +176,17 @@ defmodule SymphonyElixir.ImplementerWorkerChannelRecordingTest do
   end
 
   describe "orchestrator authority denies the worker agents it cannot record" do
+    test "help-only prompt discovery is not a denied worker attempt", context do
+      assert {0,
+              %{
+                denied: 0,
+                unparsed: 0,
+                delivery: 0,
+                assignment: 0
+              }} =
+               orchestrator(context, ["agent", "prompt", "--help"])
+    end
+
     test "creating a suffixed worker agent is denied and records its own evidence", context do
       assert {64, %{denied: 1, delivery: 0}} =
                orchestrator(context, [

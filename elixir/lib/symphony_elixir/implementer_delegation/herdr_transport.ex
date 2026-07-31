@@ -1885,6 +1885,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
             exit 64
           }
 
+          # Prompt help has no parsed target and cannot reach another agent.
+          # Let the real CLI report it without poisoning the turn's
+          # delegation evidence.
           case "$herdr_subcommand:$herdr_action" in
             agent:send-keys|pane:send-keys)
               printf '%s\n' "orchestrator Herdr authority denies: $*" >&2
@@ -1898,7 +1901,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
               ;;
             agent:prompt)
               case "$herdr_prompt_target" in
-                #{@canonical_worker_agent}|#{@orchestrator_agent}) ;;
+                ''|#{@canonical_worker_agent}|#{@orchestrator_agent}) ;;
                 *) deny_untracked_agent "$@" ;;
               esac
               ;;
