@@ -889,9 +889,9 @@ typed as `agent_identity_incomplete`; an unexpected or missing name at either
 end fails typed as `worker_agent_inventory_unexpected`, and an agent replaced
 under a canonical name between the two reads fails typed as
 `worker_agent_inventory_changed`. Identity is that name and pane only: the
-provider session is not a property of an agent's existence, since Herdr does
-not report one until the agent has been prompted, so a first turn that gives
-an agent its provider session is not a changed inventory. Because that read
+provider session is not a property of an agent's existence, since Herdr holds
+one only once the provider has reported it, so a first turn that gives an
+agent its provider session is not a changed inventory. Because that read
 never passes through a generated projection, an agent that bypasses its shim
 and drives the real binary directly is still observed. Turn completion
 considers only files absent from that opening set. No turn-local assignment
@@ -913,6 +913,30 @@ materialized recording proves no delegation occurred emits positive
 `outcome=no_delegation` evidence instead of ambiguous silence. An unobservable
 recording or a delegated result that cannot be correlated remains a typed
 failure and cannot emit either successful outcome.
+
+That provider session id is the provider's own, and the runtime never derives,
+synthesizes, or asks an agent to author one. Herdr reports only what a
+provider's integration reported to it for the pane, so a launch that inherits
+that integration from ambient host state inherits the identity invariant from
+it. Every provider launch therefore provisions its own report as part of the
+run-owned launch the transport already materializes, and provisions whatever
+that provider requires to reach a started session unattended — for Claude
+Code, run-owned workspace trust and the already-decided answer to the
+bypass-mode acceptance, since an unanswered interactive dialog means no
+session starts, no session identity exists, and no report can ever arrive.
+This is the same guarantee the Codex launch makes for itself through its own
+trust and hook-trust configuration. Credentials stay where the operator
+provisioned them; a run references them and never copies or reads them.
+Provider-neutral callers consume one normalized identity and never re-parse
+provider-specific output.
+The identity is observed at prompt acknowledgement, at terminal observation,
+and through the bounded receipt read, and it must be the same value at every
+observation that carries one. Absent or blank at the end of the receipt window
+fails closed as `implementer_provider_session_missing`; two different nonblank
+values in one turn describe two sessions and fail closed as
+`implementer_provider_session_mismatched`. Both are irrecoverable
+runtime-protocol failures, never retried and never redispatched as equivalent
+work.
 An Implementer commonly performs its own `In Progress -> Agent Review`
 transition before its provider turn has returned. State reconciliation must
 not destroy the run-owned session on the first observation of that downstream
