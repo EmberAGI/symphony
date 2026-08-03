@@ -313,11 +313,11 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
 
     # Provider-report physics (EMB-1353): herdr learns an agent's provider
     # session only when an integration reports it against the pane the agent
-    # occupies (`pane report-agent-session ... --agent-session-id <ID>
-    # <PANE_ID>`, pane id as the final argument, mirroring the real 0.7.5
-    # CLI). The reported value is stored per agent and projected into every
-    # later replayed envelope for that agent. A write acknowledgement is not
-    # a protocol read, so no recorded envelope is replayed here.
+    # occupies (`pane report-agent-session <PANE_ID> --agent-session-id <ID>
+    # ...`, pane id positional as the real 0.7.5 CLI requires). The reported
+    # value is stored per agent and projected into every later replayed
+    # envelope for that agent. A write acknowledgement is not a protocol read,
+    # so no recorded envelope is replayed here.
     if [ "$1" = "pane" ] && [ "$2" = "report-agent-session" ]; then
       report_session=
       report_pane=$3
