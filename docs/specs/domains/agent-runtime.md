@@ -918,25 +918,31 @@ That provider session id is the provider's own, and the runtime never derives,
 synthesizes, or asks an agent to author one. Herdr reports only what a
 provider's integration reported to it for the pane, so a launch that inherits
 that integration from ambient host state inherits the identity invariant from
-it. Every provider launch therefore provisions its own report as part of the
-run-owned launch the transport already materializes, and provisions whatever
-that provider requires to reach a started session unattended — for Claude
-Code, run-owned workspace trust and the already-decided answer to the
-bypass-mode acceptance, since an unanswered interactive dialog means no
-session starts, no session identity exists, and no report can ever arrive.
-This is the same guarantee the Codex launch makes for itself through its own
-trust and hook-trust configuration. Credentials stay where the operator
-provisioned them; a run references them and never copies or reads them.
+it. The invariant and the requirement are provider-neutral: every launch must
+reach a started session unattended, and every turn must end with exactly one
+reported identity. The Claude launch provisions its own report as part of the
+run-owned launch the transport already materializes, together with whatever
+Claude Code requires to reach a started session unattended — run-owned
+workspace trust and the already-decided answer to the bypass-mode acceptance,
+since an unanswered interactive dialog means no session starts, no session
+identity exists, and no report can ever arrive. The Codex launch provisions
+its own trust and hook-trust configuration the same way, but its report is
+still supplied by the operator's ambient codex↔herdr integration rather than
+by the run: a named residual, sound on a provisioned host, whose identity is
+not yet run-owned. Credentials stay where the operator provisioned them; a run
+references them and never copies or reads them.
 Provider-neutral callers consume one normalized identity and never re-parse
 provider-specific output.
-The identity is observed at prompt acknowledgement, at terminal observation,
-and through the bounded receipt read, and it must be the same value at every
-observation that carries one. Absent or blank at the end of the receipt window
+
+The identity is acknowledged at prompt submission and resolved again by the
+bounded receipt read over the terminal observation, and those two values must
+agree whenever both carry one. Absent or blank at the end of the receipt window
 fails closed as `implementer_provider_session_missing`; two different nonblank
 values in one turn describe two sessions and fail closed as
 `implementer_provider_session_mismatched`. Both are irrecoverable
 runtime-protocol failures, never retried and never redispatched as equivalent
 work.
+
 An Implementer commonly performs its own `In Progress -> Agent Review`
 transition before its provider turn has returned. State reconciliation must
 not destroy the run-owned session on the first observation of that downstream
