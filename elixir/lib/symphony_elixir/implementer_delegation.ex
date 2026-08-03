@@ -217,11 +217,13 @@ defmodule SymphonyElixir.ImplementerDelegation do
            ),
          :ok <- validate_worker_assignments(worker_assignments, herdr_session),
          # The correlation event is only durable evidence when its provider
-         # session identity is joinable. An absent or blank identity must not
-         # turn direct work into either positive success outcome.
+         # session identity is joinable. An absent, blank, or self-contradicting
+         # identity must not turn direct work into either positive success
+         # outcome.
          :ok <-
            validate_provider_session_identity(
              session_id,
+             provider_session_id(observed),
              orchestrator,
              contract_provider(Map.get(session, :contract, %{}), :orchestrator)
            ) do
@@ -483,13 +485,31 @@ defmodule SymphonyElixir.ImplementerDelegation do
   defp validate_worker_assignments(_assignments, _herdr_session),
     do: {:error, {:implementer_worker_result_missing, %{assignment_id: nil}}}
 
-  defp validate_provider_session_identity(session_id, orchestrator, provider) when is_binary(session_id) do
-    if byte_size(String.trim(session_id)) > 0,
-      do: :ok,
-      else: provider_session_identity_missing(orchestrator, provider)
+  defp validate_provider_session_identity(session_id, acknowledged, orchestrator, provider) when is_binary(session_id) do
+    cond do
+      byte_size(String.trim(session_id)) == 0 ->
+        provider_session_identity_missing(orchestrator, provider)
+
+      # One turn is one provider session. A second nonblank identity means the
+      # observations describe different sessions, so neither can be trusted to
+      # join this run's evidence — and choosing between them would invent a
+      # fact the runtime never observed.
+      is_binary(acknowledged) and acknowledged != session_id ->
+        {:error,
+         {:implementer_provider_session_mismatched,
+          %{
+            agent: Map.get(orchestrator, :name),
+            provider: provider,
+            acknowledged: acknowledged,
+            observed: session_id
+          }}}
+
+      true ->
+        :ok
+    end
   end
 
-  defp validate_provider_session_identity(_session_id, orchestrator, provider),
+  defp validate_provider_session_identity(_session_id, _acknowledged, orchestrator, provider),
     do: provider_session_identity_missing(orchestrator, provider)
 
   defp provider_session_identity_missing(orchestrator, provider) do

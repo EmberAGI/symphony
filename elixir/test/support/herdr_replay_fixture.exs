@@ -181,14 +181,35 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
           "$REPLAY/$1.stdout"
     }
 
+    # Reported-identity physics (EMB-1353): herdr 0.7.5 has no native claude
+    # session derivation — the recorded envelopes carried `agent_session` only
+    # because the recording host's claude integration had already reported it
+    # over the pane report channel. A claude agent here therefore carries the
+    # field only after such a report, and carries exactly the reported value.
+    # Codex recordings replay unchanged: the codex integration's ambient
+    # report is part of the recorded physics this double replays
+    # (differentially validated by the CD-tier harness).
+    project_provider_session() {
+      if [ "$agent_kind" = "claude" ] && [ -n "${state_root:-}" ]; then
+        if [ -f "$state_root/agent-session.$agent_name" ]; then
+          IFS= read -r reported_session < "$state_root/agent-session.$agent_name"
+          sed "s|\\(\\"agent_session\\":{[^}]*\\"value\\":\\"\\)[^\\"]*|\\1$reported_session|g"
+        else
+          sed 's|"agent_session":{[^}]*},||g'
+        fi
+      else
+        cat
+      fi
+    }
+
     replay() {
       fixture=$1
       if [ -n "$agent_revision" ]; then
-        replay_stdout "$fixture" |
+        replay_stdout "$fixture" | project_provider_session |
           sed -e "s|\\\"revision\\\":[0-9][0-9]*|\\\"revision\\\":$agent_revision|g" \\
               -e "s|\\\"state_change_seq\\\":[0-9][0-9]*|\\\"state_change_seq\\\":$agent_state_change_seq|g"
       else
-        replay_stdout "$fixture"
+        replay_stdout "$fixture" | project_provider_session
       fi
       if [ -s "$REPLAY/$fixture.stderr" ]; then
         if [ -n "$agent_state_change_seq" ]; then
@@ -250,6 +271,8 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
 
     if [ "$1" = "workspace" ] && [ "$2" = "create" ] && [ "$3" = "--cwd" ]; then
       workspace_cwd="$4"
+      mkdir -p "$state_root"
+      printf '%s\\n' "$workspace_cwd" > "$state_root/workspace-cwd"
       replay "${HERDR_REPLAY_WORKSPACE_CREATE:-workspace-create}"
     fi
 
@@ -288,6 +311,44 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       exit 0
     fi
 
+    # Provider-report physics (EMB-1353): herdr learns an agent's provider
+    # session only when an integration reports it against the pane the agent
+    # occupies (`pane report-agent-session <PANE_ID> --agent-session-id <ID>
+    # ...`, pane id positional as the real 0.7.5 CLI requires). The reported
+    # value is stored per agent and projected into every later replayed
+    # envelope for that agent. A write acknowledgement is not a protocol read,
+    # so no recorded envelope is replayed here.
+    if [ "$1" = "pane" ] && [ "$2" = "report-agent-session" ]; then
+      if [ "${HERDR_FAKE_REPORT_AGENT_SESSION_FAIL:-}" = "1" ]; then
+        printf 'sabotage: report-agent-session refused\\n' >&2
+        exit 70
+      fi
+      report_session=
+      report_source=
+      report_pane=$3
+      previous_arg=
+      for arg in "$@"; do
+        if [ "$previous_arg" = "--agent-session-id" ]; then
+          report_session=$arg
+        fi
+        if [ "$previous_arg" = "--source" ]; then
+          report_source=$arg
+        fi
+        previous_arg=$arg
+      done
+      mkdir -p "$state_root"
+      for pane_file in "$state_root"/pane.*; do
+        [ -e "$pane_file" ] || continue
+        IFS= read -r recorded_pane < "$pane_file"
+        if [ "$recorded_pane" = "$report_pane" ]; then
+          reported_name=$(basename "$pane_file")
+          printf '%s\\n' "$report_session" > "$state_root/agent-session.${reported_name#pane.}"
+          printf '%s\\n' "${report_source:--}" > "$state_root/agent-source.${reported_name#pane.}"
+        fi
+      done
+      exit 0
+    fi
+
     if [ "$1" = "agent" ] && [ "$2" = "start" ]; then
       agent_name="$3"
       agent_kind="$5"
@@ -295,6 +356,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       pane_id="$pane"
       mkdir -p "$state_root"
       printf '%s\\n' "$agent_kind" > "$state_root/kind.$agent_name"
+      printf '%s\\n' "$pane" > "$state_root/pane.$agent_name"
       printf '0\\n' > "$state_root/revision.$agent_name"
       printf '1\\n' > "$state_root/state-change-seq.$agent_name"
       recall_revision
@@ -356,7 +418,17 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
           claude) set -- --dangerously-skip-permissions "$@" ;;
           codex) set -- --yolo "$@" ;;
         esac
-        if ! HERDR_FAKE_AGENT_NAME="$agent_name" HERDR_PANE_ID="$pane" PATH="$pane_path" "$resolved" "$@" > "${HERDR_FAKE_PROVIDER_OUTPUT:-/dev/null}" 2>&1; then
+        # A started agent runs at its pane's shell prompt, so it starts in the
+        # workspace the session was created for — the directory a provider's
+        # own trust and project state is keyed by.
+        launch_cwd=$PWD
+        if [ -f "$state_root/workspace-cwd" ]; then
+          IFS= read -r recorded_cwd < "$state_root/workspace-cwd"
+          if [ -d "$recorded_cwd" ]; then
+            launch_cwd=$recorded_cwd
+          fi
+        fi
+        if ! (cd "$launch_cwd" && HERDR_FAKE_AGENT_NAME="$agent_name" HERDR_PANE_ID="$pane" PATH="$pane_path" "$resolved" "$@") > "${HERDR_FAKE_PROVIDER_OUTPUT:-/dev/null}" 2>&1; then
           if [ "${HERDR_FAKE_IGNORE_LAUNCH_FAILURE:-}" != "1" ]; then
             printf 'pane launch command exited nonzero for %s on %s\\n' "$agent_name" "$pane" >&2
             tail -n 20 "$HERDR_FAKE_LOG" >&2
@@ -509,6 +581,14 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       # entries were captured after both agents had been prompted, so the
       # third emitted field replays that prompt state and an unprompted agent
       # is listed without the recorded `agent_session` object.
+      #
+      # For claude entries the prompted correlation was a recording-host
+      # artifact (EMB-1353): identity follows the integration REPORT, not the
+      # prompt, so the fourth field carries the reported value (`-` when no
+      # report was recorded) and replaces the recorded placeholder value. The
+      # fifth field carries the reported `--source` and likewise replaces the
+      # recorded one, so an assertion on the source is an assertion about what
+      # the reporter actually sent rather than about the recording.
       started=$( (set -- "$state_root"/kind.*
         if [ -e "$1" ]; then
           for kind_file in "$@"; do
@@ -523,12 +603,30 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
             if [ "$started_revision" -gt 0 ]; then
               started_prompted=1
             fi
-            printf '%s %s %s\\n' "$started_name" "$started_kind" "$started_prompted"
+            started_session=-
+            if [ -f "$state_root/agent-session.$started_name" ]; then
+              IFS= read -r started_session < "$state_root/agent-session.$started_name"
+            fi
+            started_source=-
+            if [ -f "$state_root/agent-source.$started_name" ]; then
+              IFS= read -r started_source < "$state_root/agent-source.$started_name"
+            fi
+            printf '%s %s %s %s %s\\n' "$started_name" "$started_kind" "$started_prompted" "$started_session" "$started_source"
           done
         fi) | sort)
       agent_name='{{AGENT_NAME}}'
       agent_kind='{{AGENT_KIND}}'
       replay_stdout agent-list | awk -v pairs="$started" '
+        function set_json_field(text, key, value,   pat, pre, post) {
+          pat = q key q ":" q "[^" q "]*" q
+          if (match(text, pat)) {
+            pre = substr(text, 1, RSTART - 1)
+            post = substr(text, RSTART + RLENGTH)
+            return pre q key q ":" q value q post
+          }
+          return text
+        }
+        BEGIN { q = sprintf("%c", 34) }
         {
           head_end = index($0, "\\"agents\\":[") + 9
           head = substr($0, 1, head_end)
@@ -547,7 +645,19 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
             if (j < recorded_count) entry = entry "}"
             gsub(/\\{\\{AGENT_NAME\\}\\}/, field[1], entry)
             gsub(/\\{\\{AGENT_KIND\\}\\}/, field[2], entry)
-            if (field[3] == "0") sub(/"agent_session":\\{[^}]*\\},/, "", entry)
+            if (field[2] == "claude") {
+              if (field[4] == "-" || field[4] == "")
+                sub(/"agent_session":\\{[^}]*\\},/, "", entry)
+              else if (match(entry, /"agent_session":\\{[^}]*\\}/)) {
+                session_prefix = substr(entry, 1, RSTART - 1)
+                session_object = substr(entry, RSTART, RLENGTH)
+                session_rest = substr(entry, RSTART + RLENGTH)
+                session_object = set_json_field(session_object, "value", field[4])
+                if (field[5] != "" && field[5] != "-")
+                  session_object = set_json_field(session_object, "source", field[5])
+                entry = session_prefix session_object session_rest
+              }
+            } else if (field[3] == "0") sub(/"agent_session":\\{[^}]*\\},/, "", entry)
             if (i > 1) out = out ","
             out = out entry
           }
