@@ -191,6 +191,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
     with {:ok, kind, native_args} <- native_agent_launch(spec, argv),
          :ok <- ensure_provider_wrapper(runtime_root, hd(argv), env, context),
+         {:ok, provider_session_env} <-
+           materialize_provider_session_report(runtime_root, session_name, kind, name, cwd, context),
          {:ok, launch_token, projection_path} <-
            materialize_launch_projection(
              runtime_root,
@@ -198,7 +200,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
              kind,
              hd(argv),
              native_args,
-             %{"BASH_ENV" => launch_bash_env, "PATH" => launch_path},
+             Map.merge(%{"BASH_ENV" => launch_bash_env, "PATH" => launch_path}, provider_session_env),
              %{"PATH" => inherited_provider_path(env, orchestrator_bin)}
            ),
          :ok <- validate_launch_projection(runtime_root, projection_path),
@@ -1229,6 +1231,15 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
     with {:ok, kind, native_args} <- native_agent_launch(worker, argv),
          :ok <- ensure_role_bash_environments(runtime_root),
+         {:ok, provider_session_env} <-
+           materialize_provider_session_report(
+             runtime_root,
+             session_name,
+             kind,
+             @canonical_worker_agent,
+             Map.get(worker, :cwd),
+             context
+           ),
          {:ok, worker_token, worker_projection_path} <-
            materialize_launch_projection(
              runtime_root,
@@ -1236,11 +1247,12 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
              kind,
              hd(argv),
              native_args,
-             Map.put(
-               worker_env,
+             worker_env
+             |> Map.put(
                "PATH",
                worker_bin <> ":" <> inherited_provider_path(session_env, orchestrator_bin)
-             ),
+             )
+             |> Map.merge(provider_session_env),
              %{"PATH" => inherited_provider_path(session_env, orchestrator_bin)}
            ) do
       provider_command = hd(argv)
@@ -1785,6 +1797,124 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp materialize_launch_projection(_root, _agent, _kind, _provider, _args, _extra, _session),
     do: {:error, :invalid_launch_projection}
+
+  # Herdr never derives a provider session identity on its own: it holds the
+  # one the provider's own integration reports for the pane. A launch that
+  # inherits that integration from ambient host state inherits the whole
+  # identity invariant from it, which is how a Claude Implementer reached a
+  # terminal state carrying no `agent_session` at all (EMB-1144).
+  #
+  # Both halves of the report are therefore made run-owned here, at the launch
+  # the transport already materializes. Claude reports its session only once a
+  # session actually starts, and a session starts only in a directory its
+  # config marks trusted — a freshly created per-issue workspace never is, so
+  # the launch parks on the interactive trust dialog forever and no
+  # `SessionStart` ever fires. This is the same guarantee the Codex launch
+  # already makes for itself through `projects={...trust_level="trusted"}`.
+  #
+  # The reported identity remains the provider's own: this materializes the
+  # channel, never the value.
+  defp materialize_provider_session_report(runtime_root, session_name, "claude", agent_name, cwd, context)
+       when is_binary(cwd) and cwd != "" do
+    config_dir = Path.join([runtime_root, "provider-session", agent_name])
+    reporter = Path.join(runtime_root, "provider-session-report")
+
+    with :ok <- File.mkdir_p(config_dir),
+         :ok <- File.chmod(config_dir, 0o700),
+         :ok <- write_executable(reporter, provider_session_reporter_body(session_name, context)),
+         :ok <- File.write(Path.join(config_dir, ".claude.json"), claude_launch_state(cwd)),
+         :ok <- File.write(Path.join(config_dir, "settings.json"), claude_launch_settings(reporter)),
+         :ok <- link_provider_credentials(config_dir) do
+      {:ok, %{"CLAUDE_CONFIG_DIR" => config_dir}}
+    else
+      {:error, reason} ->
+        {:error, {:herdr_provider_session_report_failed, %{agent: agent_name, reason: reason}}}
+    end
+  end
+
+  # A spec carrying no workspace at all is not a launch: existing direct
+  # Adapter callers use `prepare_worker/3` only to materialize and inspect the
+  # compatibility launcher. Every real agent start carries its workspace, so
+  # this can never quietly drop the report for a launched agent.
+  defp materialize_provider_session_report(_runtime_root, _session_name, "claude", _agent_name, nil, _context),
+    do: {:ok, %{}}
+
+  defp materialize_provider_session_report(_runtime_root, _session_name, "claude", agent_name, _cwd, _context),
+    do: {:error, {:herdr_provider_session_report_failed, %{agent: agent_name, reason: :launch_workspace_missing}}}
+
+  defp materialize_provider_session_report(_runtime_root, _session_name, _kind, _agent_name, _cwd, _context),
+    do: {:ok, %{}}
+
+  # The provider hands its native session id to the hook on stdin; the hook
+  # hands exactly that value to Herdr through the transport-owned real binary.
+  # The role Herdr shims are deliberately bypassed: they scope an agent's own
+  # authority over other agents, and the worker shim would deny this outright.
+  defp provider_session_reporter_body(session_name, context) do
+    real_herdr = Map.get(context, :herdr_bin) || System.find_executable("herdr") || "herdr"
+
+    """
+    #!/bin/sh
+    set -eu
+    [ -n "${HERDR_PANE_ID:-}" ] || exit 0
+    hook_input=$(cat 2>/dev/null || printf '%s' '')
+    session_id=$(printf '%s' "$hook_input" |
+      sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' |
+      head -n 1)
+    [ -n "$session_id" ] || exit 0
+    exec #{shell_escape(real_herdr)} --session #{shell_escape(session_name)} pane report-agent-session \
+      --source herdr:claude --agent claude --agent-session-id "$session_id" "$HERDR_PANE_ID"
+    """
+  end
+
+  defp claude_launch_settings(reporter) do
+    Jason.encode!(%{
+      "hooks" => %{
+        "SessionStart" => [
+          %{
+            "matcher" => "*",
+            "hooks" => [%{"type" => "command", "command" => reporter, "timeout" => 10}]
+          }
+        ]
+      }
+    })
+  end
+
+  defp claude_launch_state(cwd) do
+    Jason.encode!(%{
+      "hasCompletedOnboarding" => true,
+      "projects" => %{
+        cwd => %{
+          "hasTrustDialogAccepted" => true,
+          "hasCompletedProjectOnboarding" => true
+        }
+      }
+    })
+  end
+
+  # Authentication stays exactly where the operator provisioned it. The link
+  # keeps the run's config dir usable without Symphony ever reading, copying,
+  # or storing credential bytes; a host that authenticates by environment
+  # instead has nothing to link and is equally supported.
+  defp link_provider_credentials(config_dir) do
+    source = Path.join(ambient_claude_config_dir(), ".credentials.json")
+
+    if File.exists?(source) do
+      case File.ln_s(source, Path.join(config_dir, ".credentials.json")) do
+        :ok -> :ok
+        {:error, :eexist} -> :ok
+        {:error, reason} -> {:error, {:provider_credentials_unlinkable, reason}}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp ambient_claude_config_dir do
+    case System.get_env("CLAUDE_CONFIG_DIR") do
+      dir when is_binary(dir) and dir != "" -> dir
+      _ -> Path.join(System.user_home() || "", ".claude")
+    end
+  end
 
   defp await_launch_acks(runtime_root, token, context) do
     ack_dir = Path.join([runtime_root, "launch-acks", token])

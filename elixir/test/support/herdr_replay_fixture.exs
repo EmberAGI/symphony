@@ -271,6 +271,8 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
 
     if [ "$1" = "workspace" ] && [ "$2" = "create" ] && [ "$3" = "--cwd" ]; then
       workspace_cwd="$4"
+      mkdir -p "$state_root"
+      printf '%s\\n' "$workspace_cwd" > "$state_root/workspace-cwd"
       replay "${HERDR_REPLAY_WORKSPACE_CREATE:-workspace-create}"
     fi
 
@@ -408,7 +410,17 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
           claude) set -- --dangerously-skip-permissions "$@" ;;
           codex) set -- --yolo "$@" ;;
         esac
-        if ! HERDR_FAKE_AGENT_NAME="$agent_name" HERDR_PANE_ID="$pane" PATH="$pane_path" "$resolved" "$@" > "${HERDR_FAKE_PROVIDER_OUTPUT:-/dev/null}" 2>&1; then
+        # A started agent runs at its pane's shell prompt, so it starts in the
+        # workspace the session was created for — the directory a provider's
+        # own trust and project state is keyed by.
+        launch_cwd=$PWD
+        if [ -f "$state_root/workspace-cwd" ]; then
+          IFS= read -r recorded_cwd < "$state_root/workspace-cwd"
+          if [ -d "$recorded_cwd" ]; then
+            launch_cwd=$recorded_cwd
+          fi
+        fi
+        if ! (cd "$launch_cwd" && HERDR_FAKE_AGENT_NAME="$agent_name" HERDR_PANE_ID="$pane" PATH="$pane_path" "$resolved" "$@") > "${HERDR_FAKE_PROVIDER_OUTPUT:-/dev/null}" 2>&1; then
           if [ "${HERDR_FAKE_IGNORE_LAUNCH_FAILURE:-}" != "1" ]; then
             printf 'pane launch command exited nonzero for %s on %s\\n' "$agent_name" "$pane" >&2
             tail -n 20 "$HERDR_FAKE_LOG" >&2

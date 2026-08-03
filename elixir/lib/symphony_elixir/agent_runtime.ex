@@ -976,6 +976,15 @@ defmodule SymphonyElixir.AgentRuntime do
      }}
   end
 
+  defp real_irrecoverable_runtime_reason({:implementer_provider_session_mismatched, details})
+       when is_map(details) do
+    {:invalid_workspace_or_runtime_protocol,
+     %{
+       subtype: "implementer_provider_session_mismatched",
+       message: "Implementer provider session identity changed between acknowledgement and turn completion"
+     }}
+  end
+
   defp real_irrecoverable_runtime_reason({_tag, %{checkpoint: {:error, {:implementer_checkpoint_failed, _} = inner}}}) do
     real_irrecoverable_runtime_reason(inner)
   end
