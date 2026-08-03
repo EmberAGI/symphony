@@ -319,12 +319,20 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
     # envelope for that agent. A write acknowledgement is not a protocol read,
     # so no recorded envelope is replayed here.
     if [ "$1" = "pane" ] && [ "$2" = "report-agent-session" ]; then
+      if [ "${HERDR_FAKE_REPORT_AGENT_SESSION_FAIL:-}" = "1" ]; then
+        printf 'sabotage: report-agent-session refused\\n' >&2
+        exit 70
+      fi
       report_session=
+      report_source=
       report_pane=$3
       previous_arg=
       for arg in "$@"; do
         if [ "$previous_arg" = "--agent-session-id" ]; then
           report_session=$arg
+        fi
+        if [ "$previous_arg" = "--source" ]; then
+          report_source=$arg
         fi
         previous_arg=$arg
       done
@@ -335,6 +343,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
         if [ "$recorded_pane" = "$report_pane" ]; then
           reported_name=$(basename "$pane_file")
           printf '%s\\n' "$report_session" > "$state_root/agent-session.${reported_name#pane.}"
+          printf '%s\\n' "${report_source:--}" > "$state_root/agent-source.${reported_name#pane.}"
         fi
       done
       exit 0
@@ -576,7 +585,10 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       # For claude entries the prompted correlation was a recording-host
       # artifact (EMB-1353): identity follows the integration REPORT, not the
       # prompt, so the fourth field carries the reported value (`-` when no
-      # report was recorded) and replaces the recorded placeholder value.
+      # report was recorded) and replaces the recorded placeholder value. The
+      # fifth field carries the reported `--source` and likewise replaces the
+      # recorded one, so an assertion on the source is an assertion about what
+      # the reporter actually sent rather than about the recording.
       started=$( (set -- "$state_root"/kind.*
         if [ -e "$1" ]; then
           for kind_file in "$@"; do
@@ -595,12 +607,26 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
             if [ -f "$state_root/agent-session.$started_name" ]; then
               IFS= read -r started_session < "$state_root/agent-session.$started_name"
             fi
-            printf '%s %s %s %s\\n' "$started_name" "$started_kind" "$started_prompted" "$started_session"
+            started_source=-
+            if [ -f "$state_root/agent-source.$started_name" ]; then
+              IFS= read -r started_source < "$state_root/agent-source.$started_name"
+            fi
+            printf '%s %s %s %s %s\\n' "$started_name" "$started_kind" "$started_prompted" "$started_session" "$started_source"
           done
         fi) | sort)
       agent_name='{{AGENT_NAME}}'
       agent_kind='{{AGENT_KIND}}'
       replay_stdout agent-list | awk -v pairs="$started" '
+        function set_json_field(text, key, value,   pat, pre, post) {
+          pat = q key q ":" q "[^" q "]*" q
+          if (match(text, pat)) {
+            pre = substr(text, 1, RSTART - 1)
+            post = substr(text, RSTART + RLENGTH)
+            return pre q key q ":" q value q post
+          }
+          return text
+        }
+        BEGIN { q = sprintf("%c", 34) }
         {
           head_end = index($0, "\\"agents\\":[") + 9
           head = substr($0, 1, head_end)
@@ -622,10 +648,14 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
             if (field[2] == "claude") {
               if (field[4] == "-" || field[4] == "")
                 sub(/"agent_session":\\{[^}]*\\},/, "", entry)
-              else if (match(entry, /"agent_session":\\{[^}]*"value":"/)) {
-                session_prefix = substr(entry, 1, RSTART + RLENGTH - 1)
+              else if (match(entry, /"agent_session":\\{[^}]*\\}/)) {
+                session_prefix = substr(entry, 1, RSTART - 1)
+                session_object = substr(entry, RSTART, RLENGTH)
                 session_rest = substr(entry, RSTART + RLENGTH)
-                entry = session_prefix field[4] substr(session_rest, index(session_rest, "\\""))
+                session_object = set_json_field(session_object, "value", field[4])
+                if (field[5] != "" && field[5] != "-")
+                  session_object = set_json_field(session_object, "source", field[5])
+                entry = session_prefix session_object session_rest
               }
             } else if (field[3] == "0") sub(/"agent_session":\\{[^}]*\\},/, "", entry)
             if (i > 1) out = out ","
