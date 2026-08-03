@@ -1861,13 +1861,18 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' |
       head -n 1)
     [ -n "$session_id" ] || exit 0
-    exec #{shell_escape(real_herdr)} --session #{shell_escape(session_name)} pane report-agent-session \
-      --source herdr:claude --agent claude --agent-session-id "$session_id" "$HERDR_PANE_ID"
+    exec #{shell_escape(real_herdr)} --session #{shell_escape(session_name)} pane report-agent-session "$HERDR_PANE_ID" --source herdr:claude --agent claude --agent-session-id "$session_id"
     """
   end
 
+  # An unattended launch must not stop on an interactive acceptance whose
+  # default answer is to exit. The run declares its own already-decided answer
+  # rather than inheriting whether an operator happened to accept it on this
+  # host before; the bypass mode itself is the launch's existing contract, not
+  # something granted here.
   defp claude_launch_settings(reporter) do
     Jason.encode!(%{
+      "skipDangerousModePermissionPrompt" => true,
       "hooks" => %{
         "SessionStart" => [
           %{

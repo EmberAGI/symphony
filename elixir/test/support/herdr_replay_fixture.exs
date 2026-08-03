@@ -320,13 +320,12 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
     # a protocol read, so no recorded envelope is replayed here.
     if [ "$1" = "pane" ] && [ "$2" = "report-agent-session" ]; then
       report_session=
-      report_pane=
+      report_pane=$3
       previous_arg=
       for arg in "$@"; do
         if [ "$previous_arg" = "--agent-session-id" ]; then
           report_session=$arg
         fi
-        report_pane=$arg
         previous_arg=$arg
       done
       mkdir -p "$state_root"
