@@ -192,7 +192,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     with {:ok, kind, native_args} <- native_agent_launch(spec, argv),
          :ok <- ensure_provider_wrapper(runtime_root, hd(argv), env, context),
          {:ok, provider_session_env} <-
-           materialize_provider_session_report(runtime_root, session_name, kind, name, cwd, context),
+           materialize_provider_session_report(runtime_root, session_name, kind, name, cwd, pane_id, context),
          {:ok, launch_token, projection_path} <-
            materialize_launch_projection(
              runtime_root,
@@ -1238,6 +1238,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
              kind,
              @canonical_worker_agent,
              Map.get(worker, :cwd),
+             nil,
              context
            ),
          {:ok, worker_token, worker_projection_path} <-
@@ -1814,14 +1815,39 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   #
   # The reported identity remains the provider's own: this materializes the
   # channel, never the value.
-  defp materialize_provider_session_report(runtime_root, session_name, "claude", agent_name, cwd, context)
+  #
+  # The reporter is materialized per agent, inside that agent's own config
+  # dir, and the pane it may report for is baked in at materialization time
+  # rather than read from `$HERDR_PANE_ID`. A shared reporter taking its pane
+  # from the environment is a convenient forging tool the run itself hands
+  # out; the underlying capability pre-exists (the real binary is same-uid
+  # reachable at an absolute path, and `agent-runtime.md` already records that
+  # the role shims are bypassable), so this is defense in depth, not a
+  # regression being repaired.
+  #
+  # The pane is known at `start_agent/3`, which is where every real launch —
+  # orchestrator and prestarted worker alike — materializes this. The
+  # compatibility `materialize_worker_launcher/3` path materializes before any
+  # worker pane exists, so it pins nothing: the reporter it writes refuses
+  # every report (recording `no-pane`) until the deterministic prestart runs
+  # the worker through `start_agent/3` and re-materializes it against the pane
+  # the worker actually occupies. Validating a run-time pane against a
+  # run-owned record was the alternative, but that record is same-uid writable
+  # by the very process it constrains, so it would weaken the orchestrator
+  # path to serve a path that has no real launch.
+  defp materialize_provider_session_report(runtime_root, session_name, "claude", agent_name, cwd, pane_id, context)
        when is_binary(cwd) and cwd != "" do
     config_dir = Path.join([runtime_root, "provider-session", agent_name])
-    reporter = Path.join(runtime_root, "provider-session-report")
+    reporter = Path.join(config_dir, "provider-session-report")
+    report_log = Path.join(config_dir, "report.log")
 
     with :ok <- File.mkdir_p(config_dir),
          :ok <- File.chmod(config_dir, 0o700),
-         :ok <- write_executable(reporter, provider_session_reporter_body(session_name, context)),
+         :ok <-
+           write_executable(
+             reporter,
+             provider_session_reporter_body(session_name, pane_id, report_log, context)
+           ),
          :ok <- File.write(Path.join(config_dir, ".claude.json"), claude_launch_state(cwd)),
          :ok <- File.write(Path.join(config_dir, "settings.json"), claude_launch_settings(reporter)),
          :ok <- link_provider_credentials(config_dir) do
@@ -1836,32 +1862,84 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   # Adapter callers use `prepare_worker/3` only to materialize and inspect the
   # compatibility launcher. Every real agent start carries its workspace, so
   # this can never quietly drop the report for a launched agent.
-  defp materialize_provider_session_report(_runtime_root, _session_name, "claude", _agent_name, nil, _context),
+  defp materialize_provider_session_report(_runtime_root, _session_name, "claude", _agent_name, nil, _pane_id, _context),
     do: {:ok, %{}}
 
-  defp materialize_provider_session_report(_runtime_root, _session_name, "claude", agent_name, _cwd, _context),
+  defp materialize_provider_session_report(_runtime_root, _session_name, "claude", agent_name, _cwd, _pane_id, _context),
     do: {:error, {:herdr_provider_session_report_failed, %{agent: agent_name, reason: :launch_workspace_missing}}}
 
-  defp materialize_provider_session_report(_runtime_root, _session_name, _kind, _agent_name, _cwd, _context),
+  defp materialize_provider_session_report(_runtime_root, _session_name, _kind, _agent_name, _cwd, _pane_id, _context),
     do: {:ok, %{}}
 
   # The provider hands its native session id to the hook on stdin; the hook
-  # hands exactly that value to Herdr through the transport-owned real binary.
-  # The role Herdr shims are deliberately bypassed: they scope an agent's own
-  # authority over other agents, and the worker shim would deny this outright.
-  defp provider_session_reporter_body(session_name, context) do
+  # hands exactly that value to Herdr through the transport-owned real binary,
+  # for exactly the pane baked in above.
+  #
+  # The role Herdr shims are deliberately bypassed for the report itself: the
+  # worker shim denies `pane report-agent-session` outright, and the
+  # orchestrator shim would record the call as a worker event, poisoning the
+  # delegation evidence a turn is correlated from. The residual is that this
+  # report is not visible as a shim-recorded event at all, so it is made
+  # observable here instead: every invocation appends exactly one bounded line
+  # to a run-owned log naming its outcome.
+  #
+  # That log is the whole point of EMB-1144's cost: a 60-second wait ending in
+  # `implementer_provider_session_missing` could not distinguish "the hook
+  # never fired" from "the payload did not parse" from "Herdr rejected the
+  # report". The reporter therefore runs the binary as a child rather than
+  # `exec`ing it, so the rejection status is recorded, and still exits 0 —
+  # an identity report must never be the reason a launch fails.
+  #
+  # The id is taken from the FIRST `session_id` in the payload: a greedy match
+  # yields the last, and a wrong-but-stable identity never trips the mismatch
+  # guard — it silently joins the run's evidence to the wrong session.
+  defp provider_session_reporter_body(session_name, pane_id, report_log, context) do
     real_herdr = Map.get(context, :herdr_bin) || System.find_executable("herdr") || "herdr"
 
     """
     #!/bin/sh
     set -eu
-    [ -n "${HERDR_PANE_ID:-}" ] || exit 0
+
+    pinned_pane=#{shell_escape(pane_id || "")}
+    report_log=#{shell_escape(report_log)}
+
+    # One bounded line per invocation. The session id is already in the run's
+    # logs; the hook payload never is, and never becomes so here.
+    record() {
+      printf '%s outcome=%.32s pane=%.64s session=%.128s detail=%.64s\\n' \\
+        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" "$pinned_pane" "${2:-}" "${3:-}" \\
+        >> "$report_log" 2>/dev/null || true
+    }
+
+    if [ -z "$pinned_pane" ]; then
+      record no-pane
+      exit 0
+    fi
+
+    if [ -n "${HERDR_PANE_ID:-}" ] && [ "${HERDR_PANE_ID}" != "$pinned_pane" ]; then
+      record pane-mismatch
+      exit 0
+    fi
+
     hook_input=$(cat 2>/dev/null || printf '%s' '')
     session_id=$(printf '%s' "$hook_input" |
-      sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' |
-      head -n 1)
-    [ -n "$session_id" ] || exit 0
-    exec #{shell_escape(real_herdr)} --session #{shell_escape(session_name)} pane report-agent-session "$HERDR_PANE_ID" --source herdr:claude --agent claude --agent-session-id "$session_id"
+      grep -o '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' |
+      head -n 1 |
+      sed -n 's/.*"\\([^"]*\\)"$/\\1/p')
+
+    if [ -z "$session_id" ]; then
+      record no-session-id
+      exit 0
+    fi
+
+    if #{shell_escape(real_herdr)} --session #{shell_escape(session_name)} pane report-agent-session "$pinned_pane" --source herdr:claude --agent claude --agent-session-id "$session_id" >/dev/null 2>&1; then
+      record reported "$session_id"
+    else
+      status=$?
+      record report-failed "$session_id" "exit=$status"
+    fi
+
+    exit 0
     """
   end
 

@@ -192,6 +192,119 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
     stop(session)
   end
 
+  test "the run-owned reporter pins its pane, takes the first session id, and records every invocation", context do
+    native_id = write_claude_stub!(context, "native-claude-reporter-7f3a")
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "claude_code")
+
+    session =
+      start_implementer_session(
+        context,
+        "provider-session-identity-reporter",
+        [{"HERDR_REPLAY_PROMPT", "agent-prompt-idle"}]
+      )
+
+    {result, _log} =
+      with_log(fn ->
+        AgentRuntime.run_turn(
+          session,
+          "Implement the bounded issue.",
+          issue(),
+          provider_session_receipt_timeout_ms: 1_000,
+          provider_session_receipt_interval_ms: 10
+        )
+      end)
+
+    assert {:ok, {_next_session, turn}} = result
+    assert turn.session_id == native_id
+
+    # The reporter is materialized per agent, inside the agent's own config
+    # dir — not once at the runtime root where every process of the run shares
+    # one copy.
+    agent_dir = Path.join([session.herdr_session.runtime_root, "provider-session", "implementer_orchestrator"])
+    reporter = Path.join(agent_dir, "provider-session-report")
+    report_log = Path.join(agent_dir, "report.log")
+
+    assert File.exists?(reporter)
+    refute File.exists?(Path.join(session.herdr_session.runtime_root, "provider-session-report"))
+
+    # The pinned pane is baked in, never read from the environment: an
+    # invocation announcing a foreign pane reports for nothing at all.
+    assert {_out, 0} = run_reporter(reporter, session, context, ~s({"session_id":"forged-foreign-pane"}), [{"HERDR_PANE_ID", "w9:p9"}])
+
+    # Nothing reached Herdr at all: the foreign pane never became an argument.
+    refute File.read!(context.herdr_log) =~ "w9:p9"
+    assert %{"agent_session" => %{"value" => ^native_id}} = native_agent_entry(session, context, "implementer_orchestrator")
+    assert File.read!(report_log) =~ "pane-mismatch"
+
+    # A payload carrying a nested `session_id` yields the FIRST one. A
+    # wrong-but-stable identity never trips the mismatch guard, so it silently
+    # joins the run's evidence to the wrong session.
+    assert {_out, 0} =
+             run_reporter(
+               reporter,
+               session,
+               context,
+               ~s({"session_id":"first-native-9c21","transcript":{"session_id":"nested-decoy-4b70"}}),
+               []
+             )
+
+    assert %{"agent_session" => %{"value" => "first-native-9c21"}} =
+             native_agent_entry(session, context, "implementer_orchestrator")
+
+    assert File.read!(report_log) =~ "reported"
+
+    # Both silent-failure shapes of EMB-1144 leave a distinguishable line
+    # rather than an indistinguishable `exit 0`.
+    assert {_out, 0} = run_reporter(reporter, session, context, "not-json-at-all", [])
+    assert File.read!(report_log) =~ "no-session-id"
+
+    assert {_out, 0} =
+             run_reporter(reporter, session, context, ~s({"session_id":"rejected-by-herdr"}), [
+               {"HERDR_FAKE_REPORT_AGENT_SESSION_FAIL", "1"}
+             ])
+
+    assert File.read!(report_log) =~ "report-failed"
+    assert File.read!(report_log) =~ "exit=70"
+
+    # The rejected report never became an identity.
+    assert %{"agent_session" => %{"value" => "first-native-9c21"}} =
+             native_agent_entry(session, context, "implementer_orchestrator")
+
+    # Every line stays bounded and carries no hook payload.
+    for line <- report_log |> File.read!() |> String.split("\n", trim: true) do
+      assert String.length(line) <= 512
+      refute line =~ "hook_event_name"
+      refute line =~ "transcript"
+    end
+
+    # The `source` the double projects is the source that was reported, so the
+    # source assertions in this suite are load-bearing rather than decorative.
+    assert {_out, 0} =
+             System.cmd(
+               context.herdr_bin,
+               [
+                 "--session",
+                 session.name,
+                 "pane",
+                 "report-agent-session",
+                 orchestrator_pane(session),
+                 "--source",
+                 "herdr:forged",
+                 "--agent",
+                 "claude",
+                 "--agent-session-id",
+                 "source-probe-1"
+               ],
+               env: fake_herdr_env(session, context),
+               stderr_to_stdout: true
+             )
+
+    assert %{"agent_session" => %{"value" => "source-probe-1", "source" => "herdr:forged"}} =
+             native_agent_entry(session, context, "implementer_orchestrator")
+
+    stop(session)
+  end
+
   test "worker delegation retains the orchestrator provider identity and worker correlation stays independently decidable",
        context do
     native_id = write_claude_stub!(context, "native-claude-delegation-7f3a")
@@ -435,13 +548,42 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
     session
   end
 
+  # Invoke the materialized reporter exactly as the provider's SessionStart
+  # hook does: payload on stdin, nothing else but the pane environment.
+  defp run_reporter(reporter, session, context, payload, extra_env) do
+    payload_path = Path.join(context.workspace, "hook-payload-#{System.unique_integer([:positive])}.json")
+    File.write!(payload_path, payload)
+
+    # `HERDR_PANE_ID` is whatever this scenario declares and nothing else: the
+    # test runner may itself be running inside a Herdr pane.
+    env =
+      [{"HERDR_PANE_ID", nil} | fake_herdr_env(session, context) ++ extra_env]
+      |> Map.new()
+      |> Map.to_list()
+
+    System.cmd("/bin/sh", ["-c", "exec #{reporter} < #{payload_path}"], env: env, stderr_to_stdout: true)
+  end
+
+  defp fake_herdr_env(session, context) do
+    [
+      {"HERDR_FAKE_LOG", context.herdr_log},
+      {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
+    ]
+  end
+
+  # The pane the double recorded for the started agent, i.e. the pane the
+  # reporter must have been pinned to.
+  defp orchestrator_pane(session) do
+    [session.herdr_session.runtime_root, "herdr", "sessions", session.name, "pane.implementer_orchestrator"]
+    |> Path.join()
+    |> File.read!()
+    |> String.trim()
+  end
+
   defp native_agent_entry(session, context, agent_name) do
     assert {output, 0} =
              System.cmd(context.herdr_bin, ["--session", session.name, "agent", "list"],
-               env: [
-                 {"HERDR_FAKE_LOG", context.herdr_log},
-                 {"XDG_CONFIG_HOME", session.herdr_session.runtime_root}
-               ],
+               env: fake_herdr_env(session, context),
                stderr_to_stdout: true
              )
 
