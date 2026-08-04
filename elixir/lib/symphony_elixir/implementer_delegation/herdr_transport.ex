@@ -9,6 +9,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   @behaviour SymphonyElixir.ImplementerDelegation.Transport
 
+  alias SymphonyElixir.ClaudeCode.ModelAttestation
+
   @default_start_timeout_ms 10_000
   @default_poll_interval_ms 50
   @default_stop_timeout_ms 5_000
@@ -697,6 +699,79 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   def read_agent(_session, _agent, _opts, _context), do: {:error, :invalid_herdr_agent_read}
+
+  @impl true
+  def attest_agent_model(
+        %{runtime_root: runtime_root},
+        %{name: agent_name} = agent,
+        requested_model,
+        _context
+      )
+      when is_binary(runtime_root) and is_binary(agent_name) and agent_name != "" and
+             is_binary(requested_model) do
+    with {:ok, observed_models} <-
+           observed_claude_models(runtime_root, agent_name, agent_session_value(agent)),
+         :ok <- verify_observed_models(requested_model, observed_models) do
+      :ok
+    else
+      {:error, {subtype, details}} when is_map(details) ->
+        {:error, {subtype, Map.put(details, :agent, agent_name)}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def attest_agent_model(_session, _agent, _requested_model, _context),
+    do: {:error, {:claude_model_malformed, %{requested_model: nil, observed_model: nil, agent: nil}}}
+
+  defp observed_claude_models(runtime_root, agent_name, session_id) do
+    paths =
+      [runtime_root, "provider-session", agent_name, "projects", "**", "*.jsonl"]
+      |> Path.join()
+      |> Path.wildcard()
+
+    models =
+      paths
+      |> Enum.flat_map(&File.stream!/1)
+      |> Enum.flat_map(&observed_model_from_line(&1, session_id))
+      |> Enum.uniq()
+
+    case models do
+      [] -> {:error, {:claude_model_missing, %{requested_model: nil, observed_model: nil}}}
+      values -> {:ok, values}
+    end
+  rescue
+    File.Error -> {:error, {:claude_model_missing, %{requested_model: nil, observed_model: nil}}}
+  end
+
+  defp observed_model_from_line(line, session_id) do
+    with {:ok, event} when is_map(event) <- Jason.decode(line),
+         true <- matching_session?(event, session_id),
+         model when is_binary(model) <- get_in(event, ["message", "model"]) do
+      [model]
+    else
+      _ -> []
+    end
+  end
+
+  defp matching_session?(_event, session_id) when session_id in [nil, ""], do: true
+
+  defp matching_session?(event, session_id),
+    do: Map.get(event, "sessionId") == session_id or Map.get(event, "session_id") == session_id
+
+  defp verify_observed_models(requested_model, observed_models) do
+    Enum.reduce_while(observed_models, :ok, fn observed_model, :ok ->
+      case ModelAttestation.verify(requested_model, observed_model) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp agent_session_value(%{agent_session: %{value: value}}), do: value
+  defp agent_session_value(%{agent_session: %{"value" => value}}), do: value
+  defp agent_session_value(_agent), do: nil
 
   @doc false
   @impl true

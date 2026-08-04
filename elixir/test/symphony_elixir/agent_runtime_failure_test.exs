@@ -3,6 +3,32 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
 
   alias SymphonyElixir.AgentRuntime
 
+  test "classifies Claude model mismatch as bounded irrecoverable runtime evidence" do
+    reason =
+      {:claude_model_mismatched,
+       %{
+         agent: "implementer_orchestrator",
+         requested_model: "claude-fable-5",
+         observed_model: "claude-sonnet-5"
+       }}
+
+    assert {:irrecoverable, failure} =
+             AgentRuntime.classify_failure(reason, %{
+               provider: :claude_code,
+               role: "implementer",
+               issue_id: "issue-model-mismatch",
+               workspace_path: "/tmp/model-mismatch"
+             })
+
+    assert failure.family == :invalid_workspace_or_runtime_protocol
+    assert failure.subtype == "claude_model_mismatched"
+    assert failure.retryable? == false
+    assert failure.summary =~ "requested_model=claude-fable-5"
+    assert failure.summary =~ "observed_model=claude-sonnet-5"
+    assert failure.summary =~ "agent=implementer_orchestrator"
+    assert failure.fingerprint.summary == failure.retry_reason
+  end
+
   @context %{
     issue_id: "issue-runtime-failure",
     workspace_path: "/tmp/symphony/EMB-1127",

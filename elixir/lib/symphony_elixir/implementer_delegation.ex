@@ -226,6 +226,13 @@ defmodule SymphonyElixir.ImplementerDelegation do
              provider_session_id(observed),
              orchestrator,
              contract_provider(Map.get(session, :contract, %{}), :orchestrator)
+           ),
+         :ok <-
+           attest_provider_models(
+             session,
+             observed_session,
+             orchestrator,
+             worker_assignments
            ) do
       # Herdr's terminal `agent get` response may omit `agent_session` even
       # though the acknowledged prompt response carried it. Preserve the
@@ -515,6 +522,67 @@ defmodule SymphonyElixir.ImplementerDelegation do
   defp provider_session_identity_missing(orchestrator, provider) do
     {:error, {:implementer_provider_session_missing, %{agent: Map.get(orchestrator, :name), provider: provider}}}
   end
+
+  defp attest_provider_models(session, herdr_session, orchestrator, worker_assignments) do
+    contract = Map.get(session, :contract, %{})
+
+    with :ok <-
+           attest_participant_model(
+             session,
+             herdr_session,
+             orchestrator,
+             Map.get(contract, :orchestrator),
+             contract_provider(contract, :orchestrator)
+           ) do
+      if worker_assignments == [] do
+        :ok
+      else
+        attest_participant_model(
+          session,
+          herdr_session,
+          Map.get(herdr_session, :worker),
+          Map.get(contract, :worker),
+          contract_provider(contract, :worker)
+        )
+      end
+    end
+  end
+
+  defp attest_participant_model(
+         session,
+         herdr_session,
+         agent,
+         %{provider: "claude_code", model: model},
+         "claude_code"
+       )
+       when is_map(agent) and is_binary(model) do
+    transport = Map.get(session, :transport)
+
+    if function_exported?(transport, :attest_agent_model, 4) do
+      transport.attest_agent_model(
+        herdr_session,
+        agent,
+        model,
+        Map.get(session, :transport_context, %{})
+      )
+    else
+      {:error, {:claude_model_attestation_unavailable, %{agent: Map.get(agent, :name), requested_model: model, observed_model: nil}}}
+    end
+  end
+
+  defp attest_participant_model(_session, _herdr_session, _agent, _profile, provider)
+       when provider != "claude_code",
+       do: :ok
+
+  defp attest_participant_model(_session, _herdr_session, agent, profile, "claude_code"),
+    do:
+      {:error,
+       {:claude_model_attestation_unavailable,
+        %{
+          agent: if(is_map(agent), do: Map.get(agent, :name), else: nil),
+          requested_model: if(is_map(profile), do: Map.get(profile, :model), else: nil),
+          observed_model: nil
+        }}}
 
   defp observed_assignments({:unobservable, _details}), do: []
   defp observed_assignments(assignments) when is_list(assignments), do: assignments

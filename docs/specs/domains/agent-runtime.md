@@ -1263,6 +1263,25 @@ profile. Fable unavailability is a provider failure, not permission for an
 adapter-side Opus substitution; changing the selected model requires a durable
 profile update.
 
+Before a Claude-backed session can authorize a successful turn, current-status
+handoff, worker-result correlation, QA approval, or landing outcome, Symphony
+must attest that the provider-observed model equals the resolved profile model.
+The direct Claude Adapter reads the model from the provider-native
+`system/init` stream event and repeats the check on every continuation turn.
+The Herdr-managed Implementer path reads provider-owned transcript events for
+the orchestrator and for every worker whose result contributes to the turn.
+Bare aliases are normalized only to the canonical model identity already
+accepted by the runtime configuration contract; provider routing prefixes and
+dated build suffixes do not authorize a different model family or version.
+
+Missing, malformed, conflicting, or mismatched observed-model evidence is a
+typed `invalid_workspace_or_runtime_protocol` failed run. It is irrecoverable,
+cannot enter worker-correlation or normal-completion authority, and follows the
+ordinary Human Escalation and equivalent-redispatch suppression path. Bounded
+redacted failure evidence preserves the requested model, observed model when
+present, participant identity when applicable, and typed subtype; raw provider
+payloads and transcripts are not copied into run evidence.
+
 The adapter maps Claude terminal results onto normalized events:
 `result` with `is_error: true` and an auth HTTP status (401/403) fails closed
 as an operator-visible `auth_failed` `turn_failed`; `subtype:

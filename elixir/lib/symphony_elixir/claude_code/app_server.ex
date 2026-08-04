@@ -44,7 +44,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   require Logger
 
-  alias SymphonyElixir.ClaudeCode.ProviderAuth
+  alias SymphonyElixir.ClaudeCode.{ModelAttestation, ProviderAuth}
   alias SymphonyElixir.{Config, ImplementationEffort, Linear.Issue, PathSafety, SkillExecutionContract, SSH}
   alias SymphonyElixir.Runtime.ProcessOwnership
 
@@ -152,7 +152,9 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
           state = %{
             session_id: nil,
             usage: nil,
-            tool_failed?: false
+            tool_failed?: false,
+            model_attested?: false,
+            observed_model: nil
           }
 
           await_turn_completion(port, on_message, metadata, issue, state, launch.timeout_ms)
@@ -501,16 +503,52 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
          line
        ) do
     session_id = Map.get(event, "session_id")
-    Logger.info("Claude Code session started for #{issue_context(issue)} session_id=#{inspect(session_id)}")
+    requested_model = Map.get(metadata, :claude_model)
+    observed_model = Map.get(event, "model")
 
-    emit_message(
-      on_message,
-      :session_started,
-      %{session_id: session_id, payload: redact(event), raw: redact_raw(line)},
-      metadata
-    )
+    case observed_model && ModelAttestation.verify(requested_model, observed_model) do
+      nil ->
+        emit_message(
+          on_message,
+          :session_started,
+          %{session_id: session_id, payload: redact(event), raw: redact_raw(line)},
+          metadata
+        )
 
-    receive_loop(port, on_message, metadata, issue, %{state | session_id: session_id}, timeout_ms, "")
+        receive_loop(port, on_message, metadata, issue, %{state | session_id: session_id}, timeout_ms, "")
+
+      :ok ->
+        Logger.info(
+          "Claude Code session started for #{issue_context(issue)} session_id=#{inspect(session_id)} " <>
+            "requested_model=#{requested_model} observed_model=#{observed_model}"
+        )
+
+        emit_message(
+          on_message,
+          :session_started,
+          %{
+            session_id: session_id,
+            observed_model: observed_model,
+            payload: redact(event),
+            raw: redact_raw(line)
+          },
+          metadata
+        )
+
+        receive_loop(
+          port,
+          on_message,
+          metadata,
+          issue,
+          %{state | session_id: session_id, model_attested?: true, observed_model: observed_model},
+          timeout_ms,
+          ""
+        )
+
+      {:error, reason} ->
+        emit_model_attestation_failure(on_message, metadata, session_id, reason)
+        {:error, reason}
+    end
   end
 
   # Assistant text/tool-use deltas.
@@ -640,6 +678,13 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
         emit_message(on_message, :turn_failed, details, result_metadata)
         {:error, {:turn_failed, %{subtype: subtype, api_error_status: api_error_status}}}
 
+      not state.model_attested? ->
+        reason =
+          {:claude_model_missing, %{requested_model: Map.get(metadata, :claude_model), observed_model: state.observed_model}}
+
+        emit_model_attestation_failure(on_message, metadata, session_id, reason)
+        {:error, reason}
+
       state.tool_failed? ->
         # The turn completed, but at least one tool call failed. Report the
         # completion with usage but flag the tool failure for review/QA.
@@ -670,6 +715,23 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
       subtype: subtype,
       usage: usage
     }
+  end
+
+  defp emit_model_attestation_failure(on_message, metadata, session_id, {subtype, details}) do
+    Logger.error(
+      "Claude Code model attestation failed session_id=#{inspect(session_id)} " <>
+        "subtype=#{subtype} requested_model=#{inspect(details.requested_model)} " <>
+        "observed_model=#{inspect(details.observed_model)}"
+    )
+
+    emit_message(
+      on_message,
+      :turn_failed,
+      details
+      |> Map.put(:session_id, session_id)
+      |> Map.put(:reason, subtype),
+      metadata
+    )
   end
 
   # --- Classification helpers ---

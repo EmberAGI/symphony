@@ -18,7 +18,11 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     ctx = setup_workspace("MT-CC-success")
 
     try do
-      configure!(ctx, stream_success(), claude_code_model: "sonnet", claude_code_effort: "low", claude_code_no_thinking: false)
+      configure!(ctx, stream_success("claude-fable-5"),
+        claude_code_model: "sonnet",
+        claude_code_effort: "low",
+        claude_code_no_thinking: false
+      )
 
       {result, events, trace} =
         run_shim(ctx, "Reply with exactly: SHIMOK",
@@ -69,6 +73,118 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       refute Map.has_key?(completed, :claude_preferred_model)
       refute Map.has_key?(completed, :claude_preferred_effort)
       refute Map.has_key?(completed, :claude_fallback_reason)
+    after
+      File.rm_rf(ctx.test_root)
+    end
+  end
+
+  test "fails closed before accepting work from a model that differs from the resolved profile" do
+    ctx = setup_workspace("MT-CC-model-mismatch")
+
+    try do
+      configure!(ctx, stream_model_mismatch(),
+        claude_code_model: "claude-fable-5",
+        claude_code_effort: "low",
+        claude_code_no_thinking: false
+      )
+
+      {result, events, _trace} =
+        run_shim(ctx, "do work",
+          labels: ["implementation-effort:minimal"],
+          role: "implementer"
+        )
+
+      assert {:error, {:claude_model_mismatched, %{requested_model: "claude-fable-5", observed_model: "claude-sonnet-5"}}} = result
+
+      assert [%{event: :turn_failed} = failed] = events
+      assert failed.reason == :claude_model_mismatched
+      assert failed.requested_model == "claude-fable-5"
+      assert failed.observed_model == "claude-sonnet-5"
+      refute Enum.any?(events, &(&1.event in [:text_delta, :turn_completed]))
+    after
+      File.rm_rf(ctx.test_root)
+    end
+  end
+
+  test "fails closed before completion when the provider omits observed-model evidence" do
+    ctx = setup_workspace("MT-CC-model-missing")
+
+    try do
+      configure!(ctx, stream_model_missing_success(),
+        claude_code_model: "claude-fable-5",
+        claude_code_effort: "low",
+        claude_code_no_thinking: false
+      )
+
+      {result, events, _trace} =
+        run_shim(ctx, "do work",
+          labels: ["implementation-effort:minimal"],
+          role: "implementer"
+        )
+
+      assert {:error, {:claude_model_missing, %{requested_model: "claude-fable-5", observed_model: nil}}} = result
+
+      assert Enum.any?(events, &(&1.event == :session_started))
+      assert Enum.any?(events, &(&1.event == :text_delta))
+      assert Enum.any?(events, &(&1.event == :turn_failed))
+      refute Enum.any?(events, &(&1.event == :turn_completed))
+    after
+      File.rm_rf(ctx.test_root)
+    end
+  end
+
+  test "fails closed immediately when observed-model evidence is malformed" do
+    ctx = setup_workspace("MT-CC-model-malformed")
+
+    try do
+      configure!(ctx, stream_model_malformed(),
+        claude_code_model: "claude-fable-5",
+        claude_code_effort: "low",
+        claude_code_no_thinking: false
+      )
+
+      {result, events, _trace} =
+        run_shim(ctx, "do work",
+          labels: ["implementation-effort:minimal"],
+          role: "implementer"
+        )
+
+      assert {:error, {:claude_model_malformed, %{requested_model: "claude-fable-5"}}} = result
+      assert [%{event: :turn_failed, reason: :claude_model_malformed}] = events
+    after
+      File.rm_rf(ctx.test_root)
+    end
+  end
+
+  test "re-attests the observed model on continuation turns before accepting completion" do
+    ctx = setup_workspace("MT-CC-model-continuation")
+
+    try do
+      configure!(ctx, stream_success(), claude_code_model: "opus")
+
+      issue = %SymphonyElixir.Linear.Issue{
+        id: "issue-model-continuation",
+        identifier: "MT-CC-model-continuation",
+        repository: "EmberAGI/scaling-octo-engine",
+        repository_source: "linear_label",
+        title: "Attest continuation model",
+        state: "Agent Review",
+        labels: ["implementation-effort:moderate"]
+      }
+
+      assert {:ok, session} = AgentRuntime.start_session(ctx.workspace, issue: issue, role: "reviewer")
+      assert {:ok, {continued, first}} = AgentRuntime.run_turn(session, "first turn", issue, [])
+      assert first.session_id == "sess-success"
+      assert continued.claude_session_id == "sess-success"
+
+      assert {:ok, {_continued_again, second}} =
+               AgentRuntime.run_turn(continued, "continuation turn", issue, [])
+
+      assert second.session_id == "sess-success"
+
+      trace = File.read!(ctx.trace_file)
+      assert length(Regex.scan(~r/^ARGV:/m, trace)) == 2
+      assert trace =~ "--resume sess-success"
     after
       File.rm_rf(ctx.test_root)
     end
@@ -263,7 +379,7 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     ctx = setup_workspace("MT-CC-secret")
 
     leaky_stream = [
-      ~s({"type":"system","subtype":"init","session_id":"sess-secret","oauth_token":"super-secret-value"}),
+      ~s({"type":"system","subtype":"init","session_id":"sess-secret","model":"claude-opus-4-8","oauth_token":"super-secret-value"}),
       ~s({"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"ok","session_id":"sess-secret","usage":{"input_tokens":1,"output_tokens":1}})
     ]
 

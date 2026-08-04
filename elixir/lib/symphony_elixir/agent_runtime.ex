@@ -985,6 +985,30 @@ defmodule SymphonyElixir.AgentRuntime do
      }}
   end
 
+  defp real_irrecoverable_runtime_reason({subtype, details})
+       when subtype in [
+              :claude_model_missing,
+              :claude_model_malformed,
+              :claude_model_mismatched,
+              :claude_model_attestation_unavailable
+            ] and is_map(details) do
+    requested_model = safe_detail_fragment(Map.get(details, :requested_model))
+    observed_model = safe_detail_fragment(Map.get(details, :observed_model))
+    agent = safe_detail_fragment(Map.get(details, :agent))
+
+    {:invalid_workspace_or_runtime_protocol,
+     %{
+       subtype: Atom.to_string(subtype),
+       requested_model: requested_model,
+       observed_model: observed_model,
+       agent: agent,
+       message:
+         "Claude provider-observed model did not satisfy the resolved runtime profile " <>
+           "requested_model=#{requested_model || "missing"} " <>
+           "observed_model=#{observed_model || "missing"} agent=#{agent || "direct"}"
+     }}
+  end
+
   defp real_irrecoverable_runtime_reason({_tag, %{checkpoint: {:error, {:implementer_checkpoint_failed, _} = inner}}}) do
     real_irrecoverable_runtime_reason(inner)
   end

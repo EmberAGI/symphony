@@ -80,7 +80,11 @@ defmodule SymphonyElixir.ClaudeCodeLaunchConfigTest do
     ctx = setup_workspace("MT-CC-default-effort")
 
     try do
-      configure!(ctx, stream_success(), claude_code_model: "opus", claude_code_effort: "low", claude_code_no_thinking: false)
+      configure!(ctx, stream_success("claude-fable-5"),
+        claude_code_model: "opus",
+        claude_code_effort: "low",
+        claude_code_no_thinking: false
+      )
 
       {result, events, trace} =
         run_shim(ctx, "do work", labels: ["implementation-effort:bogus"], role: "implementer")
@@ -102,7 +106,11 @@ defmodule SymphonyElixir.ClaudeCodeLaunchConfigTest do
     ctx = setup_workspace("MT-CC-fable-exact")
 
     try do
-      configure!(ctx, stream_success(), claude_code_model: "sonnet", claude_code_effort: "low", claude_code_no_thinking: false)
+      configure!(ctx, stream_success("claude-fable-5"),
+        claude_code_model: "sonnet",
+        claude_code_effort: "low",
+        claude_code_no_thinking: false
+      )
 
       {result, events, trace} =
         run_shim(ctx, "do work", labels: ["implementation-effort:extreme"], role: "qa")

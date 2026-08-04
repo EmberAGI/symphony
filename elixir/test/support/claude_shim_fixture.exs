@@ -14,12 +14,35 @@ defmodule SymphonyElixir.ClaudeShimFixture do
 
   # One JSON object per line, mirroring `claude -p --output-format stream-json
   # --verbose`. Captured from a real Claude Code 2.x invocation.
-  def stream_success do
+  def stream_success(model \\ "claude-opus-4-8") do
     [
-      ~s({"type":"system","subtype":"init","session_id":"sess-success","model":"claude-sonnet-4-6","permissionMode":"bypassPermissions","apiKeySource":"none"}),
+      ~s({"type":"system","subtype":"init","session_id":"sess-success","model":"#{model}","permissionMode":"bypassPermissions","apiKeySource":"none"}),
       ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"SHIMOK"}]},"session_id":"sess-success"}),
       ~s({"type":"rate_limit_event","rate_limit_info":{"status":"allowed"},"session_id":"sess-success"}),
       ~s({"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"SHIMOK","session_id":"sess-success","usage":{"input_tokens":3,"cache_read_input_tokens":100,"cache_creation_input_tokens":50,"output_tokens":6},"total_cost_usd":0.04})
+    ]
+  end
+
+  def stream_model_mismatch do
+    [
+      ~s({"type":"system","subtype":"init","session_id":"sess-model-mismatch","model":"claude-sonnet-5","permissionMode":"bypassPermissions","apiKeySource":"none"}),
+      ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"work from the wrong model"}]},"session_id":"sess-model-mismatch"}),
+      ~s({"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"done","session_id":"sess-model-mismatch","usage":{"input_tokens":1,"output_tokens":1}})
+    ]
+  end
+
+  def stream_model_missing_success do
+    [
+      ~s({"type":"system","subtype":"init","session_id":"sess-model-missing","permissionMode":"bypassPermissions","apiKeySource":"none"}),
+      ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"unattested work"}]},"session_id":"sess-model-missing"}),
+      ~s({"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"done","session_id":"sess-model-missing","usage":{"input_tokens":1,"output_tokens":1}})
+    ]
+  end
+
+  def stream_model_malformed do
+    [
+      ~s({"type":"system","subtype":"init","session_id":"sess-model-malformed","model":{"family":"fable"},"permissionMode":"bypassPermissions","apiKeySource":"none"}),
+      ~s({"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"done","session_id":"sess-model-malformed","usage":{"input_tokens":1,"output_tokens":1}})
     ]
   end
 
@@ -60,7 +83,7 @@ defmodule SymphonyElixir.ClaudeShimFixture do
 
   def stream_tool_failure do
     [
-      ~s({"type":"system","subtype":"init","session_id":"sess-tool"}),
+      ~s({"type":"system","subtype":"init","session_id":"sess-tool","model":"claude-opus-4-8"}),
       ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"t1"}]},"session_id":"sess-tool"}),
       ~s({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"boom"}]},"session_id":"sess-tool"}),
       ~s({"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"done","session_id":"sess-tool","usage":{"input_tokens":1,"output_tokens":1}})

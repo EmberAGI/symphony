@@ -134,7 +134,7 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
     ctx = setup_gate_workspace("GT-bypass-perms")
 
     init_stream = [
-      ~s({"type":"system","subtype":"init","session_id":"sess-bypass","apiKeySource":"none"}),
+      ~s({"type":"system","subtype":"init","session_id":"sess-bypass","model":"claude-opus-4-8","apiKeySource":"none"}),
       ~s({"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"ok","session_id":"sess-bypass","usage":{"input_tokens":1,"output_tokens":1}})
     ]
 
@@ -168,7 +168,7 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
     ctx = setup_gate_workspace("GT-surface-linear-graphql")
 
     stream = [
-      ~s({"type":"system","subtype":"init","session_id":"sess-linear","apiKeySource":"none"}),
+      ~s({"type":"system","subtype":"init","session_id":"sess-linear","model":"claude-opus-4-8","apiKeySource":"none"}),
       # Bash call simulating `linear-macro graphql ...` succeeding
       ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"linear-t1","input":{"command":"linear-macro graphql --query viewer-id"}}]},"session_id":"sess-linear"}),
       ~s({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"linear-t1","is_error":false,"content":"viewer id abc"}]},"session_id":"sess-linear"}),
@@ -209,7 +209,7 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
     ctx = setup_gate_workspace("GT-surface-workpad")
 
     stream = [
-      ~s({"type":"system","subtype":"init","session_id":"sess-workpad","apiKeySource":"none"}),
+      ~s({"type":"system","subtype":"init","session_id":"sess-workpad","model":"claude-opus-4-8","apiKeySource":"none"}),
       # Bash call simulating `linear-macro workpad read ...` succeeding
       ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"workpad-t1","input":{"command":"linear-macro workpad read EMB-1029"}}]},"session_id":"sess-workpad"}),
       ~s({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"workpad-t1","is_error":false,"content":"## Workpad - Content here."}]},"session_id":"sess-workpad"}),
@@ -249,7 +249,7 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
     ctx = setup_gate_workspace("GT-surface-artifact")
 
     stream = [
-      ~s({"type":"system","subtype":"init","session_id":"sess-artifact","apiKeySource":"none"}),
+      ~s({"type":"system","subtype":"init","session_id":"sess-artifact","model":"claude-opus-4-8","apiKeySource":"none"}),
       # Bash call simulating a file write for artifact capture succeeding
       ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"artifact-t1","input":{"command":"printf '%s' 'proof content' > /tmp/proof.md"}}]},"session_id":"sess-artifact"}),
       ~s({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"artifact-t1","is_error":false,"content":""}]},"session_id":"sess-artifact"}),
@@ -289,7 +289,7 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
     ctx = setup_gate_workspace("GT-surface-repo-status")
 
     stream = [
-      ~s({"type":"system","subtype":"init","session_id":"sess-repo","apiKeySource":"none"}),
+      ~s({"type":"system","subtype":"init","session_id":"sess-repo","model":"claude-opus-4-8","apiKeySource":"none"}),
       # Bash call simulating `git status` succeeding
       ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"repo-t1","input":{"command":"git status --short"}}]},"session_id":"sess-repo"}),
       ~s({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"repo-t1","is_error":false,"content":"M elixir/mix.exs"}]},"session_id":"sess-repo"}),
@@ -329,7 +329,7 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
     ctx = setup_gate_workspace("GT-surface-pr-status")
 
     stream = [
-      ~s({"type":"system","subtype":"init","session_id":"sess-pr","apiKeySource":"none"}),
+      ~s({"type":"system","subtype":"init","session_id":"sess-pr","model":"claude-opus-4-8","apiKeySource":"none"}),
       # Bash call simulating `gh pr view` succeeding
       ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"pr-t1","input":{"command":"gh pr view --json state,title"}}]},"session_id":"sess-pr"}),
       ~s({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"pr-t1","is_error":false,"content":"state:OPEN title:EMB-1029 gate checks"}]},"session_id":"sess-pr"}),
@@ -370,7 +370,7 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
     ctx = setup_gate_workspace("GT-tool-gate")
 
     tool_failure_stream = [
-      ~s({"type":"system","subtype":"init","session_id":"sess-gate-tool","apiKeySource":"none"}),
+      ~s({"type":"system","subtype":"init","session_id":"sess-gate-tool","model":"claude-opus-4-8","apiKeySource":"none"}),
       ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"gate-t1"}]},"session_id":"sess-gate-tool"}),
       ~s({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"gate-t1","is_error":true,"content":"linear_graphql transport error: timeout"}]},"session_id":"sess-gate-tool"}),
       ~s({"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"done with tool error","session_id":"sess-gate-tool","usage":{"input_tokens":5,"output_tokens":3}})
@@ -440,7 +440,7 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
     # strip it before emitting the session_started event so credentials never
     # reach the orchestrator, status surfaces, or handoff logic.
     leaky_stream = [
-      ~s({"type":"system","subtype":"init","session_id":"sess-gate-oauth","oauth_token":"super-secret-oauth-value","apiKeySource":"none"}),
+      ~s({"type":"system","subtype":"init","session_id":"sess-gate-oauth","model":"claude-opus-4-8","oauth_token":"super-secret-oauth-value","apiKeySource":"none"}),
       ~s({"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"ok","session_id":"sess-gate-oauth","usage":{"input_tokens":1,"output_tokens":1}})
     ]
 
@@ -482,7 +482,7 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
 
     # A result event carrying an api_key field; the shim must strip it.
     leaky_result_stream = [
-      ~s({"type":"system","subtype":"init","session_id":"sess-gate-apikey","apiKeySource":"none"}),
+      ~s({"type":"system","subtype":"init","session_id":"sess-gate-apikey","model":"claude-opus-4-8","apiKeySource":"none"}),
       ~s({"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"ok","session_id":"sess-gate-apikey","api_key":"secret-api-key-value","usage":{"input_tokens":1,"output_tokens":1}})
     ]
 
@@ -519,7 +519,7 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
     # tracker token from WORKFLOW.md through Config.settings!(), but must never
     # echo it back through events.
     benign_stream = [
-      ~s({"type":"system","subtype":"init","session_id":"sess-gate-tracker","apiKeySource":"none"}),
+      ~s({"type":"system","subtype":"init","session_id":"sess-gate-tracker","model":"claude-opus-4-8","apiKeySource":"none"}),
       ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"tracker-key-check-ok"}]},"session_id":"sess-gate-tracker"}),
       ~s({"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"ok","session_id":"sess-gate-tracker","usage":{"input_tokens":1,"output_tokens":1}})
     ]
@@ -561,7 +561,7 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
     ctx = setup_gate_workspace("GT-normalize-tool")
 
     multi_tool_stream = [
-      ~s({"type":"system","subtype":"init","session_id":"sess-gate-norm","apiKeySource":"none"}),
+      ~s({"type":"system","subtype":"init","session_id":"sess-gate-norm","model":"claude-opus-4-8","apiKeySource":"none"}),
       # Tool call 1 succeeds.
       ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","id":"norm-t1"}]},"session_id":"sess-gate-norm"}),
       ~s({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"norm-t1","is_error":false,"content":"file contents"}]},"session_id":"sess-gate-norm"}),
@@ -619,7 +619,7 @@ defmodule SymphonyElixir.ClaudeCodeGateTest do
     ctx = setup_gate_workspace("GT-tool-success-norm")
 
     success_tool_stream = [
-      ~s({"type":"system","subtype":"init","session_id":"sess-gate-ok-tool","apiKeySource":"none"}),
+      ~s({"type":"system","subtype":"init","session_id":"sess-gate-ok-tool","model":"claude-opus-4-8","apiKeySource":"none"}),
       ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"ok-t1"}]},"session_id":"sess-gate-ok-tool"}),
       ~s({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"ok-t1","is_error":false,"content":"command output"}]},"session_id":"sess-gate-ok-tool"}),
       ~s({"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"ok","session_id":"sess-gate-ok-tool","usage":{"input_tokens":3,"output_tokens":2}})

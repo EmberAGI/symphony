@@ -145,7 +145,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
   end
 
   test "a Claude-backed direct-work turn exposes one stable nonblank provider session identity", context do
-    native_id = write_claude_stub!(context, "native-claude-direct-7f3a")
+    native_id = write_claude_stub!(context, "native-claude-direct-7f3a", "claude-fable-5")
     System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "claude_code")
 
     session =
@@ -192,8 +192,49 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
     stop(session)
   end
 
+  test "a Herdr-managed Claude turn rejects a provider-observed model that differs from its profile", context do
+    write_claude_stub!(context, "native-claude-model-mismatch-7f3a", "claude-sonnet-5")
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "claude_code")
+
+    session =
+      start_implementer_session(
+        context,
+        "provider-model-mismatch",
+        [{"HERDR_REPLAY_PROMPT", "agent-prompt-idle"}]
+      )
+
+    {result, log} =
+      with_log(fn ->
+        AgentRuntime.run_turn(
+          session,
+          "Implement the bounded issue.",
+          issue(),
+          provider_session_receipt_timeout_ms: 1_000,
+          provider_session_receipt_interval_ms: 10
+        )
+      end)
+
+    assert {:error,
+            {:claude_model_mismatched,
+             %{
+               agent: "implementer_orchestrator",
+               requested_model: "claude-fable-5",
+               observed_model: "claude-sonnet-5"
+             }}} = result
+
+    assert {:irrecoverable, %{family: :invalid_workspace_or_runtime_protocol, subtype: "claude_model_mismatched", retryable?: false}} =
+             AgentRuntime.classify_failure(elem(result, 1), %{
+               provider: :claude_code,
+               role: "implementer"
+             })
+
+    refute log =~ @correlation_event
+    refute log =~ @no_delegation_event
+    stop(session)
+  end
+
   test "the run-owned reporter pins its pane, takes the first session id, and records every invocation", context do
-    native_id = write_claude_stub!(context, "native-claude-reporter-7f3a")
+    native_id = write_claude_stub!(context, "native-claude-reporter-7f3a", "claude-fable-5")
     System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "claude_code")
 
     session =
@@ -307,7 +348,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
 
   test "worker delegation retains the orchestrator provider identity and worker correlation stays independently decidable",
        context do
-    native_id = write_claude_stub!(context, "native-claude-delegation-7f3a")
+    native_id = write_claude_stub!(context, "native-claude-delegation-7f3a", "claude-fable-5")
     System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "claude_code")
 
     session =
@@ -368,6 +409,68 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
     stop(session)
   end
 
+  test "worker correlation fails closed when the contributing Claude worker used a different model", context do
+    write_claude_stub!(
+      context,
+      "native-claude-worker-model-mismatch-7f3a",
+      "claude-fable-5",
+      "claude-opus-5"
+    )
+
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "claude_code")
+
+    session =
+      start_implementer_session(
+        context,
+        "worker-model-mismatch",
+        [{"HERDR_REPLAY_PROMPT", "agent-prompt-idle"}]
+      )
+
+    {result, log} =
+      with_log(fn ->
+        AgentRuntime.run_turn(
+          session,
+          "Implement the bounded issue.",
+          issue(),
+          on_message: fn
+            %{event: :session_started} ->
+              assert :ok =
+                       orchestrator_prompt(
+                         session,
+                         context,
+                         "implementer_worker",
+                         "OCTO_MSG/1 kind=assignment assignment=EMB1357-WORKER-MODEL deliverable=bounded"
+                       )
+
+              assert :ok =
+                       worker_prompt(
+                         session,
+                         context,
+                         "implementer_orchestrator",
+                         "OCTO_MSG/1 kind=result assignment=EMB1357-WORKER-MODEL status=completed"
+                       )
+
+            _message ->
+              :ok
+          end,
+          provider_session_receipt_timeout_ms: 1_000,
+          provider_session_receipt_interval_ms: 10
+        )
+      end)
+
+    assert {:error,
+            {:claude_model_mismatched,
+             %{
+               agent: "implementer_worker",
+               requested_model: "claude-sonnet-5",
+               observed_model: "claude-opus-5"
+             }}} = result
+
+    refute log =~ @correlation_event
+    refute log =~ @no_delegation_event
+    stop(session)
+  end
+
   test "a Codex-backed turn keeps its provider session identity behavior unchanged", context do
     System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
 
@@ -406,7 +509,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
   test "a Claude turn whose integration never reports still fails closed without either positive outcome", context do
     for {shape, stub_writer} <- [
           {:missing, fn -> write_hookless_claude_stub!(context) end},
-          {:blank, fn -> write_claude_stub!(context, " ") end}
+          {:blank, fn -> write_claude_stub!(context, " ", "claude-fable-5") end}
         ] do
       stub_writer.()
       System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "claude_code")
@@ -496,7 +599,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
   # home: that is what a freshly materialized per-issue workspace is under any
   # config home, and it keeps the test independent of the developer's own
   # Claude installation.
-  defp write_claude_stub!(context, native_session_id) do
+  defp write_claude_stub!(context, native_session_id, orchestrator_model, worker_model \\ "claude-sonnet-5") do
     stub = Path.join(context.provider_bin, "claude")
 
     File.write!(stub, """
@@ -514,6 +617,17 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
 
     printf '{"hook_event_name":"SessionStart","source":"startup","session_id":"#{native_session_id}"}' |
       sh -c "$hook_command" || true
+
+    transcript_dir="$config_dir/projects/model-attestation"
+    mkdir -p "$transcript_dir"
+    case "$config_dir" in
+      */implementer_worker)
+        printf '%s\n' '{"type":"assistant","sessionId":"#{native_session_id}","message":{"role":"assistant","model":"#{worker_model}","content":[]}}' > "$transcript_dir/#{native_session_id}.jsonl"
+        ;;
+      *)
+        printf '%s\n' '{"type":"assistant","sessionId":"#{native_session_id}","message":{"role":"assistant","model":"#{orchestrator_model}","content":[]}}' > "$transcript_dir/#{native_session_id}.jsonl"
+        ;;
+    esac
     exit 0
     """)
 
