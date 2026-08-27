@@ -135,6 +135,63 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
+  test "Codex launch projects Herdr's provider detection hint only into the provider process", context do
+    root = Path.dirname(context.bin)
+    session_name = "octo-codex-detection-hint-#{System.unique_integer([:positive])}"
+    provider_bin = Path.join(root, "codex-detection-provider-bin")
+    provider_out = Path.join(root, "codex-detection-provider.out")
+    File.mkdir_p!(provider_bin)
+
+    File.write!(Path.join(provider_bin, "codex"), """
+    #!/bin/sh
+    printf '%s\n' "${HERDR_AGENT:-unset}" > #{provider_out}
+    """)
+
+    File.chmod!(Path.join(provider_bin, "codex"), 0o755)
+
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_FAKE_PROVIDER_OUTPUT", provider_out}
+      ],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 10
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{
+                 name: session_name,
+                 isolated: true,
+                 workspace: "/tmp/selected-workspace",
+                 env: %{"PATH" => provider_bin <> ":" <> (System.get_env("PATH") || "")}
+               },
+               adapter_context
+             )
+
+    on_exit(fn ->
+      if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
+    end)
+
+    refute List.keymember?(session.env, "HERDR_AGENT", 0)
+
+    assert {:ok, _agent} =
+             HerdrTransport.start_agent(
+               session,
+               %{
+                 name: "implementer_orchestrator",
+                 provider: "codex",
+                 cwd: "/tmp/selected-workspace",
+                 argv: ["codex", "--model", "gpt-5.6-sol"]
+               },
+               adapter_context
+             )
+
+    assert File.read!(provider_out) == "codex\n"
+    assert :ok = HerdrTransport.stop_session(session, adapter_context)
+  end
+
   test "start_agent fails closed when the session wrapper artifact was tampered", context do
     adapter_context = %{
       herdr_bin: context.bin,

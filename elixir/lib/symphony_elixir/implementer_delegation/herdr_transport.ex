@@ -200,7 +200,10 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
              kind,
              hd(argv),
              native_args,
-             Map.merge(%{"BASH_ENV" => launch_bash_env, "PATH" => launch_path}, provider_session_env),
+             Map.merge(
+               %{"BASH_ENV" => launch_bash_env, "HERDR_AGENT" => kind, "PATH" => launch_path},
+               provider_session_env
+             ),
              %{"PATH" => inherited_provider_path(env, orchestrator_bin)}
            ),
          :ok <- validate_launch_projection(runtime_root, projection_path),
