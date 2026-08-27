@@ -2295,6 +2295,59 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
+  test "a revision-advanced settled prompt receipt still waits for working confirmation", context do
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"},
+        {"HERDR_REPLAY_WAIT", "agent-wait-working"}
+      ],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 5
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{
+                 name: "octo-prompt-confirm-#{System.unique_integer([:positive])}",
+                 isolated: true,
+                 workspace: "/tmp/selected-workspace"
+               },
+               adapter_context
+             )
+
+    on_exit(fn ->
+      if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
+    end)
+
+    assert {:ok, agent} =
+             HerdrTransport.start_agent(
+               session,
+               %{
+                 name: "implementer_orchestrator",
+                 provider: "codex",
+                 cwd: "/tmp/selected-workspace",
+                 argv: ["codex", "--model", "gpt-5.6-sol"]
+               },
+               adapter_context
+             )
+
+    File.write!(context.log, "")
+
+    assert {:ok, %{phase: :working, agent: observed}} =
+             HerdrTransport.begin_turn(session, agent, "Complete the assignment.", 6_000, adapter_context)
+
+    assert observed.agent_status == "working"
+    assert observed.provider == "codex"
+
+    commands = File.read!(context.log)
+    assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
+    assert length(:binary.matches(commands, "agent wait implementer_orchestrator")) == 1
+    refute commands =~ "agent send-keys implementer_orchestrator"
+    assert :ok = HerdrTransport.stop_session(session, adapter_context)
+  end
+
   test "starts Claude with multiline-preserving control-safe native args", context do
     adapter_context = %{
       herdr_bin: context.bin,
