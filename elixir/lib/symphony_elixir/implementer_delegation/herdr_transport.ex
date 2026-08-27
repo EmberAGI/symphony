@@ -311,10 +311,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   def begin_turn(_session, _agent, _prompt, _timeout_ms, _context),
     do: {:error, :invalid_herdr_begin_turn}
 
-  defp begin_prompt_turn_result({:ok, output}, _context, _session_name, _env, agent, _deadline) do
+  defp begin_prompt_turn_result({:ok, output}, context, session_name, env, agent, deadline) do
     with {:ok, observed} <- decode_agent_response(output),
          {:ok, phase} <- prompt_outcome(observed, agent.name) do
-      {:ok, %{phase: phase, agent: preserve_provider(observed, agent)}}
+      observed = preserve_provider(observed, agent)
+
+      if phase == :completed and not newer_agent_revision?(observed, agent) do
+        observe_prompt_transition(context, session_name, env, agent, deadline)
+      else
+        {:ok, %{phase: phase, agent: observed}}
+      end
     else
       {:error, reason} -> prompt_error(reason, agent.name)
     end

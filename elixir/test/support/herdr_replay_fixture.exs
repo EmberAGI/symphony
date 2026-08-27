@@ -126,6 +126,8 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
   `HERDR_FAKE_WORKING_PROMPT_WAIT_TIMEOUT` (an already-working target whose
   accepted waited prompt emits the recorded ordinary timeout because no
   lifecycle edge follows),
+  `HERDR_FAKE_PROMPT_STALE_SETTLED` (a successful prompt receipt that repeats
+  the pre-submit settled revision before the real working transition),
   `HERDR_FAKE_PROMPT_STALL_DELAY_SECONDS` (delay before the recorded stall),
   `HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS` (delayed revision timing
   after a separate Enter submission),
@@ -488,6 +490,10 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       fi
 
       recall_revision
+      if [ "${HERDR_FAKE_PROMPT_STALE_SETTLED:-}" = "1" ]; then
+        recall_kind prompt
+        replay "${HERDR_REPLAY_PROMPT:-agent-prompt-idle}"
+      fi
       agent_revision=$((agent_revision + 1))
       agent_state_change_seq=$((agent_state_change_seq + 1))
       mkdir -p "$state_root"
