@@ -2239,12 +2239,14 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
-  test "recognizes a prompt that completes before the caller observes working", context do
+  test "an unchanged settled prompt receipt waits for the real working transition", context do
     adapter_context = %{
       herdr_bin: context.bin,
       extra_env: [
         {"HERDR_FAKE_LOG", context.log},
-        {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"}
+        {"HERDR_FAKE_PROMPT_STALE_SETTLED", "1"},
+        {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"},
+        {"HERDR_REPLAY_WAIT", "agent-wait-working"}
       ],
       start_timeout_ms: 2_000,
       poll_interval_ms: 5
@@ -2272,17 +2274,24 @@ defmodule SymphonyElixir.HerdrTransportTest do
                adapter_context
              )
 
-    assert {:ok, ready} =
-             HerdrTransport.await_agent(session, agent, ["idle", "done", "blocked"], 3_000, adapter_context)
+    ready = %{
+      agent
+      | agent_status: "idle",
+        revision: HerdrReplayFixture.agent_field!("agent-prompt-idle", "revision"),
+        state_change_seq: HerdrReplayFixture.agent_field!("agent-prompt-idle", "state_change_seq")
+    }
 
-    assert {:ok, %{phase: :completed, agent: observed}} =
+    File.write!(context.log, "")
+
+    assert {:ok, %{phase: :working, agent: observed}} =
              HerdrTransport.begin_turn(session, ready, "Complete immediately.", 1_000, adapter_context)
 
-    assert observed.agent_status == "idle"
-    assert observed.revision == HerdrReplayFixture.agent_field!("agent-prompt-idle", "revision")
+    assert observed.agent_status == "working"
 
     commands = File.read!(context.log)
     assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
+    assert length(:binary.matches(commands, "agent wait implementer_orchestrator")) == 1
+    refute commands =~ "agent send-keys implementer_orchestrator"
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
