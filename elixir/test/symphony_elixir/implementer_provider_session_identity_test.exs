@@ -152,7 +152,10 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
       start_implementer_session(
         context,
         "provider-session-identity-direct",
-        [{"HERDR_REPLAY_PROMPT", "agent-prompt-idle"}]
+        [
+          {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"},
+          {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
+        ]
       )
 
     parent = self()
@@ -200,7 +203,10 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
       start_implementer_session(
         context,
         "provider-session-identity-reporter",
-        [{"HERDR_REPLAY_PROMPT", "agent-prompt-idle"}]
+        [
+          {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"},
+          {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
+        ]
       )
 
     {result, _log} =
@@ -314,7 +320,10 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
       start_implementer_session(
         context,
         "provider-session-identity-delegation",
-        [{"HERDR_REPLAY_PROMPT", "agent-prompt-idle"}]
+        [
+          {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"},
+          {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
+        ]
       )
 
     parent = self()
@@ -375,7 +384,10 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
       start_implementer_session(
         context,
         "provider-session-identity-codex-parity",
-        [{"HERDR_REPLAY_PROMPT", "agent-prompt-idle"}]
+        [
+          {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"},
+          {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
+        ]
       )
 
     parent = self()
@@ -415,7 +427,10 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
         start_implementer_session(
           context,
           "provider-session-identity-#{shape}",
-          [{"HERDR_REPLAY_PROMPT", "agent-prompt-idle"}]
+          [
+            {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"},
+            {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
+          ]
         )
 
       {result, log} =
