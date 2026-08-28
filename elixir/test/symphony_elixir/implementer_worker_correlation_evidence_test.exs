@@ -1127,7 +1127,10 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
         start_implementer_session(
           context,
           "evidence-direct-work-#{shape}-provider-session",
-          [{"HERDR_REPLAY_PROMPT", "agent-prompt-idle"}]
+          [
+            {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"},
+            {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
+          ]
         )
 
       {result, log} =

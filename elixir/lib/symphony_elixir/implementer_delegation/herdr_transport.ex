@@ -316,8 +316,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
          {:ok, phase} <- prompt_outcome(observed, agent.name) do
       observed = preserve_provider(observed, agent)
 
-      if phase == :completed and not newer_agent_revision?(observed, agent) do
-        observe_prompt_transition(context, session_name, env, agent, deadline)
+      if phase == :completed do
+        context
+        |> observe_prompt_transition(
+          session_name,
+          env,
+          agent,
+          deadline,
+          @prompt_effect_window_ms
+        )
+        |> preserve_prompt_receipt_identity(observed)
       else
         {:ok, %{phase: phase, agent: observed}}
       end
@@ -374,13 +382,20 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     end
   end
 
-  defp observe_prompt_transition(context, session_name, env, %{name: agent_name} = baseline, deadline) do
+  defp observe_prompt_transition(
+         context,
+         session_name,
+         env,
+         %{name: agent_name} = baseline,
+         deadline,
+         observation_timeout_ms \\ @prompt_recovery_observation_timeout_ms
+       ) do
     remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
 
     if remaining_ms == 0 do
       prompt_recovery_timeout(agent_name)
     else
-      native_timeout_ms = min(@prompt_recovery_observation_timeout_ms, remaining_ms)
+      native_timeout_ms = min(observation_timeout_ms, remaining_ms)
 
       args =
         ["--session", session_name, "agent", "wait", agent_name] ++
@@ -469,6 +484,18 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     newer_agent_field?(observed, baseline, :revision) or
       newer_agent_field?(observed, baseline, :state_change_seq)
   end
+
+  defp preserve_prompt_receipt_identity({:ok, %{agent: confirmed} = result}, prompt_observed) do
+    case {Map.get(confirmed, :agent_session), Map.get(prompt_observed, :agent_session)} do
+      {nil, prompt_session} when is_map(prompt_session) ->
+        {:ok, %{result | agent: Map.put(confirmed, :agent_session, prompt_session)}}
+
+      _ ->
+        {:ok, result}
+    end
+  end
+
+  defp preserve_prompt_receipt_identity(result, _prompt_observed), do: result
 
   defp newer_agent_field?(observed, baseline, field) do
     observed_value = Map.get(observed, field)
