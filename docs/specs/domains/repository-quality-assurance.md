@@ -177,7 +177,8 @@ post-submit observation baseline. A settled receipt may advance beyond the
 launch revision while still carrying no provider session; a later timeout and
 unchanged final get must remain a typed failure rather than false completion.
 True `working` and genuinely newer post-receipt settled observations remain
-successful, and the existing one-Enter stalled-prompt recovery is unchanged.
+successful. Herdr v0.8.2 owns the delayed encoded Enter, so the obsolete
+one-Enter stalled-prompt compatibility recovery must be absent.
 
 | Change Surface | Required Invariants | Minimum Local Validation | Escalation Route |
 | --- | --- | --- | --- |
