@@ -321,7 +321,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         |> observe_prompt_transition(
           session_name,
           env,
-          agent,
+          observed,
           deadline,
           @prompt_effect_window_ms
         )
