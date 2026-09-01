@@ -2187,6 +2187,141 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
+  test "v0.8.2 agent_blocked fails typed without compatibility Enter", context do
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_REPLAY_PROMPT", "error-agent-prompt-blocked"}
+      ],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 5
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{
+                 name: "octo-tur-844-prompt-blocked-#{System.unique_integer([:positive])}",
+                 isolated: true,
+                 workspace: "/tmp/selected-workspace"
+               },
+               adapter_context
+             )
+
+    on_exit(fn ->
+      if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
+    end)
+
+    assert {:ok, agent} =
+             HerdrTransport.start_agent(
+               session,
+               %{
+                 name: "implementer_orchestrator",
+                 provider: "claude_code",
+                 cwd: "/tmp/selected-workspace",
+                 argv: ["claude", "--model", "claude-fable-5"]
+               },
+               adapter_context
+             )
+
+    assert {:error, {:herdr_agent_blocked, "implementer_orchestrator"}} =
+             HerdrTransport.begin_turn(session, agent, "must-not-send", 6_000, adapter_context)
+
+    commands = File.read!(context.log)
+    assert commands =~ "agent prompt implementer_orchestrator must-not-send"
+    refute commands =~ "agent send-keys implementer_orchestrator"
+    assert :ok = HerdrTransport.stop_session(session, adapter_context)
+  end
+
+  test "v0.8.2 blocked startup preserves a typed inspectable target", context do
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_REPLAY_AGENT_START", "error-agent-start-not-ready"}
+      ],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 5
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{
+                 name: "octo-tur-844-start-blocked-#{System.unique_integer([:positive])}",
+                 isolated: true,
+                 workspace: "/tmp/selected-workspace"
+               },
+               adapter_context
+             )
+
+    on_exit(fn ->
+      if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
+    end)
+
+    assert {:error, {:herdr_agent_not_ready, "implementer_orchestrator"}} =
+             HerdrTransport.start_agent(
+               session,
+               %{
+                 name: "implementer_orchestrator",
+                 provider: "claude_code",
+                 cwd: "/tmp/selected-workspace",
+                 argv: ["claude", "--model", "claude-fable-5"]
+               },
+               adapter_context
+             )
+
+    commands = File.read!(context.log)
+    assert commands =~ "agent start implementer_orchestrator"
+    refute commands =~ "agent prompt implementer_orchestrator"
+    assert :ok = HerdrTransport.stop_session(session, adapter_context)
+  end
+
+  test "v0.8.2 prompt stall does not race Herdr's delayed Enter", context do
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"}
+      ],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 5
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{
+                 name: "octo-tur-844-native-enter-#{System.unique_integer([:positive])}",
+                 isolated: true,
+                 workspace: "/tmp/selected-workspace"
+               },
+               adapter_context
+             )
+
+    on_exit(fn ->
+      if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
+    end)
+
+    assert {:ok, agent} =
+             HerdrTransport.start_agent(
+               session,
+               %{
+                 name: "implementer_orchestrator",
+                 provider: "codex",
+                 cwd: "/tmp/selected-workspace",
+                 argv: ["codex", "--model", "gpt-5.6-sol"]
+               },
+               adapter_context
+             )
+
+    assert {:error, {:herdr_agent_prompt_stalled, "implementer_orchestrator"}} =
+             HerdrTransport.begin_turn(session, agent, "one semantic prompt", 6_000, adapter_context)
+
+    commands = File.read!(context.log)
+    assert length(:binary.matches(commands, "agent prompt implementer_orchestrator one semantic prompt")) == 1
+    refute commands =~ "agent send-keys implementer_orchestrator"
+    assert :ok = HerdrTransport.stop_session(session, adapter_context)
+  end
+
   test "an await that settles blocked is a typed blocked outcome under the upstream default settle set", context do
     adapter_context = %{
       herdr_bin: context.bin,

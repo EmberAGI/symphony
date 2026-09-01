@@ -1,0 +1,32 @@
+{
+  "argv": [
+    "/tmp/tur844-herdr-audit.zXdUCl/assets/herdr-linux-x86_64",
+    "--session",
+    "tur844probe",
+    "agent",
+    "prompt",
+    "tur844blocked",
+    "must-not-send",
+    "--wait",
+    "--until",
+    "working",
+    "--until",
+    "idle",
+    "--until",
+    "done",
+    "--until",
+    "blocked",
+    "--timeout",
+    "5001"
+  ],
+  "derivation": null,
+  "exit_status": 1,
+  "herdr_binary_sha256": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
+  "herdr_version": "herdr 0.8.2",
+  "name": "error-agent-prompt-blocked",
+  "provenance": "recorded",
+  "recorded_at": "2026-09-01T23:49:48+00:00",
+  "redaction": "parameterized: the run-varying target name tur844blocked was replaced with {{AGENT_NAME}}; semantic error and message are otherwise verbatim",
+  "stderr": "{\"error\":{\"code\":\"agent_blocked\",\"message\":\"agent {{AGENT_NAME}} is blocked and requires interactive input\"},\"id\":\"cli:agent:prompt\"}\n",
+  "stdout": ""
+}
