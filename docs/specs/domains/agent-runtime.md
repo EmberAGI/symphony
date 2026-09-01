@@ -826,8 +826,14 @@ observation never restart it. On the first typed stall, the transport sends
 exactly one logical Enter through Herdr's agent-scoped `agent send-keys`
 Interface, then gives Herdr up to 60 seconds, capped by the remaining caller
 deadline, to expose the authoritative state/revision transition. `working`
-proves turn start; `idle` or `done` proves a fast completion only with a newer
-Herdr revision; `blocked`, `unknown`, closed agents, command failures,
+proves turn start. A successful settled prompt receipt becomes the post-submit
+observation baseline, including its Herdr revision, `state_change_seq`, and
+provider-session identity when present; the older pre-submit launch snapshot
+never remains the baseline after receipt. A later `idle` or `done` observation
+proves a fast completion only with a revision or state-change sequence newer
+than that receipt. An unchanged final observation, including one that still has
+no provider session, never proves that the provider turn started. `blocked`,
+`unknown`, closed agents, command failures,
 protocol mismatches, and deadline exhaustion remain distinct typed outcomes.
 Same-revision settled status never proves delivery. Provider transcript output
 is diagnostic evidence only and never substitutes for this observation.
