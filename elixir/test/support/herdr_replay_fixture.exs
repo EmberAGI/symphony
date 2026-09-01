@@ -128,6 +128,8 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
   lifecycle edge follows),
   `HERDR_FAKE_PROMPT_STALE_SETTLED` (a successful prompt receipt that repeats
   the pre-submit settled revision before the real working transition),
+  `HERDR_FAKE_POST_PROMPT_SETTLED_TRANSITION` (a successful settled prompt
+  receipt followed by one newer settled revision before lifecycle waiting),
   `HERDR_FAKE_PROMPT_STALL_DELAY_SECONDS` (delay before the recorded stall),
   `HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS` (delayed revision timing
   after a separate Enter submission),
@@ -499,6 +501,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       mkdir -p "$state_root"
       printf '%s\\n' "$agent_revision" > "$state_root/revision.$agent_name"
       printf '%s\\n' "$agent_state_change_seq" > "$state_root/state-change-seq.$agent_name"
+      : > "$state_root/prompt-received.$agent_name"
       recall_kind prompt
       replay "${HERDR_REPLAY_PROMPT:-agent-prompt-working}"
     fi
@@ -518,6 +521,15 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
     if [ "$1" = "agent" ] && [ "$2" = "wait" ]; then
       agent_name="$3"
       recall_revision
+      if [ "${HERDR_FAKE_POST_PROMPT_SETTLED_TRANSITION:-}" = "1" ] &&
+         [ -f "$state_root/prompt-received.$agent_name" ] &&
+         [ ! -f "$state_root/post-prompt-settled-transition.$agent_name" ]; then
+        agent_revision=$((agent_revision + 1))
+        agent_state_change_seq=$((agent_state_change_seq + 1))
+        printf '%s\\n' "$agent_revision" > "$state_root/revision.$agent_name"
+        printf '%s\\n' "$agent_state_change_seq" > "$state_root/state-change-seq.$agent_name"
+        : > "$state_root/post-prompt-settled-transition.$agent_name"
+      fi
       if [ -n "${HERDR_FAKE_MIN_PROMPT_TRANSITION_WAIT_MS:-}" ] &&
          [ -f "$state_root/prompt-enter-sent.$agent_name" ]; then
         wait_timeout=0

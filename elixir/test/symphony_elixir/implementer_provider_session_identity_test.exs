@@ -154,6 +154,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
         "provider-session-identity-direct",
         [
           {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"},
+          {"HERDR_FAKE_POST_PROMPT_SETTLED_TRANSITION", "1"},
           {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
         ]
       )
@@ -205,6 +206,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
         "provider-session-identity-reporter",
         [
           {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"},
+          {"HERDR_FAKE_POST_PROMPT_SETTLED_TRANSITION", "1"},
           {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
         ]
       )
@@ -322,6 +324,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
         "provider-session-identity-delegation",
         [
           {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"},
+          {"HERDR_FAKE_POST_PROMPT_SETTLED_TRANSITION", "1"},
           {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
         ]
       )
@@ -386,6 +389,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
         "provider-session-identity-codex-parity",
         [
           {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"},
+          {"HERDR_FAKE_POST_PROMPT_SETTLED_TRANSITION", "1"},
           {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
         ]
       )
@@ -429,6 +433,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
           "provider-session-identity-#{shape}",
           [
             {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"},
+            {"HERDR_FAKE_POST_PROMPT_SETTLED_TRANSITION", "1"},
             {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
           ]
         )

@@ -2390,8 +2390,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert agent.agent_session == nil
     File.write!(context.log, "")
 
-    assert {:error,
-            {:herdr_agent_status_timeout, "implementer_orchestrator", ["working", "idle", "done"]}} =
+    assert {:error, {:herdr_agent_status_timeout, "implementer_orchestrator", ["working", "idle", "done"]}} =
              HerdrTransport.begin_turn(
                session,
                agent,
