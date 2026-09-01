@@ -1129,6 +1129,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
           "evidence-direct-work-#{shape}-provider-session",
           [
             {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"},
+            {"HERDR_FAKE_POST_PROMPT_SETTLED_TRANSITION", "1"},
             {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
           ]
         )
