@@ -1555,6 +1555,11 @@ slices without weakening the skills/tools release gate.
 
 ## References to source issues
 
+- [TUR-834: Failed 142-only prompt-start canary](https://linear.app/martellventures/issue/TUR-834)
+  provides the no-provider-session incident evidence for the prompt receipt
+  baseline clarification implemented by TUR-838. The failed canary must not be
+  resumed.
+- [TUR-838: Treat Herdr prompt receipt revision as the pre-submit baseline](https://linear.app/martellventures/issue/TUR-838)
 - [EMB-166: Integrate Claude Code as an Octo Symphony role runtime](https://linear.app/emberai/issue/EMB-166/implement-multi-runtime-symphony-support-for-codex-claude-code-and-pi)
   (re-scoped 2026-06-10 from "Implement multi-runtime Symphony support for
   Codex, Claude Code, and Pi")
