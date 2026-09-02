@@ -561,15 +561,6 @@ defmodule SymphonyElixir.HerdrTransportTest do
     orchestrator_herdr = Path.join(session.orchestrator_bin, "herdr")
     claude_projection = Path.join(session.orchestrator_bin, "claude")
     base_env = [{"HERDR_FAKE_LOG", context.log}, {"XDG_CONFIG_HOME", session.runtime_root}]
-    default_state_root = Path.join([session.runtime_root, "herdr", "sessions", "default"])
-
-    generated_unknown_fixture =
-      HerdrReplayFixture.write_replay_mutation!(
-        context.replay_dir,
-        "agent-wait-working",
-        "agent-wait-unknown-generated",
-        &String.replace(&1, ~s("agent_status":"working"), ~s("agent_status":"unknown"))
-      )
 
     generated_working_get_fixture =
       HerdrReplayFixture.write_replay_mutation!(
@@ -787,78 +778,6 @@ defmodule SymphonyElixir.HerdrTransportTest do
       refute commands =~ "pane send-keys"
     end
 
-    recovery_cases = [
-      {worker_herdr, "implementer_orchestrator", "OCTO_MSG/1 kind=result assignment=emb1312 status=completed", "result.*"},
-      {orchestrator_herdr, "implementer_worker", "OCTO_MSG/1 kind=assignment assignment=emb1312", "assignment.*"}
-    ]
-
-    for {role_herdr, target, message, correlation_glob} <- recovery_cases do
-      File.write!(context.log, "")
-      File.rm(Path.join([session.runtime_root, "herdr", "sessions", "default", "prompt-attempts"]))
-
-      correlations_before =
-        Path.wildcard(Path.join([session.runtime_root, "worker-events", correlation_glob]))
-
-      assert {_native_response, 0} =
-               System.cmd(
-                 role_herdr,
-                 ["agent", "prompt", target, message],
-                 env:
-                   base_env ++
-                     [
-                       {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
-                       {"HERDR_FAKE_MIN_PROMPT_TRANSITION_WAIT_MS", "1500"},
-                       {"HERDR_FAKE_GET_BEFORE_PROMPT_TRANSITION", "1"},
-                       {"HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS", "0.05"},
-                       {"HERDR_REPLAY_WAIT", "agent-wait-working"}
-                     ],
-                 stderr_to_stdout: true
-               )
-
-      prompt_commands =
-        context.log
-        |> File.read!()
-        |> String.split("\n")
-        |> Enum.filter(&String.contains?(&1, "agent prompt #{target}"))
-
-      assert length(prompt_commands) == 1
-      assert Enum.any?(prompt_commands, &String.contains?(&1, "#{message} --wait"))
-      assert Enum.all?(prompt_commands, &String.contains?(&1, "--timeout 60000"))
-
-      commands = File.read!(context.log)
-      assert length(:binary.matches(commands, "agent send-keys #{target} enter")) == 1
-      assert length(:binary.matches(commands, "agent wait #{target}")) == 1
-      assert commands =~ "--until working --until blocked --timeout 60000"
-
-      [correlation] =
-        Path.wildcard(Path.join([session.runtime_root, "worker-events", correlation_glob])) --
-          correlations_before
-
-      assert File.read!(correlation) == message <> "\n"
-
-      File.write!(context.log, "")
-      File.rm(Path.join([session.runtime_root, "herdr", "sessions", "default", "prompt-attempts"]))
-
-      assert {failure, 70} =
-               System.cmd(
-                 role_herdr,
-                 ["agent", "prompt", target, message],
-                 env:
-                   base_env ++
-                     [
-                       {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
-                       {"HERDR_FAKE_SEND_KEYS_FAIL", "1"}
-                     ],
-                 stderr_to_stdout: true
-               )
-
-      assert failure =~ "sabotage: agent send-keys refused"
-
-      commands = File.read!(context.log)
-      assert length(:binary.matches(commands, "agent prompt #{target}")) == 1
-      assert length(:binary.matches(commands, "agent send-keys #{target} enter")) == 1
-    end
-
     File.write!(context.log, "")
     File.rm(Path.join([session.runtime_root, "herdr", "sessions", "default", "prompt-attempts"]))
     busy_target_result = "OCTO_MSG/1 kind=result assignment=emb1344 status=completed"
@@ -1018,75 +937,6 @@ defmodule SymphonyElixir.HerdrTransportTest do
     commands = File.read!(context.log)
     assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
     refute commands =~ "agent send-keys implementer_orchestrator enter"
-
-    File.write!(context.log, "")
-    File.rm(Path.join(default_state_root, "prompt-attempts"))
-    File.rm(Path.join(default_state_root, "delayed-prompt-transition.implementer_worker"))
-    fast_message = "OCTO_MSG/1 kind=assignment assignment=emb1312-fast"
-    assignments_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "assignment.*"]))
-
-    assert {fast_settled, 0} =
-             System.cmd(
-               orchestrator_herdr,
-               ["agent", "prompt", "implementer_worker", fast_message],
-               env:
-                 base_env ++
-                   [
-                     {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
-                     {"HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS", "0.05"},
-                     {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
-                   ],
-               stderr_to_stdout: true
-             )
-
-    assert fast_settled =~ ~s("agent_status":"idle")
-    commands = File.read!(context.log)
-    assert length(:binary.matches(commands, "agent prompt implementer_worker")) == 1
-    assert length(:binary.matches(commands, "agent send-keys implementer_worker enter")) == 1
-    assert length(:binary.matches(commands, "agent wait implementer_worker")) == 1
-    # One preflight read selected the waited path; the final read proves the
-    # post-stall fast-settled revision.
-    assert length(:binary.matches(commands, "agent get implementer_worker")) == 2
-
-    [fast_assignment] =
-      Path.wildcard(Path.join([session.runtime_root, "worker-events", "assignment.*"])) --
-        assignments_before
-
-    assert File.read!(fast_assignment) == fast_message <> "\n"
-
-    for {fixture, expected_status} <- [
-          {"agent-wait-blocked", "blocked"},
-          {generated_unknown_fixture, "unknown"}
-        ] do
-      File.write!(context.log, "")
-      File.rm(Path.join(default_state_root, "prompt-attempts"))
-      results_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"]))
-      assert results_before != []
-
-      assert {non_success, 1} =
-               System.cmd(
-                 worker_herdr,
-                 [
-                   "agent",
-                   "prompt",
-                   "implementer_orchestrator",
-                   "OCTO_MSG/1 kind=result assignment=emb1312-#{expected_status} status=failed"
-                 ],
-                 env:
-                   base_env ++
-                     [
-                       {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
-                       {"HERDR_REPLAY_WAIT", fixture}
-                     ],
-                 stderr_to_stdout: true
-               )
-
-      assert non_success =~ ~s("agent_status":"#{expected_status}")
-      assert Path.wildcard(Path.join([session.runtime_root, "worker-events", "result.*"])) == results_before
-      commands = File.read!(context.log)
-      assert length(:binary.matches(commands, "agent send-keys implementer_orchestrator enter")) == 1
-      assert length(:binary.matches(commands, "agent get implementer_orchestrator")) == 1
-    end
 
     for args <- [
           ["agent", "list"],
@@ -1443,7 +1293,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       context.replay_dir,
       "status-server-running",
       "status-server-0.8.0",
-      &String.replace(&1, "version: 0.7.5", "version: 0.8.0")
+      &String.replace(&1, "version: 0.8.2", "version: 0.8.0")
     )
 
     adapter_context = %{
@@ -1457,10 +1307,10 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     incompatible_runtime = %{
-      expected_version: "0.7.5",
-      expected_protocol: 17,
+      expected_version: "0.8.2",
+      expected_protocol: 20,
       actual_version: "0.8.0",
-      actual_protocol: 17
+      actual_protocol: 20
     }
 
     session_name = "octo-emb-1244-i-#{System.unique_integer([:positive])}"
@@ -1510,8 +1360,8 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert {:error,
             {:incompatible_herdr_runtime,
              %{
-               expected_version: "0.7.5",
-               expected_protocol: 17,
+               expected_version: "0.8.2",
+               expected_protocol: 20,
                actual_version: nil,
                actual_protocol: nil,
                error_code: "protocol_mismatch"
@@ -1737,283 +1587,6 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
-  test "recovers a stalled prompt with one Enter for both providers", context do
-    for provider <- ["codex", "claude_code"] do
-      adapter_context = %{
-        herdr_bin: context.bin,
-        extra_env: [
-          {"HERDR_FAKE_LOG", context.log},
-          {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
-          {"HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS", "0.01"},
-          {"HERDR_REPLAY_WAIT", "agent-wait-working"}
-        ],
-        start_timeout_ms: 2_000,
-        poll_interval_ms: 5
-      }
-
-      assert {:ok, session} =
-               HerdrTransport.start_session(
-                 %{
-                   name: "octo-emb-1231-recover-#{provider}-#{System.unique_integer([:positive])}",
-                   isolated: true,
-                   workspace: "/tmp/selected-workspace"
-                 },
-                 adapter_context
-               )
-
-      on_exit(fn ->
-        if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
-      end)
-
-      executable = if provider == "codex", do: "codex", else: "claude"
-
-      assert {:ok, agent} =
-               HerdrTransport.start_agent(
-                 session,
-                 %{
-                   name: "implementer_orchestrator",
-                   provider: provider,
-                   cwd: "/tmp/selected-workspace",
-                   argv: [executable, "--model", "test-model"]
-                 },
-                 adapter_context
-               )
-
-      assert {:ok, %{phase: :working, agent: observed}} =
-               HerdrTransport.begin_turn(
-                 session,
-                 agent,
-                 "Complete the assignment.",
-                 6_000,
-                 adapter_context
-               )
-
-      assert observed.agent_status == "working"
-
-      prompt_commands =
-        context.log
-        |> File.read!()
-        |> String.split("\n")
-        |> Enum.filter(&String.contains?(&1, "agent prompt implementer_orchestrator"))
-
-      assert Enum.any?(prompt_commands, &String.contains?(&1, "Complete the assignment."))
-      assert length(prompt_commands) == 1
-      assert Enum.all?(prompt_commands, &String.contains?(&1, "--timeout 5001"))
-
-      commands = File.read!(context.log)
-      assert length(:binary.matches(commands, "agent send-keys implementer_orchestrator enter")) == 1
-      assert length(:binary.matches(commands, "agent wait implementer_orchestrator")) == 1
-
-      [_, recovery_timeout] =
-        Regex.run(
-          ~r/agent wait implementer_orchestrator --until working --until blocked --timeout (\d+)/,
-          commands
-        )
-
-      assert String.to_integer(recovery_timeout) > 750
-      assert String.to_integer(recovery_timeout) <= 6_000
-      refute commands =~ "agent get implementer_orchestrator"
-      refute commands =~ "agent prompt implementer_orchestrator   --wait"
-      assert :ok = HerdrTransport.stop_session(session, adapter_context)
-      File.write!(context.log, "")
-    end
-  end
-
-  test "returns a typed failure when the one Enter recovery fails", context do
-    for provider <- ["codex", "claude_code"] do
-      adapter_context = %{
-        herdr_bin: context.bin,
-        extra_env: [
-          {"HERDR_FAKE_LOG", context.log},
-          {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
-          {"HERDR_FAKE_SEND_KEYS_FAIL", "1"}
-        ],
-        start_timeout_ms: 2_000,
-        poll_interval_ms: 5
-      }
-
-      assert {:ok, session} =
-               HerdrTransport.start_session(
-                 %{
-                   name: "octo-emb-1231-exhausted-#{provider}-#{System.unique_integer([:positive])}",
-                   isolated: true,
-                   workspace: "/tmp/selected-workspace"
-                 },
-                 adapter_context
-               )
-
-      executable = if provider == "codex", do: "codex", else: "claude"
-
-      assert {:ok, agent} =
-               HerdrTransport.start_agent(
-                 session,
-                 %{
-                   name: "implementer_orchestrator",
-                   provider: provider,
-                   cwd: "/tmp/selected-workspace",
-                   argv: [executable, "--model", "test-model"]
-                 },
-                 adapter_context
-               )
-
-      assert {:error, {:herdr_agent_send_keys_failed, "implementer_orchestrator", {:port_exit, 70, failure}}} =
-               HerdrTransport.begin_turn(
-                 session,
-                 agent,
-                 "Complete the assignment.",
-                 6_000,
-                 adapter_context
-               )
-
-      assert failure =~ "sabotage: agent send-keys refused"
-
-      commands = File.read!(context.log)
-      assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
-      assert length(:binary.matches(commands, "agent send-keys implementer_orchestrator enter")) == 1
-      assert :ok = HerdrTransport.stop_session(session, adapter_context)
-      File.write!(context.log, "")
-    end
-  end
-
-  test "accepts a delayed Herdr revision transition inside the turn-start deadline", context do
-    adapter_context = %{
-      herdr_bin: context.bin,
-      extra_env: [
-        {"HERDR_FAKE_LOG", context.log},
-        {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
-        {"HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS", "0.05"},
-        {"HERDR_REPLAY_WAIT", "error-agent-wait-timeout"}
-      ],
-      start_timeout_ms: 2_000,
-      poll_interval_ms: 5
-    }
-
-    assert {:ok, session} =
-             HerdrTransport.start_session(
-               %{
-                 name: "octo-emb-1312-delayed-transition-#{System.unique_integer([:positive])}",
-                 isolated: true,
-                 workspace: "/tmp/selected-workspace"
-               },
-               adapter_context
-             )
-
-    on_exit(fn ->
-      if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
-    end)
-
-    assert {:ok, agent} =
-             HerdrTransport.start_agent(
-               session,
-               %{
-                 name: "implementer_orchestrator",
-                 provider: "codex",
-                 cwd: "/tmp/selected-workspace",
-                 argv: ["codex", "--model", "gpt-5.6-sol"]
-               },
-               adapter_context
-             )
-
-    assert {:ok, %{phase: :completed, agent: observed}} =
-             HerdrTransport.begin_turn(
-               session,
-               agent,
-               "Complete the assignment.",
-               1_000,
-               adapter_context
-             )
-
-    assert observed.agent_status == "idle"
-    assert observed.revision == agent.revision + 1
-    assert observed.provider == "codex"
-
-    commands = File.read!(context.log)
-    assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
-    assert length(:binary.matches(commands, "agent send-keys implementer_orchestrator enter")) == 1
-    assert length(:binary.matches(commands, "agent wait implementer_orchestrator")) == 1
-
-    [_, recovery_timeout] =
-      Regex.run(
-        ~r/agent wait implementer_orchestrator --until working --until blocked --timeout (\d+)/,
-        commands
-      )
-
-    assert String.to_integer(recovery_timeout) > 750
-    assert String.to_integer(recovery_timeout) <= 5_001
-    assert length(:binary.matches(commands, "agent get implementer_orchestrator")) == 1
-    assert :ok = HerdrTransport.stop_session(session, adapter_context)
-  end
-
-  test "observes a delayed prompt transition beyond the obsolete 750ms window", context do
-    adapter_context = %{
-      herdr_bin: context.bin,
-      extra_env: [
-        {"HERDR_FAKE_LOG", context.log},
-        {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
-        {"HERDR_FAKE_MIN_PROMPT_TRANSITION_WAIT_MS", "1500"},
-        {"HERDR_FAKE_GET_BEFORE_PROMPT_TRANSITION", "1"},
-        {"HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS", "0.01"},
-        {"HERDR_REPLAY_WAIT", "agent-wait-working"}
-      ],
-      start_timeout_ms: 2_000,
-      poll_interval_ms: 5
-    }
-
-    assert {:ok, session} =
-             HerdrTransport.start_session(
-               %{
-                 name: "octo-emb-1340-delayed-observation-#{System.unique_integer([:positive])}",
-                 isolated: true,
-                 workspace: "/tmp/selected-workspace"
-               },
-               adapter_context
-             )
-
-    on_exit(fn ->
-      if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
-    end)
-
-    assert {:ok, agent} =
-             HerdrTransport.start_agent(
-               session,
-               %{
-                 name: "implementer_orchestrator",
-                 provider: "codex",
-                 cwd: "/tmp/selected-workspace",
-                 argv: ["codex", "--model", "gpt-5.6-sol"]
-               },
-               adapter_context
-             )
-
-    assert {:ok, %{phase: :working, agent: observed}} =
-             HerdrTransport.begin_turn(
-               session,
-               agent,
-               "Complete the assignment.",
-               60_000,
-               adapter_context
-             )
-
-    assert observed.agent_status == "working"
-    assert observed.revision == agent.revision + 1
-
-    commands = File.read!(context.log)
-    assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
-    assert length(:binary.matches(commands, "agent send-keys implementer_orchestrator enter")) == 1
-    assert length(:binary.matches(commands, "agent wait implementer_orchestrator")) == 1
-
-    [_, recovery_timeout] =
-      Regex.run(
-        ~r/agent wait implementer_orchestrator --until working --until blocked --timeout (\d+)/,
-        commands
-      )
-
-    assert String.to_integer(recovery_timeout) > 1_500
-    assert String.to_integer(recovery_timeout) <= 60_000
-    refute commands =~ "agent get implementer_orchestrator"
-    assert :ok = HerdrTransport.stop_session(session, adapter_context)
-  end
-
   test "prompt submissions settle on the upstream default set plus working and exceed the prompt-effect window",
        context do
     adapter_context = %{
@@ -2061,60 +1634,6 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert prompt_command =~ "--until working --until idle --until done --until blocked"
     refute prompt_command =~ "--until unknown"
     assert prompt_command =~ "--timeout 5001"
-    assert :ok = HerdrTransport.stop_session(session, adapter_context)
-  end
-
-  test "one 5001ms deadline bounds prompt and recovery without restarting", context do
-    adapter_context = %{
-      herdr_bin: context.bin,
-      extra_env: [
-        {"HERDR_FAKE_LOG", context.log},
-        {"HERDR_FAKE_PROMPT_STALL_COUNT", "1"},
-        {"HERDR_FAKE_PROMPT_STALL_DELAY_SECONDS", "4.2"},
-        {"HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS", "1"},
-        {"HERDR_REPLAY_WAIT", "agent-wait-working"}
-      ],
-      start_timeout_ms: 2_000,
-      poll_interval_ms: 5
-    }
-
-    assert {:ok, session} =
-             HerdrTransport.start_session(
-               %{
-                 name: "octo-emb-1244-stall-boundary-#{System.unique_integer([:positive])}",
-                 isolated: true,
-                 workspace: "/tmp/selected-workspace"
-               },
-               adapter_context
-             )
-
-    on_exit(fn ->
-      if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
-    end)
-
-    assert {:ok, agent} =
-             HerdrTransport.start_agent(
-               session,
-               %{
-                 name: "implementer_orchestrator",
-                 provider: "codex",
-                 cwd: "/tmp/selected-workspace",
-                 argv: ["codex", "--model", "gpt-5.6-sol"]
-               },
-               adapter_context
-             )
-
-    started_at = System.monotonic_time(:millisecond)
-
-    assert {:error, {:herdr_agent_status_timeout, "implementer_orchestrator", ["working", "idle", "done"]}} =
-             HerdrTransport.begin_turn(session, agent, "Complete the assignment.", 5_000, adapter_context)
-
-    assert System.monotonic_time(:millisecond) - started_at < 5_500
-    commands = File.read!(context.log)
-    assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
-    assert length(:binary.matches(commands, "agent send-keys implementer_orchestrator enter")) == 1
-    assert length(:binary.matches(commands, "agent wait implementer_orchestrator")) == 1
-    refute commands =~ "agent get implementer_orchestrator"
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 

@@ -1,0 +1,17 @@
+{
+  "tag": "v0.8.2",
+  "release_commit": "9eb521456ac0d19d3ab3d9d7cea3cca10baa8a4c",
+  "protocol": 20,
+  "version": "0.8.2",
+  "source_hashes": {
+    "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "skills/herdr/SKILL.md": "237ad2ab2d8123e2bb37956d3a41eed141f2d22a7c36e415b7876c0397679099"
+  },
+  "release_assets": {
+    "herdr-linux-aarch64": "f55610658e1c2e0d2aaef730b4b2ab885f7f8ba00285ab372bfb14f2e3d5b40d",
+    "herdr-linux-x86_64": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
+    "herdr-macos-aarch64": "a5d4f4d504d8b309c91f811050559300faba31258425f53c50852fc96f6ae574",
+    "herdr-macos-x86_64": "ab50262c8190cd7aa9056d249d255c08c328c3e8716de9cfa29db4f131b8e2c1",
+    "herdr-windows-x86_64.zip": "0ab3d0fe1434d55757997542b978c771d642987bb15a7130f4160f0db38821d5"
+  }
+}

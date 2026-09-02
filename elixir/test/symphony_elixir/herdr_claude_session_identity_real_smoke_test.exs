@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.HerdrClaudeSessionIdentityRealSmokeTest do
   @moduledoc """
-  Live provider-session identity proof against the real Herdr 0.7.5 binary and
+  Live provider-session identity proof against the real Herdr 0.8.2 binary and
   the real Claude Code role launcher (EMB-1353 AC3).
 
   Production run EMB-1144 reached a terminal Herdr state carrying no
@@ -26,7 +26,7 @@ defmodule SymphonyElixir.HerdrClaudeSessionIdentityRealSmokeTest do
   @handshake_repeats 3
 
   # Opt-in (RUN_HERDR_REAL_SMOKE=1) is enforced at runtime in test_helper.exs
-  # via tag exclusion; binary presence and the pinned 0.7.5 version are
+  # via tag exclusion; binary presence and the pinned 0.8.2 version are
   # resolved here at runtime so a warm _build cannot stale-skip or stale-run.
   setup_all do
     herdr_bin = System.find_executable("herdr")
@@ -38,8 +38,8 @@ defmodule SymphonyElixir.HerdrClaudeSessionIdentityRealSmokeTest do
         _ -> nil
       end
 
-    assert version == "0.7.5",
-           "RUN_HERDR_REAL_SMOKE=1 requires real herdr 0.7.5 (found: #{inspect(version)})"
+    assert version == "0.8.2",
+           "RUN_HERDR_REAL_SMOKE=1 requires real herdr 0.8.2 (found: #{inspect(version)})"
 
     claude_bin = System.find_executable("claude")
     assert is_binary(claude_bin), "RUN_HERDR_REAL_SMOKE=1 requires a claude binary on PATH"

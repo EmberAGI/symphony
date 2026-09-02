@@ -90,7 +90,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     @moduledoc false
 
     def default_server_snapshot(_context),
-      do: {:ok, %{status: "running", version: "0.7.5", protocol: 17, socket: "/tmp/default.sock"}}
+      do: {:ok, %{status: "running", version: "0.8.2", protocol: 20, socket: "/tmp/default.sock"}}
 
     def start_session(spec, _context),
       do:
@@ -140,7 +140,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     @moduledoc false
 
     def default_server_snapshot(_context),
-      do: {:ok, %{status: "running", version: "0.7.5", protocol: 17, socket: "/tmp/default.sock"}}
+      do: {:ok, %{status: "running", version: "0.8.2", protocol: 20, socket: "/tmp/default.sock"}}
 
     def start_session(spec, _context),
       do:
@@ -191,7 +191,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     @moduledoc false
 
     def default_server_snapshot(_context),
-      do: {:ok, %{status: "running", version: "0.7.5", protocol: 17, socket: "/tmp/default.sock"}}
+      do: {:ok, %{status: "running", version: "0.8.2", protocol: 20, socket: "/tmp/default.sock"}}
 
     def start_session(spec, _context),
       do:
@@ -530,7 +530,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
   test "a provider session that only appears after prompting is not agent identity", context do
     session = start_implementer_session(context, "evidence-first-turn-provider-session")
 
-    # Herdr 0.7.5 first-turn physics: `agent_session` is the provider session
+    # Herdr 0.8.2 first-turn physics: `agent_session` is the provider session
     # and does not exist until the agent has been prompted. On the first turn
     # the inventory is read before the orchestrator is prompted and again after
     # it answered, so this optional field is absent at turn start and present

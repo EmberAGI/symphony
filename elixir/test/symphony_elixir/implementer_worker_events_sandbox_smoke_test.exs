@@ -41,7 +41,7 @@ defmodule SymphonyElixir.ImplementerWorkerEventsSandboxSmokeTest do
   # yields is the one the real session would have been launched under.
   defmodule CaptureTransport do
     def default_server_snapshot(_context),
-      do: {:ok, %{status: "running", version: "0.7.5", protocol: 17, socket: "/tmp/capture/herdr.sock"}}
+      do: {:ok, %{status: "running", version: "0.8.2", protocol: 20, socket: "/tmp/capture/herdr.sock"}}
 
     def start_session(spec, %{owner: owner, runtime_root: runtime_root, socket: socket}) do
       send(owner, {:capture, :start_session, spec})

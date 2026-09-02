@@ -85,6 +85,12 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     assert bare_blocked.family == :human_input_required
     assert bare_blocked.retryable? == false
 
+    assert {:irrecoverable, startup_blocked} =
+             AgentRuntime.classify_failure({:herdr_agent_not_ready, "implementer_orchestrator"}, @context)
+
+    assert startup_blocked.family == :human_input_required
+    assert startup_blocked.retryable? == false
+
     # Direct checkpoint failure → irrecoverable, ordinary retry prevented.
     direct_checkpoint_failure =
       {:implementer_checkpoint_failed, %{failed_checkpoint_details | shutdown_reason: :hard_budget_exhausted}}
@@ -148,10 +154,10 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
 
   test "classifies real adapter and runtime error shapes without pre-normalized families" do
     incompatible_runtime = %{
-      expected_version: "0.7.5",
-      expected_protocol: 17,
+      expected_version: "0.8.2",
+      expected_protocol: 20,
       actual_version: "0.8.0",
-      actual_protocol: 17
+      actual_protocol: 20
     }
 
     missing_skill_contract =

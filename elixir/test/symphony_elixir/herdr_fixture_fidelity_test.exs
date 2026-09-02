@@ -4,20 +4,21 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
   alias SymphonyElixir.TestSupport.HerdrReplayFixture
 
   @moduledoc """
-  Fidelity gate for the recorded herdr 0.7.5 protocol fixtures (EMB-1244).
+  Fidelity gate for the recorded Herdr protocol fixtures (EMB-1244).
 
   Fails the suite when any committed fixture claims an out-of-enum agent
   status, loses its raw provenance, stops being a pure recording, or drifts
-  from the pinned 0.7.5 contract. Committed fixtures are CI inputs; recording
+  from their declared binaries. Committed fixtures are CI inputs; recording
   itself is the CD-tier concern documented in the fixtures README.
   """
 
   @required_provenance_keys ~w(argv stdout stderr exit_status recorded_at herdr_version herdr_binary_sha256 provenance derivation redaction name)
   @declared_placeholders ~w({{AGENT_NAME}} {{AGENT_KIND}} {{SOCKET_PATH}} {{WORKSPACE_CWD}} {{PANE_ID}})
-  @known_error_codes ~w(agent_not_found agent_pane_busy agent_prompt_stalled timeout)
+  @known_error_codes ~w(agent_blocked agent_not_found agent_not_ready agent_pane_busy agent_prompt_stalled timeout)
+  @v082_recordings ~w(error-agent-prompt-blocked error-agent-start-not-ready status-server-running version)
   @recorded_binary_sha256s ~w(
     37350546b0012555943b92eaf962665de4e264395baeb44227b8015e8ff5b0d6
-    3dc83288073e4c2d3c679a30e7be97bcca9141c6fd17dbbb9219142e95c59253
+    976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4
   )
 
   test "every fixture is a pure recording with complete raw provenance" do
@@ -35,7 +36,8 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
              "#{name} is not a pure recording; synthesized or derived protocol fixtures are forbidden"
 
       assert fixture["derivation"] == nil
-      assert fixture["herdr_version"] == "herdr 0.7.5"
+      expected_version = if name in @v082_recordings, do: "herdr 0.8.2", else: "herdr 0.7.5"
+      assert fixture["herdr_version"] == expected_version
       assert fixture["redaction"] != ""
       assert is_list(fixture["argv"]) and fixture["argv"] != []
       assert is_integer(fixture["exit_status"])
@@ -49,7 +51,7 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
       |> Enum.sort()
 
     assert shas == Enum.sort(@recorded_binary_sha256s),
-           "fixtures did not come from the exact audited Herdr 0.7.5 binaries"
+           "fixtures did not come from the exact audited Herdr binaries"
   end
 
   test "every agent status claimed by any fixture is inside the five-state enum" do
@@ -88,16 +90,27 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
     assert HerdrReplayFixture.load!("agent-start")["redaction"] =~ "{{PANE_ID}}"
   end
 
-  test "the agent-scoped Enter acknowledgement is a required real recording" do
-    fixture = HerdrReplayFixture.load!("agent-send-keys-enter")
+  test "v0.8.2 evidence deletes the obsolete separate Enter recording" do
+    refute "agent-send-keys-enter" in HerdrReplayFixture.fixture_names()
+    assert HerdrReplayFixture.load!("error-agent-prompt-blocked")["herdr_version"] == "herdr 0.8.2"
+    assert HerdrReplayFixture.load!("error-agent-start-not-ready")["herdr_version"] == "herdr 0.8.2"
+  end
 
-    assert fixture["argv"] |> Enum.take(-4) ==
-             ["agent", "send-keys", "emb1312probe", "enter"]
+  test "release authority pins the exact v0.8.2 generation" do
+    authority =
+      Path.expand("../fixtures/herdr/0.8.2/release-authority.json", __DIR__)
+      |> File.read!()
+      |> Jason.decode!()
 
-    assert fixture["provenance"] == "recorded"
-    assert fixture["derivation"] == nil
-    assert fixture["herdr_binary_sha256"] == "3dc83288073e4c2d3c679a30e7be97bcca9141c6fd17dbbb9219142e95c59253"
-    assert Jason.decode!(fixture["stdout"]) == %{"id" => "cli:agent:send-keys", "result" => %{"type" => "ok"}}
+    assert authority["release_commit"] == "9eb521456ac0d19d3ab3d9d7cea3cca10baa8a4c"
+    assert authority["protocol"] == 20
+    assert authority["version"] == "0.8.2"
+
+    assert authority["release_assets"]["herdr-linux-x86_64"] ==
+             "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4"
+
+    assert authority["source_hashes"]["skills/herdr/SKILL.md"] ==
+             "237ad2ab2d8123e2bb37956d3a41eed141f2d22a7c36e415b7876c0397679099"
   end
 
   test "fixtures use only the declared run-varying placeholders" do

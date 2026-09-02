@@ -10,7 +10,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
 
   defmodule PreservationTransport do
     def default_server_snapshot(%{owner: _owner}) do
-      {:ok, %{status: "running", version: "0.7.5", protocol: 17, socket: "/tmp/default.sock"}}
+      {:ok, %{status: "running", version: "0.8.2", protocol: 20, socket: "/tmp/default.sock"}}
     end
 
     def start_session(spec, %{owner: _owner}) do

@@ -6,7 +6,7 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
   @moduledoc """
   CD-tier fake-vs-real differential harness (EMB-1244 AC 4a).
 
-  Runs identical operations against the real herdr 0.7.5 binary and the
+  Runs identical operations against the real herdr 0.8.2 binary and the
   replay-backed test double and fails on divergence, so no hand-authored
   behavior in the double survives without a differential check backing it.
   Opt-in only: requires `SYMPHONY_RUN_HERDR_DIFFERENTIAL=1` and a real herdr
@@ -30,8 +30,8 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
 
     {version_output, 0} = System.cmd(real, ["--version"])
 
-    assert String.trim(version_output) == "herdr 0.7.5",
-           "differential harness requires the pinned real herdr 0.7.5"
+    assert String.trim(version_output) == "herdr 0.8.2",
+           "differential harness requires the pinned real herdr 0.8.2"
 
     root = Path.join(System.tmp_dir!(), "herdr-diff-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf(root) end)
@@ -82,8 +82,8 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
     {real_status, 0} = System.cmd(real, ["--session", session, "status", "server"], env: real_env)
     {fake_status, 0} = System.cmd(fake, ["--session", session, "status", "server"], env: fake_session_env)
     assert field_names(real_status) == field_names(fake_status)
-    assert real_status =~ "version: 0.7.5"
-    assert fake_status =~ "version: 0.7.5"
+    assert real_status =~ "version: 0.8.2"
+    assert fake_status =~ "version: 0.8.2"
 
     # workspace create: identical envelope key shape.
     {real_ws, 0} =

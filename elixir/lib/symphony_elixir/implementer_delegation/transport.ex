@@ -24,7 +24,7 @@ defmodule SymphonyElixir.ImplementerDelegation.Transport do
   @doc """
   Submit one verified prompt and observe how it settles.
 
-  The effective prompt wait always exceeds Herdr 0.7.5's 5000 ms prompt-effect
+  The effective prompt wait always exceeds Herdr v0.8.2's 5000 ms prompt-effect
   window (a smaller caller budget is raised to 5001 ms) so an unchanged
   `state_change_seq` is the typed `agent_prompt_stalled` result, never an
   ordinary timeout. A `blocked` settle is the typed blocked outcome, and an

@@ -1187,8 +1187,9 @@ defense in depth rather than a complete process sandbox; one-generation
 delegation remains a profile invariant backed by evals.
 
 Herdr protocol test evidence is recorded, not authored (EMB-1244 Stage 1).
-Every protocol read in the deterministic suite replays a response recorded from
-the official checksum-verified Herdr v0.8.2 binary, committed with raw provenance: argv, stdout,
+Every changed v0.8.2 protocol read in the deterministic suite replays a
+response recorded from the official checksum-verified Herdr v0.8.2 binary,
+committed with raw provenance: argv, stdout,
 stderr, exit status, timestamp, binary version and SHA-256, and the declared
 redaction/parameterization method. Placeholder substitution is permitted only
 for run-varying identity/path fields, never for statuses, error codes, or other
@@ -1204,6 +1205,8 @@ the annotated `v0.8.2` tag peeled to
 `9eb521456ac0d19d3ab3d9d7cea3cca10baa8a4c`: `Cargo.toml` is version `0.8.2`,
 `src/protocol/wire.rs` is protocol `20`, and fixture provenance pins the
 official release asset digests plus the official skill and license hashes.
+Unchanged v0.7.5 recordings remain only as historical parser-regression inputs;
+they are not accepted as current runtime-generation or changed-protocol proof.
 
 Symphony observes Herdr identity/status and emits its existing normalized
 top-level runtime events. Runtime contract tests prove that resolved profiles

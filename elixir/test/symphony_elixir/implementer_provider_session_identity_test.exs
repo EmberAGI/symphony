@@ -10,7 +10,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
   provider-session receipt window never carried `agent_session`, so the run
   failed closed as `implementer_provider_session_missing`.
 
-  Herdr 0.7.5 has no native Claude session derivation: `agent_session` exists
+  Herdr 0.8.2 has no native Claude session derivation: `agent_session` exists
   only after the Claude Code integration hook reports the provider's own
   session id over the pane report channel. Symphony owns the entire Claude
   launch (wrapper, projection, argv) yet neither provisions nor verifies that
@@ -90,7 +90,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
     @moduledoc false
 
     def default_server_snapshot(_context),
-      do: {:ok, %{status: "running", version: "0.7.5", protocol: 17, socket: "/tmp/default.sock"}}
+      do: {:ok, %{status: "running", version: "0.8.2", protocol: 20, socket: "/tmp/default.sock"}}
 
     def start_session(spec, _context),
       do:
