@@ -305,7 +305,9 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
         PATH="$pane_path" sh -c "$*" || exit 1
       else
         HERDR_FAKE_PANE_PATH_FILE="$path_file" PATH="$pane_path" sh -c "$*
-    printf '%s' \\"\\$PATH\\" > \\"\\$HERDR_FAKE_PANE_PATH_FILE\\"" || exit 1
+    path_tmp=\\"\\$HERDR_FAKE_PANE_PATH_FILE.\\$\\$\\"
+    printf '%s' \\"\\$PATH\\" > \\"\\$path_tmp\\"
+    mv -f \\"\\$path_tmp\\" \\"\\$HERDR_FAKE_PANE_PATH_FILE\\"" || exit 1
       fi
       exit 0
     fi
