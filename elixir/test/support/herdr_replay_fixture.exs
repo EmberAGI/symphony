@@ -19,7 +19,8 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
   real binary will not produce on demand.
   """
 
-  @fixtures_dir Path.expand("../fixtures/herdr/0.7.5", __DIR__)
+  @fixtures_dir Path.expand("../fixtures/herdr/0.8.2", __DIR__)
+  @legacy_fixtures_dir Path.expand("../fixtures/herdr/0.7.5", __DIR__)
   @statuses ~w(idle working blocked done unknown)
 
   def fixtures_dir, do: @fixtures_dir
@@ -29,11 +30,27 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
     |> Path.join("*.json")
     |> Path.wildcard()
     |> Enum.map(&Path.basename(&1, ".json"))
+    |> Enum.reject(&(&1 == "release-authority"))
+    |> Enum.sort()
+  end
+
+  def legacy_fixture_names do
+    @legacy_fixtures_dir
+    |> Path.join("*.json")
+    |> Path.wildcard()
+    |> Enum.map(&Path.basename(&1, ".json"))
     |> Enum.sort()
   end
 
   def load!(name) do
     @fixtures_dir
+    |> Path.join(name <> ".json")
+    |> File.read!()
+    |> Jason.decode!()
+  end
+
+  def load_legacy!(name) do
+    @legacy_fixtures_dir
     |> Path.join(name <> ".json")
     |> File.read!()
     |> Jason.decode!()

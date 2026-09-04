@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "/home/admin/code/symphony-workspaces/TUR-844-symphony/.tur844-tools/herdr",
+    "--session",
+    "tur844record",
+    "agent",
+    "get",
+    "missing_agent"
+  ],
+  "derivation": null,
+  "exit_status": 1,
+  "herdr_binary_sha256": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
+  "herdr_version": "herdr 0.8.2",
+  "name": "error-agent-get-not-found",
+  "provenance": "recorded",
+  "recorded_at": "2026-09-04T22:26:36Z",
+  "redaction": "parameterized: run-varying agent, provider, workspace, pane, or socket fields use the declared placeholders; semantic fields and command outcome remain verbatim",
+  "stderr": "{\"error\":{\"code\":\"agent_not_found\",\"message\":\"agent target {{AGENT_NAME}} not found\"},\"id\":\"cli:agent:get\"}\n",
+  "stdout": ""
+}

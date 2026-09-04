@@ -1377,6 +1377,37 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 
+  test "a response naming a different agent fails identity closed", context do
+    HerdrReplayFixture.write_replay_mutation!(
+      context.replay_dir,
+      "agent-get-idle",
+      "agent-get-conflicting-identity",
+      &String.replace(&1, "{{AGENT_NAME}}", "different_agent")
+    )
+
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_REPLAY_GET", "agent-get-conflicting-identity"}
+      ]
+    }
+
+    assert {:error,
+            {:incompatible_herdr_runtime,
+             %{
+               error_code: "agent_identity_mismatch",
+               expected_agent: "implementer_orchestrator",
+               actual_agent: "different_agent"
+             }}} =
+             HerdrTransport.get_agent(
+               %{name: "octo-tur-844-identity", env: %{}},
+               %{name: "implementer_orchestrator", provider: "codex"},
+               1_000,
+               adapter_context
+             )
+  end
+
   test "unknown and unsettled or out-of-enum statuses never read as completion", context do
     for {source, mutation, target, expected} <- [
           {"agent-wait-idle", ~s("agent_status":"unknown"), {"HERDR_REPLAY_WAIT", "agent-wait-unknown"}, {:herdr_agent_status_unknown, "implementer_orchestrator"}},

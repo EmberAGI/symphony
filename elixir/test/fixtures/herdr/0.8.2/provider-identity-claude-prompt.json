@@ -1,0 +1,26 @@
+{
+  "argv": [
+    "/home/admin/code/symphony-workspaces/TUR-844-symphony/.tur844-tools/herdr",
+    "--session",
+    "tur844record",
+    "agent",
+    "prompt",
+    "claudeagent",
+    "CLAUDE",
+    "--wait",
+    "--until",
+    "working",
+    "--timeout",
+    "10000"
+  ],
+  "derivation": null,
+  "exit_status": 0,
+  "herdr_binary_sha256": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
+  "herdr_version": "herdr 0.8.2",
+  "name": "provider-identity-claude-prompt",
+  "provenance": "recorded",
+  "recorded_at": "2026-09-04T22:26:36Z",
+  "redaction": "parameterized: run-varying agent, provider, workspace, pane, or socket fields use the declared placeholders; semantic fields and command outcome remain verbatim",
+  "stderr": "",
+  "stdout": "{\"id\":\"cli:agent:prompt\",\"result\":{\"agent\":{\"agent\":\"claude\",\"agent_session\":{\"agent\":\"claude\",\"kind\":\"id\",\"source\":\"herdr:claude\",\"value\":\"claude-session-tur844\"},\"agent_status\":\"working\",\"cwd\":\"{{WORKSPACE_CWD}}\",\"focused\":false,\"foreground_cwd\":\"{{WORKSPACE_CWD}}\",\"interactive_ready\":true,\"name\":\"{{AGENT_NAME}}\",\"pane_id\":\"w3:p1\",\"revision\":2,\"state_change_seq\":11,\"tab_id\":\"w3:t1\",\"terminal_id\":\"term_65aafc4a40cb04\",\"terminal_title\":\"⠴ TUR-844 Claude fixture\",\"terminal_title_stripped\":\"TUR-844 Claude fixture\",\"workspace_id\":\"w3\"},\"type\":\"agent_prompted\"}}\n"
+}

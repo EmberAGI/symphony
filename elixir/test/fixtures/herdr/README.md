@@ -1,9 +1,14 @@
 # Recorded herdr protocol fixtures
 
-`0.7.5/` contains protocol responses recorded from the real herdr 0.7.5 binary
-(EMB-1244 Stage 1). Every fixture is a pure recording of one real command
-outcome with raw provenance: argv, stdout, stderr, exit status, timestamp,
-`herdr --version` output, and the SHA-256 of the recorded binary.
+`0.8.2/` is the current protocol-20 corpus. It contains responses recorded
+from the exact Linux x86_64 v0.8.2 release asset, including readiness, all five
+agent states, prompt/wait/deadline outcomes, blocked prompt/start errors,
+provider identity, and run-owned server/workspace operations. Every protocol
+fixture is one real command outcome with raw provenance: argv, stdout, stderr,
+exit status, timestamp, `herdr --version`, and the binary SHA-256.
+
+`0.7.5/` remains only as the historical parser-regression corpus from
+EMB-1244. The current replay Adapter never selects that directory.
 
 `0.8.2/release-authority.json` pins the exact stable generation promoted by
 TUR-844: annotated tag `v0.8.2`, release commit
@@ -11,8 +16,6 @@ TUR-844: annotated tag `v0.8.2`, release commit
 license hashes, and every supported release asset digest. Changed v0.8.2
 protocol evidence is recorded with the official Linux x86_64 asset
 `976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4`.
-Historical 0.7.5 recordings remain parser-regression inputs only; they do not
-prove the current runtime generation.
 
 Mutation policy (enforced by `herdr_fixture_fidelity_test.exs`):
 
@@ -29,23 +32,34 @@ Mutation policy (enforced by `herdr_fixture_fidelity_test.exs`):
   (`HerdrReplayFixture.write_replay_mutation!/4`); those variants exist only
   in a test run's replay directory and are never committed.
 
-Recording method (2026-07-23, macOS, herdr 0.7.5, real Claude Code TUI agents
-in isolated `--session`/private `XDG_CONFIG_HOME` sessions; the operator's
-default server was never touched):
+Current recording method (2026-09-04, Linux x86_64, exact Herdr v0.8.2 release
+asset, isolated `--session`/private `XDG_CONFIG_HOME`; the operator's default
+server was never touched):
 
-- `idle`/`working`/`done` envelopes from live `agent start`/`prompt`/`wait`
-  against a real `claude --model haiku` agent.
-- `blocked` from a real plan-mode approval dialog.
-- `agent_prompt_stalled` and the sub-5000 ms `timeout` counterpart from a
-  claude onboarding selection screen that ignores typed characters.
-- `unknown` witnessed by the recorded `pane split` envelope (agentless shell
-  pane); no live-agent envelope with `unknown` could be elicited.
-- Error envelopes from real missing-agent targets.
+- A controlled foreground Codex/Claude terminal fixture supplies detectable
+  ready, working, idle, done, and blocked screens and reports exact provider
+  session identity through Herdr's native pane-report Interface. It contains
+  no Symphony validation or transport policy.
+- The same foreground fixture captures terminal input bytes to prove Herdr's
+  bracketed-paste plus delayed-Enter ownership without synthesizing a CLI
+  response.
+- A non-reactive foreground process records `agent_prompt_stalled`, the
+  sub-5000 ms `timeout`, and wait-deadline behavior.
+- `unknown` is witnessed by the real `pane split` envelope for an agentless
+  shell pane; missing-agent and pane-busy errors are direct real CLI outcomes.
 
 The obsolete separate `agent send-keys ... enter` recording is removed for
-v0.8.2. Herdr now owns bracketed-paste prompt bytes and the delayed encoded
-Enter. Real v0.8.2 `agent_blocked` and `agent_not_ready` recordings prove the
-new fail-closed boundaries without an extra input path.
+v0.8.2. `prompt-delivery-bytes.json` records the bytes read by a controlled
+foreground provider after two real `agent prompt` calls: each is one
+bracketed-paste payload followed by one encoded LF Enter. Real v0.8.2
+`agent_blocked` and `agent_not_ready` recordings prove the new fail-closed
+boundaries without an extra input path.
+
+The exact `provider-identity-{codex,claude}-{start,prompt,wait}.json`
+recordings deliberately do not parameterize provider kind, provider-session
+source, or provider-session value. Generic replay fixtures may parameterize
+provider kind for deterministic variants, but they are not provider-identity
+proof.
 
 Committed fixtures are CI inputs. Re-recording is a CD-tier operation: run the
 same commands against the pinned real binary and re-wrap with full provenance.

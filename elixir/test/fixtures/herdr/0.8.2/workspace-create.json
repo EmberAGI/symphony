@@ -1,0 +1,22 @@
+{
+  "argv": [
+    "/home/admin/code/symphony-workspaces/TUR-844-symphony/.tur844-tools/herdr",
+    "--session",
+    "tur844record",
+    "workspace",
+    "create",
+    "--cwd",
+    "/tmp/h844record/workspace",
+    "--no-focus"
+  ],
+  "derivation": null,
+  "exit_status": 0,
+  "herdr_binary_sha256": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
+  "herdr_version": "herdr 0.8.2",
+  "name": "workspace-create",
+  "provenance": "recorded",
+  "recorded_at": "2026-09-04T22:26:36Z",
+  "redaction": "parameterized: run-varying agent, provider, workspace, pane, or socket fields use the declared placeholders; semantic fields and command outcome remain verbatim",
+  "stderr": "",
+  "stdout": "{\"id\":\"cli:workspace:create\",\"result\":{\"root_pane\":{\"agent_status\":\"unknown\",\"cwd\":\"{{WORKSPACE_CWD}}\",\"focused\":true,\"foreground_cwd\":\"{{WORKSPACE_CWD}}\",\"pane_id\":\"w1:p1\",\"revision\":0,\"scroll\":{\"max_offset_from_bottom\":0,\"offset_from_bottom\":0,\"viewport_rows\":40},\"tab_id\":\"w1:t1\",\"terminal_id\":\"term_65aafc3005f041\",\"workspace_id\":\"w1\"},\"tab\":{\"agent_status\":\"unknown\",\"focused\":true,\"label\":\"1\",\"number\":1,\"pane_count\":1,\"tab_id\":\"w1:t1\",\"workspace_id\":\"w1\"},\"type\":\"workspace_created\",\"workspace\":{\"active_tab_id\":\"w1:t1\",\"agent_status\":\"unknown\",\"focused\":true,\"label\":\"workspace\",\"number\":1,\"pane_count\":1,\"tab_count\":1,\"workspace_id\":\"w1\"}}}\n"
+}

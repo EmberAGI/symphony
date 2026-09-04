@@ -8,12 +8,12 @@
   ],
   "derivation": null,
   "exit_status": 0,
-  "herdr_binary_sha256": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
-  "herdr_version": "herdr 0.8.2",
+  "herdr_binary_sha256": "37350546b0012555943b92eaf962665de4e264395baeb44227b8015e8ff5b0d6",
+  "herdr_version": "herdr 0.7.5",
   "name": "status-server-running",
   "provenance": "recorded",
-  "recorded_at": "2026-09-01T23:49:14+00:00",
+  "recorded_at": "2026-07-24T01:26:01.025686+00:00",
   "redaction": "parameterized: run-varying fields replaced with {{SOCKET_PATH}} placeholders; envelope otherwise verbatim from the recorded command outcome; argv preserved verbatim. none required: no secret-bearing fields present (verified by scan for username, tokens, keys)",
   "stderr": "",
-  "stdout": "status: running\nversion: 0.8.2\nprotocol: 20\ncompatible: yes\nsocket: {{SOCKET_PATH}}\n"
+  "stdout": "status: running\nversion: 0.7.5\nprotocol: 17\ncompatible: yes\nsocket: {{SOCKET_PATH}}\n"
 }

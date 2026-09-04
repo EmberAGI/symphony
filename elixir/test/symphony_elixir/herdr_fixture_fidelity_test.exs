@@ -15,11 +15,8 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
   @required_provenance_keys ~w(argv stdout stderr exit_status recorded_at herdr_version herdr_binary_sha256 provenance derivation redaction name)
   @declared_placeholders ~w({{AGENT_NAME}} {{AGENT_KIND}} {{SOCKET_PATH}} {{WORKSPACE_CWD}} {{PANE_ID}})
   @known_error_codes ~w(agent_blocked agent_not_found agent_not_ready agent_pane_busy agent_prompt_stalled timeout)
-  @v082_recordings ~w(error-agent-prompt-blocked error-agent-start-not-ready status-server-running version)
-  @recorded_binary_sha256s ~w(
-    37350546b0012555943b92eaf962665de4e264395baeb44227b8015e8ff5b0d6
-    976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4
-  )
+  @v082_binary_sha256 "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4"
+  @v075_binary_sha256 "37350546b0012555943b92eaf962665de4e264395baeb44227b8015e8ff5b0d6"
 
   test "every fixture is a pure recording with complete raw provenance" do
     names = HerdrReplayFixture.fixture_names()
@@ -36,8 +33,8 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
              "#{name} is not a pure recording; synthesized or derived protocol fixtures are forbidden"
 
       assert fixture["derivation"] == nil
-      expected_version = if name in @v082_recordings, do: "herdr 0.8.2", else: "herdr 0.7.5"
-      assert fixture["herdr_version"] == expected_version
+      assert fixture["herdr_version"] == "herdr 0.8.2"
+      assert fixture["herdr_binary_sha256"] == @v082_binary_sha256
       assert fixture["redaction"] != ""
       assert is_list(fixture["argv"]) and fixture["argv"] != []
       assert is_integer(fixture["exit_status"])
@@ -50,8 +47,19 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
       |> Enum.uniq()
       |> Enum.sort()
 
-    assert shas == Enum.sort(@recorded_binary_sha256s),
-           "fixtures did not come from the exact audited Herdr binaries"
+    assert shas == [@v082_binary_sha256],
+           "current fixtures did not come from the exact audited Herdr v0.8.2 binary"
+  end
+
+  test "historical v0.7.5 recordings remain isolated parser-regression inputs" do
+    names = HerdrReplayFixture.legacy_fixture_names()
+    assert names != []
+
+    for name <- names do
+      fixture = HerdrReplayFixture.load_legacy!(name)
+      assert fixture["herdr_version"] == "herdr 0.7.5"
+      assert fixture["herdr_binary_sha256"] == @v075_binary_sha256
+    end
   end
 
   test "every agent status claimed by any fixture is inside the five-state enum" do
@@ -96,6 +104,37 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
     assert HerdrReplayFixture.load!("error-agent-start-not-ready")["herdr_version"] == "herdr 0.8.2"
   end
 
+  test "the real v0.8.2 prompt path owns bracketed paste and exactly one delayed Enter" do
+    fixture = HerdrReplayFixture.load!("prompt-delivery-bytes")
+
+    assert fixture["captured_input_hex"] ==
+             "1b5b3230307e50494e471b5b3230317e0a" <>
+               "1b5b3230307e414741494e1b5b3230317e0a"
+
+    assert fixture["input_provenance"] =~ "foreground provider process"
+    refute fixture["captured_input_hex"] =~ "0a0a"
+  end
+
+  test "exact Codex and Claude recordings preserve prompted-agent provider identity" do
+    for provider <- ["codex", "claude"] do
+      start = recorded_agent!("provider-identity-#{provider}-start")
+      prompted = recorded_agent!("provider-identity-#{provider}-prompt")
+      completed = recorded_agent!("provider-identity-#{provider}-wait")
+
+      assert start["agent"] == provider
+      assert start["name"] == "{{AGENT_NAME}}"
+      refute Map.has_key?(start, "agent_session")
+
+      for observed <- [prompted, completed] do
+        assert observed["agent"] == provider
+        assert observed["name"] == "{{AGENT_NAME}}"
+        assert observed["agent_session"]["agent"] == provider
+        assert observed["agent_session"]["source"] == "herdr:#{provider}"
+        assert observed["agent_session"]["value"] == "#{provider}-session-tur844"
+      end
+    end
+  end
+
   test "release authority pins the exact v0.8.2 generation" do
     authority =
       Path.expand("../fixtures/herdr/0.8.2/release-authority.json", __DIR__)
@@ -103,14 +142,27 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
       |> Jason.decode!()
 
     assert authority["release_commit"] == "9eb521456ac0d19d3ab3d9d7cea3cca10baa8a4c"
+    assert authority["tag"] == "v0.8.2"
+    assert authority["tag_type"] == "annotated"
+    assert authority["tag_peels_to"] == authority["release_commit"]
     assert authority["protocol"] == 20
     assert authority["version"] == "0.8.2"
+    assert authority["source_assertions"] == %{
+             "Cargo.toml.package.version" => "0.8.2",
+             "src/protocol/wire.rs.PROTOCOL_VERSION" => 20
+           }
 
-    assert authority["release_assets"]["herdr-linux-x86_64"] ==
-             "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4"
+    assert authority["source_hashes"] == %{
+             "LICENSE" => "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+             "skills/herdr/SKILL.md" => "237ad2ab2d8123e2bb37956d3a41eed141f2d22a7c36e415b7876c0397679099"
+           }
 
-    assert authority["source_hashes"]["skills/herdr/SKILL.md"] ==
-             "237ad2ab2d8123e2bb37956d3a41eed141f2d22a7c36e415b7876c0397679099"
+    assert authority["release_assets"] == %{
+             "herdr-linux-aarch64" => "f55610658e1c2e0d2aaef730b4b2ab885f7f8ba00285ab372bfb14f2e3d5b40d",
+             "herdr-linux-x86_64" => @v082_binary_sha256,
+             "herdr-macos-aarch64" => "a5d4f4d504d8b309c91f811050559300faba31258425f53c50852fc96f6ae574",
+             "herdr-macos-x86_64" => "ab50262c8190cd7aa9056d249d255c08c328c3e8716de9cfa29db4f131b8e2c1"
+           }
   end
 
   test "fixtures use only the declared run-varying placeholders" do
@@ -155,5 +207,12 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
     # and by the recorded help enum, and its typed handling is exercised via
     # the transport seam.
     assert HerdrReplayFixture.stdout!("pane-split") =~ ~s("agent_status":"unknown")
+  end
+
+  defp recorded_agent!(name) do
+    name
+    |> HerdrReplayFixture.stdout!()
+    |> Jason.decode!()
+    |> get_in(["result", "agent"])
   end
 end

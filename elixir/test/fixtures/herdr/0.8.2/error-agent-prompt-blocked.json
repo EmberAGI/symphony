@@ -26,7 +26,7 @@
   "name": "error-agent-prompt-blocked",
   "provenance": "recorded",
   "recorded_at": "2026-09-01T23:49:48+00:00",
-  "redaction": "parameterized: the run-varying target name tur844blocked was replaced with {{AGENT_NAME}}; semantic error and message are otherwise verbatim",
+  "redaction": "parameterized: the run-varying target name tur844blocked was replaced with {{AGENT_NAME}}; binary path, semantic error, and message are otherwise verbatim",
   "stderr": "{\"error\":{\"code\":\"agent_blocked\",\"message\":\"agent {{AGENT_NAME}} is blocked and requires interactive input\"},\"id\":\"cli:agent:prompt\"}\n",
   "stdout": ""
 }

@@ -512,7 +512,7 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
         context.replay_dir,
         "agent-list",
         "agent-list",
-        &String.replace(&1, "w3:p1", "w9:p1")
+        &String.replace(&1, "w2:p1", "w9:p1")
       )
     end
 

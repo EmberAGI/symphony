@@ -1195,7 +1195,13 @@ redaction/parameterization method. Placeholder substitution is permitted only
 for run-varying identity/path fields, never for statuses, error codes, or other
 semantic fields; a fidelity check fails the suite on any out-of-enum status
 claim, unrecorded error code, missing provenance, or non-recorded fixture. The
-only executable test double behavior is launch/timing physics that cannot be a
+prompt-delivery recording captures the exact bytes read by a foreground
+provider process and must show one bracketed-paste payload followed by exactly
+one encoded Enter for each native prompt. Provider-identity proof uses separate
+Codex and Claude start/prompt/wait recordings whose provider kind, session
+source, and session value are not parameterized; generic provider substitution
+is deterministic variant coverage, not identity evidence. The only executable
+test double behavior is launch/timing physics that cannot be a
 recording (server run loop, provider execution for `agent start`, the 5000 ms
 prompt-effect window), and that behavior is differentially validated against
 the real binary by an opt-in CD-tier fake-vs-real harness that runs identical

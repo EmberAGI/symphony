@@ -712,6 +712,12 @@ defmodule SymphonyElixir.ImplementerDelegation do
       {:ok, orchestrator} ->
         {:ok, orchestrator}
 
+      {:error, {:herdr_agent_not_ready, _agent_name} = reason} ->
+        # Herdr v0.8.2 owns startup readiness. A blocked launch remains a named
+        # run-owned target so the caller can inspect or recover it; tearing the
+        # session down here would erase the evidence carried by this result.
+        {:error, reason}
+
       {:error, reason} ->
         _ = transport.stop_session(herdr_session, transport_context)
         {:error, {:implementer_orchestrator_start_failed, reason}}
