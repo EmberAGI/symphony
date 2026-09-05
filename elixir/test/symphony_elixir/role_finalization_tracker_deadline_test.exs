@@ -144,7 +144,7 @@ defmodule SymphonyElixir.RoleFinalizationTrackerDeadlineTest do
     alias SymphonyElixir.RoleFinalizationTrackerDeadlineTest, as: Proof
 
     def default_server_snapshot(_context),
-      do: {:ok, %{status: "running", version: "0.7.5", protocol: 17, socket: "/tmp/default.sock"}}
+      do: {:ok, %{status: "running", version: "0.8.2", protocol: 20, socket: "/tmp/default.sock"}}
 
     def start_session(spec, _context) do
       {:ok,

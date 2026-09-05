@@ -4,6 +4,10 @@ defmodule SymphonyElixir.ImplementerDelegation.Transport do
 
   The production adapter controls isolated Herdr sessions. Deterministic tests
   use an in-memory adapter and exercise the same lifecycle interface.
+
+  Every successful agent response must name the exact agent requested by the
+  caller. A missing or conflicting name fails before lifecycle success or
+  correlation evidence can be emitted.
   """
 
   @type context :: term()
@@ -24,7 +28,7 @@ defmodule SymphonyElixir.ImplementerDelegation.Transport do
   @doc """
   Submit one verified prompt and observe how it settles.
 
-  The effective prompt wait always exceeds Herdr 0.7.5's 5000 ms prompt-effect
+  The effective prompt wait always exceeds Herdr v0.8.2's 5000 ms prompt-effect
   window (a smaller caller budget is raised to 5001 ms) so an unchanged
   `state_change_seq` is the typed `agent_prompt_stalled` result, never an
   ordinary timeout. A `blocked` settle is the typed blocked outcome, and an
@@ -61,6 +65,7 @@ defmodule SymphonyElixir.ImplementerDelegation.Transport do
               {:ok, [map()]} | {:error, term()}
   @callback worker_assignments(session_ref(), term(), context()) ::
               {:ok, [map()]} | {:error, term()}
+  @callback owned_session_ref(session_ref(), context()) :: map() | nil
   @callback stop_session(session_ref(), context()) :: :ok | {:error, term()}
 
   @optional_callbacks begin_worker_assignment_observation: 3,

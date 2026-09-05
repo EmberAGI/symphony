@@ -4,12 +4,12 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
   alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation, SkillExecutionContract}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Runtime.ProcessOwnership
-  alias SymphonyElixir.TestSupport.HerdrReplayFixture
+  alias SymphonyElixir.TestSupport.{HerdrReplayFixture, HerdrSessionFixture}
 
   defmodule RecordingTransport do
     def default_server_snapshot(%{owner: owner}) do
       send(owner, {:transport, :default_server_snapshot})
-      {:ok, %{status: "running", version: "0.7.5", protocol: 17, socket: "/tmp/operator-default/herdr.sock"}}
+      {:ok, %{status: "running", version: "0.8.2", protocol: 20, socket: "/tmp/operator-default/herdr.sock"}}
     end
 
     def start_session(spec, %{owner: owner}) do
@@ -86,6 +86,34 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     def read_agent(session, agent, opts, %{owner: owner}) do
       send(owner, {:transport, :read_agent, session, agent, opts})
       {:ok, %{text: "IMPLEMENTER_TURN_COMPLETE"}}
+    end
+  end
+
+  defmodule NotReadyTransport do
+    alias SymphonyElixir.ImplementerDelegationTest.RecordingTransport
+
+    defdelegate default_server_snapshot(context), to: RecordingTransport
+    defdelegate start_session(spec, context), to: RecordingTransport
+    defdelegate prepare_worker(session, spec, context), to: RecordingTransport
+    defdelegate stop_session(session, context), to: RecordingTransport
+    defdelegate owned_session_ref(session, context), to: RecordingTransport
+
+    def start_agent(session, spec, %{owner: owner}) do
+      send(owner, {:transport, :start_agent, session, spec})
+      {:error, {:herdr_agent_not_ready, spec.name}}
+    end
+  end
+
+  defmodule WorkerNotReadyTransport do
+    alias SymphonyElixir.ImplementerDelegationTest.RecordingTransport
+
+    defdelegate default_server_snapshot(context), to: RecordingTransport
+    defdelegate start_session(spec, context), to: RecordingTransport
+    defdelegate stop_session(session, context), to: RecordingTransport
+    defdelegate owned_session_ref(session, context), to: RecordingTransport
+
+    def prepare_worker(_session, spec, _context) do
+      {:error, {:herdr_agent_not_ready, spec.name}}
     end
   end
 
@@ -316,6 +344,59 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert orchestrator_spec.argv == claude_argv(contract.orchestrator)
     assert Enum.member?(worker_spec.argv, contract.worker.instructions)
     assert Enum.member?(orchestrator_spec.argv, contract.orchestrator.instructions)
+  end
+
+  test "blocked orchestrator startup preserves the typed target for inspection and recovery" do
+    assert {:error,
+            {:herdr_agent_not_ready,
+             %{
+               agent_name: "implementer_orchestrator",
+               owned_session_ref:
+                 %{
+                   kind: "recording",
+                   session_name: "octo-emb-1141-not-ready",
+                   handoff_settlement: :implementer_turn
+                 } = ownership_ref
+             }}} =
+             ImplementerDelegation.start_session(
+               "/tmp/selected-workspace",
+               contract(:codex),
+               issue_identifier: "EMB-1141",
+               run_id: "not-ready",
+               transport: NotReadyTransport,
+               transport_context: %{owner: self()}
+             )
+
+    assert_receive {:transport, :start_agent, %{name: "octo-emb-1141-not-ready"}, %{name: "implementer_orchestrator"}}
+    refute_receive {:transport, :stop_session, _}
+    assert :ok = AgentRuntime.cleanup_owned_session(ownership_ref)
+    assert_receive {:transport, :cleanup_owned_session, "octo-emb-1141-not-ready"}
+  end
+
+  test "blocked worker startup preserves the typed target for inspection and recovery" do
+    assert {:error,
+            {:herdr_agent_not_ready,
+             %{
+               agent_name: "implementer_worker",
+               owned_session_ref:
+                 %{
+                   kind: "recording",
+                   session_name: "octo-emb-1141-worker-not-ready",
+                   handoff_settlement: :implementer_turn
+                 } = ownership_ref
+             }}} =
+             ImplementerDelegation.start_session(
+               "/tmp/selected-workspace",
+               contract(:codex),
+               issue_identifier: "EMB-1141",
+               run_id: "worker-not-ready",
+               transport: WorkerNotReadyTransport,
+               transport_context: %{owner: self()}
+             )
+
+    refute_receive {:transport, :stop_session, _}
+    assert :ok = AgentRuntime.cleanup_owned_session(ownership_ref)
+    assert_receive {:transport, :cleanup_owned_session, "octo-emb-1141-worker-not-ready"}
   end
 
   test "mixed provider contract launches Claude orchestrator and Codex worker adapters" do
@@ -644,7 +725,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     }
 
     assert {:ok, session} =
-             AgentRuntime.start_session(workspace,
+             HerdrSessionFixture.start_session(workspace,
                issue: issue(),
                role: "implementer",
                run_id: "default-herdr",
@@ -711,7 +792,9 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
                on_message: on_message
              )
 
-    assert turn.response == HerdrReplayFixture.stdout!("agent-read-recent")
+    assert turn.response ==
+             HerdrReplayFixture.stdout!("agent-read-recent")
+             |> String.replace("{{WORKSPACE_CWD}}", workspace)
 
     assert [
              %{
@@ -892,7 +975,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       write_fake_herdr!(herdr_bin)
 
       assert {:ok, session} =
-               AgentRuntime.start_session(workspace,
+               HerdrSessionFixture.start_session(workspace,
                  issue: issue(),
                  role: "implementer",
                  run_id: "native-worker-#{kind}",

@@ -1,9 +1,9 @@
 defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
   @moduledoc """
-  Replay seam for recorded herdr 0.7.5 protocol responses (EMB-1244 AC 4a).
+  Replay seam for recorded Herdr protocol responses (EMB-1244 AC 4a).
 
   Every protocol read performed by the test double replays a response recorded
-  from the real herdr 0.7.5 binary (`test/fixtures/herdr/0.7.5/`). The double
+  from checksum-verified real Herdr binaries (`test/fixtures/herdr/`). The double
   script written by `write_fake_herdr!/2` contains no hand-authored protocol
   JSON: it selects a recorded fixture per command (overridable per scenario via
   `HERDR_REPLAY_*` env), fills the declared run-varying placeholders, and exits
@@ -19,7 +19,8 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
   real binary will not produce on demand.
   """
 
-  @fixtures_dir Path.expand("../fixtures/herdr/0.7.5", __DIR__)
+  @fixtures_dir Path.expand("../fixtures/herdr/0.8.2", __DIR__)
+  @legacy_fixtures_dir Path.expand("../fixtures/herdr/0.7.5", __DIR__)
   @statuses ~w(idle working blocked done unknown)
 
   def fixtures_dir, do: @fixtures_dir
@@ -29,11 +30,27 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
     |> Path.join("*.json")
     |> Path.wildcard()
     |> Enum.map(&Path.basename(&1, ".json"))
+    |> Enum.reject(&(&1 == "release-authority"))
+    |> Enum.sort()
+  end
+
+  def legacy_fixture_names do
+    @legacy_fixtures_dir
+    |> Path.join("*.json")
+    |> Path.wildcard()
+    |> Enum.map(&Path.basename(&1, ".json"))
     |> Enum.sort()
   end
 
   def load!(name) do
     @fixtures_dir
+    |> Path.join(name <> ".json")
+    |> File.read!()
+    |> Jason.decode!()
+  end
+
+  def load_legacy!(name) do
+    @legacy_fixtures_dir
     |> Path.join(name <> ".json")
     |> File.read!()
     |> Jason.decode!()
@@ -63,6 +80,28 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
   end
 
   def known_statuses, do: @statuses
+
+  @doc "Exact JSON envelope shape, retaining every key and value type."
+  def json_shape!(output), do: output |> Jason.decode!() |> shape()
+
+  @doc "AgentStarted shape with only optional terminal-title metadata removed."
+  def agent_started_shape!(output) do
+    output
+    |> Jason.decode!()
+    |> update_in(["result", "agent"], fn
+      agent when is_map(agent) -> Map.drop(agent, ~w(terminal_title terminal_title_stripped))
+      agent -> agent
+    end)
+    |> shape()
+  end
+
+  @doc "Stable prompted-agent identity carried by a protocol envelope."
+  def agent_identity!(output) do
+    output
+    |> Jason.decode!()
+    |> get_in(["result", "agent"])
+    |> Map.take(~w(agent name pane_id agent_session))
+  end
 
   @doc """
   Write a test-local replay variant derived from one recorded fixture.
@@ -105,7 +144,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
   Non-recordable launch physics (EMB-1245, differentially validated): pane
   shells reset to `HERDR_FAKE_LOGIN_PATH` (default `/usr/bin:/bin`) and only
   `pane run` exports persist per pane; `agent start` resolves the kind
-  exec-style from the pane PATH state, prepends the probe-verified 0.7.5
+  exec-style from the pane PATH state, prepends the probe-verified pinned
   injected unattended flag (`--dangerously-skip-permissions` for claude,
   `--yolo` for codex), and executes the wrapper -> projection -> provider
   chain, which writes the per-token acknowledgement/reject markers. The only
@@ -131,11 +170,6 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
   `HERDR_FAKE_POST_PROMPT_SETTLED_TRANSITION` (a successful settled prompt
   receipt followed by one newer settled revision before lifecycle waiting),
   `HERDR_FAKE_PROMPT_STALL_DELAY_SECONDS` (delay before the recorded stall),
-  `HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS` (delayed revision timing
-  after a separate Enter submission),
-  `HERDR_FAKE_MIN_PROMPT_TRANSITION_WAIT_MS` plus
-  `HERDR_FAKE_GET_BEFORE_PROMPT_TRANSITION` (a server-bounded wait and
-  immediate get that both precede that delayed revision), and
   `HERDR_FAKE_STATUS_STALL*`.
   """
   def write_fake_herdr!(path, replay_dir) do
@@ -177,6 +211,9 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
     }
 
     replay_stdout() {
+      if [ -n "${state_root:-}" ] && [ -f "$state_root/workspace-cwd" ]; then
+        IFS= read -r workspace_cwd < "$state_root/workspace-cwd"
+      fi
       sed -e "s|{{AGENT_NAME}}|$agent_name|g" \\
           -e "s|{{AGENT_KIND}}|$agent_kind|g" \\
           -e "s|{{SOCKET_PATH}}|$socket_path|g" \\
@@ -185,7 +222,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
           "$REPLAY/$1.stdout"
     }
 
-    # Reported-identity physics (EMB-1353): herdr 0.7.5 has no native claude
+    # Reported-identity physics (EMB-1353): herdr 0.8.2 has no native claude
     # session derivation — the recorded envelopes carried `agent_session` only
     # because the recording host's claude integration had already reported it
     # over the pane report channel. A claude agent here therefore carries the
@@ -270,6 +307,17 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
 
     if [ "$#" -eq 2 ] && [ "$1" = "server" ] && [ "$2" = "stop" ]; then
       : > "$stopped"
+      # Process scaffolding: acknowledge stop only after the owned loop exits.
+      # Otherwise cleanup can delete the stop marker before the loop sees it.
+      stop_attempts=0
+      while [ -f "$running" ]; do
+        stop_attempts=$((stop_attempts + 1))
+        if [ "$stop_attempts" -ge 200 ]; then
+          printf 'fixture server did not stop\\n' >&2
+          exit 1
+        fi
+        sleep 0.01
+      done
       exit 0
     fi
 
@@ -310,7 +358,9 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
         PATH="$pane_path" sh -c "$*" || exit 1
       else
         HERDR_FAKE_PANE_PATH_FILE="$path_file" PATH="$pane_path" sh -c "$*
-    printf '%s' \\"\\$PATH\\" > \\"\\$HERDR_FAKE_PANE_PATH_FILE\\"" || exit 1
+    path_tmp=\\"\\$HERDR_FAKE_PANE_PATH_FILE.\\$\\$\\"
+    printf '%s' \\"\\$PATH\\" > \\"\\$path_tmp\\"
+    mv -f \\"\\$path_tmp\\" \\"\\$HERDR_FAKE_PANE_PATH_FILE\\"" || exit 1
       fi
       exit 0
     fi
@@ -318,7 +368,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
     # Provider-report physics (EMB-1353): herdr learns an agent's provider
     # session only when an integration reports it against the pane the agent
     # occupies (`pane report-agent-session <PANE_ID> --agent-session-id <ID>
-    # ...`, pane id positional as the real 0.7.5 CLI requires). The reported
+    # ...`, pane id positional as the real 0.8.2 CLI requires). The reported
     # value is stored per agent and projected into every later replayed
     # envelope for that agent. A write acknowledgement is not a protocol read,
     # so no recorded envelope is replayed here.
@@ -361,7 +411,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       mkdir -p "$state_root"
       printf '%s\\n' "$agent_kind" > "$state_root/kind.$agent_name"
       printf '%s\\n' "$pane" > "$state_root/pane.$agent_name"
-      printf '0\\n' > "$state_root/revision.$agent_name"
+      printf '1\\n' > "$state_root/revision.$agent_name"
       printf '1\\n' > "$state_root/state-change-seq.$agent_name"
       recall_revision
 
@@ -387,7 +437,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
       shift
 
-      # launch-chain physics (EMB-1245, probe-verified against real 0.7.5):
+      # launch-chain physics (EMB-1245, probe-verified against real 0.8.2):
       # exec-style kind resolution from the pane PATH state, kind-specific
       # injected unattended flag, process replacement through the wrapper ->
       # projection -> provider chain (which writes the per-token acks/rejects).
@@ -456,6 +506,11 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
         previous_arg=$arg
       done
 
+      if [ "${HERDR_REPLAY_PROMPT:-}" = "error-agent-prompt-blocked" ]; then
+        recall_kind prompt
+        replay error-agent-prompt-blocked
+      fi
+
       if [ -n "${HERDR_FAKE_MIN_PROMPT_TIMEOUT_MS:-}" ] &&
          [ "$prompt_timeout" -lt "$HERDR_FAKE_MIN_PROMPT_TIMEOUT_MS" ]; then
         replay error-agent-prompt-timeout-under-window
@@ -483,7 +538,6 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
         prompt_attempts=$((prompt_attempts + 1))
         printf '%s\\n' "$prompt_attempts" > "$prompt_attempt_file"
         if [ "$prompt_attempts" -le "$HERDR_FAKE_PROMPT_STALL_COUNT" ]; then
-          : > "$state_root/pending-prompt.$agent_name"
           if [ -n "${HERDR_FAKE_PROMPT_STALL_DELAY_SECONDS:-}" ]; then
             sleep "$HERDR_FAKE_PROMPT_STALL_DELAY_SECONDS"
           fi
@@ -506,20 +560,11 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       replay "${HERDR_REPLAY_PROMPT:-agent-prompt-working}"
     fi
 
-    if [ "$1" = "agent" ] && [ "$2" = "send-keys" ]; then
-      agent_name="$3"
-      if [ "$4" = "enter" ] && [ -f "$state_root/pending-prompt.$agent_name" ]; then
-        if [ "${HERDR_FAKE_SEND_KEYS_FAIL:-}" = "1" ]; then
-          printf 'sabotage: agent send-keys refused\\n' >&2
-          exit 70
-        fi
-        : > "$state_root/prompt-enter-sent.$agent_name"
-        replay agent-send-keys-enter
-      fi
-    fi
-
     if [ "$1" = "agent" ] && [ "$2" = "wait" ]; then
       agent_name="$3"
+      if [ -n "${HERDR_FAKE_WAIT_STALL_SECONDS:-}" ]; then
+        sleep "$HERDR_FAKE_WAIT_STALL_SECONDS"
+      fi
       recall_revision
       if [ "${HERDR_FAKE_POST_PROMPT_SETTLED_TRANSITION:-}" = "1" ] &&
          [ -f "$state_root/prompt-received.$agent_name" ] &&
@@ -530,33 +575,6 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
         printf '%s\\n' "$agent_state_change_seq" > "$state_root/state-change-seq.$agent_name"
         : > "$state_root/post-prompt-settled-transition.$agent_name"
       fi
-      if [ -n "${HERDR_FAKE_MIN_PROMPT_TRANSITION_WAIT_MS:-}" ] &&
-         [ -f "$state_root/prompt-enter-sent.$agent_name" ]; then
-        wait_timeout=0
-        previous_arg=
-        for arg in "$@"; do
-          if [ "$previous_arg" = "--timeout" ]; then
-            wait_timeout=$arg
-            break
-          fi
-          previous_arg=$arg
-        done
-        if [ "$wait_timeout" -lt "$HERDR_FAKE_MIN_PROMPT_TRANSITION_WAIT_MS" ]; then
-          replay error-agent-wait-timeout
-        fi
-      fi
-      if [ -n "${HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS:-}" ] &&
-         [ -f "$state_root/prompt-enter-sent.$agent_name" ]; then
-        transition_file="$state_root/delayed-prompt-transition.$agent_name"
-        if [ ! -f "$transition_file" ]; then
-          sleep "$HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS"
-          agent_revision=$((agent_revision + 1))
-          agent_state_change_seq=$((agent_state_change_seq + 1))
-          printf '%s\\n' "$agent_revision" > "$state_root/revision.$agent_name"
-          printf '%s\\n' "$agent_state_change_seq" > "$state_root/state-change-seq.$agent_name"
-          : > "$transition_file"
-        fi
-      fi
       recall_kind wait
       replay "${HERDR_REPLAY_WAIT:-agent-wait-idle}"
     fi
@@ -564,24 +582,6 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
     if [ "$1" = "agent" ] && [ "$2" = "get" ]; then
       agent_name="$3"
       recall_revision
-      if [ "${HERDR_FAKE_GET_BEFORE_PROMPT_TRANSITION:-}" = "1" ] &&
-         [ -f "$state_root/prompt-enter-sent.$agent_name" ] &&
-         [ ! -f "$state_root/delayed-prompt-transition.$agent_name" ]; then
-        recall_kind get
-        replay "${HERDR_REPLAY_GET:-agent-get-idle}"
-      fi
-      if [ -n "${HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS:-}" ] &&
-         [ -f "$state_root/prompt-enter-sent.$agent_name" ]; then
-        transition_file="$state_root/delayed-prompt-transition.$agent_name"
-        if [ ! -f "$transition_file" ]; then
-          sleep "$HERDR_FAKE_DELAYED_PROMPT_TRANSITION_SECONDS"
-          agent_revision=$((agent_revision + 1))
-          agent_state_change_seq=$((agent_state_change_seq + 1))
-          printf '%s\\n' "$agent_revision" > "$state_root/revision.$agent_name"
-          printf '%s\\n' "$agent_state_change_seq" > "$state_root/state-change-seq.$agent_name"
-          : > "$transition_file"
-        fi
-      fi
       recall_kind get
       replay "${HERDR_REPLAY_GET:-agent-get-idle}"
     fi
@@ -592,7 +592,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       # order and only the declared {{AGENT_NAME}}/{{AGENT_KIND}} placeholders
       # are filled, one entry per agent this session actually started.
       #
-      # First-turn physics (0.7.5, visible in the recorded envelopes):
+      # First-turn physics, visible in the recorded envelopes:
       # `agent_session` is the provider session and does not exist until the
       # agent has been prompted — `agent-start` and `agent-get-idle` carry no
       # such field, `agent-prompt-working` does. The recorded `agent list`
@@ -613,12 +613,8 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
             started_name=$(basename "$kind_file")
             started_name=${started_name#kind.}
             IFS= read -r started_kind < "$kind_file"
-            started_revision=0
-            if [ -f "$state_root/revision.$started_name" ]; then
-              IFS= read -r started_revision < "$state_root/revision.$started_name"
-            fi
             started_prompted=0
-            if [ "$started_revision" -gt 0 ]; then
+            if [ -f "$state_root/prompt-received.$started_name" ]; then
               started_prompted=1
             fi
             started_session=-
@@ -696,4 +692,12 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
   defp shell_escape(value) do
     "'" <> String.replace(to_string(value), "'", "'\\''") <> "'"
   end
+
+  defp shape(map) when is_map(map), do: Map.new(map, fn {key, value} -> {key, shape(value)} end)
+  defp shape(list) when is_list(list), do: Enum.map(list, &shape/1)
+  defp shape(value) when is_binary(value), do: :string
+  defp shape(value) when is_integer(value), do: :integer
+  defp shape(value) when is_float(value), do: :float
+  defp shape(value) when is_boolean(value), do: :boolean
+  defp shape(nil), do: nil
 end

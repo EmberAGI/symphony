@@ -14,12 +14,11 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @default_stop_timeout_ms 5_000
   @default_agent_start_timeout_ms 120_000
   # Provider output can precede Herdr's authoritative state/revision update on
-  # a loaded host. Give the one-Enter compatibility recovery the same bounded
-  # grace as the production provider handshake, for both direct turns and the
-  # generated worker assignment/result channel.
+  # a loaded host. Give the post-receipt observation the same bounded grace as
+  # the production provider handshake.
   @prompt_recovery_observation_timeout_ms 60_000
-  @required_version "0.7.5"
-  @required_protocol 17
+  @required_version "0.8.2"
+  @required_protocol 20
   @launch_projection_sentinel "--symphony-launch-projection"
   @default_launch_handshake_timeout_ms 5_000
   # The two agents a run owns: the orchestrator it starts and the one canonical
@@ -37,9 +36,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     :herdr_provider_start_failed
   ]
 
-  # Herdr 0.7.5 live-agent status vocabulary (recorded from `agent wait --help`).
+  # Herdr v0.8.2 live-agent status vocabulary (recorded from `agent wait --help`).
   @herdr_agent_statuses ~w(idle working blocked done unknown)
-  # Herdr 0.7.5 classifies an unchanged state_change_seq within this window as
+  # Herdr v0.8.2 classifies an unchanged state_change_seq within this window as
   # agent_prompt_stalled; a shorter --timeout returns a generic timeout instead.
   @prompt_effect_window_ms 5_000
 
@@ -164,6 +163,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
        |> Map.put(:worker, worker_agent)
        |> Map.put(:worker_pane_id, worker_pane_id)}
     else
+      {:error, {:herdr_agent_not_ready, _agent_name} = reason} -> {:error, reason}
       {:error, reason} -> {:error, {:implementer_worker_launch_failed, reason}}
     end
   end
@@ -235,14 +235,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
              @launch_projection_sentinel,
              projection_path
            ],
-         {:ok, output} <- start_agent_command(context, args, env, runtime_root, launch_token),
+         {:ok, output} <- start_agent_command(context, args, env, runtime_root, launch_token, name),
          :ok <- await_launch_acks(runtime_root, launch_token, context),
          {:ok, payload} <- Jason.decode(output),
          agent when is_map(agent) <- get_in(payload, ["result", "agent"]),
          observed = atomize_known_agent_fields(agent),
+         :ok <- validate_observed_agent_name(observed, name),
          {:ok, _status} <- classify_agent_status(observed.agent_status) do
       {:ok, Map.put(observed, :provider, Map.get(spec, :provider))}
     else
+      {:error, {:herdr_agent_not_ready, _agent_name} = reason} -> {:error, reason}
       {:error, {stage, _details} = reason} when stage in @launch_stage_failures -> {:error, reason}
       {:error, {:incompatible_herdr_runtime, _details} = reason} -> {:error, reason}
       {:error, reason} -> {:error, {:herdr_agent_start_failed, reason}}
@@ -313,6 +315,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp begin_prompt_turn_result({:ok, output}, context, session_name, env, agent, deadline) do
     with {:ok, observed} <- decode_agent_response(output),
+         :ok <- validate_observed_agent_name(observed, agent.name),
          {:ok, phase} <- prompt_outcome(observed, agent.name) do
       observed = preserve_provider(observed, agent)
 
@@ -334,13 +337,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     end
   end
 
-  defp begin_prompt_turn_result({:error, reason}, context, session_name, env, agent, deadline) do
-    if cli_error_code(reason) == "agent_prompt_stalled" do
-      recover_stalled_prompt(context, session_name, env, agent, deadline)
-    else
-      prompt_error(reason, agent.name)
-    end
-  end
+  defp begin_prompt_turn_result({:error, reason}, _context, _session_name, _env, agent, _deadline),
+    do: prompt_error(reason, agent.name)
 
   defp submit_prompt(context, session_name, env, agent_name, prompt, deadline) do
     # The wait must exceed the 5000 ms prompt-effect window so an unchanged
@@ -355,40 +353,13 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     command_before_deadline(context, args, env, deadline)
   end
 
-  defp recover_stalled_prompt(
-         context,
-         session_name,
-         env,
-         %{name: agent_name} = agent,
-         deadline
-       ) do
-    args = ["--session", session_name, "agent", "send-keys", agent_name, "enter"]
-
-    with {:ok, output} <- command_before_deadline(context, args, env, deadline),
-         :ok <- validate_send_keys_response(output) do
-      observe_prompt_transition(context, session_name, env, agent, deadline)
-    else
-      {:error, reason} -> prompt_recovery_send_keys_error(reason, agent_name)
-    end
-  end
-
-  defp validate_send_keys_response(output) do
-    with {:ok, payload} <- Jason.decode(output),
-         "ok" <- get_in(payload, ["result", "type"]) do
-      :ok
-    else
-      _ ->
-        {:error, {:incompatible_herdr_runtime, %{error_code: "invalid_agent_send_keys_response", actual_response: String.trim(output)}}}
-    end
-  end
-
   defp observe_prompt_transition(
          context,
          session_name,
          env,
          %{name: agent_name} = baseline,
          deadline,
-         observation_timeout_ms \\ @prompt_recovery_observation_timeout_ms
+         observation_timeout_ms
        ) do
     remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
 
@@ -414,6 +385,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp prompt_recovery_wait_result(output, baseline) do
     with {:ok, observed} <- decode_agent_response(output),
+         :ok <- validate_observed_agent_name(observed, baseline.name),
          {:ok, _status} <- classify_agent_status(observed.agent_status) do
       prompt_recovery_wait_observation(preserve_provider(observed, baseline))
     else
@@ -504,31 +476,14 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     is_integer(observed_value) and is_integer(baseline_value) and observed_value > baseline_value
   end
 
-  defp prompt_recovery_send_keys_error(:command_timeout, agent_name),
-    do: prompt_recovery_timeout(agent_name)
-
-  defp prompt_recovery_send_keys_error(
-         {:incompatible_herdr_runtime, _details} = reason,
-         _agent_name
-       ),
-       do: {:error, reason}
-
-  defp prompt_recovery_send_keys_error(reason, agent_name) do
-    case cli_error_code(reason) do
-      code when code in ["agent_not_running", "agent_not_found", "agent_name_not_found"] ->
-        {:error, {:herdr_agent_closed, agent_name}}
-
-      _ ->
-        {:error, {:herdr_agent_send_keys_failed, agent_name, reason}}
-    end
-  end
-
   defp prompt_recovery_timeout(agent_name),
     do: {:error, {:herdr_agent_status_timeout, agent_name, ["working", "idle", "done"]}}
 
   @impl true
   def await_agent(%{name: session_name, env: env}, %{name: agent_name} = agent, statuses, timeout_ms, context)
       when is_list(statuses) and statuses != [] and is_integer(timeout_ms) and timeout_ms >= 0 do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
     # The requested settle set must be exactly the upstream default
     # (idle|done|blocked): never re-narrowed below it, never widened with
     # unknown. The set is passed explicitly so the wire request states what
@@ -537,8 +492,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
          args =
            ["--session", session_name, "agent", "wait", agent_name] ++
              until_args(statuses) ++ ["--timeout", to_string(timeout_ms)],
-         {:ok, output} <- command(context, args, env),
+         {:ok, output} <- command_before_deadline(context, args, env, deadline),
          {:ok, observed} <- decode_agent_response(output),
+         :ok <- validate_observed_agent_name(observed, agent_name),
          :ok <- wait_outcome(observed, agent_name) do
       {:ok, preserve_provider(observed, agent)}
     else
@@ -567,6 +523,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     # Decode then classify: an out-of-enum status from a get read stays a
     # typed protocol/version error, never coerced to unknown.
     with {:ok, observed} <- decode_agent_response(output),
+         :ok <- validate_observed_agent_name(observed, agent.name),
          {:ok, _status} <- classify_agent_status(observed.agent_status) do
       {:ok, preserve_provider(observed, agent)}
     end
@@ -594,7 +551,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       else: {:error, {:invalid_herdr_wait_settle_set, statuses}}
   end
 
-  # Classify one observed Herdr 0.7.5 agent status string. The five statuses
+  # Classify one observed Herdr 0.8.2 agent status string. The five statuses
   # are first-class outcomes. Any other string is a typed protocol/version
   # error, never coerced to `unknown`; command failures remain a distinct
   # class handled by the CLI error mapping.
@@ -607,6 +564,18 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         error_code: "unrecognized_agent_status",
         actual_status: status,
         expected_statuses: @herdr_agent_statuses
+      }}}
+  end
+
+  defp validate_observed_agent_name(%{name: expected}, expected) when is_binary(expected), do: :ok
+
+  defp validate_observed_agent_name(observed, expected) do
+    {:error,
+     {:incompatible_herdr_runtime,
+      %{
+        error_code: "agent_identity_mismatch",
+        expected_agent: expected,
+        actual_agent: Map.get(observed, :name)
       }}}
   end
 
@@ -669,6 +638,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp prompt_error(reason, agent_name) do
     case cli_error_code(reason) do
+      "agent_blocked" ->
+        {:error, {:herdr_agent_blocked, agent_name}}
+
       "agent_prompt_stalled" ->
         {:error, {:herdr_agent_prompt_stalled, agent_name}}
 
@@ -685,6 +657,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp wait_error({:incompatible_herdr_runtime, _details} = reason, _agent_name, _statuses),
     do: {:error, reason}
+
+  defp wait_error(:command_timeout, agent_name, statuses),
+    do: {:error, {:herdr_agent_status_timeout, agent_name, statuses}}
 
   defp wait_error(reason, agent_name, statuses) do
     case cli_error_code(reason) do
@@ -912,8 +887,10 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   @impl true
   def stop_session(%{name: name, env: env, server_task: server_task, runtime_root: runtime_root}, context) do
-    stop_result = command(context, ["--session", name, "server", "stop"], env)
-    task_result = await_server_stop(server_task, Map.get(context, :stop_timeout_ms, @default_stop_timeout_ms))
+    timeout_ms = Map.get(context, :stop_timeout_ms, @default_stop_timeout_ms)
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    stop_result = command_before_deadline(context, ["--session", name, "server", "stop"], env, deadline)
+    task_result = await_server_stop(server_task, remaining_ms(deadline))
     File.rm_rf(runtime_root)
 
     case {stop_result, task_result} do
@@ -927,14 +904,16 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   @doc "Return the narrow capability needed to clean up this run-owned server outside its owner task."
   @spec owned_session_ref(map(), map()) :: map()
-  def owned_session_ref(%{name: name, runtime_root: runtime_root}, context)
+  @impl true
+  def owned_session_ref(%{name: name, runtime_root: runtime_root} = session, context)
       when is_binary(name) and is_binary(runtime_root) and is_map(context) do
     %{
       kind: "herdr",
       session_name: name,
       runtime_root: runtime_root,
       cleanup_module: __MODULE__,
-      cleanup_context: Map.take(context, [:herdr_bin, :extra_env, :socket_root, :stop_timeout_ms])
+      cleanup_context: Map.take(context, [:herdr_bin, :extra_env, :socket_root, :stop_timeout_ms]),
+      default_server_before: Map.get(session, :default_server_before)
     }
   end
 
@@ -946,7 +925,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     context = Map.get(ownership_ref, :cleanup_context, %{})
 
     with :ok <- validate_owned_runtime_root(name, runtime_root, context),
-         :ok <- stop_owned_server_if_running(context, name, runtime_root) do
+         :ok <- verify_owned_default_server(context, ownership_ref),
+         :ok <- stop_owned_server_if_running(context, name, runtime_root),
+         :ok <- verify_owned_default_server(context, ownership_ref) do
       File.rm_rf(runtime_root)
       :ok
     end
@@ -975,8 +956,12 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   defp cleanup_started_server(%{name: name, env: env, server_task: server_task, runtime_root: runtime_root}, context) do
-    _ = command(context, ["--session", name, "server", "stop"], env)
-    _ = await_server_stop(server_task, Map.get(context, :stop_timeout_ms, @default_stop_timeout_ms))
+    deadline =
+      System.monotonic_time(:millisecond) +
+        Map.get(context, :stop_timeout_ms, @default_stop_timeout_ms)
+
+    _ = command_before_deadline(context, ["--session", name, "server", "stop"], env, deadline)
+    _ = await_server_stop(server_task, remaining_ms(deadline))
     File.rm_rf(runtime_root)
     :ok
   end
@@ -1220,13 +1205,29 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       else: {:error, :invalid_herdr_owned_runtime_root}
   end
 
+  defp verify_owned_default_server(_context, %{default_server_before: nil}), do: :ok
+
+  defp verify_owned_default_server(context, %{default_server_before: expected}) when is_map(expected) do
+    case default_server_snapshot(context) do
+      {:ok, ^expected} -> :ok
+      {:ok, actual} -> {:error, {:default_herdr_server_changed, %{expected: expected, actual: actual}}}
+      {:error, reason} -> {:error, {:default_herdr_server_check_failed, reason}}
+    end
+  end
+
+  defp verify_owned_default_server(_context, _ownership_ref), do: :ok
+
   defp stop_owned_server_if_running(context, name, runtime_root) do
     env = isolated_env(context, runtime_root)
 
-    case command(context, ["--session", name, "status", "server"], env) do
+    deadline =
+      System.monotonic_time(:millisecond) +
+        Map.get(context, :stop_timeout_ms, @default_stop_timeout_ms)
+
+    case command_before_deadline(context, ["--session", name, "status", "server"], env, deadline) do
       {:ok, output} ->
         case parse_server_status(output) do
-          {:ok, %{status: "running"}} -> stop_owned_server(context, name, env)
+          {:ok, %{status: "running"}} -> stop_owned_server(context, name, env, deadline)
           {:ok, _status} -> :ok
           {:error, reason} -> {:error, {:herdr_owned_session_status_failed, reason}}
         end
@@ -1241,12 +1242,14 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     end
   end
 
-  defp stop_owned_server(context, name, env) do
-    case command(context, ["--session", name, "server", "stop"], env) do
+  defp stop_owned_server(context, name, env, deadline) do
+    case command_before_deadline(context, ["--session", name, "server", "stop"], env, deadline) do
       {:ok, _output} -> :ok
       {:error, reason} -> {:error, {:herdr_owned_session_stop_failed, reason}}
     end
   end
+
+  defp remaining_ms(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 
   defp materialize_worker_launcher(_session, nil, _context), do: {:ok, nil, nil}
 
@@ -1471,7 +1474,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     """
   end
 
-  # Herdr 0.7.5 may prepend one kind-specific unattended-mode flag to the typed
+  # Herdr 0.8.2 may prepend one kind-specific unattended-mode flag to the typed
   # AGENT_ARGs (observed on macOS and absent on Linux). The wrapper strips
   # exactly that flag when present before requiring the exact sentinel
   # invocation.
@@ -1704,12 +1707,12 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
        ),
        do: :ok
 
-  defp start_agent_command(context, args, env, runtime_root, launch_token) do
+  defp start_agent_command(context, args, env, runtime_root, launch_token, agent_name) do
     deadline = System.monotonic_time(:millisecond) + launch_handshake_timeout_ms(context)
-    start_agent_command(context, args, env, runtime_root, launch_token, deadline)
+    start_agent_command(context, args, env, runtime_root, launch_token, agent_name, deadline)
   end
 
-  defp start_agent_command(context, args, env, runtime_root, launch_token, deadline) do
+  defp start_agent_command(context, args, env, runtime_root, launch_token, agent_name, deadline) do
     case command(context, args, env) do
       {:ok, output} ->
         {:ok, output}
@@ -1718,16 +1721,23 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         {:error, reason}
 
       {:error, reason} ->
-        # The pane shell can still be settling from the preparation commands
-        # when start is issued; retry the transient busy state within the
-        # startup window only.
-        if cli_error_code(reason) == "agent_pane_busy" and
-             System.monotonic_time(:millisecond) < deadline do
-          Process.sleep(100)
-          start_agent_command(context, args, env, runtime_root, launch_token, deadline)
-        else
-          {:error, provider_start_failure(runtime_root, launch_token, reason)}
-        end
+        start_agent_failure(context, args, env, runtime_root, launch_token, agent_name, deadline, reason)
+    end
+  end
+
+  defp start_agent_failure(context, args, env, runtime_root, launch_token, agent_name, deadline, reason) do
+    error_code = cli_error_code(reason)
+
+    cond do
+      error_code == "agent_pane_busy" and System.monotonic_time(:millisecond) < deadline ->
+        Process.sleep(100)
+        start_agent_command(context, args, env, runtime_root, launch_token, agent_name, deadline)
+
+      error_code == "agent_not_ready" ->
+        {:error, {:herdr_agent_not_ready, agent_name}}
+
+      true ->
+        {:error, provider_start_failure(runtime_root, launch_token, reason)}
     end
   end
 
@@ -2176,6 +2186,14 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       message=$herdr_prompt_message
       prompt_timeout=#{@prompt_recovery_observation_timeout_ms}
 
+      validate_agent_identity() {
+        observed_agent_name=$(printf '%s' "$1" | sed -n 's/.*"name":"\\([^"]*\\)".*/\\1/p')
+        if [ "$observed_agent_name" != "$agent_name" ]; then
+          printf '{"error":{"code":"agent_identity_mismatch","details":{"expected_agent":"%s","actual_agent":"%s"}}}\n' "$agent_name" "$observed_agent_name" >&2
+          return 1
+        fi
+      }
+
       if [ -n "$herdr_prompt_session" ]; then
         set -- --session "$herdr_prompt_session" agent get "$agent_name"
       else
@@ -2200,6 +2218,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
           ;;
       esac
 
+      validate_agent_identity "$target_before" || exit 1
+
       target_status=$(printf '%s' "$target_before" | sed -n 's/.*"agent_status":"\\([^"]*\\)".*/\\1/p')
 
       case "$target_status" in
@@ -2222,6 +2242,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
           case "$output" in
             '{"id":"cli:agent:prompt","result":{"agent":'*',"type":"agent_prompted"}}')
+              validate_agent_identity "$output" || exit 1
               #{worker_message_recording(role, runtime_root)}
               printf '%s' "$output"
               exit 0
@@ -2256,126 +2277,11 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       set -e
 
       if [ "$status" -eq 0 ]; then
+        validate_agent_identity "$output" || exit 1
         #{worker_message_recording(role, runtime_root)}
         printf '%s' "$output"
         exit 0
       fi
-
-      case "$output" in
-        *'"code":"agent_prompt_stalled"'*)
-          baseline_seq=$(printf '%s' "$output" | sed -n 's/.*state_change_seq remained \\([0-9][0-9]*\\).*/\\1/p')
-          ;;
-        *)
-          printf '%s\n' "$output" >&2
-          exit "$status"
-          ;;
-      esac
-
-      case "$baseline_seq" in
-        ''|*[!0-9]*)
-          printf '%s\n' "$output" >&2
-          exit "$status"
-          ;;
-      esac
-
-      if [ -n "$herdr_prompt_session" ]; then
-        set -- --session "$herdr_prompt_session" agent send-keys "$agent_name" enter
-      else
-        set -- agent send-keys "$agent_name" enter
-      fi
-
-      set +e
-      enter_output=$(#{shell_escape(real_herdr)} "$@" 2>&1)
-      enter_status=$?
-      set -e
-
-      case "$enter_output" in
-        *'"result":{"type":"ok"}'*) ;;
-        *)
-          printf '%s\n' "$enter_output" >&2
-          if [ "$enter_status" -eq 0 ]; then exit 1; else exit "$enter_status"; fi
-          ;;
-      esac
-
-      if [ "$enter_status" -ne 0 ]; then
-        printf '%s\n' "$enter_output" >&2
-        exit "$enter_status"
-      fi
-
-      if [ -n "$herdr_prompt_session" ]; then
-        set -- --session "$herdr_prompt_session" agent wait "$agent_name" --until working --until blocked --timeout #{@prompt_recovery_observation_timeout_ms}
-      else
-        set -- agent wait "$agent_name" --until working --until blocked --timeout #{@prompt_recovery_observation_timeout_ms}
-      fi
-
-      set +e
-      observation=$(#{shell_escape(real_herdr)} "$@" 2>&1)
-      observation_status=$?
-      set -e
-
-      if [ "$observation_status" -eq 0 ]; then
-        case "$observation" in
-          *'"agent_status":"working"'*)
-            #{worker_message_recording(role, runtime_root)}
-            printf '%s' "$observation"
-            exit 0
-            ;;
-          *'"agent_status":"blocked"'*)
-            printf '%s\n' "$observation" >&2
-            exit 1
-            ;;
-          *)
-            printf '%s\n' "$observation" >&2
-            exit 1
-            ;;
-        esac
-      fi
-
-      case "$observation" in
-        *'"code":"timeout"'*) ;;
-        *)
-          printf '%s\n' "$observation" >&2
-          exit "$observation_status"
-          ;;
-      esac
-
-      if [ -n "$herdr_prompt_session" ]; then
-        set -- --session "$herdr_prompt_session" agent get "$agent_name"
-      else
-        set -- agent get "$agent_name"
-      fi
-
-      set +e
-      observation=$(#{shell_escape(real_herdr)} "$@" 2>&1)
-      observation_status=$?
-      set -e
-
-      if [ "$observation_status" -ne 0 ]; then
-        printf '%s\n' "$observation" >&2
-        exit "$observation_status"
-      fi
-
-      observed_status=$(printf '%s' "$observation" | sed -n 's/.*"agent_status":"\\([^"]*\\)".*/\\1/p')
-      observed_seq=$(printf '%s' "$observation" | sed -n 's/.*"state_change_seq":\\([0-9][0-9]*\\).*/\\1/p')
-
-      case "$observed_status" in
-        working)
-          #{worker_message_recording(role, runtime_root)}
-          printf '%s' "$observation"
-          exit 0
-          ;;
-        idle|done)
-          if [ -n "$observed_seq" ] && [ "$observed_seq" -gt "$baseline_seq" ]; then
-            #{worker_message_recording(role, runtime_root)}
-            printf '%s' "$observation"
-            exit 0
-          fi
-          ;;
-        blocked|unknown)
-          printf '%s\n' "$observation" >&2
-          exit 1
-          ;;
-      esac
 
       printf '%s\n' "$output" >&2
       exit "$status"
@@ -2755,7 +2661,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   defp run_owned_agent_name(%{name: name}) when is_binary(name) and name != "", do: name
   defp run_owned_agent_name(_agent), do: nil
 
-  # Identity is the pair Herdr 0.7.5 reports for every listed agent: the name
+  # Identity is the pair Herdr 0.8.2 reports for every listed agent: the name
   # it answers to and the pane it occupies. `agent_session` is deliberately not
   # part of it — the provider session does not exist until the agent has been
   # prompted, so binding identity to it would fail every first turn closed. An
@@ -3004,6 +2910,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       agent_status: Map.get(agent, "agent_status"),
       agent: Map.get(agent, "agent"),
       agent_session: Map.get(agent, "agent_session"),
+      interactive_ready: Map.get(agent, "interactive_ready", false),
+      launch_pending: Map.get(agent, "launch_pending", false),
       revision: Map.get(agent, "revision"),
       state_change_seq: Map.get(agent, "state_change_seq")
     }

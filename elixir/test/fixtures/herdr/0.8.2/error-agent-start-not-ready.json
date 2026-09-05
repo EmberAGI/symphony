@@ -1,0 +1,28 @@
+{
+  "argv": [
+    "/tmp/tur844-herdr-audit.zXdUCl/assets/herdr-linux-x86_64",
+    "--session",
+    "tur844probe",
+    "agent",
+    "start",
+    "tur844blockedstart2",
+    "--kind",
+    "claude",
+    "--pane",
+    "w5:p1",
+    "--timeout",
+    "5000",
+    "--",
+    "claude"
+  ],
+  "derivation": null,
+  "exit_status": 1,
+  "herdr_binary_sha256": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
+  "herdr_version": "herdr 0.8.2",
+  "name": "error-agent-start-not-ready",
+  "provenance": "recorded",
+  "recorded_at": "2026-09-01T23:54:07+00:00",
+  "redaction": "parameterized: run-varying target tur844blockedstart2 was replaced with {{AGENT_NAME}}; binary path, error code, and message are otherwise verbatim",
+  "stderr": "{\"error\":{\"code\":\"agent_not_ready\",\"message\":\"agent {{AGENT_NAME}} is blocked during startup and is not ready for prompts\"},\"id\":\"cli:agent:start\"}\n",
+  "stdout": ""
+}

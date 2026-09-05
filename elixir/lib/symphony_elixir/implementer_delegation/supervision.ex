@@ -32,7 +32,7 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
   @spec default_status_read_timeout_ms() :: pos_integer()
   def default_status_read_timeout_ms, do: @default_status_read_timeout_ms
 
-  # Herdr 0.7.5's prompt-effect window: a same-revision idle/done read inside
+  # Herdr v0.8.2's prompt-effect window: a same-revision idle/done read inside
   # this window after submission is transitional, not completion.
   @default_settle_window_ms 5_000
 

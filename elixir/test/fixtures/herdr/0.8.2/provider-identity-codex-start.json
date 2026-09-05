@@ -1,0 +1,27 @@
+{
+  "argv": [
+    "/home/admin/code/symphony-workspaces/TUR-844-symphony/.tur844-tools/herdr-v0.8.2-bin",
+    "--session",
+    "tur844rec2",
+    "agent",
+    "start",
+    "codexagent",
+    "--kind",
+    "codex",
+    "--pane",
+    "w2:p1",
+    "--timeout",
+    "10000",
+    "--"
+  ],
+  "derivation": null,
+  "exit_status": 0,
+  "herdr_binary_sha256": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
+  "herdr_version": "herdr 0.8.2",
+  "name": "provider-identity-codex-start",
+  "provenance": "recorded",
+  "recorded_at": "2026-09-05T01:30:59Z",
+  "redaction": "parameterized: the run-varying agent name, workspace, and pane in stdout use declared placeholders; argv, provider identity, command outcome, and provider session remain verbatim",
+  "stderr": "",
+  "stdout": "{\"id\":\"cli:agent:start\",\"result\":{\"agent\":{\"agent\":\"codex\",\"agent_session\":{\"agent\":\"codex\",\"kind\":\"id\",\"source\":\"herdr:codex\",\"value\":\"codex-session-tur844\"},\"agent_status\":\"idle\",\"cwd\":\"{{WORKSPACE_CWD}}\",\"focused\":true,\"foreground_cwd\":\"{{WORKSPACE_CWD}}\",\"interactive_ready\":true,\"name\":\"{{AGENT_NAME}}\",\"pane_id\":\"{{PANE_ID}}\",\"revision\":2,\"state_change_seq\":1,\"tab_id\":\"w2:t1\",\"terminal_id\":\"term_65ab2541857f52\",\"terminal_title\":\"Codex\",\"terminal_title_stripped\":\"Codex\",\"workspace_id\":\"w2\"},\"argv\":[\"codex\"],\"type\":\"agent_started\"}}\n"
+}

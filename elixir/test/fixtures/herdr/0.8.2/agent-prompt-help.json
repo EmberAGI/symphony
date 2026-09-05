@@ -1,0 +1,18 @@
+{
+  "argv": [
+    "/home/admin/code/symphony-workspaces/TUR-844-symphony/.tur844-tools/herdr",
+    "agent",
+    "prompt",
+    "--help"
+  ],
+  "derivation": null,
+  "exit_status": 0,
+  "herdr_binary_sha256": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
+  "herdr_version": "herdr 0.8.2",
+  "name": "agent-prompt-help",
+  "provenance": "recorded",
+  "recorded_at": "2026-09-04T22:26:36Z",
+  "redaction": "parameterized: run-varying agent, provider, workspace, pane, or socket fields use the declared placeholders; semantic fields and command outcome remain verbatim",
+  "stderr": "",
+  "stdout": "Submit a prompt to an agent\n\nUsage: herdr agent prompt <TARGET> <TEXT> [OPTIONS]\n\nArguments:\n  <TARGET>\n          \n\n  <TEXT>\n          \n\nOptions:\n      --wait\n          Wait for the first matching state observed after submission\n\n      --until <STATUS>\n          State to match after --wait; repeat for more than one state\n          \n          [possible values: idle, working, blocked, done, unknown]\n\n      --timeout <MS>\n          Fail after this many milliseconds\n\nIf the agent is already blocked, submission is rejected with agent_blocked before any input is sent. When an accepted submission starts from another non-working state, --wait first requires an observed state change within 5000ms; otherwise it returns agent_prompt_stalled. A shorter --timeout returns timeout instead. It then matches idle, done, or blocked by default, or any exact --until state. It does not track turns: if the agent is already working, that active turn's completion may match. Without --timeout, the settled-state wait is indefinite.\n\n"
+}

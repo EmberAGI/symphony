@@ -1,0 +1,24 @@
+{
+  "argv": [
+    "/home/admin/code/symphony-workspaces/TUR-844-symphony/.tur844-tools/herdr",
+    "--session",
+    "tur844record",
+    "agent",
+    "read",
+    "probeagent",
+    "--source",
+    "recent-unwrapped",
+    "--lines",
+    "40"
+  ],
+  "derivation": null,
+  "exit_status": 0,
+  "herdr_binary_sha256": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
+  "herdr_version": "herdr 0.8.2",
+  "name": "agent-read-recent",
+  "provenance": "recorded",
+  "recorded_at": "2026-09-04T22:26:36Z",
+  "redaction": "parameterized: run-varying agent, provider, workspace, pane, or socket fields use the declared placeholders; semantic fields and command outcome remain verbatim",
+  "stderr": "",
+  "stdout": "To run a command as administrator (user \"root\"), use \"sudo <command>\".\nSee \"man sudo_root\" for details.\n\nadmin@ubuntu-s-2vcpu-4gb-nyc1:{{WORKSPACE_CWD}}$ export PATH=/tmp/h844record/codex-bin:/usr/bin:/bin PROBE_PROVIDER=codex PROBE_TITLE=Codex PROVIDER_TITLE=Codex PROBE_PROVIDER_SESSION=codex-session-tur844 PROBE_CAPTURE=/tmp/h844record/prompt-input.bin\nadmin@ubuntu-s-2vcpu-4gb-nyc1:{{WORKSPACE_CWD}}$ codex\n› ^[[200~PING^[[201~\n\nWorking"
+}

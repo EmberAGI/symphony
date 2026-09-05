@@ -673,7 +673,7 @@ matrix. Invalid or ambiguous Codex labels fail closed. Claude keeps its
 documented invalid-label fallback, now to the universally moderate default.
 
 For Implementer, Symphony resolves one exact orchestrator/worker contract and
-starts a new isolated named Herdr 0.7.5/protocol 17 session containing one
+starts a new isolated named Herdr v0.8.2/protocol 20 session containing one
 deterministically prestarted `implementer_worker` and the orchestrator, with
 their independently resolved participant provider bindings. The compatibility
 worker launcher remains available for an orchestrator profile that explicitly
@@ -705,7 +705,7 @@ exec-style `PATH` lookup: pane shells reset to a login `PATH` (session `--env`
 does not survive into panes), only `pane run` exports persist there, and Herdr
 may prepend one kind-specific unattended-mode flag to the typed agent
 arguments (`--dangerously-skip-permissions` for `claude`, `--yolo` for
-`codex`; observed on macOS and absent on Linux with Herdr 0.7.5). Before every
+`codex`; retained as diagnostic evidence rather than runtime authority). Before every
 `agent start` — orchestrator
 and worker alike — the launching side therefore prepares the target pane with a
 `pane run` export placing the session `orchestrator-bin` first on the pane
@@ -765,7 +765,14 @@ concurrent worker launches cannot share or clear each other's launch state;
 its shell exit codes are stage-specific diagnostics surfaced to the
 orchestrator's pane, while typed launch outcomes remain the transport's
 Elixir results.
-Orchestrator and worker startup share a 120-second cold-start budget. Before
+Orchestrator and worker startup share a 120-second cold-start budget. Herdr
+v0.8.2 `agent start` owns the bounded interactive-readiness wait. A blocked
+orchestrator or prestarted worker returns typed `agent_not_ready`; Symphony preserves the named target
+for bounded inspection and recovery and never reports it as readiness or
+provider-session success. The typed result carries the same narrow run-owned
+cleanup capability used after successful startup, and the default Agent Runner
+registers that capability before failure settlement, so the preserved target
+is externally inspectable and cleanable rather than unreachable. Before
 Claude profile instructions are written to the projection, CRLF and CR
 normalize to LF, LF becomes the Unicode line separator U+2028, and each tab
 becomes four spaces. This preserves multiline semantics without terminal
@@ -796,7 +803,7 @@ snapshot is unchanged.
 
 Herdr owns terminal input, bracketed-paste handling, provider keyboard protocol,
 prompt acknowledgement, and lifecycle waiting behind its native live-agent
-Interface. Herdr 0.7.5's agent status vocabulary is exactly `idle`, `working`,
+Interface. Herdr v0.8.2's agent status vocabulary is exactly `idle`, `working`,
 `blocked`, `done`, and `unknown`, and every Symphony status read types all five
 as first-class outcomes. `working` starts a turn; `idle` and `done` complete
 one. `blocked` (a recognized approval/question UI) settles a prompt or wait but
@@ -817,15 +824,15 @@ below the upstream default and never includes `unknown`. Bounded lifecycle
 observation with `agent wait` requests exactly the upstream default settle set
 (`idle`, `done`, `blocked`), stated explicitly on the wire and rejected typed
 if a caller asks for anything narrower or wider. The submission wait must
-exceed Herdr 0.7.5's 5000 ms prompt-effect window so an unchanged
+exceed Herdr v0.8.2's 5000 ms prompt-effect window so an unchanged
 `state_change_seq` is classified as the typed `agent_prompt_stalled` result
 rather than an ordinary timeout; the transport deliberately raises any smaller
 caller budget to a 5001 ms floor. That effective budget is derived once for
-`begin_turn/5`; prompt submission, compatibility recovery, and lifecycle
-observation never restart it. On the first typed stall, the transport sends
-exactly one logical Enter through Herdr's agent-scoped `agent send-keys`
-Interface, then gives Herdr up to 60 seconds, capped by the remaining caller
-deadline, to expose the authoritative state/revision transition. `working`
+`begin_turn/5`; prompt submission and lifecycle observation never restart it.
+Herdr v0.8.2 owns bracketed-paste encoding and the delayed encoded Enter, so
+Symphony never sends a compatibility Enter, retries semantic prompt text, or
+submits blank input. A typed `agent_blocked` prompt failure maps directly to
+the named blocked outcome and sends no semantic text or Enter. `working`
 proves turn start. A successful settled prompt receipt becomes the post-submit
 observation baseline, including its Herdr revision, `state_change_seq`, and
 provider-session identity when present; the older pre-submit launch snapshot
@@ -839,7 +846,7 @@ Same-revision settled status never proves delivery. Provider transcript output
 is diagnostic evidence only and never substitutes for this observation.
 
 The generated orchestrator/worker prompt projections apply the same causal
-Herdr 0.7.5 compatibility recovery to assignments and results. Before
+Herdr v0.8.2 submission contract to assignments and results. Before
 submission, the generated projection reads the named target through native
 `agent get`; a failed or malformed native read fails without semantic
 submission or correlation. When that target is already `working`, it submits the exact
@@ -850,15 +857,12 @@ correlation record; a missing, malformed, or failed acknowledgement writes
 none. This already-working path sends no Enter and does not infer delivery from
 transcript output, later status, or timeout. A preflight `blocked` or `unknown`
 status fails without semantic submission or correlation. For `idle` and `done`
-targets, the native prompt retains its 60-second waited lifecycle contract. A
-typed prompt stall permits one internal agent-scoped Enter followed by one 60-second
-server-bounded `working|blocked` observation and at most one final `agent get`
-for a fast-settled newer revision. An ordinary timeout remains a failure and
-writes no correlation record. Generated projections never submit a blank or
-replayed prompt. Caller-supplied semantic `agent send-keys` and all pane-key
-input stay denied; the Enter is available only inside Adapter-owned recovery.
-Remove this compatibility path when the pinned stable Herdr release contains
-upstream commit
+targets, the native prompt retains its 60-second waited lifecycle contract.
+A typed prompt stall or timeout remains a failure and writes no correlation
+record. Generated projections never submit a blank or replayed prompt.
+Caller-supplied semantic `agent send-keys` and all pane-key input stay denied.
+The obsolete Herdr 0.7.5 one-Enter compatibility path is deleted because the
+pinned release contains upstream commit
 `bb29eedb7209a0d5e91052458ce76bc7e4259d18`.
 
 The orchestrator's machine-readable assignment message is
@@ -967,7 +971,7 @@ bounded cadence: a 30-second observation interval, a 60-second per-read
 timeout capped by the remaining hard turn budget, and 0 ms jitter
 (deterministic cadence; no randomization surface). A
 `blocked` status must therefore surface within one observation interval plus
-one read timeout. All five Herdr 0.7.5 statuses (`idle`, `working`,
+one read timeout. All five Herdr v0.8.2 statuses (`idle`, `working`,
 `blocked`, `done`, `unknown`) are first-class typed observations; an
 out-of-enum status is a typed protocol error, never coerced to `unknown` and
 never retried.
@@ -1007,6 +1011,9 @@ leave the owned-session reference recoverable. A successful checkpoint
 permits bounded shutdown. The runner and monitored-task boundary both consume
 the same idempotent owned-session cleanup capability so success, failure,
 cancellation, timeout, and abrupt task exit converge on bounded teardown.
+External cleanup uses the same deadline-bounded native command path and verifies
+the default Herdr server snapshot before and after stopping the exact named
+run-owned session.
 The Implementer runner must publish that cleanup capability to the registered
 top-level orchestrator and receive its acknowledgement before sending the first
 provider prompt. A missing acknowledgement is a typed failed run and the
@@ -1149,24 +1156,23 @@ emits.
 Completed terminal output is consumed from native `agent read` text; Symphony
 does not expect a JSON response envelope from that command.
 
-Native prompt-stall compatibility recovery never makes the failure ordinarily
-retryable. A failed Enter is a typed transport failure; unchanged lifecycle
+Native prompt-stall failure never makes the failure ordinarily retryable.
+Unchanged lifecycle
 evidence expires as a bounded status-timeout result; and a prompt or wait whose
 named live agent has closed remains a typed closed-agent failure. Protocol
 mismatch remains a machine-readable incompatible-runtime failure. Symphony
 does not retain the 0.7.4 `pane run` prompt-submission,
 manual confirmation, revision-acknowledgement choreography, top-level wait,
 provider-specific multiline handling, translation, dual-version, or
-other legacy compatibility machinery. The temporary Herdr 0.7.5 one-Enter
-path above is the sole exception until the pinned stable release contains the
-named upstream fix. `pane run` survives only as the launch PATH preparation
+other legacy compatibility machinery. The Herdr 0.7.5 one-Enter path is
+deleted. `pane run` survives only as the launch PATH preparation
 and preflight primitive described above, and read-only observation of the
 reported agent `revision` (for example the prompt-transition settle guard) is
 not acknowledgement choreography and remains permitted.
 
 Inter-agent messaging uses the same `agent prompt` command for Codex and Claude.
 The runtime-owned orchestrator and restricted worker projections add the same
-verified-submission wait and one-Enter prompt-stall compatibility recovery
+verified-submission wait
 before forwarding to the native Herdr Interface. The restricted worker
 projection permits only agent
 list/get/read, prompt, and wait operations; it denies caller-supplied agent
@@ -1175,7 +1181,7 @@ control, and descendant delegation.
 
 Managed isolated sessions write private Herdr update configuration with both
 version and remote manifest background checks disabled. This prevents a
-30-minute update check from changing or perturbing the pinned 0.7.5/protocol-17
+30-minute update check from changing or perturbing the pinned v0.8.2/protocol-20
 runtime contract during a role session.
 
 The Codex launcher uses unattended workspace-write/no-approval mode, disables
@@ -1187,19 +1193,36 @@ defense in depth rather than a complete process sandbox; one-generation
 delegation remains a profile invariant backed by evals.
 
 Herdr protocol test evidence is recorded, not authored (EMB-1244 Stage 1).
-Every protocol read in the deterministic suite replays a response recorded from
-the real herdr 0.7.5 binary, committed with raw provenance: argv, stdout,
+Every changed v0.8.2 protocol read in the deterministic suite replays a
+response recorded from the official checksum-verified Herdr v0.8.2 binary,
+committed with raw provenance: argv, stdout,
 stderr, exit status, timestamp, binary version and SHA-256, and the declared
 redaction/parameterization method. Placeholder substitution is permitted only
 for run-varying identity/path fields, never for statuses, error codes, or other
 semantic fields; a fidelity check fails the suite on any out-of-enum status
 claim, unrecorded error code, missing provenance, or non-recorded fixture. The
-only executable test double behavior is launch/timing physics that cannot be a
+prompt-delivery recording captures the exact bytes read by a foreground
+provider process and must show one bracketed-paste payload followed by exactly
+one encoded Enter for each native prompt. Provider-identity proof uses separate
+Codex and Claude start/prompt/wait recordings whose provider kind, session
+source, and session value are not parameterized; generic provider substitution
+is deterministic variant coverage, not identity evidence. The only executable
+test double behavior is launch/timing physics that cannot be a
 recording (server run loop, provider execution for `agent start`, the 5000 ms
 prompt-effect window), and that behavior is differentially validated against
 the real binary by an opt-in CD-tier fake-vs-real harness that runs identical
-operations against both and fails on divergence. Recording is a CD-tier
-operation; committed fixtures are CI inputs.
+operations against both and fails on divergence. For `AgentStarted`, the
+harness removes only the optional, environment-dependent `terminal_title` and
+`terminal_title_stripped` presentation fields before comparing envelope shape,
+then separately compares exact agent kind, name, pane, and provider-session
+identity. Every other envelope field remains in the shape comparison.
+Recording is a CD-tier operation; committed fixtures are CI inputs. The only upstream authority is
+the annotated `v0.8.2` tag peeled to
+`9eb521456ac0d19d3ab3d9d7cea3cca10baa8a4c`: `Cargo.toml` is version `0.8.2`,
+`src/protocol/wire.rs` is protocol `20`, and fixture provenance pins the
+official release asset digests plus the official skill and license hashes.
+Unchanged v0.7.5 recordings remain only as historical parser-regression inputs;
+they are not accepted as current runtime-generation or changed-protocol proof.
 
 Symphony observes Herdr identity/status and emits its existing normalized
 top-level runtime events. Runtime contract tests prove that resolved profiles

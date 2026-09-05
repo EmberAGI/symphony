@@ -32,7 +32,7 @@ defmodule SymphonyElixir.ImplementerWorkerAssignmentTest do
   # assignment contract alone.
   defmodule AssignmentTransport do
     def default_server_snapshot(_context),
-      do: {:ok, %{status: "running", version: "0.7.5", protocol: 17, socket: "/tmp/default.sock"}}
+      do: {:ok, %{status: "running", version: "0.8.2", protocol: 20, socket: "/tmp/default.sock"}}
 
     def start_session(spec, _context) do
       {:ok,

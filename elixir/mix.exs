@@ -32,6 +32,8 @@ defmodule SymphonyElixir.MixProject do
         "test/support/snapshot_support.exs",
         "test/support/claude_shim_fixture.exs",
         "test/support/herdr_replay_fixture.exs",
+        "test/support/herdr_session_fixture.exs",
+        "test/support/herdr_session_teardown_probe.exs",
         "test/support/test_support.exs",
         "test/support/agent_profile_fixture.exs",
         "test/support/non_live_linear_client.exs",

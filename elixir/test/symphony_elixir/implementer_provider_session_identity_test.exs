@@ -10,7 +10,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
   provider-session receipt window never carried `agent_session`, so the run
   failed closed as `implementer_provider_session_missing`.
 
-  Herdr 0.7.5 has no native Claude session derivation: `agent_session` exists
+  Herdr 0.8.2 has no native Claude session derivation: `agent_session` exists
   only after the Claude Code integration hook reports the provider's own
   session id over the pane report channel. Symphony owns the entire Claude
   launch (wrapper, projection, argv) yet neither provisions nor verifies that
@@ -31,7 +31,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
   alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation}
   alias SymphonyElixir.ImplementerDelegation.HerdrTransport
   alias SymphonyElixir.Linear.Issue
-  alias SymphonyElixir.TestSupport.HerdrReplayFixture
+  alias SymphonyElixir.TestSupport.{HerdrReplayFixture, HerdrSessionFixture}
 
   @correlation_event "Implementer worker result correlated"
   @no_delegation_event "Implementer worker result correlation not required"
@@ -90,7 +90,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
     @moduledoc false
 
     def default_server_snapshot(_context),
-      do: {:ok, %{status: "running", version: "0.7.5", protocol: 17, socket: "/tmp/default.sock"}}
+      do: {:ok, %{status: "running", version: "0.8.2", protocol: 20, socket: "/tmp/default.sock"}}
 
     def start_session(spec, _context),
       do:
@@ -552,7 +552,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
 
   defp start_implementer_session(context, run_id, extra_env) do
     assert {:ok, session} =
-             AgentRuntime.start_session(context.workspace,
+             HerdrSessionFixture.start_session(context.workspace,
                issue: issue(),
                role: "implementer",
                run_id: run_id,
