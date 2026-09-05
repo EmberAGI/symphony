@@ -153,6 +153,18 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
     end
   end
 
+  test "every structured response envelope matches its recorded operation argv" do
+    for name <- HerdrReplayFixture.fixture_names() do
+      fixture = HerdrReplayFixture.load!(name)
+
+      with {:ok, envelope} <- recorded_envelope(fixture),
+           "cli:" <> _operation <- envelope["id"] do
+        assert envelope["id"] == expected_envelope_id!(fixture["argv"]),
+               "#{name} relabels #{inspect(fixture["argv"])} as #{inspect(envelope["id"])}"
+      end
+    end
+  end
+
   test "an already-blocked prompt records unchanged foreground-provider input" do
     fixture = HerdrReplayFixture.load!("error-agent-prompt-blocked")
 
@@ -243,5 +255,26 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
     |> HerdrReplayFixture.stdout!()
     |> Jason.decode!()
     |> get_in(["result", "agent"])
+  end
+
+  defp recorded_envelope(fixture) do
+    [fixture["stdout"], fixture["stderr"]]
+    |> Enum.find(&String.starts_with?(&1, "{"))
+    |> case do
+      nil -> :not_structured
+      json -> Jason.decode(json)
+    end
+  end
+
+  defp expected_envelope_id!(argv) do
+    for group <- ~w(agent pane workspace),
+        group_index = Enum.find_index(argv, &(&1 == group)),
+        is_integer(group_index),
+        operation = Enum.at(argv, group_index + 1),
+        is_binary(operation),
+        reduce: nil do
+      nil -> "cli:#{group}:#{operation}"
+      _duplicate -> flunk("recorded argv contains multiple protocol operation groups: #{inspect(argv)}")
+    end || flunk("structured recording has no protocol operation argv: #{inspect(argv)}")
   end
 end
