@@ -31,7 +31,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
   alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation}
   alias SymphonyElixir.ImplementerDelegation.HerdrTransport
   alias SymphonyElixir.Linear.Issue
-  alias SymphonyElixir.TestSupport.HerdrReplayFixture
+  alias SymphonyElixir.TestSupport.{HerdrReplayFixture, HerdrSessionFixture}
 
   @correlation_event "Implementer worker result correlated"
   @no_delegation_event "Implementer worker result correlation not required"
@@ -552,7 +552,7 @@ defmodule SymphonyElixir.ImplementerProviderSessionIdentityTest do
 
   defp start_implementer_session(context, run_id, extra_env) do
     assert {:ok, session} =
-             AgentRuntime.start_session(context.workspace,
+             HerdrSessionFixture.start_session(context.workspace,
                issue: issue(),
                role: "implementer",
                run_id: run_id,

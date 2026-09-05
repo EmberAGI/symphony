@@ -277,6 +277,15 @@ with explicit intervals. A test that drives dispatch through retry timers
 seeds its tracker issues only after its own orchestrator's startup poll has
 completed against an empty tracker.
 
+Tests that create real Adapter sessions register their run-owned cleanup
+capability immediately after successful creation, before an assertion can
+interrupt normal stop. ExUnit `on_exit` runs outside the creator task and uses
+`AgentRuntime.cleanup_owned_session/1` with the captured `owned_session_ref/1`;
+in-test completion uses `AgentRuntime.stop_session/1`. Session cleanup must
+finish before fixture/runtime directories are removed and remain safe after
+an earlier explicit stop. A deliberately failing bounded child test proves
+process exit and artifact cleanup while an unrelated sentinel remains alive.
+
 When EMB-1180 changes a large test or validation file, the affected behavior
 MUST be moved progressively into focused ExUnit modules organized by the
 production Interface being proved. Restoring this Symphony gate does not own

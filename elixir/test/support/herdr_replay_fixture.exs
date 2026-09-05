@@ -189,6 +189,9 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
     }
 
     replay_stdout() {
+      if [ -n "${state_root:-}" ] && [ -f "$state_root/workspace-cwd" ]; then
+        IFS= read -r workspace_cwd < "$state_root/workspace-cwd"
+      fi
       sed -e "s|{{AGENT_NAME}}|$agent_name|g" \\
           -e "s|{{AGENT_KIND}}|$agent_kind|g" \\
           -e "s|{{SOCKET_PATH}}|$socket_path|g" \\
@@ -282,6 +285,17 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
 
     if [ "$#" -eq 2 ] && [ "$1" = "server" ] && [ "$2" = "stop" ]; then
       : > "$stopped"
+      # Process scaffolding: acknowledge stop only after the owned loop exits.
+      # Otherwise cleanup can delete the stop marker before the loop sees it.
+      stop_attempts=0
+      while [ -f "$running" ]; do
+        stop_attempts=$((stop_attempts + 1))
+        if [ "$stop_attempts" -ge 200 ]; then
+          printf 'fixture server did not stop\\n' >&2
+          exit 1
+        fi
+        sleep 0.01
+      done
       exit 0
     fi
 
@@ -375,7 +389,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
       mkdir -p "$state_root"
       printf '%s\\n' "$agent_kind" > "$state_root/kind.$agent_name"
       printf '%s\\n' "$pane" > "$state_root/pane.$agent_name"
-      printf '0\\n' > "$state_root/revision.$agent_name"
+      printf '1\\n' > "$state_root/revision.$agent_name"
       printf '1\\n' > "$state_root/state-change-seq.$agent_name"
       recall_revision
 
@@ -526,6 +540,9 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
 
     if [ "$1" = "agent" ] && [ "$2" = "wait" ]; then
       agent_name="$3"
+      if [ -n "${HERDR_FAKE_WAIT_STALL_SECONDS:-}" ]; then
+        sleep "$HERDR_FAKE_WAIT_STALL_SECONDS"
+      fi
       recall_revision
       if [ "${HERDR_FAKE_POST_PROMPT_SETTLED_TRANSITION:-}" = "1" ] &&
          [ -f "$state_root/prompt-received.$agent_name" ] &&
@@ -574,12 +591,8 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
             started_name=$(basename "$kind_file")
             started_name=${started_name#kind.}
             IFS= read -r started_kind < "$kind_file"
-            started_revision=0
-            if [ -f "$state_root/revision.$started_name" ]; then
-              IFS= read -r started_revision < "$state_root/revision.$started_name"
-            fi
             started_prompted=0
-            if [ "$started_revision" -gt 0 ]; then
+            if [ -f "$state_root/prompt-received.$started_name" ]; then
               started_prompted=1
             fi
             started_session=-

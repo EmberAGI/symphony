@@ -74,3 +74,18 @@ and the stall/timeout boundary are differentially validated against the real bin
 test-only process scaffolding that emit no protocol responses. The double's
 direct provider execution is interim: it must inherit EMB-1245's canonical
 wrapper/projection launch behavior when that lands.
+
+The replay server-stop scaffolding acknowledges only after its running marker
+is removed. This follows the availability fence in `src/session.rs:260-296`
+at upstream release commit `9eb521456ac0d19d3ab3d9d7cea3cca10baa8a4c`:
+`stop_socket_with_timeout` waits until the API and client sockets are no longer
+reachable before returning success. The marker represents server availability,
+not a new protocol recording or an upstream guarantee about OS process reaping.
+
+Real-runtime test helpers register the public run-owned cleanup capability
+immediately after session creation. ExUnit callbacks run outside the creator
+task, so they use `AgentRuntime.cleanup_owned_session/1` with the captured
+`owned_session_ref/1`, while normal in-test shutdown still uses `stop_session/1`.
+Cleanup precedes removal of fixture files and remains safe after explicit stop.
+A bounded child ExUnit proof intentionally fails before stop and independently
+checks fixture-process exit, artifact removal, and unrelated-process survival.

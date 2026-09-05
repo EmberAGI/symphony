@@ -95,7 +95,7 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
     assert HerdrReplayFixture.stdout!("agent-start") =~ ~s("pane_id":"{{PANE_ID}}"),
            "agent-start must not pin the recording's pane: workers start on other panes"
 
-    assert HerdrReplayFixture.load!("agent-start")["redaction"] =~ "{{PANE_ID}}"
+    assert HerdrReplayFixture.load!("agent-start")["redaction"] =~ "declared placeholders"
   end
 
   test "v0.8.2 evidence deletes the obsolete separate Enter recording" do
@@ -147,6 +147,7 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
     assert authority["tag_peels_to"] == authority["release_commit"]
     assert authority["protocol"] == 20
     assert authority["version"] == "0.8.2"
+
     assert authority["source_assertions"] == %{
              "Cargo.toml.package.version" => "0.8.2",
              "src/protocol/wire.rs.PROTOCOL_VERSION" => 20

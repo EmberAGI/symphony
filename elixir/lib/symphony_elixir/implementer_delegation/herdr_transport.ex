@@ -480,6 +480,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   @impl true
   def await_agent(%{name: session_name, env: env}, %{name: agent_name} = agent, statuses, timeout_ms, context)
       when is_list(statuses) and statuses != [] and is_integer(timeout_ms) and timeout_ms >= 0 do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
     # The requested settle set must be exactly the upstream default
     # (idle|done|blocked): never re-narrowed below it, never widened with
     # unknown. The set is passed explicitly so the wire request states what
@@ -488,7 +490,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
          args =
            ["--session", session_name, "agent", "wait", agent_name] ++
              until_args(statuses) ++ ["--timeout", to_string(timeout_ms)],
-         {:ok, output} <- command(context, args, env),
+         {:ok, output} <- command_before_deadline(context, args, env, deadline),
          {:ok, observed} <- decode_agent_response(output),
          :ok <- validate_observed_agent_name(observed, agent_name),
          :ok <- wait_outcome(observed, agent_name) do
@@ -653,6 +655,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp wait_error({:incompatible_herdr_runtime, _details} = reason, _agent_name, _statuses),
     do: {:error, reason}
+
+  defp wait_error(:command_timeout, agent_name, statuses),
+    do: {:error, {:herdr_agent_status_timeout, agent_name, statuses}}
 
   defp wait_error(reason, agent_name, statuses) do
     case cli_error_code(reason) do

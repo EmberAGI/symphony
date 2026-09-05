@@ -2,7 +2,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
   use ExUnit.Case, async: true
 
   alias SymphonyElixir.ImplementerDelegation.HerdrTransport
-  alias SymphonyElixir.TestSupport.HerdrReplayFixture
+  alias SymphonyElixir.TestSupport.{HerdrReplayFixture, HerdrSessionFixture}
 
   setup do
     root = Path.join(System.tmp_dir!(), "symphony-herdr-transport-#{System.unique_integer([:positive])}")
@@ -77,7 +77,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: session_name,
                  isolated: true,
@@ -160,7 +160,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: session_name,
                  isolated: true,
@@ -202,7 +202,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-emb-1245-tamper-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -252,7 +252,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-emb-1245-busy-recover-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -283,7 +283,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, exhausted_session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-emb-1245-busy-exhausted-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -312,7 +312,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       }
 
       assert {:ok, session} =
-               HerdrTransport.start_session(
+               HerdrSessionFixture.start_transport_session(
                  %{
                    name: "octo-emb-1245-toctou-#{System.unique_integer([:positive])}",
                    isolated: true,
@@ -358,7 +358,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       }
 
       assert {:ok, session} =
-               HerdrTransport.start_session(
+               HerdrSessionFixture.start_transport_session(
                  %{
                    name: "octo-emb-1245-stage-#{index}-#{System.unique_integer([:positive])}",
                    isolated: true,
@@ -397,7 +397,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-emb-1245-corrupt-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -432,7 +432,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-emb-1245-scoped-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -480,7 +480,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     # earlier launches can never satisfy it: with the launch chain suppressed,
     # pre-seeded stale acks still leave the handshake unsatisfied.
     assert {:ok, stale_session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-emb-1245-stale-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -532,7 +532,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: session_name,
                  isolated: true,
@@ -1007,7 +1007,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       }
 
       assert {:ok, session} =
-               HerdrTransport.start_session(
+               HerdrSessionFixture.start_transport_session(
                  %{
                    name: session_name,
                    isolated: true,
@@ -1095,7 +1095,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert default_before.socket == "/tmp/operator-default/herdr.sock"
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-emb-1141-run-7",
                  isolated: true,
@@ -1242,7 +1242,9 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert ready_orchestrator.agent_session ==
              HerdrReplayFixture.agent_field!("agent-wait-idle", "agent_session", %{"{{AGENT_KIND}}" => "codex"})
 
-    recorded_read_text = HerdrReplayFixture.stdout!("agent-read-recent")
+    recorded_read_text =
+      HerdrReplayFixture.stdout!("agent-read-recent")
+      |> String.replace("{{WORKSPACE_CWD}}", "/tmp/selected-workspace")
 
     assert {:ok, %{text: ^recorded_read_text}} =
              HerdrTransport.read_agent(
@@ -1316,7 +1318,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     session_name = "octo-emb-1244-i-#{System.unique_integer([:positive])}"
 
     assert {:error, {:incompatible_herdr_runtime, ^incompatible_runtime}} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{name: session_name, isolated: true, workspace: "/tmp/selected-workspace"},
                adapter_context
              )
@@ -1344,7 +1346,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-emb-1244-pm-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -1389,7 +1391,8 @@ defmodule SymphonyElixir.HerdrTransportTest do
       herdr_bin: context.bin,
       extra_env: [
         {"HERDR_FAKE_LOG", context.log},
-        {"HERDR_REPLAY_GET", "agent-get-conflicting-identity"}
+        {"HERDR_REPLAY_GET", "agent-get-conflicting-identity"},
+        {"XDG_CONFIG_HOME", Path.dirname(context.bin)}
       ]
     }
 
@@ -1401,7 +1404,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
                actual_agent: "different_agent"
              }}} =
              HerdrTransport.get_agent(
-               %{name: "octo-tur-844-identity", env: %{}},
+               %{name: "octo-tur-844-identity", env: Map.new(adapter_context.extra_env)},
                %{name: "implementer_orchestrator", provider: "codex"},
                1_000,
                adapter_context
@@ -1437,7 +1440,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       }
 
       assert {:ok, session} =
-               HerdrTransport.start_session(
+               HerdrSessionFixture.start_transport_session(
                  %{
                    name: "octo-emb-1244-u#{System.unique_integer([:positive])}",
                    isolated: true,
@@ -1479,7 +1482,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-emb-1244-pu-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -1525,7 +1528,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     session_name = "octo-emb-1244-reject-#{System.unique_integer([:positive])}"
 
     assert {:error, {:herdr_workspace_create_failed, _reason}} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{name: session_name, isolated: true, workspace: "/tmp/selected-workspace"},
                adapter_context
              )
@@ -1557,7 +1560,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     started_at = System.monotonic_time(:millisecond)
 
     assert {:error, :herdr_server_start_timeout} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{name: "octo-emb-1201-stalled-status", isolated: true, workspace: "/tmp/selected-workspace"},
                adapter_context
              )
@@ -1579,7 +1582,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{name: "octo-emb-1141-confirm", isolated: true, workspace: "/tmp/selected-workspace"},
                adapter_context
              )
@@ -1628,7 +1631,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-emb-1244-prompt-settle-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -1706,7 +1709,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-emb-1244-pb-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -1749,7 +1752,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-tur-844-prompt-blocked-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -1795,7 +1798,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-tur-844-start-blocked-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -1838,7 +1841,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-tur-844-native-enter-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -1884,7 +1887,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-emb-1244-await-blocked-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -1938,7 +1941,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{name: "octo-emb-1141-fast", isolated: true, workspace: "/tmp/selected-workspace"},
                adapter_context
              )
@@ -1993,7 +1996,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-prompt-confirm-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -2046,7 +2049,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-prompt-receipt-baseline-#{System.unique_integer([:positive])}",
                  isolated: true,
@@ -2071,7 +2074,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
                adapter_context
              )
 
-    assert agent.revision == 0
+    assert agent.revision == HerdrReplayFixture.agent_field!("agent-start", "revision")
     assert agent.agent_session == nil
     File.write!(context.log, "")
 
@@ -2102,7 +2105,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-emb-1201-claude-kind",
                  isolated: true,
@@ -2168,7 +2171,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-emb-1227-shared-cold-start-budget",
                  isolated: true,
@@ -2208,7 +2211,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{
                  name: "octo-emb-1227-unrepresentable-control",
                  isolated: true,
@@ -2256,7 +2259,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       }
 
       assert {:ok, session} =
-               HerdrTransport.start_session(
+               HerdrSessionFixture.start_transport_session(
                  %{
                    name: "octo-emb-1201-#{scenario}",
                    isolated: true,
@@ -2306,7 +2309,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
       }
 
       assert {:ok, session} =
-               HerdrTransport.start_session(
+               HerdrSessionFixture.start_transport_session(
                  %{
                    name: "octo-emb-1201-wait-#{if fixture =~ "timeout", do: "t", else: "c"}",
                    isolated: true,
@@ -2340,6 +2343,50 @@ defmodule SymphonyElixir.HerdrTransportTest do
     end
   end
 
+  test "terminates a hung native wait at the public timeout", context do
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_FAKE_WAIT_STALL_SECONDS", "1"}
+      ],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 5
+    }
+
+    assert {:ok, session} =
+             HerdrSessionFixture.start_transport_session(
+               %{name: "octo-tur-844-hung-wait", isolated: true, workspace: "/tmp/selected-workspace"},
+               adapter_context
+             )
+
+    ownership = HerdrTransport.owned_session_ref(session, adapter_context)
+    on_exit(fn -> assert :ok = HerdrTransport.cleanup_owned_session(ownership) end)
+
+    assert {:ok, agent} =
+             HerdrTransport.start_agent(
+               session,
+               %{
+                 name: "implementer_orchestrator",
+                 provider: "codex",
+                 cwd: "/tmp/selected-workspace",
+                 argv: ["codex", "--model", "gpt-5.6-sol"]
+               },
+               adapter_context
+             )
+
+    assert {:error, {:herdr_agent_status_timeout, "implementer_orchestrator", ["idle", "done", "blocked"]}} =
+             HerdrTransport.await_agent(
+               session,
+               agent,
+               ["idle", "done", "blocked"],
+               100,
+               adapter_context
+             )
+
+    assert :ok = HerdrTransport.stop_session(session, adapter_context)
+  end
+
   test "an ownership reference stops an abandoned run idempotently", context do
     adapter_context = %{
       herdr_bin: context.bin,
@@ -2349,7 +2396,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{name: "octo-emb-1141-abandoned", isolated: true, workspace: "/tmp/selected-workspace"},
                adapter_context
              )
@@ -2380,7 +2427,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     }
 
     assert {:ok, session} =
-             HerdrTransport.start_session(
+             HerdrSessionFixture.start_transport_session(
                %{name: "octo-emb-1201-custom-owned", isolated: true, workspace: "/tmp/selected-workspace"},
                adapter_context
              )

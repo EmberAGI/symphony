@@ -4,7 +4,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
   alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation, SkillExecutionContract}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Runtime.ProcessOwnership
-  alias SymphonyElixir.TestSupport.HerdrReplayFixture
+  alias SymphonyElixir.TestSupport.{HerdrReplayFixture, HerdrSessionFixture}
 
   defmodule RecordingTransport do
     def default_server_snapshot(%{owner: owner}) do
@@ -673,7 +673,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     }
 
     assert {:ok, session} =
-             AgentRuntime.start_session(workspace,
+             HerdrSessionFixture.start_session(workspace,
                issue: issue(),
                role: "implementer",
                run_id: "default-herdr",
@@ -740,7 +740,9 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
                on_message: on_message
              )
 
-    assert turn.response == HerdrReplayFixture.stdout!("agent-read-recent")
+    assert turn.response ==
+             HerdrReplayFixture.stdout!("agent-read-recent")
+             |> String.replace("{{WORKSPACE_CWD}}", workspace)
 
     assert [
              %{
@@ -921,7 +923,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       write_fake_herdr!(herdr_bin)
 
       assert {:ok, session} =
-               AgentRuntime.start_session(workspace,
+               HerdrSessionFixture.start_session(workspace,
                  issue: issue(),
                  role: "implementer",
                  run_id: "native-worker-#{kind}",
