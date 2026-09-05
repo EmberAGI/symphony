@@ -251,6 +251,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
                        session_name: "octo-emb-1244-run-preserve-startup-blocked",
                        handoff_settlement: :implementer_turn
                      }}
+
     refute_received {:stop_session, _name}
   end
 
@@ -258,8 +259,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
   test "a blocked startup registration timeout cleans the preserved session" do
     assert {:irrecoverable_runtime_failed, _failure} = run_startup_ack_timeout_case()
 
-    assert_received {:cleanup_owned_session,
-                     "octo-emb-1244-run-preserve-startup-ack-timeout"}
+    assert_received {:cleanup_owned_session, "octo-emb-1244-run-preserve-startup-ack-timeout"}
     refute_received {:stop_session, _name}
   end
 end

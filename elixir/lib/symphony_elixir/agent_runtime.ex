@@ -969,9 +969,7 @@ defmodule SymphonyElixir.AgentRuntime do
      }}
   end
 
-  defp real_irrecoverable_runtime_reason(
-         {:herdr_agent_not_ready, %{agent_name: agent_name, owned_session_ref: ownership_ref}}
-       )
+  defp real_irrecoverable_runtime_reason({:herdr_agent_not_ready, %{agent_name: agent_name, owned_session_ref: ownership_ref}})
        when is_binary(agent_name) and is_map(ownership_ref) do
     real_irrecoverable_runtime_reason({:herdr_agent_not_ready, agent_name})
   end

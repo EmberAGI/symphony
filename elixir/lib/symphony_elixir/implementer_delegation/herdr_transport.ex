@@ -903,6 +903,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   @doc "Return the narrow capability needed to clean up this run-owned server outside its owner task."
   @spec owned_session_ref(map(), map()) :: map()
+  @impl true
   def owned_session_ref(%{name: name, runtime_root: runtime_root} = session, context)
       when is_binary(name) and is_binary(runtime_root) and is_map(context) do
     %{
@@ -1217,6 +1218,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp stop_owned_server_if_running(context, name, runtime_root) do
     env = isolated_env(context, runtime_root)
+
     deadline =
       System.monotonic_time(:millisecond) +
         Map.get(context, :stop_timeout_ms, @default_stop_timeout_ms)
