@@ -68,6 +68,40 @@ snapshots prove that `agent_blocked` wrote neither semantic text nor Enter.
 
 Committed fixtures are CI inputs. Re-recording is a CD-tier operation: run the
 same commands against the pinned real binary and re-wrap with full provenance.
+
+`differential-claude-start.json` records actual Claude Code 2.1.259 started
+with native arguments `--model haiku`, without an initial prompt, on its fresh
+theme-onboarding screen. The 2026-09-05 capture used the pinned Herdr binary,
+masked real home and managed credential state, an empty credential environment,
+and a parsed `loggedIn=false` guard. Anonymous startup connectivity was allowed;
+no login or inference occurred. Only the differential selects this recording.
+Its native argv and absent optional title fields remain exactly as recorded;
+the existing controlled-provider and Codex recordings remain unchanged.
+
+The differential's nonresponsive-provider scenario uses explicit test-only
+fault injection. A transparent shell wrapper records a random ownership token,
+its PID and pane-shell parent PID, then execs the actual Claude executable.
+After anonymous theme onboarding, `ps` verifies process identity, start time,
+parent relationship and foreground group. The test pauses the pane shell before
+Claude so job control cannot reclaim the foreground, then rechecks native Herdr
+identity/readiness. Real Herdr receives the unchanged 6500 ms and 4000 ms prompt
+probes. Neither process is resumed: identity-checked termination precedes native
+session cleanup, and both processes must disappear. This is timing fault
+injection, not a provider emulator or inference proof. Unpaused Claude 2.1.259
+advances from theme selection to login when it receives native prompt input.
+
+Run these opt-in proofs unprivileged in a private PID namespace with writable
+temporary state and a masked, writable home preserving the operator's HOME
+identity. Restore only required public executables/toolchains, isolate managed
+credential files and DBus, clear credentials and shell startup variables, and
+verify the actual CLI reports `loggedIn=false`. The differential rejects direct
+provider credential/selection variables and requires fresh theme onboarding;
+it requires POSIX signals and `ps` fields `pid`, `ppid`, `pgid`, `lstart`, `comm`
+and `tpgid`, failing explicitly if unavailable. Anonymous Claude startup may
+require network access and a readable resolver; no login or model request is
+permitted. The smoke and non-live gate need no network. Never point these tests
+at production sessions or relax existing role authentication/routing policy.
+
 The replay-backed test double (`test/support/herdr_replay_fixture.exs`) keeps
 only non-recordable process and terminal timing behavior: the file-based
 server run loop, status-stall timing, provider process execution for

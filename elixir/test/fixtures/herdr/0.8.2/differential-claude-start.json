@@ -1,0 +1,32 @@
+{
+  "argv": [
+    "/tmp/t844proof5f2074/bin/herdr",
+    "--session",
+    "t844recordstart",
+    "agent",
+    "start",
+    "diff_agent",
+    "--kind",
+    "claude",
+    "--pane",
+    "w1:p1",
+    "--timeout",
+    "120000",
+    "--",
+    "--model",
+    "haiku"
+  ],
+  "derivation": null,
+  "exit_status": 0,
+  "herdr_binary_sha256": "976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4",
+  "herdr_version": "herdr 0.8.2",
+  "name": "differential-claude-start",
+  "provenance": "recorded",
+  "recorded_at": "2026-09-05T03:25:25Z",
+  "redaction": "parameterized: stdout replaces only /tmp/t844proof5f2074/record-start/ws with {{WORKSPACE_CWD}}, diff_agent with {{AGENT_NAME}}, and the pane_id value w1:p1 with {{PANE_ID}}. All other bytes, native argv, provider identity, optional-field absence, and semantic fields remain verbatim; stderr is empty.",
+  "stderr": "",
+  "stdout": "{\"id\":\"cli:agent:start\",\"result\":{\"agent\":{\"agent\":\"claude\",\"agent_status\":\"idle\",\"cwd\":\"{{WORKSPACE_CWD}}\",\"focused\":true,\"foreground_cwd\":\"{{WORKSPACE_CWD}}\",\"interactive_ready\":true,\"name\":\"{{AGENT_NAME}}\",\"pane_id\":\"{{PANE_ID}}\",\"revision\":0,\"state_change_seq\":1,\"tab_id\":\"w1:t1\",\"terminal_id\":\"term_65ab3ef6ddbba1\",\"workspace_id\":\"w1\"},\"argv\":[\"claude\",\"--model\",\"haiku\"],\"type\":\"agent_started\"}}\n",
+  "raw_stdout_sha256": "566c90ec5a37949bb853146129d1dd565c5ad63e23c5547e9b92d01d3413cf08",
+  "provider_version": "2.1.259 (Claude Code)",
+  "recording_context": "Actual Claude CLI with --model haiku and no initial prompt; fresh CLAUDE_CONFIG_DIR, credential-free environment, masked real home and managed auth state, parsed loggedIn=false, theme-onboarding screen verified. Private named Herdr session, PID namespace, and writable temporary state; anonymous startup connectivity only, no login or inference."
+}

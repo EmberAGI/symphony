@@ -25,8 +25,19 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
     real = System.find_executable("herdr")
     assert real, "the differential harness was requested but no real herdr binary is available"
 
-    assert System.find_executable("claude"),
+    claude = System.find_executable("claude")
+
+    assert claude,
            "the differential harness was requested but no real claude binary is available"
+
+    assert match?({:unix, _}, :os.type()), "the differential fault injection requires POSIX process signals and ps"
+
+    for key <- ~w(ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN
+                  CLAUDE_CODE_API_KEY_HELPER_FD CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX
+                  CLAUDE_CODE_USE_FOUNDRY CLIPROXYAPI_API_KEY OPENAI_API_KEY) do
+      credential_absent? = System.get_env(key) in [nil, ""]
+      assert credential_absent?, "anonymous differential requires #{key} to be unset"
+    end
 
     {version_output, 0} = System.cmd(real, ["--version"])
 
@@ -50,7 +61,15 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
     fake_log = Path.join(root, "fake.log")
     session = "emb1244diff"
 
-    real_env = [{"XDG_CONFIG_HOME", root}, {"HERDR_DISABLE_SOUND", "1"}]
+    provider_receipt = prepare_provider_receipt!(root, claude)
+
+    real_env = [
+      {"XDG_CONFIG_HOME", root},
+      {"HERDR_DISABLE_SOUND", "1"},
+      {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"},
+      {"PATH", provider_receipt.bin <> ":" <> (System.get_env("PATH") || "")}
+    ]
+
     fake_env = real_env ++ [{"HERDR_FAKE_LOG", fake_log}]
 
     # Version and help text must be byte-identical to the recordings.
@@ -113,21 +132,36 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
              "real and double disagree on error code for #{Enum.join(command, " ")}"
     end
 
-    workspace_pane = real_ws |> String.trim() |> Jason.decode!() |> get_in(["result", "root_pane", "pane_id"])
-    differential_launch_physics!(real, fake, session, root, real_env, fake_session_env, workspace_pane)
+    pane = real_ws |> String.trim() |> Jason.decode!() |> get_in(["result", "root_pane", "pane_id"])
+
+    paused_processes =
+      differential_launch_physics!(real, fake, session, root, real_env, fake_session_env, pane, provider_receipt)
+
+    terminate_owned_processes!(paused_processes)
 
     {_stop_output, 0} =
       System.cmd(real, ["--session", session, "server", "stop"], env: real_env, stderr_to_stdout: true)
 
     _ = Task.yield(server_task, 5_000) || Task.shutdown(server_task, :brutal_kill)
+    assert_owned_processes_dead!(paused_processes)
   end
 
   # Launch/timing physics that stay executable in the double: provider
   # execution/process replacement on `agent start`, and the 5000 ms
   # prompt-effect boundary (stall vs short-timeout), run against both sides.
-  defp differential_launch_physics!(real, fake, session, root, real_env, fake_session_env, pane) do
+  defp differential_launch_physics!(real, fake, session, root, real_env, fake_session_env, pane, provider_receipt) do
     stall_config = Path.join(root, "claude-fresh-config")
     File.mkdir_p!(stall_config)
+
+    {auth_output, _status} =
+      System.cmd(provider_receipt.claude, ["auth", "status"],
+        env: real_env ++ [{"CLAUDE_CONFIG_DIR", stall_config}],
+        stderr_to_stdout: true
+      )
+
+    anonymous? = match?({:ok, %{"loggedIn" => false}}, Jason.decode(auth_output))
+    assert anonymous?, "differential requires a parseable loggedIn=false result from the fresh provider config"
+
     Process.sleep(2_000)
 
     {_run_output, 0} =
@@ -140,11 +174,12 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
 
     # Real provider execution/process replacement: the pane shell is replaced
     # by a live claude TUI that herdr validates as interactively ready.
+    # Herdr supplies the executable from --kind; only native arguments follow --.
     {real_start, 0} =
       System.cmd(
         real,
         ["--session", session, "agent", "start", "diff_agent", "--kind", "claude", "--pane", pane] ++
-          ["--timeout", "120000", "--", "claude", "--model", "haiku"],
+          ["--timeout", "120000", "--", "--model", "haiku"],
         env: real_env
       )
 
@@ -159,10 +194,11 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
       System.cmd(
         fake,
         ["--session", session, "agent", "start", "diff_agent", "--kind", "claude", "--pane", pane] ++
-          ["--timeout", "120000", "--", "claude", "--model", "haiku"],
+          ["--timeout", "120000", "--", "--model", "haiku"],
         env:
           fake_session_env ++
             [
+              {"HERDR_REPLAY_AGENT_START", "differential-claude-start"},
               {"HERDR_FAKE_LOGIN_PATH", stub_bin <> ":" <> (System.get_env("PATH") || "")},
               {"HERDR_FAKE_PROVIDER_OUTPUT", provider_capture}
             ],
@@ -172,12 +208,39 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
     assert json_shape(real_start) == json_shape(fake_start)
     assert real_start =~ ~s("interactive_ready":true)
 
-    assert File.read!(provider_capture) == "--dangerously-skip-permissions\nclaude\n--model\nhaiku\n",
+    assert File.read!(provider_capture) == "--dangerously-skip-permissions\n--model\nhaiku\n",
            "the double must prepend the pinned Herdr flag and hand the provider its native argv byte-exact"
 
-    # 5000 ms prompt-effect boundary on a genuinely non-reactive UI (claude
-    # onboarding selection screen ignores typed characters): above the window
-    # the typed stall code is returned, at/below it a generic timeout.
+    {screen, 0} = System.cmd(real, ["--session", session, "pane", "read", pane, "--source", "visible"], env: real_env)
+    onboarding? = String.contains?(screen, "Choose the text style")
+    assert onboarding?, "differential must remain on fresh theme onboarding before fault injection"
+
+    paused_processes = owned_provider_processes!(provider_receipt)
+
+    # Register cleanup before any pause. Never resume queued input: kill only
+    # receipt-owned, identity-matching processes before native PTY shutdown.
+    on_exit(fn ->
+      terminate_owned_processes!(paused_processes)
+      _ = System.cmd(real, ["--session", session, "server", "stop"], env: real_env, stderr_to_stdout: true)
+      assert_owned_processes_dead!(paused_processes)
+    end)
+
+    for process <- [paused_processes.shell, paused_processes.provider] do
+      assert process_identity(process.pid) == process
+      assert {_, 0} = System.cmd("kill", ["-STOP", Integer.to_string(process.pid)])
+    end
+
+    Process.sleep(100)
+    assert foreground_process_group!(paused_processes.provider.pid) == paused_processes.provider.pgid
+    {paused_agent, 0} = System.cmd(real, ["--session", session, "agent", "get", "diff_agent"], env: real_env)
+
+    assert %{"agent" => "claude", "name" => "diff_agent", "agent_status" => "idle", "interactive_ready" => true} =
+             paused_agent |> Jason.decode!() |> get_in(["result", "agent"])
+
+    # Explicit test-only timing fault: freeze the pane shell before actual
+    # Claude so job control cannot reclaim the foreground. Real Herdr still
+    # owns prompt input and the 5000 ms stall boundary. The provider is never
+    # resumed and cannot consume these queued bytes or advance into login.
     prompt_args = fn timeout ->
       ["--session", session, "agent", "prompt", "diff_agent", "x", "--wait"] ++
         ["--until", "working", "--until", "idle", "--until", "done", "--until", "blocked"] ++
@@ -197,7 +260,102 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
     assert error_code(real_short) == error_code(fake_short)
 
     differential_pane_busy!(real, fake, session, root, real_env, fake_session_env)
+    paused_processes
   end
+
+  defp prepare_provider_receipt!(root, claude) do
+    bin = Path.join(root, "real-provider-bin")
+    path = Path.join(root, "provider-process.receipt")
+    token = Base.encode16(:crypto.strong_rand_bytes(16))
+    File.mkdir_p!(bin)
+    File.chmod!(bin, 0o700)
+
+    File.write!(Path.join(bin, "claude"), """
+    #!/bin/sh
+    umask 077
+    printf '%s\\n' '#{token}' "$$" "$PPID" > #{shell_quote(path)}
+    exec #{shell_quote(claude)} "$@"
+    """)
+
+    File.chmod!(Path.join(bin, "claude"), 0o700)
+    %{bin: bin, path: path, token: token, claude: claude}
+  end
+
+  defp owned_provider_processes!(receipt) do
+    assert [token, provider_pid, shell_pid] = receipt.path |> File.read!() |> String.split()
+    assert token == receipt.token
+    provider = process_identity(String.to_integer(provider_pid))
+    shell = process_identity(String.to_integer(shell_pid))
+    assert is_map(provider) and is_map(shell), "receipt-owned provider and pane shell must exist"
+    assert provider.pid > 1 and shell.pid > 1 and provider.pid != shell.pid
+    assert provider.ppid == shell.pid
+    assert Path.basename(provider.command) == "claude", "receipt must identify actual Claude after exec"
+    assert Path.basename(shell.command) in ~w(sh dash bash zsh ksh fish), "receipt parent must be the pane shell"
+    assert foreground_process_group!(provider.pid) == provider.pgid
+    %{provider: provider, shell: shell}
+  end
+
+  # ps lstart/comm/tpgid support is checked explicitly at this opt-in boundary.
+  # Process identity policy remains test-local; no production PID API changes.
+  defp process_identity(pid) do
+    case System.cmd("ps", ["-p", Integer.to_string(pid), "-o", "pid=,ppid=,pgid=,lstart=,comm="],
+           env: [{"LC_ALL", "C"}],
+           stderr_to_stdout: true
+         ) do
+      {"", 1} ->
+        nil
+
+      {output, 0} ->
+        assert [pid, ppid, pgid, day, month, date, clock, year, command] = String.split(String.trim(output), ~r/\s+/, parts: 9)
+
+        %{
+          pid: String.to_integer(pid),
+          ppid: String.to_integer(ppid),
+          pgid: String.to_integer(pgid),
+          started_at: Enum.join([day, month, date, clock, year], " "),
+          command: command
+        }
+
+      _ ->
+        flunk("differential requires ps with pid, ppid, pgid, lstart and comm fields")
+    end
+  end
+
+  defp foreground_process_group!(pid) do
+    case System.cmd("ps", ["-p", Integer.to_string(pid), "-o", "tpgid="], stderr_to_stdout: true) do
+      {output, 0} -> String.to_integer(String.trim(output))
+      _ -> flunk("differential requires ps with the tpgid field")
+    end
+  end
+
+  defp terminate_owned_processes!(processes) do
+    for expected <- [processes.provider, processes.shell] do
+      case process_identity(expected.pid) do
+        nil ->
+          :ok
+
+        ^expected ->
+          assert {_, 0} = System.cmd("kill", ["-KILL", Integer.to_string(expected.pid)])
+
+        _ ->
+          flunk("receipt-owned process identity changed; refusing to signal a different process")
+      end
+    end
+  end
+
+  defp assert_owned_processes_dead!(processes) do
+    Enum.reduce_while(1..100, :waiting, fn _, _ ->
+      if Enum.all?([processes.provider, processes.shell], &(process_identity(&1.pid) == nil)) do
+        {:halt, :dead}
+      else
+        Process.sleep(20)
+        {:cont, :waiting}
+      end
+    end)
+    |> then(&assert(&1 == :dead, "receipt-owned paused processes survived cleanup"))
+  end
+
+  defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\\''") <> "'"
 
   # Pane-busy launch physics: the same occupied-pane scenario that recorded
   # the error-agent-start-pane-busy fixture, run against the real binary and
@@ -219,7 +377,7 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
 
     start_args = fn pane ->
       ["--session", session, "agent", "start", "busy_agent", "--kind", "claude", "--pane", pane] ++
-        ["--timeout", "8000", "--", "claude", "--model", "haiku"]
+        ["--timeout", "8000", "--", "--model", "haiku"]
     end
 
     {real_busy, 1} = System.cmd(real, start_args.(busy_pane), env: real_env, stderr_to_stdout: true)

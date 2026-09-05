@@ -42,13 +42,13 @@ defmodule SymphonyElixir.HerdrTransportRealSmokeTest do
     File.mkdir_p!(workspace)
     on_exit(fn -> File.rm_rf!(root) end)
 
-    # Stub provider: records its exact argv and environment, then stays in the
+    # Stub provider: records its exact argv and PATH only, then stays in the
     # foreground with `claude` in its cmdline so Herdr agent detection holds
     # across both exec transitions (wrapper -> projection -> provider).
     File.write!(Path.join(stub_bin, "claude"), """
     #!/bin/sh
     printf '%s\\n' "$@" > #{argv_out}
-    env > #{env_out}
+    printf 'PATH=%s\\n' "$PATH" > #{env_out}
     printf 'stub claude ready\\n'
     while :; do sleep 1; done
     """)
@@ -69,7 +69,10 @@ defmodule SymphonyElixir.HerdrTransportRealSmokeTest do
                  name: "octo-emb-1245-smoke-#{System.unique_integer([:positive])}",
                  isolated: true,
                  workspace: workspace,
-                 env: %{"PATH" => stub_bin <> ":" <> (System.get_env("PATH") || "")}
+                 env: %{
+                   "PATH" => stub_bin <> ":" <> (System.get_env("PATH") || ""),
+                   "OCTO_SMOKE_SECRET_SENTINEL" => "synthetic-secret-must-not-be-recorded"
+                 }
                },
                adapter_context
              )
@@ -106,6 +109,8 @@ defmodule SymphonyElixir.HerdrTransportRealSmokeTest do
 
     provider_env = File.read!(env_out)
     assert provider_env =~ "PATH=#{session.runtime_root}/orchestrator-bin:#{stub_bin}:"
+    refute provider_env =~ "OCTO_SMOKE_SECRET_SENTINEL"
+    refute provider_env =~ "synthetic-secret-must-not-be-recorded"
 
     # Both per-launch acknowledgements carry the launch token.
     [projection_path] = Path.wildcard(Path.join(session.runtime_root, "launch-projections/*.sh"))
