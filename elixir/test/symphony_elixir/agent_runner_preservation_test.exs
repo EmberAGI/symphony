@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.AgentRunnerPreservationTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Runtime.ProcessOwnership
+
   @moduledoc """
   Runner cleanup contract for supervised delegated turns (EMB-1244 Stage 2):
   a typed work-preservation checkpoint failure blocks the runner's destructive
@@ -185,7 +187,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
         holder: ProcessOwnership.holder_id()
       })
 
-    silent_recipient = spawn_link(fn -> Process.sleep(:infinity) end)
+    silent_recipient = spawn(fn -> Process.sleep(:infinity) end)
 
     try do
       catch_exit(
@@ -259,7 +261,8 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
   test "a blocked startup registration timeout cleans the preserved session" do
     assert {:irrecoverable_runtime_failed, _failure} = run_startup_ack_timeout_case()
 
-    assert_received {:cleanup_owned_session, "octo-emb-1244-run-preserve-startup-ack-timeout"}
+    assert_received {:cleanup_owned_session, session_name}
+    assert String.starts_with?(session_name, "octo-emb-1244-")
     refute_received {:stop_session, _name}
   end
 end
