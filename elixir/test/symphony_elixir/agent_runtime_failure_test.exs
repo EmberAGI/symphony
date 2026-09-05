@@ -91,6 +91,19 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     assert startup_blocked.family == :human_input_required
     assert startup_blocked.retryable? == false
 
+    assert {:irrecoverable, startup_blocked_with_cleanup} =
+             AgentRuntime.classify_failure(
+               {:herdr_agent_not_ready,
+                %{
+                  agent_name: "implementer_orchestrator",
+                  owned_session_ref: %{kind: "herdr", session_name: "octo-tur-844"}
+                }},
+               @context
+             )
+
+    assert startup_blocked_with_cleanup.family == :human_input_required
+    assert startup_blocked_with_cleanup.retryable? == false
+
     # Direct checkpoint failure → irrecoverable, ordinary retry prevented.
     direct_checkpoint_failure =
       {:implementer_checkpoint_failed, %{failed_checkpoint_details | shutdown_reason: :hard_budget_exhausted}}

@@ -123,9 +123,10 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
 
       assert start["agent"] == provider
       assert start["name"] == "{{AGENT_NAME}}"
-      refute Map.has_key?(start, "agent_session")
 
-      for observed <- [prompted, completed] do
+      observations = if provider == "codex", do: [start, prompted, completed], else: [prompted, completed]
+
+      for observed <- observations do
         assert observed["agent"] == provider
         assert observed["name"] == "{{AGENT_NAME}}"
         assert observed["agent_session"]["agent"] == provider
@@ -133,6 +134,33 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
         assert observed["agent_session"]["value"] == "#{provider}-session-tur844"
       end
     end
+  end
+
+  test "provider identity recordings cross their claimed native operation" do
+    for provider <- ["codex", "claude"],
+        {phase, command, envelope_id} <- [
+          {"start", "start", "cli:agent:start"},
+          {"prompt", "prompt", "cli:agent:prompt"},
+          {"wait", "wait", "cli:agent:wait"}
+        ] do
+      fixture = HerdrReplayFixture.load!("provider-identity-#{provider}-#{phase}")
+      envelope = Jason.decode!(fixture["stdout"])
+      agent_command_index = Enum.find_index(fixture["argv"], &(&1 == "agent"))
+
+      assert is_integer(agent_command_index), "#{provider} #{phase} recording has no agent command"
+      assert Enum.at(fixture["argv"], agent_command_index + 1) == command
+      assert envelope["id"] == envelope_id
+    end
+  end
+
+  test "an already-blocked prompt records unchanged foreground-provider input" do
+    fixture = HerdrReplayFixture.load!("error-agent-prompt-blocked")
+
+    assert fixture["captured_input_bytes_before"] == 5
+    assert fixture["captured_input_bytes_after"] == fixture["captured_input_bytes_before"]
+    assert fixture["captured_input_sha256_after"] == fixture["captured_input_sha256_before"]
+    assert fixture["input_provenance"] =~ "foreground Codex process"
+    assert fixture["input_provenance"] =~ "delayed-Enter observation window"
   end
 
   test "release authority pins the exact v0.8.2 generation" do

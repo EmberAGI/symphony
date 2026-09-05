@@ -61,6 +61,11 @@ source, or provider-session value. Generic replay fixtures may parameterize
 provider kind for deterministic variants, but they are not provider-identity
 proof.
 
+`error-agent-prompt-blocked.json` also carries byte-count and SHA-256 snapshots
+from the same controlled foreground Codex input stream immediately before the
+rejected prompt and after a one-second delayed-Enter observation window. Equal
+snapshots prove that `agent_blocked` wrote neither semantic text nor Enter.
+
 Committed fixtures are CI inputs. Re-recording is a CD-tier operation: run the
 same commands against the pinned real binary and re-wrap with full provenance.
 The replay-backed test double (`test/support/herdr_replay_fixture.exs`) keeps

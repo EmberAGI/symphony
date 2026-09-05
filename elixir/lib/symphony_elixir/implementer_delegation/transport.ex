@@ -61,6 +61,7 @@ defmodule SymphonyElixir.ImplementerDelegation.Transport do
               {:ok, [map()]} | {:error, term()}
   @callback worker_assignments(session_ref(), term(), context()) ::
               {:ok, [map()]} | {:error, term()}
+  @callback owned_session_ref(session_ref(), context()) :: map() | nil
   @callback stop_session(session_ref(), context()) :: :ok | {:error, term()}
 
   @optional_callbacks begin_worker_assignment_observation: 3,

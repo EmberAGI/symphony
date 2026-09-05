@@ -285,6 +285,10 @@ in-test completion uses `AgentRuntime.stop_session/1`. Session cleanup must
 finish before fixture/runtime directories are removed and remain safe after
 an earlier explicit stop. A deliberately failing bounded child test proves
 process exit and artifact cleanup while an unrelated sentinel remains alive.
+Blocked startup exercises the same public capability: its typed
+`agent_not_ready` result carries the named target and narrow owned-session
+reference, and the default Agent Runner registers that reference before
+settling the failed run.
 
 When EMB-1180 changes a large test or validation file, the affected behavior
 MUST be moved progressively into focused ExUnit modules organized by the

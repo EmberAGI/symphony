@@ -60,6 +60,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
          herdr_session =
            herdr_session
            |> Map.put(:session_env, session_env)
+           |> Map.put(:default_server_before, default_server_before)
            |> Map.put(:permission_read_roots, permission_read_roots)
            |> Map.put(:skill_execution_contracts, skill_execution_contracts),
          {:ok, herdr_session} <-
@@ -712,15 +713,33 @@ defmodule SymphonyElixir.ImplementerDelegation do
       {:ok, orchestrator} ->
         {:ok, orchestrator}
 
-      {:error, {:herdr_agent_not_ready, _agent_name} = reason} ->
+      {:error, {:herdr_agent_not_ready, agent_name}} ->
         # Herdr v0.8.2 owns startup readiness. A blocked launch remains a named
         # run-owned target so the caller can inspect or recover it; tearing the
         # session down here would erase the evidence carried by this result.
-        {:error, reason}
+        blocked_startup_result(transport, transport_context, herdr_session, agent_name)
 
       {:error, reason} ->
         _ = transport.stop_session(herdr_session, transport_context)
         {:error, {:implementer_orchestrator_start_failed, reason}}
+    end
+  end
+
+  defp blocked_startup_result(transport, transport_context, herdr_session, agent_name) do
+    ownership_ref =
+      if function_exported?(transport, :owned_session_ref, 2),
+        do: transport.owned_session_ref(herdr_session, transport_context)
+
+    if is_map(ownership_ref) do
+      {:error,
+       {:herdr_agent_not_ready,
+        %{
+          agent_name: agent_name,
+          owned_session_ref: Map.put(ownership_ref, :handoff_settlement, :implementer_turn)
+        }}}
+    else
+      _ = transport.stop_session(herdr_session, transport_context)
+      {:error, {:implementer_orchestrator_start_failed, :owned_session_capability_missing}}
     end
   end
 
@@ -759,6 +778,9 @@ defmodule SymphonyElixir.ImplementerDelegation do
     case transport.prepare_worker(herdr_session, worker_spec, transport_context) do
       {:ok, prepared_session} ->
         {:ok, prepared_session}
+
+      {:error, {:herdr_agent_not_ready, agent_name}} ->
+        blocked_startup_result(transport, transport_context, herdr_session, agent_name)
 
       {:error, reason} ->
         _ = transport.stop_session(herdr_session, transport_context)

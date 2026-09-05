@@ -767,9 +767,12 @@ orchestrator's pane, while typed launch outcomes remain the transport's
 Elixir results.
 Orchestrator and worker startup share a 120-second cold-start budget. Herdr
 v0.8.2 `agent start` owns the bounded interactive-readiness wait. A blocked
-startup returns typed `agent_not_ready`; Symphony preserves the named target
+orchestrator or prestarted worker returns typed `agent_not_ready`; Symphony preserves the named target
 for bounded inspection and recovery and never reports it as readiness or
-provider-session success. Before
+provider-session success. The typed result carries the same narrow run-owned
+cleanup capability used after successful startup, and the default Agent Runner
+registers that capability before failure settlement, so the preserved target
+is externally inspectable and cleanable rather than unreachable. Before
 Claude profile instructions are written to the projection, CRLF and CR
 normalize to LF, LF becomes the Unicode line separator U+2028, and each tab
 becomes four spaces. This preserves multiline semantics without terminal
@@ -1008,6 +1011,9 @@ leave the owned-session reference recoverable. A successful checkpoint
 permits bounded shutdown. The runner and monitored-task boundary both consume
 the same idempotent owned-session cleanup capability so success, failure,
 cancellation, timeout, and abrupt task exit converge on bounded teardown.
+External cleanup uses the same deadline-bounded native command path and verifies
+the default Herdr server snapshot before and after stopping the exact named
+run-owned session.
 The Implementer runner must publish that cleanup capability to the registered
 top-level orchestrator and receive its acknowledgement before sending the first
 provider prompt. A missing acknowledgement is a typed failed run and the

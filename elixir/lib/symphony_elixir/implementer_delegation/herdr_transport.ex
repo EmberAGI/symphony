@@ -163,6 +163,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
        |> Map.put(:worker, worker_agent)
        |> Map.put(:worker_pane_id, worker_pane_id)}
     else
+      {:error, {:herdr_agent_not_ready, _agent_name} = reason} -> {:error, reason}
       {:error, reason} -> {:error, {:implementer_worker_launch_failed, reason}}
     end
   end
@@ -885,8 +886,10 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   @impl true
   def stop_session(%{name: name, env: env, server_task: server_task, runtime_root: runtime_root}, context) do
-    stop_result = command(context, ["--session", name, "server", "stop"], env)
-    task_result = await_server_stop(server_task, Map.get(context, :stop_timeout_ms, @default_stop_timeout_ms))
+    timeout_ms = Map.get(context, :stop_timeout_ms, @default_stop_timeout_ms)
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    stop_result = command_before_deadline(context, ["--session", name, "server", "stop"], env, deadline)
+    task_result = await_server_stop(server_task, remaining_ms(deadline))
     File.rm_rf(runtime_root)
 
     case {stop_result, task_result} do
@@ -900,14 +903,15 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   @doc "Return the narrow capability needed to clean up this run-owned server outside its owner task."
   @spec owned_session_ref(map(), map()) :: map()
-  def owned_session_ref(%{name: name, runtime_root: runtime_root}, context)
+  def owned_session_ref(%{name: name, runtime_root: runtime_root} = session, context)
       when is_binary(name) and is_binary(runtime_root) and is_map(context) do
     %{
       kind: "herdr",
       session_name: name,
       runtime_root: runtime_root,
       cleanup_module: __MODULE__,
-      cleanup_context: Map.take(context, [:herdr_bin, :extra_env, :socket_root, :stop_timeout_ms])
+      cleanup_context: Map.take(context, [:herdr_bin, :extra_env, :socket_root, :stop_timeout_ms]),
+      default_server_before: Map.get(session, :default_server_before)
     }
   end
 
@@ -919,7 +923,9 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     context = Map.get(ownership_ref, :cleanup_context, %{})
 
     with :ok <- validate_owned_runtime_root(name, runtime_root, context),
-         :ok <- stop_owned_server_if_running(context, name, runtime_root) do
+         :ok <- verify_owned_default_server(context, ownership_ref),
+         :ok <- stop_owned_server_if_running(context, name, runtime_root),
+         :ok <- verify_owned_default_server(context, ownership_ref) do
       File.rm_rf(runtime_root)
       :ok
     end
@@ -948,8 +954,12 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   defp cleanup_started_server(%{name: name, env: env, server_task: server_task, runtime_root: runtime_root}, context) do
-    _ = command(context, ["--session", name, "server", "stop"], env)
-    _ = await_server_stop(server_task, Map.get(context, :stop_timeout_ms, @default_stop_timeout_ms))
+    deadline =
+      System.monotonic_time(:millisecond) +
+        Map.get(context, :stop_timeout_ms, @default_stop_timeout_ms)
+
+    _ = command_before_deadline(context, ["--session", name, "server", "stop"], env, deadline)
+    _ = await_server_stop(server_task, remaining_ms(deadline))
     File.rm_rf(runtime_root)
     :ok
   end
@@ -1193,13 +1203,28 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       else: {:error, :invalid_herdr_owned_runtime_root}
   end
 
+  defp verify_owned_default_server(_context, %{default_server_before: nil}), do: :ok
+
+  defp verify_owned_default_server(context, %{default_server_before: expected}) when is_map(expected) do
+    case default_server_snapshot(context) do
+      {:ok, ^expected} -> :ok
+      {:ok, actual} -> {:error, {:default_herdr_server_changed, %{expected: expected, actual: actual}}}
+      {:error, reason} -> {:error, {:default_herdr_server_check_failed, reason}}
+    end
+  end
+
+  defp verify_owned_default_server(_context, _ownership_ref), do: :ok
+
   defp stop_owned_server_if_running(context, name, runtime_root) do
     env = isolated_env(context, runtime_root)
+    deadline =
+      System.monotonic_time(:millisecond) +
+        Map.get(context, :stop_timeout_ms, @default_stop_timeout_ms)
 
-    case command(context, ["--session", name, "status", "server"], env) do
+    case command_before_deadline(context, ["--session", name, "status", "server"], env, deadline) do
       {:ok, output} ->
         case parse_server_status(output) do
-          {:ok, %{status: "running"}} -> stop_owned_server(context, name, env)
+          {:ok, %{status: "running"}} -> stop_owned_server(context, name, env, deadline)
           {:ok, _status} -> :ok
           {:error, reason} -> {:error, {:herdr_owned_session_status_failed, reason}}
         end
@@ -1214,12 +1239,14 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     end
   end
 
-  defp stop_owned_server(context, name, env) do
-    case command(context, ["--session", name, "server", "stop"], env) do
+  defp stop_owned_server(context, name, env, deadline) do
+    case command_before_deadline(context, ["--session", name, "server", "stop"], env, deadline) do
       {:ok, _output} -> :ok
       {:error, reason} -> {:error, {:herdr_owned_session_stop_failed, reason}}
     end
   end
+
+  defp remaining_ms(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 
   defp materialize_worker_launcher(_session, nil, _context), do: {:ok, nil, nil}
 

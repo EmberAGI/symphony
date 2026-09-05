@@ -38,6 +38,9 @@ defmodule SymphonyElixir.TestSupport.NonLiveDelegationTransport do
   def read_agent(_session, _agent, _opts, _context), do: sealed(:read_agent)
 
   @impl true
+  def owned_session_ref(_session, _context), do: nil
+
+  @impl true
   def stop_session(_session, _context), do: :ok
 
   defp sealed(callback), do: {:error, {:non_live_delegation_transport, callback}}

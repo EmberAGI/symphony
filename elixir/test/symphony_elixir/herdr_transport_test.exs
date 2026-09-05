@@ -2414,6 +2414,77 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert commands =~ "--session octo-emb-1141-abandoned server stop"
   end
 
+  test "an ownership cleanup timeout is bounded and leaves the session recoverable", context do
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [{"HERDR_FAKE_LOG", context.log}],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 10,
+      stop_timeout_ms: 100
+    }
+
+    assert {:ok, session} =
+             HerdrSessionFixture.start_transport_session(
+               %{name: "octo-tur-844-cleanup-timeout", isolated: true, workspace: "/tmp/selected-workspace"},
+               adapter_context
+             )
+
+    ownership_ref = HerdrTransport.owned_session_ref(session, adapter_context)
+
+    stalled_ref =
+      put_in(
+        ownership_ref,
+        [:cleanup_context, :extra_env],
+        adapter_context.extra_env ++
+          [
+            {"HERDR_FAKE_STATUS_STALL", "1"},
+            {"HERDR_FAKE_STATUS_STALL_SECONDS", "2"},
+            {"HERDR_FAKE_STATUS_PID_FILE", Path.join(Path.dirname(context.bin), "status-stall-pid")}
+          ]
+      )
+
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, {:herdr_owned_session_status_failed, :command_timeout}} =
+             HerdrTransport.cleanup_owned_session(stalled_ref)
+
+    assert System.monotonic_time(:millisecond) - started_at < 1_000
+    assert File.exists?(session.runtime_root)
+    assert :ok = HerdrTransport.cleanup_owned_session(ownership_ref)
+    refute File.exists?(session.runtime_root)
+  end
+
+  test "external ownership cleanup preserves the default server snapshot", context do
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [{"HERDR_FAKE_LOG", context.log}],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 10,
+      stop_timeout_ms: 500
+    }
+
+    assert {:ok, default_server_before} =
+             HerdrTransport.default_server_snapshot(adapter_context)
+
+    assert {:ok, session} =
+             HerdrSessionFixture.start_transport_session(
+               %{name: "octo-tur-844-default-preserved", isolated: true, workspace: "/tmp/selected-workspace"},
+               adapter_context
+             )
+
+    ownership_ref =
+      session
+      |> Map.put(:default_server_before, default_server_before)
+      |> HerdrTransport.owned_session_ref(adapter_context)
+
+    assert :ok = HerdrTransport.cleanup_owned_session(ownership_ref)
+    assert {:ok, ^default_server_before} = HerdrTransport.default_server_snapshot(adapter_context)
+
+    commands = context.log |> File.read!() |> String.split("\n", trim: true)
+    assert Enum.count(commands, &(&1 == "status server")) >= 4
+    assert Enum.count(commands, &String.contains?(&1, "--session octo-tur-844-default-preserved server stop")) == 1
+  end
+
   test "an ownership reference recovers an explicitly owned custom socket root", context do
     runtime_root =
       Path.join(System.tmp_dir!(), "octo-herdr-custom-#{System.unique_integer([:positive])}")

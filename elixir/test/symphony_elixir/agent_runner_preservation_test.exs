@@ -51,7 +51,17 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
     end
 
     def owned_session_ref(session, %{owner: owner}) do
-      %{kind: "preservation", session_name: session.name, owner: owner}
+      %{
+        kind: "preservation",
+        session_name: session.name,
+        owner: owner,
+        cleanup_module: __MODULE__
+      }
+    end
+
+    def cleanup_owned_session(%{owner: owner, session_name: session_name}) do
+      send(owner, {:cleanup_owned_session, session_name})
+      :ok
     end
   end
 
@@ -68,6 +78,20 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
 
     def begin_turn(_session, agent, _prompt, _timeout_ms, %{owner: _owner}) do
       {:error, {:herdr_agent_blocked, agent.name}}
+    end
+  end
+
+  defmodule StartupBlockedPreservationTransport do
+    alias SymphonyElixir.AgentRunnerPreservationTest.PreservationTransport
+
+    defdelegate default_server_snapshot(context), to: PreservationTransport
+    defdelegate start_session(spec, context), to: PreservationTransport
+    defdelegate prepare_worker(session, spec, context), to: PreservationTransport
+    defdelegate stop_session(session, context), to: PreservationTransport
+    defdelegate owned_session_ref(session, context), to: PreservationTransport
+
+    def start_agent(_session, spec, _context) do
+      {:error, {:herdr_agent_not_ready, spec.name}}
     end
   end
 
@@ -128,6 +152,65 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
     end
   end
 
+  defp run_startup_ack_timeout_case do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-agent-runner-preservation-startup-ack-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    File.mkdir_p!(workspace_root)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue = %Issue{
+      id: "issue-preservation-startup-ack-timeout",
+      identifier: "EMB-1244",
+      repository: "EmberAGI/scaling-octo-engine",
+      repository_source: "linear_label",
+      title: "Preserve blocked startup",
+      description: "Blocked startup registration",
+      state: "In Progress",
+      branch_name: "octo/emb-1244-preserve",
+      url: "https://example.org/issues/EMB-1244",
+      labels: []
+    }
+
+    run_id = "run-preserve-startup-ack-timeout"
+
+    {:ok, ownership} =
+      ProcessOwnership.acquire(issue, %{
+        role: "implementer",
+        run_id: run_id,
+        holder: ProcessOwnership.holder_id()
+      })
+
+    silent_recipient = spawn_link(fn -> Process.sleep(:infinity) end)
+
+    try do
+      catch_exit(
+        AgentRunner.run(issue, silent_recipient,
+          run_id: run_id,
+          role: "implementer",
+          process_ownership: ownership,
+          delegation_transport: StartupBlockedPreservationTransport,
+          delegation_transport_context: %{owner: self(), checkpoint_readable: true}
+        )
+      )
+    after
+      Process.exit(silent_recipient, :kill)
+
+      _ =
+        ProcessOwnership.release(issue, %{
+          holder: ownership.holder,
+          run_id: ownership.run_id,
+          workspace_path: ownership.workspace_path
+        })
+
+      File.rm_rf(test_root)
+    end
+  end
+
   test "a typed checkpoint failure blocks the runner's destructive session stop" do
     log = run_preservation_case("blocked", false)
 
@@ -157,5 +240,26 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
 
     refute_received :checkpoint_read_failed
     assert_received {:stop_session, _name}
+  end
+
+  test "a blocked startup registers its owned session before failure settlement" do
+    _log = run_preservation_case("startup-blocked", true, StartupBlockedPreservationTransport)
+
+    assert_received {:owned_session_runtime_info, "issue-preservation-startup-blocked",
+                     %{
+                       kind: "preservation",
+                       session_name: "octo-emb-1244-run-preserve-startup-blocked",
+                       handoff_settlement: :implementer_turn
+                     }}
+    refute_received {:stop_session, _name}
+  end
+
+  @tag timeout: 10_000
+  test "a blocked startup registration timeout cleans the preserved session" do
+    assert {:irrecoverable_runtime_failed, _failure} = run_startup_ack_timeout_case()
+
+    assert_received {:cleanup_owned_session,
+                     "octo-emb-1244-run-preserve-startup-ack-timeout"}
+    refute_received {:stop_session, _name}
   end
 end
