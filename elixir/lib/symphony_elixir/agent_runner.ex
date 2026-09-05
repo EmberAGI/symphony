@@ -223,37 +223,15 @@ defmodule SymphonyElixir.AgentRunner do
             )
         end
 
-      {:error, {:herdr_agent_not_ready, %{owned_session_ref: ownership_ref}}} = result
-      when is_map(ownership_ref) ->
-        case send_owned_session_runtime_info_ref(
-               codex_update_recipient,
-               issue,
-               ownership_ref,
-               registration_ack_required?(opts)
-             ) do
-          :ok ->
-            finish_with_after_run_hook(result, workspace, issue, worker_host, ownership_env)
-
-          {:error, reason} ->
-            cleanup_result = AgentRuntime.cleanup_owned_session(ownership_ref)
-
-            failure =
-              case cleanup_result do
-                :ok -> reason
-                {:error, cleanup_reason} -> {:owned_session_cleanup_failed, cleanup_reason}
-              end
-
-            finish_with_after_run_hook({:error, failure}, workspace, issue, worker_host, ownership_env)
-        end
-
       result ->
-        finish_with_after_run_hook(
-          result,
-          workspace,
-          issue,
-          worker_host,
-          ownership_env
-        )
+        finish_start_result(result, %{
+          recipient: codex_update_recipient,
+          issue: issue,
+          registration_ack_required?: registration_ack_required?(opts),
+          workspace: workspace,
+          worker_host: worker_host,
+          ownership_env: ownership_env
+        })
     end
   end
 
@@ -314,6 +292,59 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp send_owned_session_runtime_info(_recipient, _issue, _session, _ack_required), do: :ok
+
+  defp finish_start_result(
+         {:error, {:herdr_agent_not_ready, %{owned_session_ref: ownership_ref}}} = result,
+         context
+       )
+       when is_map(ownership_ref),
+       do: finish_blocked_startup(result, ownership_ref, context)
+
+  defp finish_start_result(result, context) do
+    finish_with_after_run_hook(
+      result,
+      context.workspace,
+      context.issue,
+      context.worker_host,
+      context.ownership_env
+    )
+  end
+
+  defp finish_blocked_startup(result, ownership_ref, context) do
+    case send_owned_session_runtime_info_ref(
+           context.recipient,
+           context.issue,
+           ownership_ref,
+           context.registration_ack_required?
+         ) do
+      :ok ->
+        finish_with_after_run_hook(
+          result,
+          context.workspace,
+          context.issue,
+          context.worker_host,
+          context.ownership_env
+        )
+
+      {:error, reason} ->
+        failure = cleanup_after_registration_failure(ownership_ref, reason)
+
+        finish_with_after_run_hook(
+          {:error, failure},
+          context.workspace,
+          context.issue,
+          context.worker_host,
+          context.ownership_env
+        )
+    end
+  end
+
+  defp cleanup_after_registration_failure(ownership_ref, registration_reason) do
+    case AgentRuntime.cleanup_owned_session(ownership_ref) do
+      :ok -> registration_reason
+      {:error, cleanup_reason} -> {:owned_session_cleanup_failed, cleanup_reason}
+    end
+  end
 
   defp send_owned_session_runtime_info_ref(recipient, %Issue{id: issue_id}, ownership_ref, true)
        when is_binary(issue_id) and is_pid(recipient) and is_map(ownership_ref) do
