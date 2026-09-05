@@ -594,6 +594,22 @@ defmodule SymphonyElixir.HerdrTransportTest do
         &String.replace(&1, ~s("id":"cli:agent:prompt"), ~s("id":"cli:agent:get"))
       )
 
+    conflicting_get_identity_fixture =
+      HerdrReplayFixture.write_replay_mutation!(
+        context.replay_dir,
+        "agent-get-idle",
+        "agent-get-conflicting-identity-generated",
+        &String.replace(&1, "{{AGENT_NAME}}", "different_agent")
+      )
+
+    conflicting_prompt_identity_fixture =
+      HerdrReplayFixture.write_replay_mutation!(
+        context.replay_dir,
+        "agent-prompt-working",
+        "agent-prompt-conflicting-identity-generated",
+        &String.replace(&1, "{{AGENT_NAME}}", "different_agent")
+      )
+
     # The wrapper fails closed for any invocation other than the exact
     # sentinel plus one projection path: no default-bootstrap escape hatch.
     assert {wrapper_denial, 64} =
@@ -909,6 +925,55 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert Enum.count(commands, &String.contains?(&1, "agent get implementer_orchestrator")) == 1
     refute Enum.any?(commands, &String.contains?(&1, "agent prompt implementer_orchestrator"))
     refute Enum.any?(commands, &String.contains?(&1, "agent send-keys implementer_orchestrator enter"))
+
+    for {role_herdr, target, message, event_prefix} <- [
+          {
+            orchestrator_herdr,
+            "implementer_worker",
+            "OCTO_MSG/1 kind=assignment assignment=emb1344-identity deliverable=bounded",
+            "assignment.*"
+          },
+          {
+            worker_herdr,
+            "implementer_orchestrator",
+            "OCTO_MSG/1 kind=result assignment=emb1344-identity status=completed",
+            "result.*"
+          }
+        ] do
+      File.write!(context.log, "")
+      events_before = Path.wildcard(Path.join([session.runtime_root, "worker-events", event_prefix]))
+
+      assert {preflight_mismatch, 1} =
+               System.cmd(role_herdr, ["agent", "prompt", target, message],
+                 env: base_env ++ [{"HERDR_REPLAY_GET", conflicting_get_identity_fixture}],
+                 stderr_to_stdout: true
+               )
+
+      assert preflight_mismatch =~ ~s("code":"agent_identity_mismatch")
+      assert preflight_mismatch =~ ~s("expected_agent":"#{target}")
+      assert preflight_mismatch =~ ~s("actual_agent":"different_agent")
+      assert Path.wildcard(Path.join([session.runtime_root, "worker-events", event_prefix])) == events_before
+      refute File.read!(context.log) =~ "agent prompt #{target}"
+
+      File.write!(context.log, "")
+
+      assert {prompt_mismatch, 1} =
+               System.cmd(role_herdr, ["agent", "prompt", target, message],
+                 env:
+                   base_env ++
+                     [
+                       {"HERDR_REPLAY_GET", generated_working_get_fixture},
+                       {"HERDR_REPLAY_PROMPT", conflicting_prompt_identity_fixture}
+                     ],
+                 stderr_to_stdout: true
+               )
+
+      assert prompt_mismatch =~ ~s("code":"agent_identity_mismatch")
+      assert prompt_mismatch =~ ~s("expected_agent":"#{target}")
+      assert prompt_mismatch =~ ~s("actual_agent":"different_agent")
+      assert Path.wildcard(Path.join([session.runtime_root, "worker-events", event_prefix])) == events_before
+      assert File.read!(context.log) =~ "agent prompt #{target}"
+    end
 
     File.write!(context.log, "")
     File.rm(Path.join([session.runtime_root, "herdr", "sessions", "default", "prompt-attempts"]))
@@ -1980,6 +2045,69 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
     assert length(:binary.matches(commands, "agent wait implementer_orchestrator")) == 1
     refute commands =~ "agent send-keys implementer_orchestrator"
+    assert :ok = HerdrTransport.stop_session(session, adapter_context)
+  end
+
+  test "a post-receipt wait naming a different agent fails identity closed", context do
+    HerdrReplayFixture.write_replay_mutation!(
+      context.replay_dir,
+      "agent-wait-working",
+      "agent-wait-conflicting-identity",
+      &String.replace(&1, "{{AGENT_NAME}}", "different_agent")
+    )
+
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_REPLAY_PROMPT", "agent-prompt-idle"},
+        {"HERDR_REPLAY_WAIT", "agent-wait-conflicting-identity"}
+      ],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 5
+    }
+
+    assert {:ok, session} =
+             HerdrSessionFixture.start_transport_session(
+               %{
+                 name: "octo-prompt-identity-#{System.unique_integer([:positive])}",
+                 isolated: true,
+                 workspace: "/tmp/selected-workspace"
+               },
+               adapter_context
+             )
+
+    on_exit(fn ->
+      if File.exists?(session.runtime_root), do: HerdrTransport.stop_session(session, adapter_context)
+    end)
+
+    assert {:ok, agent} =
+             HerdrTransport.start_agent(
+               session,
+               %{
+                 name: "implementer_orchestrator",
+                 provider: "codex",
+                 cwd: "/tmp/selected-workspace",
+                 argv: ["codex", "--model", "gpt-5.6-sol"]
+               },
+               adapter_context
+             )
+
+    assert {:error,
+            {:incompatible_herdr_runtime,
+             %{
+               error_code: "agent_identity_mismatch",
+               expected_agent: "implementer_orchestrator",
+               actual_agent: "different_agent"
+             }}} =
+             HerdrTransport.begin_turn(
+               session,
+               agent,
+               "Complete the assignment.",
+               6_000,
+               adapter_context
+             )
+
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 

@@ -385,6 +385,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   defp prompt_recovery_wait_result(output, baseline) do
     with {:ok, observed} <- decode_agent_response(output),
+         :ok <- validate_observed_agent_name(observed, baseline.name),
          {:ok, _status} <- classify_agent_status(observed.agent_status) do
       prompt_recovery_wait_observation(preserve_provider(observed, baseline))
     else
@@ -2185,6 +2186,14 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       message=$herdr_prompt_message
       prompt_timeout=#{@prompt_recovery_observation_timeout_ms}
 
+      validate_agent_identity() {
+        observed_agent_name=$(printf '%s' "$1" | sed -n 's/.*"name":"\\([^"]*\\)".*/\\1/p')
+        if [ "$observed_agent_name" != "$agent_name" ]; then
+          printf '{"error":{"code":"agent_identity_mismatch","details":{"expected_agent":"%s","actual_agent":"%s"}}}\n' "$agent_name" "$observed_agent_name" >&2
+          return 1
+        fi
+      }
+
       if [ -n "$herdr_prompt_session" ]; then
         set -- --session "$herdr_prompt_session" agent get "$agent_name"
       else
@@ -2209,6 +2218,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
           ;;
       esac
 
+      validate_agent_identity "$target_before" || exit 1
+
       target_status=$(printf '%s' "$target_before" | sed -n 's/.*"agent_status":"\\([^"]*\\)".*/\\1/p')
 
       case "$target_status" in
@@ -2231,6 +2242,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
           case "$output" in
             '{"id":"cli:agent:prompt","result":{"agent":'*',"type":"agent_prompted"}}')
+              validate_agent_identity "$output" || exit 1
               #{worker_message_recording(role, runtime_root)}
               printf '%s' "$output"
               exit 0
@@ -2265,6 +2277,7 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
       set -e
 
       if [ "$status" -eq 0 ]; then
+        validate_agent_identity "$output" || exit 1
         #{worker_message_recording(role, runtime_root)}
         printf '%s' "$output"
         exit 0

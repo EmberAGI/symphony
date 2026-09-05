@@ -4,6 +4,10 @@ defmodule SymphonyElixir.ImplementerDelegation.Transport do
 
   The production adapter controls isolated Herdr sessions. Deterministic tests
   use an in-memory adapter and exercise the same lifecycle interface.
+
+  Every successful agent response must name the exact agent requested by the
+  caller. A missing or conflicting name fails before lifecycle success or
+  correlation evidence can be emitted.
   """
 
   @type context :: term()
