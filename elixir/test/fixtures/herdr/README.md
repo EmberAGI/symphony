@@ -77,6 +77,12 @@ and a parsed `loggedIn=false` guard. Anonymous startup connectivity was allowed;
 no login or inference occurred. Only the differential selects this recording.
 Its native argv and absent optional title fields remain exactly as recorded;
 the existing controlled-provider and Codex recordings remain unchanged.
+The real-versus-replay differential removes only `terminal_title` and
+`terminal_title_stripped` before comparing the `AgentStarted` envelope shape,
+because those optional presentation fields depend on when the provider updates
+the terminal title. It separately compares the exact agent kind, name, pane,
+and provider-session identity map, so presentation variance cannot weaken the
+prompted-agent identity contract.
 
 The differential's nonresponsive-provider scenario uses explicit test-only
 fault injection. A transparent shell wrapper records a random ownership token,

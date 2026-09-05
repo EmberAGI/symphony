@@ -111,7 +111,7 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
     {fake_ws, 0} =
       System.cmd(fake, ["--session", session, "workspace", "create", "--cwd", Path.join(root, "ws"), "--no-focus"], env: fake_session_env)
 
-    assert json_shape(real_ws) == json_shape(fake_ws)
+    assert HerdrReplayFixture.json_shape!(real_ws) == HerdrReplayFixture.json_shape!(fake_ws)
 
     # not-found errors: the exact recorded scenario is selected per operation.
     for {command, override} <- [
@@ -126,7 +126,7 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
           stderr_to_stdout: true
         )
 
-      assert json_shape(real_error) == json_shape(fake_error)
+      assert HerdrReplayFixture.json_shape!(real_error) == HerdrReplayFixture.json_shape!(fake_error)
 
       assert error_code(real_error) == error_code(fake_error),
              "real and double disagree on error code for #{Enum.join(command, " ")}"
@@ -205,7 +205,12 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
         stderr_to_stdout: true
       )
 
-    assert json_shape(real_start) == json_shape(fake_start)
+    assert HerdrReplayFixture.agent_started_shape!(real_start) ==
+             HerdrReplayFixture.agent_started_shape!(fake_start)
+
+    assert HerdrReplayFixture.agent_identity!(real_start) ==
+             HerdrReplayFixture.agent_identity!(fake_start)
+
     assert real_start =~ ~s("interactive_ready":true)
 
     assert File.read!(provider_capture) == "--dangerously-skip-permissions\n--model\nhaiku\n",
@@ -390,7 +395,7 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
 
     assert error_code(real_busy) == "agent_pane_busy"
     assert error_code(real_busy) == error_code(fake_busy)
-    assert json_shape(real_busy) == json_shape(fake_busy)
+    assert HerdrReplayFixture.json_shape!(real_busy) == HerdrReplayFixture.json_shape!(fake_busy)
   end
 
   defp await_real_server!(real, session, env) do
@@ -416,21 +421,6 @@ defmodule SymphonyElixir.HerdrDifferentialTest do
     |> String.split("\n", trim: true)
     |> Enum.map(fn line -> line |> String.split(":", parts: 2) |> hd() end)
   end
-
-  defp json_shape(output) do
-    output
-    |> String.trim()
-    |> Jason.decode!()
-    |> shape()
-  end
-
-  defp shape(map) when is_map(map), do: map |> Map.new(fn {key, value} -> {key, shape(value)} end)
-  defp shape(list) when is_list(list), do: Enum.map(list, &shape/1)
-  defp shape(value) when is_binary(value), do: :string
-  defp shape(value) when is_integer(value), do: :integer
-  defp shape(value) when is_float(value), do: :float
-  defp shape(value) when is_boolean(value), do: :boolean
-  defp shape(nil), do: nil
 
   defp error_code(output) do
     output |> String.trim() |> Jason.decode!() |> get_in(["error", "code"])

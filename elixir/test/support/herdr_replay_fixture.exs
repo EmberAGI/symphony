@@ -81,6 +81,28 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
 
   def known_statuses, do: @statuses
 
+  @doc "Exact JSON envelope shape, retaining every key and value type."
+  def json_shape!(output), do: output |> Jason.decode!() |> shape()
+
+  @doc "AgentStarted shape with only optional terminal-title metadata removed."
+  def agent_started_shape!(output) do
+    output
+    |> Jason.decode!()
+    |> update_in(["result", "agent"], fn
+      agent when is_map(agent) -> Map.drop(agent, ~w(terminal_title terminal_title_stripped))
+      agent -> agent
+    end)
+    |> shape()
+  end
+
+  @doc "Stable prompted-agent identity carried by a protocol envelope."
+  def agent_identity!(output) do
+    output
+    |> Jason.decode!()
+    |> get_in(["result", "agent"])
+    |> Map.take(~w(agent name pane_id agent_session))
+  end
+
   @doc """
   Write a test-local replay variant derived from one recorded fixture.
 
@@ -670,4 +692,12 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
   defp shell_escape(value) do
     "'" <> String.replace(to_string(value), "'", "'\\''") <> "'"
   end
+
+  defp shape(map) when is_map(map), do: Map.new(map, fn {key, value} -> {key, shape(value)} end)
+  defp shape(list) when is_list(list), do: Enum.map(list, &shape/1)
+  defp shape(value) when is_binary(value), do: :string
+  defp shape(value) when is_integer(value), do: :integer
+  defp shape(value) when is_float(value), do: :float
+  defp shape(value) when is_boolean(value), do: :boolean
+  defp shape(nil), do: nil
 end

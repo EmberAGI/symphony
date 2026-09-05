@@ -98,6 +98,32 @@ defmodule SymphonyElixir.HerdrFixtureFidelityTest do
     assert HerdrReplayFixture.load!("agent-start")["redaction"] =~ "declared placeholders"
   end
 
+  test "differential shape ignores only environment-dependent terminal titles" do
+    recorded = HerdrReplayFixture.stdout!("differential-claude-start")
+
+    observed =
+      recorded
+      |> Jason.decode!()
+      |> put_in(["result", "agent", "terminal_title"], "Claude Code")
+      |> put_in(["result", "agent", "terminal_title_stripped"], "Claude Code")
+      |> Jason.encode!()
+
+    refute HerdrReplayFixture.json_shape!(observed) ==
+             HerdrReplayFixture.json_shape!(recorded)
+
+    assert HerdrReplayFixture.agent_started_shape!(observed) ==
+             HerdrReplayFixture.agent_started_shape!(recorded)
+
+    wrong_agent =
+      observed
+      |> Jason.decode!()
+      |> put_in(["result", "agent", "name"], "other_agent")
+      |> Jason.encode!()
+
+    refute HerdrReplayFixture.agent_identity!(wrong_agent) ==
+             HerdrReplayFixture.agent_identity!(recorded)
+  end
+
   test "v0.8.2 evidence deletes the obsolete separate Enter recording" do
     refute "agent-send-keys-enter" in HerdrReplayFixture.fixture_names()
     assert HerdrReplayFixture.load!("error-agent-prompt-blocked")["herdr_version"] == "herdr 0.8.2"

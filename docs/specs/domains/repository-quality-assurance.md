@@ -185,6 +185,11 @@ not infer coverage from a green replay suite. It must verify exact captured
 prompt bytes, separate unparameterized Codex and Claude provider-session
 identity recordings across start/prompt/settlement, all typed lifecycle states
 and deadlines, and isolation of `0.7.5` inputs to historical parser regression.
+Real-versus-replay `AgentStarted` shape comparison may remove only the optional,
+environment-dependent `terminal_title` and `terminal_title_stripped`
+presentation fields. It must separately compare exact agent kind, name, pane,
+and provider-session identity; every other envelope field remains covered by
+the shape comparison.
 
 | Change Surface | Required Invariants | Minimum Local Validation | Escalation Route |
 | --- | --- | --- | --- |

@@ -1211,8 +1211,12 @@ test double behavior is launch/timing physics that cannot be a
 recording (server run loop, provider execution for `agent start`, the 5000 ms
 prompt-effect window), and that behavior is differentially validated against
 the real binary by an opt-in CD-tier fake-vs-real harness that runs identical
-operations against both and fails on divergence. Recording is a CD-tier
-operation; committed fixtures are CI inputs. The only upstream authority is
+operations against both and fails on divergence. For `AgentStarted`, the
+harness removes only the optional, environment-dependent `terminal_title` and
+`terminal_title_stripped` presentation fields before comparing envelope shape,
+then separately compares exact agent kind, name, pane, and provider-session
+identity. Every other envelope field remains in the shape comparison.
+Recording is a CD-tier operation; committed fixtures are CI inputs. The only upstream authority is
 the annotated `v0.8.2` tag peeled to
 `9eb521456ac0d19d3ab3d9d7cea3cca10baa8a4c`: `Cargo.toml` is version `0.8.2`,
 `src/protocol/wire.rs` is protocol `20`, and fixture provenance pins the
