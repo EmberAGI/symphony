@@ -3368,7 +3368,10 @@ defmodule SymphonyElixir.Orchestrator do
     case Map.get(state.routine_persistence, issue_id) do
       %{task_pid: task_pid, token: token} when is_pid(task_pid) and is_reference(token) ->
         Process.exit(task_pid, :shutdown)
-        Process.demonitor(token, [:flush])
+
+        receive do
+          {:DOWN, ^token, :process, ^task_pid, _reason} -> :ok
+        end
 
       _ ->
         :ok
