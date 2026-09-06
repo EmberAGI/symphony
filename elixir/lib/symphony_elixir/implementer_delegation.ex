@@ -49,11 +49,8 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
   def start_session(_workspace, _contract, _opts), do: {:error, :invalid_implementer_delegation_start}
 
-  @doc false
-  @spec start_resolved_session(Path.t(), map(), HostResourceContract.t(), keyword()) ::
-          {:ok, session()} | {:error, term()}
-  def start_resolved_session(workspace, contract, %HostResourceContract{} = host_resource_contract, opts)
-      when is_binary(workspace) and is_map(contract) and is_list(opts) do
+  defp start_resolved_session(workspace, contract, %HostResourceContract{} = host_resource_contract, opts)
+       when is_binary(workspace) and is_map(contract) and is_list(opts) do
     transport = Keyword.fetch!(opts, :transport)
     transport_context = Keyword.get(opts, :transport_context, %{})
     orchestrator_env = Keyword.get(opts, :orchestrator_env, %{})
@@ -116,7 +113,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
     end
   end
 
-  def start_resolved_session(_workspace, _contract, _host_resource_contract, _opts),
+  defp start_resolved_session(_workspace, _contract, _host_resource_contract, _opts),
     do: {:error, :invalid_resolved_host_resource_session}
 
   @doc false

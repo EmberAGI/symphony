@@ -73,9 +73,89 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
                role: "implementer",
                run_id: "host-resource-launch-guard",
                host_resources: declaration,
+               runtime_generation: 7,
                delegation_transport: LaunchProbeTransport,
                delegation_transport_context: %{owner: self()}
              )
+
+    refute_received :host_resource_launch_started
+  end
+
+  test "AgentRuntime rejects unsafe local roots and remote materialization before launch" do
+    fixture = host_resource_fixture()
+    verification_path = ["operations", "symphony_runtime_verification"]
+    tool_config_sha256 = fixture.context[:tool_config_sha256]
+    shims_dir = Path.join(fixture.root, "shims")
+    shim = Path.join(shims_dir, "mise")
+
+    install_alias =
+      Path.join([
+        fixture.root,
+        "alias",
+        "installs",
+        "elixir",
+        Path.basename(fixture.elixir_install)
+      ])
+
+    File.mkdir_p!(shims_dir)
+    File.mkdir_p!(Path.dirname(install_alias))
+    File.ln_s!(fixture.mise_target, shim)
+    File.ln_s!(fixture.elixir_install, install_alias)
+
+    replace_tool_config = fn path ->
+      fixture.declaration
+      |> put_in(verification_path ++ ["tool_config"], path)
+      |> put_in(verification_path ++ ["tool_config_sha256"], tool_config_sha256)
+    end
+
+    invalid_cases = [
+      {replace_tool_config.("/"), [tool_config_path: "/"]},
+      {replace_tool_config.(System.user_home!()), [tool_config_path: System.user_home!()]},
+      {replace_tool_config.(Path.join(fixture.root, "nested/../mise.toml")), [tool_config_path: Path.join(fixture.root, "nested/../mise.toml")]},
+      {put_in(fixture.declaration, verification_path ++ ["mise", "executable"], shim), []},
+      {fixture.declaration
+       |> put_in(verification_path ++ ["mise", "executable"], Path.dirname(fixture.mise_target))
+       |> put_in(verification_path ++ ["mise", "target"], Path.dirname(fixture.mise_target)), []},
+      {put_in(
+         fixture.declaration,
+         verification_path ++ ["elixir", "install_path"],
+         Path.dirname(fixture.elixir_install)
+       ), []},
+      {put_in(
+         fixture.declaration,
+         verification_path ++ ["elixir", "install_path"],
+         install_alias
+       ), []},
+      {fixture.declaration, [worker_host: "remote-worker"]}
+    ]
+
+    issue = %Issue{
+      id: "host-resource-unsafe-roots",
+      identifier: "TUR-877-UNSAFE-ROOTS",
+      title: "Host resource unsafe roots",
+      repository: "EmberAGI/symphony"
+    }
+
+    for {declaration, extra_opts} <- invalid_cases do
+      opts =
+        [
+          issue: issue,
+          role: "implementer",
+          run_id: "host-resource-unsafe-roots",
+          host_resources: declaration,
+          execution_generation: fixture.context[:execution_generation],
+          runtime_generation: fixture.context[:runtime_generation],
+          source_ref: fixture.context[:source_ref],
+          tool_config_path: fixture.context[:tool_config_path],
+          tool_config_sha256: tool_config_sha256,
+          delegation_transport: LaunchProbeTransport,
+          delegation_transport_context: %{owner: self()}
+        ]
+        |> Keyword.merge(extra_opts)
+
+      assert {:error, {:invalid_host_resource_contract, _details}} =
+               AgentRuntime.start_session("/tmp/selected-workspace", opts)
+    end
 
     refute_received :host_resource_launch_started
   end
@@ -134,7 +214,7 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
              )
   end
 
-  test "ordinary Codex receives host reads without changing its network projection" do
+  test "ordinary Codex receives host runtime reads with no skills" do
     fixture = host_resource_fixture()
     root = Path.join(System.tmp_dir!(), "host-resource-codex-#{System.unique_integer([:positive])}")
     workspace_root = Path.join(root, "workspaces")
@@ -202,6 +282,25 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
     refute trace_contents =~ "permissions.symphony_skill_runtime.network"
     assert :ok = AppServer.stop_session(session)
     on_exit(fn -> File.rm_rf!(root) end)
+  end
+
+  test "ordinary Codex enables declared DNS with no skills" do
+    resolver_target = "/run/systemd/resolve/stub-resolv.conf"
+
+    host_resources = %HostResourceContract{
+      operations: %{"host_dns" => %{"resolver_target" => resolver_target}},
+      read_paths: [resolver_target]
+    }
+
+    assert {:ok, command} =
+             CodexAppServer.project_skill_permissions_for_test(
+               "codex app-server",
+               [],
+               host_resources
+             )
+
+    assert command =~ "#{inspect(resolver_target)}=\"read\""
+    assert command =~ "permissions.symphony_skill_runtime.network={enabled=true}"
   end
 
   test "normal AgentRuntime startup derives independent provenance from its locked Workflow source" do
@@ -365,7 +464,118 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
     assert_receive {:host_resource_transport, :stop_session, _}
   end
 
+  test "concurrent AgentRuntime sessions retain distinct versions with sparse ambient context" do
+    first = host_resource_fixture(role: "reviewer")
+
+    second =
+      host_resource_fixture(
+        elixir_version: "1.18.4-otp-27",
+        erlang_version: "27.3",
+        runtime_generation: 8,
+        source_ref: String.duplicate("b", 40),
+        role: "reviewer"
+      )
+
+    root = Path.join(System.tmp_dir!(), "host-resource-concurrent-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(root, "workspaces")
+    fake_codex = Path.join(root, "fake-codex")
+    File.mkdir_p!(workspace_root)
+    File.ln_s!("/bin/bash", Path.join(root, "bash"))
+
+    File.write!(fake_codex, """
+    #!/bin/sh
+    count=0
+    while IFS= read -r line; do
+      count=$((count + 1))
+      case "$count" in
+        1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"host-resource-concurrent"}}}' ;;
+      esac
+    done
+    """)
+
+    File.chmod!(fake_codex, 0o755)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      codex_command: "#{fake_codex} app-server"
+    )
+
+    previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    previous_home = System.get_env("HOME")
+    previous_path = System.get_env("PATH")
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
+    System.put_env("HOME", Path.join(root, "unrelated-home"))
+    System.put_env("PATH", root)
+
+    on_exit(fn ->
+      restore_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_provider)
+      restore_env("HOME", previous_home)
+      restore_env("PATH", previous_path)
+      File.rm_rf!(root)
+    end)
+
+    parent = self()
+
+    start = fn tag, fixture ->
+      workspace = Path.join(workspace_root, "TUR-877-#{tag}")
+      File.mkdir_p!(workspace)
+
+      issue = %Issue{
+        id: "host-resource-#{tag}",
+        identifier: "TUR-877-#{tag}",
+        title: "Concurrent host resource #{tag}",
+        repository: "EmberAGI/symphony",
+        repository_source: "linear_label",
+        labels: ["implementation-effort:moderate"]
+      }
+
+      Task.async(fn ->
+        assert {:ok, session} =
+                 AgentRuntime.start_session(workspace,
+                   issue: issue,
+                   role: "reviewer",
+                   host_resources: fixture.declaration,
+                   execution_generation: fixture.context[:execution_generation],
+                   runtime_generation: fixture.context[:runtime_generation],
+                   source_ref: fixture.context[:source_ref],
+                   tool_config_path: fixture.context[:tool_config_path],
+                   tool_config_sha256: fixture.context[:tool_config_sha256]
+                 )
+
+        send(parent, {:host_resource_session, tag, session.host_resource_contract})
+
+        receive do
+          :stop -> AgentRuntime.stop_session(session)
+        end
+      end)
+    end
+
+    first_task = start.("FIRST", first)
+    second_task = start.("SECOND", second)
+
+    assert_receive {:host_resource_session, "FIRST", first_contract}, 5_000
+    assert_receive {:host_resource_session, "SECOND", second_contract}, 5_000
+
+    assert first_contract.operations["symphony_runtime_verification"]["elixir"].version ==
+             "1.19.5-otp-28"
+
+    assert second_contract.operations["symphony_runtime_verification"]["elixir"].version ==
+             "1.18.4-otp-27"
+
+    refute Enum.any?(first_contract.read_paths, &String.starts_with?(&1, second.root <> "/"))
+    refute Enum.any?(second_contract.read_paths, &String.starts_with?(&1, first.root <> "/"))
+
+    send(first_task.pid, :stop)
+    send(second_task.pid, :stop)
+    assert :ok = Task.await(first_task)
+    assert :ok = Task.await(second_task)
+  end
+
   test "direct entrypoints cannot bypass raw declaration validation with a typed-looking option" do
+    refute function_exported?(CodexAppServer, :start_resolved_session, 3)
+    refute function_exported?(ImplementerDelegation, :start_resolved_session, 4)
+
     invalid_declaration = %{"unexpected" => true}
     typed_looking = %HostResourceContract{}
 
@@ -500,23 +710,30 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
              AgentRuntime.start_session(workspace,
                issue: issue,
                role: "reviewer",
-               host_resources: declaration
+               host_resources: declaration,
+               runtime_generation: 7
              )
   end
 
-  defp host_resource_fixture do
+  defp host_resource_fixture(opts \\ []) do
+    elixir_version = Keyword.get(opts, :elixir_version, "1.19.5-otp-28")
+    erlang_version = Keyword.get(opts, :erlang_version, "28.5")
+    runtime_generation = Keyword.get(opts, :runtime_generation, 7)
+    source_ref = Keyword.get(opts, :source_ref, String.duplicate("a", 40))
+    role = Keyword.get(opts, :role, "implementer")
     root = Path.join(System.tmp_dir!(), "host-resource-launch-#{System.unique_integer([:positive])}")
     tool_config = Path.join(root, "mise.toml")
     mise_bin = Path.join([root, "mise", "bin", "mise"])
     mise_target = Path.join([root, "mise", "targets", "mise-2026.09"])
-    elixir_install = Path.join([root, "mise", "installs", "elixir", "1.19.5-otp-28"])
-    erlang_install = Path.join([root, "mise", "installs", "erlang", "28.5"])
+    elixir_install = Path.join([root, "mise", "installs", "elixir", elixir_version])
+    erlang_install = Path.join([root, "mise", "installs", "erlang", erlang_version])
 
     File.mkdir_p!(Path.dirname(mise_bin))
     File.mkdir_p!(Path.dirname(mise_target))
     File.mkdir_p!(Path.join(elixir_install, "bin"))
     File.mkdir_p!(Path.join(erlang_install, "bin"))
-    File.write!(tool_config, "[tools]\nerlang = \"28\"\nelixir = \"1.19.5-otp-28\"\n")
+    erlang_major = erlang_version |> String.split(".", parts: 2) |> hd()
+    File.write!(tool_config, "[tools]\nerlang = \"#{erlang_major}\"\nelixir = \"#{elixir_version}\"\n")
     File.write!(mise_target, "#!/bin/sh\nexit 0\n")
     File.ln_s!(mise_target, mise_bin)
     File.write!(Path.join(elixir_install, "bin/elixir"), "#!/bin/sh\nexit 0\n")
@@ -528,12 +745,12 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
 
     declaration = %{
       "schema_version" => 1,
-      "role" => "implementer",
+      "role" => role,
       "execution_generation" => "exec-20260906",
-      "runtime_generation" => 7,
+      "runtime_generation" => runtime_generation,
       "operations" => %{
         "symphony_runtime_verification" => %{
-          "symphony_ref" => String.duplicate("a", 40),
+          "symphony_ref" => source_ref,
           "tool_config" => tool_config,
           "tool_config_sha256" => digest(tool_config),
           "mise" => %{
@@ -542,11 +759,11 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
             "sha256" => digest(mise_target)
           },
           "elixir" => %{
-            "version" => "1.19.5-otp-28",
+            "version" => elixir_version,
             "install_path" => elixir_install
           },
           "erlang" => %{
-            "version" => "28.5",
+            "version" => erlang_version,
             "install_path" => erlang_install
           }
         }
@@ -554,16 +771,23 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
     }
 
     context = [
-      role: "implementer",
+      role: role,
       execution_generation: "exec-20260906",
-      runtime_generation: 7,
-      source_ref: String.duplicate("a", 40),
+      runtime_generation: runtime_generation,
+      source_ref: source_ref,
       tool_config_path: tool_config,
       tool_config_sha256: declaration["operations"]["symphony_runtime_verification"]["tool_config_sha256"]
     ]
 
     on_exit(fn -> File.rm_rf!(root) end)
-    %{declaration: declaration, context: context}
+
+    %{
+      declaration: declaration,
+      context: context,
+      root: root,
+      mise_target: mise_target,
+      elixir_install: elixir_install
+    }
   end
 
   defp digest(path) do

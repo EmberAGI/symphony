@@ -72,11 +72,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  @doc false
-  @spec start_resolved_session(Path.t(), HostResourceContract.t(), keyword()) ::
-          {:ok, session()} | {:error, term()}
-  def start_resolved_session(workspace, %HostResourceContract{} = host_resource_contract, opts)
-      when is_binary(workspace) and is_list(opts) do
+  defp start_resolved_session(workspace, %HostResourceContract{} = host_resource_contract, opts)
+       when is_binary(workspace) and is_list(opts) do
     worker_host = Keyword.get(opts, :worker_host)
     skill_execution_contracts = Keyword.get(opts, :skill_execution_contracts, [])
     issue = Keyword.get(opts, :issue)
@@ -116,7 +113,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  def start_resolved_session(_workspace, _host_resource_contract, _opts),
+  defp start_resolved_session(_workspace, _host_resource_contract, _opts),
     do: {:error, :invalid_resolved_host_resource_session}
 
   @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -267,6 +264,16 @@ defmodule SymphonyElixir.Codex.AppServer do
     project_skill_permissions(command, skill_execution_projection(contracts))
   end
 
+  @doc false
+  @spec project_skill_permissions_for_test(
+          String.t(),
+          [SkillExecutionContract.t()],
+          HostResourceContract.t()
+        ) :: {:ok, String.t()} | {:error, term()}
+  def project_skill_permissions_for_test(command, contracts, %HostResourceContract{} = host_resources) do
+    project_skill_permissions(command, skill_execution_projection(contracts, host_resources))
+  end
+
   defp skill_execution_projection(contracts),
     do: skill_execution_projection(contracts, %HostResourceContract{})
 
@@ -277,7 +284,9 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     %{
       read_paths: read_paths,
-      network?: skill_read_paths != [],
+      network?:
+        skill_read_paths != [] or
+          Map.has_key?(host_resource_contract.operations, "host_dns"),
       permission_config: "permissions.symphony_skill_runtime.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"},#{exact_reads}}",
       environment:
         %{"SYMPHONY_SKILL_EXECUTION_CONTRACTS" => SkillExecutionContract.encode!(contracts)}

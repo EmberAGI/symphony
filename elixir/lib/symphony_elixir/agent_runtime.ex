@@ -166,7 +166,7 @@ defmodule SymphonyElixir.AgentRuntime do
 
     with {:ok, host_resource_context} <-
            expected_host_resource_context(role, host_resources, opts),
-         {:ok, host_resource_contract} <-
+         {:ok, _validated_host_resources} <-
            HostResourceContract.resolve(host_resources, host_resource_context),
          {:ok, skill_execution_contracts} <- resolve_skill_execution_contracts(workspace, opts),
          {:ok, issue_bootstrap_env} <- Workspace.issue_environment(Keyword.get(opts, :issue)) do
@@ -178,17 +178,17 @@ defmodule SymphonyElixir.AgentRuntime do
         |> Keyword.put(:issue_bootstrap_env, issue_bootstrap_env)
 
       if role == "implementer" do
-        start_implementer_session(workspace, provider, role, host_resource_contract, opts)
+        start_implementer_session(workspace, provider, role, opts)
       else
-        start_provider_session(provider, workspace, host_resource_contract, opts)
+        start_provider_session(provider, workspace, opts)
       end
     end
   end
 
-  defp start_provider_session(:codex, workspace, host_resource_contract, opts),
-    do: CodexAppServer.start_resolved_session(workspace, host_resource_contract, opts)
+  defp start_provider_session(:codex, workspace, opts),
+    do: CodexAppServer.start_session(workspace, opts)
 
-  defp start_provider_session(provider, workspace, _host_resource_contract, opts),
+  defp start_provider_session(provider, workspace, opts),
     do: adapter(provider).start_session(workspace, opts)
 
   defp host_resource_declaration(opts) do
@@ -270,7 +270,7 @@ defmodule SymphonyElixir.AgentRuntime do
 
   defp session_runtime_adapter(_session), do: adapter()
 
-  defp start_implementer_session(workspace, provider, role, host_resource_contract, opts) do
+  defp start_implementer_session(workspace, provider, role, opts) do
     issue = Keyword.get(opts, :issue)
     worker_host = Keyword.get(opts, :worker_host)
 
@@ -281,10 +281,9 @@ defmodule SymphonyElixir.AgentRuntime do
          {:ok, issue_identifier} <- required_issue_identifier(issue),
          {:ok, contract} <- resolve_profile(provider, issue, role),
          {:ok, transport_context} <- delegation_transport_context(opts, transport) do
-      ImplementerDelegation.start_resolved_session(
+      ImplementerDelegation.start_session(
         workspace,
         contract,
-        host_resource_contract,
         [
           issue_identifier: issue_identifier,
           run_id: run_id,
