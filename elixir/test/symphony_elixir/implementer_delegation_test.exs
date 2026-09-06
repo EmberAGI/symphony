@@ -682,6 +682,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     executable = Path.join(root, "tooling-uv")
     herdr_bin = Path.join(root, "fake-herdr")
     herdr_log = Path.join(root, "herdr.log")
+    server_pid_file = Path.join(System.tmp_dir!(), "agent-runtime-default-herdr-#{System.unique_integer([:positive])}.pid")
     runtime_root = Path.join(System.tmp_dir!(), "arh-#{System.unique_integer([:positive])}")
     previous_root = System.get_env("SYMPHONY_ORCHESTRATION_ROOT")
     previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
@@ -715,6 +716,13 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
       File.rm_rf(root)
       File.rm_rf(runtime_root)
+      File.rm(server_pid_file)
+    end)
+
+    on_exit(fn ->
+      if File.exists?(server_pid_file) and process_alive?(File.read!(server_pid_file)) do
+        System.cmd("kill", ["-KILL", String.trim(File.read!(server_pid_file))])
+      end
     end)
 
     entry = %{
@@ -732,7 +740,10 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
                skill_execution_contracts: [entry],
                delegation_transport_context: %{
                  herdr_bin: herdr_bin,
-                 extra_env: [{"HERDR_FAKE_LOG", herdr_log}],
+                 extra_env: [
+                   {"HERDR_FAKE_LOG", herdr_log},
+                   {"HERDR_FAKE_SERVER_PID_FILE", server_pid_file}
+                 ],
                  socket_root: runtime_root,
                  poll_interval_ms: 5,
                  start_timeout_ms: 2_000
@@ -809,6 +820,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
            ] = turn.worker_assignments
 
     assert :ok = AgentRuntime.stop_session(next_session)
+    refute process_alive?(File.read!(server_pid_file))
   end
 
   test "AgentRuntime forwards local Claude auth only to Claude delegation participants without argv leakage" do
@@ -1106,6 +1118,13 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
   defp restore_env(name, nil), do: System.delete_env(name)
   defp restore_env(name, value), do: System.put_env(name, value)
+
+  defp process_alive?(pid) do
+    case System.cmd("kill", ["-0", String.trim(pid)], stderr_to_stdout: true) do
+      {_output, 0} -> true
+      {_output, _status} -> false
+    end
+  end
 
   defp codex_argv(profile, workspace, herdr_session) do
     runtime_root = herdr_session.runtime_root
