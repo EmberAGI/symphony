@@ -393,11 +393,27 @@ defmodule SymphonyElixir.Config.Schema do
     import Ecto.Changeset
 
     @supported_providers ~w(codex claude_code)
+    @host_resource_fields ~w(schema_version role execution_generation runtime_generation operations)
+    @host_operation_keys ~w(symphony_runtime_verification host_dns)
+
+    @runtime_verification_fields ~w(
+      symphony_ref
+      tool_config
+      tool_config_sha256
+      mise
+      elixir
+      erlang
+    )
+
+    @mise_fields ~w(executable target sha256)
+    @installation_fields ~w(version install_path)
+    @dns_fields ~w(resolver_target)
 
     @primary_key false
     embedded_schema do
       field(:provider, :string, default: "codex")
       field(:skill_execution_contracts, {:array, :map}, default: [])
+      field(:host_resources, :map, default: %{})
       # Deadline for one terminal settlement (teardown + evidence capture) to
       # reach a typed outcome. Production surface for the value the orchestrator
       # previously exposed only through an app-env test seam (EMB-1260).
@@ -407,11 +423,176 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:provider, :skill_execution_contracts, :terminal_settlement_timeout_ms], empty_values: [])
+      |> cast(
+        attrs,
+        [:provider, :skill_execution_contracts, :host_resources, :terminal_settlement_timeout_ms],
+        empty_values: []
+      )
+      |> validate_host_resources()
       |> validate_required([:provider, :terminal_settlement_timeout_ms])
       |> validate_number(:terminal_settlement_timeout_ms, greater_than: 0)
       |> validate_inclusion(:provider, @supported_providers, message: "must be one of: #{Enum.join(@supported_providers, ", ")}")
     end
+
+    defp validate_host_resources(changeset) do
+      validate_change(changeset, :host_resources, fn field, host_resources ->
+        case validate_host_resources_map(host_resources) do
+          :ok -> []
+          {:error, message} -> [{field, message}]
+        end
+      end)
+    end
+
+    defp validate_host_resources_map(host_resources)
+         when is_map(host_resources) and map_size(host_resources) == 0,
+         do: :ok
+
+    defp validate_host_resources_map(host_resources) when is_map(host_resources) do
+      path = "host_resources"
+
+      with :ok <- validate_exact_keys(host_resources, @host_resource_fields, path),
+           :ok <- validate_schema_version(host_resources["schema_version"], path <> ".schema_version"),
+           :ok <- validate_nonblank_string(host_resources["role"], path <> ".role"),
+           :ok <- validate_nonblank_string(host_resources["execution_generation"], path <> ".execution_generation"),
+           :ok <- validate_positive_integer(host_resources["runtime_generation"], path <> ".runtime_generation") do
+        validate_operations(host_resources["operations"])
+      end
+    end
+
+    defp validate_host_resources_map(_host_resources),
+      do: validation_error("host_resources", "must be a map")
+
+    defp validate_operations(operations) when is_map(operations) and map_size(operations) > 0 do
+      path = "host_resources.operations"
+
+      with :ok <- validate_supported_operation_keys(operations, path),
+           :ok <-
+             validate_optional_operation(
+               operations,
+               "symphony_runtime_verification",
+               &validate_runtime_verification/1
+             ) do
+        validate_optional_operation(operations, "host_dns", &validate_host_dns/1)
+      end
+    end
+
+    defp validate_operations(operations) when is_map(operations),
+      do: validation_error("host_resources.operations", "must be a nonempty map")
+
+    defp validate_operations(_operations),
+      do: validation_error("host_resources.operations", "must be a map")
+
+    defp validate_supported_operation_keys(operations, path) do
+      if Enum.all?(Map.keys(operations), &(&1 in @host_operation_keys)) do
+        :ok
+      else
+        validation_error(path, "contains an unsupported operation")
+      end
+    end
+
+    defp validate_optional_operation(operations, key, validator) do
+      case Map.fetch(operations, key) do
+        {:ok, value} -> validator.(value)
+        :error -> :ok
+      end
+    end
+
+    defp validate_runtime_verification(value) when is_map(value) do
+      path = "host_resources.operations.symphony_runtime_verification"
+
+      with :ok <- validate_exact_keys(value, @runtime_verification_fields, path),
+           :ok <- validate_lower_hex(value["symphony_ref"], 40, path <> ".symphony_ref"),
+           :ok <- validate_absolute_path(value["tool_config"], path <> ".tool_config"),
+           :ok <- validate_lower_hex(value["tool_config_sha256"], 64, path <> ".tool_config_sha256"),
+           :ok <- validate_mise(value["mise"], path <> ".mise"),
+           :ok <- validate_installation(value["elixir"], path <> ".elixir") do
+        validate_installation(value["erlang"], path <> ".erlang")
+      end
+    end
+
+    defp validate_runtime_verification(_value),
+      do: validation_error("host_resources.operations.symphony_runtime_verification", "must be a map")
+
+    defp validate_mise(value, path) when is_map(value) do
+      with :ok <- validate_exact_keys(value, @mise_fields, path),
+           :ok <- validate_absolute_path(value["executable"], path <> ".executable"),
+           :ok <- validate_absolute_path(value["target"], path <> ".target") do
+        validate_lower_hex(value["sha256"], 64, path <> ".sha256")
+      end
+    end
+
+    defp validate_mise(_value, path), do: validation_error(path, "must be a map")
+
+    defp validate_installation(value, path) when is_map(value) do
+      with :ok <- validate_exact_keys(value, @installation_fields, path),
+           :ok <- validate_nonblank_string(value["version"], path <> ".version") do
+        validate_absolute_path(value["install_path"], path <> ".install_path")
+      end
+    end
+
+    defp validate_installation(_value, path), do: validation_error(path, "must be a map")
+
+    defp validate_host_dns(value) when is_map(value) do
+      path = "host_resources.operations.host_dns"
+
+      with :ok <- validate_exact_keys(value, @dns_fields, path) do
+        validate_absolute_path(value["resolver_target"], path <> ".resolver_target")
+      end
+    end
+
+    defp validate_host_dns(_value),
+      do: validation_error("host_resources.operations.host_dns", "must be a map")
+
+    defp validate_exact_keys(value, expected, path) when is_map(value) do
+      if MapSet.new(Map.keys(value)) == MapSet.new(expected) do
+        :ok
+      else
+        validation_error(path, "must contain exactly: #{Enum.join(expected, ", ")}")
+      end
+    end
+
+    defp validate_schema_version(1, _path), do: :ok
+    defp validate_schema_version(_value, path), do: validation_error(path, "must be integer 1")
+
+    defp validate_positive_integer(value, _path) when is_integer(value) and value > 0, do: :ok
+    defp validate_positive_integer(_value, path), do: validation_error(path, "must be a positive integer")
+
+    defp validate_nonblank_string(value, path) when is_binary(value) do
+      if String.trim(value) == "" do
+        validation_error(path, "must not be blank")
+      else
+        :ok
+      end
+    end
+
+    defp validate_nonblank_string(_value, path),
+      do: validation_error(path, "must be a nonblank string")
+
+    defp validate_absolute_path(value, path) when is_binary(value) do
+      with :ok <- validate_nonblank_string(value, path) do
+        if Path.type(value) == :absolute do
+          :ok
+        else
+          validation_error(path, "must be an absolute path")
+        end
+      end
+    end
+
+    defp validate_absolute_path(_value, path),
+      do: validation_error(path, "must be an absolute path")
+
+    defp validate_lower_hex(value, length, path) when is_binary(value) do
+      if byte_size(value) == length and Regex.match?(~r/\A[0-9a-f]+\z/, value) do
+        :ok
+      else
+        validation_error(path, "must be #{length} lowercase hexadecimal characters")
+      end
+    end
+
+    defp validate_lower_hex(_value, length, path),
+      do: validation_error(path, "must be #{length} lowercase hexadecimal characters")
+
+    defp validation_error(path, message), do: {:error, "#{path} #{message}"}
   end
 
   defmodule Hooks do
@@ -708,17 +889,27 @@ defmodule SymphonyElixir.Config.Schema do
   defp normalize_key(value) when is_atom(value), do: Atom.to_string(value)
   defp normalize_key(value), do: to_string(value)
 
-  defp drop_nil_values(value) when is_map(value) do
+  defp drop_nil_values(value), do: drop_nil_values(value, [])
+
+  defp drop_nil_values(value, path) when is_map(value) do
     Enum.reduce(value, %{}, fn {key, nested}, acc ->
-      case drop_nil_values(nested) do
-        nil -> acc
-        normalized -> Map.put(acc, key, normalized)
-      end
+      normalized = drop_nil_values(nested, path ++ [key])
+      put_normalized_value(acc, key, normalized, path)
     end)
   end
 
-  defp drop_nil_values(value) when is_list(value), do: Enum.map(value, &drop_nil_values/1)
-  defp drop_nil_values(value), do: value
+  defp drop_nil_values(value, path) when is_list(value), do: Enum.map(value, &drop_nil_values(&1, path))
+  defp drop_nil_values(value, _path), do: value
+
+  defp put_normalized_value(acc, key, nil, path) do
+    if preserve_host_resource_nil?(path), do: Map.put(acc, key, nil), else: acc
+  end
+
+  defp put_normalized_value(acc, key, normalized, _path), do: Map.put(acc, key, normalized)
+
+  defp preserve_host_resource_nil?(path) do
+    List.starts_with?(path, ["agent_runtime", "host_resources"])
+  end
 
   defp resolve_secret_setting(nil, fallback), do: normalize_secret_value(fallback)
 

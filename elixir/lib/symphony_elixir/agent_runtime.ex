@@ -13,7 +13,16 @@ defmodule SymphonyElixir.AgentRuntime do
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
   alias SymphonyElixir.ClaudeCode.ProviderAuth
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
-  alias SymphonyElixir.{Config, ImplementationEffort, ImplementerDelegation, SkillExecutionContract, Workspace}
+
+  alias SymphonyElixir.{
+    Config,
+    HostResourceContract,
+    ImplementationEffort,
+    ImplementerDelegation,
+    SkillExecutionContract,
+    Workspace
+  }
+
   alias SymphonyElixir.ImplementerDelegation.HerdrTransport
   alias SymphonyElixir.Runtime.ProcessOwnership
 
@@ -67,6 +76,15 @@ defmodule SymphonyElixir.AgentRuntime do
   # way a completed hook can ask to be retried. Every other non-zero exit is
   # read as a verdict on the run.
   @hook_temporary_failure_status 75
+  @host_resource_context_keys ~w(
+    role
+    execution_generation
+    runtime_generation
+    source_ref
+    tool_config_path
+    tool_config_sha256
+    worker_host
+  )a
 
   @doc """
   Resolve the configured runtime adapter module.
@@ -143,11 +161,14 @@ defmodule SymphonyElixir.AgentRuntime do
   def start_session(workspace, opts) do
     provider = provider()
     role = Keyword.get(opts, :role, role_name())
+    host_resources = host_resource_declaration(opts)
 
-    with {:ok, skill_execution_contracts} <- resolve_skill_execution_contracts(workspace, opts),
+    with :ok <- validate_host_resources_before_dispatch(provider, role, host_resources, opts),
+         {:ok, skill_execution_contracts} <- resolve_skill_execution_contracts(workspace, opts),
          {:ok, issue_bootstrap_env} <- Workspace.issue_environment(Keyword.get(opts, :issue)) do
       opts =
         opts
+        |> Keyword.put(:host_resources, host_resources)
         |> Keyword.put(:skill_execution_contracts, skill_execution_contracts)
         |> Keyword.put(:issue_bootstrap_env, issue_bootstrap_env)
 
@@ -156,6 +177,25 @@ defmodule SymphonyElixir.AgentRuntime do
       else
         adapter(provider).start_session(workspace, opts)
       end
+    end
+  end
+
+  defp host_resource_declaration(opts) do
+    Keyword.get_lazy(opts, :host_resources, fn -> Config.settings!().agent_runtime.host_resources end)
+  end
+
+  defp validate_host_resources_before_dispatch(:codex, _role, _declaration, _opts), do: :ok
+  defp validate_host_resources_before_dispatch(_provider, "implementer", _declaration, _opts), do: :ok
+
+  defp validate_host_resources_before_dispatch(_provider, role, declaration, opts) do
+    context =
+      opts
+      |> Keyword.take(@host_resource_context_keys)
+      |> Keyword.put(:role, role)
+
+    case HostResourceContract.resolve(declaration, context) do
+      {:ok, _contract} -> :ok
+      {:error, _reason} = error -> error
     end
   end
 
@@ -240,21 +280,25 @@ defmodule SymphonyElixir.AgentRuntime do
       ImplementerDelegation.start_session(
         workspace,
         contract,
-        issue_identifier: issue_identifier,
-        run_id: run_id,
-        orchestrator_env:
-          implementer_run_environment(
-            issue,
-            role,
-            run_id,
-            workspace,
-            contract,
-            Keyword.get(opts, :process_ownership_env),
-            Keyword.fetch!(opts, :issue_bootstrap_env)
-          ),
-        skill_execution_contracts: Keyword.get(opts, :skill_execution_contracts, []),
-        transport: transport,
-        transport_context: transport_context
+        [
+          issue_identifier: issue_identifier,
+          run_id: run_id,
+          orchestrator_env:
+            implementer_run_environment(
+              issue,
+              role,
+              run_id,
+              workspace,
+              contract,
+              Keyword.get(opts, :process_ownership_env),
+              Keyword.fetch!(opts, :issue_bootstrap_env)
+            ),
+          host_resources: Keyword.get(opts, :host_resources),
+          skill_execution_contracts: Keyword.get(opts, :skill_execution_contracts, []),
+          transport: transport,
+          transport_context: transport_context
+        ]
+        |> Keyword.merge(Keyword.take(opts, @host_resource_context_keys))
       )
     end
   end
@@ -1050,6 +1094,21 @@ defmodule SymphonyElixir.AgentRuntime do
        subtype: "post_turn_gate_rejected",
        method: hook,
        message: workspace_hook_summary(output)
+     }}
+  end
+
+  defp real_irrecoverable_runtime_reason({:invalid_host_resource_contract, details}) when is_map(details) do
+    subtype =
+      case Map.get(details, :reason) do
+        reason when is_atom(reason) -> Atom.to_string(reason)
+        _ -> "invalid_contract"
+      end
+
+    {:missing_required_runtime_configuration,
+     %{
+       name: "agent_runtime.host_resources",
+       subtype: subtype,
+       message: "explicit deployment host resource validation failed"
      }}
   end
 

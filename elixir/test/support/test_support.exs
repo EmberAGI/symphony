@@ -388,6 +388,7 @@ defmodule SymphonyElixir.TestSupport do
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
           agent_runtime_provider: nil,
+          agent_runtime_host_resources: nil,
           claude_code_command: nil,
           claude_code_model: nil,
           claude_code_effort: nil,
@@ -440,6 +441,7 @@ defmodule SymphonyElixir.TestSupport do
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
     agent_runtime_provider = Keyword.get(config, :agent_runtime_provider)
+    agent_runtime_host_resources = Keyword.get(config, :agent_runtime_host_resources)
     claude_code_command = Keyword.get(config, :claude_code_command)
     claude_code_model = Keyword.get(config, :claude_code_model)
     claude_code_effort = Keyword.get(config, :claude_code_effort)
@@ -494,7 +496,7 @@ defmodule SymphonyElixir.TestSupport do
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
-        agent_runtime_yaml(agent_runtime_provider),
+        agent_runtime_yaml(agent_runtime_provider, agent_runtime_host_resources),
         claude_code_yaml(
           claude_code_command,
           claude_code_model,
@@ -544,10 +546,16 @@ defmodule SymphonyElixir.TestSupport do
 
   defp yaml_value(value), do: yaml_value(to_string(value))
 
-  defp agent_runtime_yaml(nil), do: nil
+  defp agent_runtime_yaml(nil, nil), do: nil
 
-  defp agent_runtime_yaml(provider) do
-    "agent_runtime:\n  provider: #{yaml_value(provider)}"
+  defp agent_runtime_yaml(provider, host_resources) do
+    [
+      "agent_runtime:",
+      !is_nil(provider) && "  provider: #{yaml_value(provider)}",
+      !is_nil(host_resources) && "  host_resources: #{yaml_value(host_resources)}"
+    ]
+    |> Enum.reject(&(&1 in [nil, false]))
+    |> Enum.join("\n")
   end
 
   defp claude_code_yaml(nil, nil, nil, nil, nil, nil, nil), do: nil

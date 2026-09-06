@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   alias SymphonyElixir.{
     Codex.DynamicTool,
     Config,
+    HostResourceContract,
     ImplementationEffort,
     Linear.Issue,
     PathSafety,
@@ -23,6 +24,15 @@ defmodule SymphonyElixir.Codex.AppServer do
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
   @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
+  @host_resource_context_keys ~w(
+    role
+    execution_generation
+    runtime_generation
+    source_ref
+    tool_config_path
+    tool_config_sha256
+    worker_host
+  )a
 
   @type session :: %{
           port: port(),
@@ -55,12 +65,16 @@ defmodule SymphonyElixir.Codex.AppServer do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
-    skill_projection = skill_execution_projection(Keyword.get(opts, :skill_execution_contracts, []))
+    skill_execution_contracts = Keyword.get(opts, :skill_execution_contracts, [])
+    host_resources = host_resource_declaration(opts)
 
     issue = Keyword.get(opts, :issue)
     role = Keyword.get(opts, :role, runtime_role())
 
-    with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
+    with {:ok, host_resource_contract} <-
+           HostResourceContract.resolve(host_resources, host_resource_context(opts)),
+         skill_projection = skill_execution_projection(skill_execution_contracts, host_resource_contract),
+         {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, launch} <- launch_config(issue, role),
          {:ok, command} <- project_skill_permissions(launch.command, skill_projection),
          bootstrap_env = issue_bootstrap_env(opts),
@@ -72,18 +86,19 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
            {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
-        {:ok,
-         %{
-           port: port,
-           metadata: metadata,
-           approval_policy: session_policies.approval_policy,
-           auto_approve_requests: session_policies.approval_policy == "never",
-           thread_sandbox: session_policies.thread_sandbox,
-           turn_sandbox_policy: session_policies.turn_sandbox_policy,
-           thread_id: thread_id,
-           workspace: expanded_workspace,
-           worker_host: worker_host
-         }}
+        session = %{
+          port: port,
+          metadata: metadata,
+          approval_policy: session_policies.approval_policy,
+          auto_approve_requests: session_policies.approval_policy == "never",
+          thread_sandbox: session_policies.thread_sandbox,
+          turn_sandbox_policy: session_policies.turn_sandbox_policy,
+          thread_id: thread_id,
+          workspace: expanded_workspace,
+          worker_host: worker_host
+        }
+
+        {:ok, maybe_put_host_resource_contract(session, host_resource_contract)}
       else
         {:error, reason} ->
           stop_port(port)
@@ -240,16 +255,21 @@ defmodule SymphonyElixir.Codex.AppServer do
     project_skill_permissions(command, skill_execution_projection(contracts))
   end
 
-  defp skill_execution_projection(contracts) do
-    read_paths = SkillExecutionContract.read_paths(contracts)
+  defp skill_execution_projection(contracts),
+    do: skill_execution_projection(contracts, %HostResourceContract{})
+
+  defp skill_execution_projection(contracts, %HostResourceContract{} = host_resource_contract) do
+    skill_read_paths = SkillExecutionContract.read_paths(contracts)
+    read_paths = Enum.uniq(skill_read_paths ++ host_resource_contract.read_paths)
     exact_reads = Enum.map_join(read_paths, ",", &"#{inspect(&1)}=\"read\"")
 
     %{
       read_paths: read_paths,
+      network?: skill_read_paths != [],
       permission_config: "permissions.symphony_skill_runtime.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"},#{exact_reads}}",
-      environment: %{
-        "SYMPHONY_SKILL_EXECUTION_CONTRACTS" => SkillExecutionContract.encode!(contracts)
-      }
+      environment:
+        %{"SYMPHONY_SKILL_EXECUTION_CONTRACTS" => SkillExecutionContract.encode!(contracts)}
+        |> Map.merge(host_resource_environment(host_resource_contract))
     }
   end
 
@@ -266,10 +286,12 @@ defmodule SymphonyElixir.Codex.AppServer do
          [
            prefix,
            "--config default_permissions=\"symphony_skill_runtime\"",
-           "--config #{shell_escape(projection.permission_config)}",
-           "--config #{shell_escape("permissions.symphony_skill_runtime.network={enabled=true}")}",
-           suffix
-         ],
+           "--config #{shell_escape(projection.permission_config)}"
+         ] ++
+           if(projection.network?,
+             do: ["--config #{shell_escape("permissions.symphony_skill_runtime.network={enabled=true}")}"],
+             else: []
+           ) ++ [suffix],
          " "
        )}
     else
@@ -394,6 +416,26 @@ defmodule SymphonyElixir.Codex.AppServer do
       _ -> nil
     end
   end
+
+  defp host_resource_declaration(opts) do
+    Keyword.get_lazy(opts, :host_resources, fn -> Config.settings!().agent_runtime.host_resources end)
+  end
+
+  defp host_resource_context(opts), do: Keyword.take(opts, @host_resource_context_keys)
+
+  defp host_resource_environment(%HostResourceContract{operations: operations} = contract)
+       when map_size(operations) > 0 do
+    %{"SYMPHONY_HOST_RESOURCE_CONTRACT" => HostResourceContract.encode!(contract)}
+  end
+
+  defp host_resource_environment(_contract), do: %{}
+
+  defp maybe_put_host_resource_contract(session, %HostResourceContract{operations: operations} = contract)
+       when map_size(operations) > 0 do
+    Map.put(session, :host_resource_contract, contract)
+  end
+
+  defp maybe_put_host_resource_contract(session, _contract), do: session
 
   defp send_initialize(port) do
     payload = %{

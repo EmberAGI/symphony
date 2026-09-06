@@ -12,11 +12,20 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
-  alias SymphonyElixir.ImplementationEffort
+  alias SymphonyElixir.{Config, HostResourceContract, ImplementationEffort}
   alias SymphonyElixir.ImplementerDelegation.Supervision
 
   @max_session_name_bytes 44
   @session_name_digest_chars 16
+  @host_resource_context_keys ~w(
+    role
+    execution_generation
+    runtime_generation
+    source_ref
+    tool_config_path
+    tool_config_sha256
+    worker_host
+  )a
 
   @type session :: %{
           required(:name) => String.t(),
@@ -34,16 +43,24 @@ defmodule SymphonyElixir.ImplementerDelegation do
     transport_context = Keyword.get(opts, :transport_context, %{})
     orchestrator_env = Keyword.get(opts, :orchestrator_env, %{})
     skill_execution_contracts = Keyword.get(opts, :skill_execution_contracts, [])
-    permission_read_roots = SymphonyElixir.SkillExecutionContract.read_paths(skill_execution_contracts)
+    host_resources = host_resource_declaration(opts)
 
     with :ok <- validate_workspace(workspace),
          :ok <- validate_orchestrator_env(orchestrator_env),
+         {:ok, host_resource_contract} <-
+           HostResourceContract.resolve(host_resources, host_resource_context(opts)),
+         permission_read_roots =
+           Enum.uniq(
+             SymphonyElixir.SkillExecutionContract.read_paths(skill_execution_contracts) ++
+               host_resource_contract.read_paths
+           ),
          session_env =
            Map.put(
              orchestrator_env,
              "SYMPHONY_SKILL_EXECUTION_CONTRACTS",
              SymphonyElixir.SkillExecutionContract.encode!(skill_execution_contracts)
-           ),
+           )
+           |> Map.merge(host_resource_environment(host_resource_contract)),
          {:ok, contract} <- ImplementationEffort.validate_runtime_contract(contract),
          {:ok, name} <- session_name(opts),
          {:ok, default_server_before} <- transport.default_server_snapshot(transport_context),
@@ -62,7 +79,8 @@ defmodule SymphonyElixir.ImplementerDelegation do
            |> Map.put(:session_env, session_env)
            |> Map.put(:default_server_before, default_server_before)
            |> Map.put(:permission_read_roots, permission_read_roots)
-           |> Map.put(:skill_execution_contracts, skill_execution_contracts),
+           |> Map.put(:skill_execution_contracts, skill_execution_contracts)
+           |> maybe_put_host_resource_contract(host_resource_contract),
          {:ok, herdr_session} <-
            prepare_worker(
              transport,
@@ -691,6 +709,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
         "SYMPHONY_SKILL_EXECUTION_CONTRACTS",
         SymphonyElixir.SkillExecutionContract.encode!(Map.get(herdr_session, :skill_execution_contracts, []))
       )
+      |> Map.merge(host_resource_environment(Map.get(herdr_session, :host_resource_contract, %HostResourceContract{})))
       |> project_orchestrator_herdr_path(herdr_session)
 
     spec = %{
@@ -750,6 +769,26 @@ defmodule SymphonyElixir.ImplementerDelegation do
   end
 
   defp validate_orchestrator_env(_env), do: {:error, :invalid_implementer_orchestrator_environment}
+
+  defp host_resource_declaration(opts) do
+    Keyword.get_lazy(opts, :host_resources, fn -> Config.settings!().agent_runtime.host_resources end)
+  end
+
+  defp host_resource_context(opts), do: Keyword.take(opts, @host_resource_context_keys)
+
+  defp host_resource_environment(%HostResourceContract{operations: operations} = contract)
+       when map_size(operations) > 0 do
+    %{"SYMPHONY_HOST_RESOURCE_CONTRACT" => HostResourceContract.encode!(contract)}
+  end
+
+  defp host_resource_environment(_contract), do: %{}
+
+  defp maybe_put_host_resource_contract(session, %HostResourceContract{operations: operations} = contract)
+       when map_size(operations) > 0 do
+    Map.put(session, :host_resource_contract, contract)
+  end
+
+  defp maybe_put_host_resource_contract(session, _contract), do: session
 
   defp orchestrator_permission_session(herdr_session, orchestrator_env) do
     case Map.get(orchestrator_env, "SYMPHONY_ROLE_OWNERSHIP_PATH") do

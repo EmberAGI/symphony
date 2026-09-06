@@ -167,6 +167,11 @@ defmodule SymphonyElixir.AgentRunner do
         run_id: Keyword.get(opts, :run_id)
       ]
       |> put_optional(:role, Keyword.get(opts, :role))
+      |> put_optional(:execution_generation, Keyword.get(opts, :execution_generation))
+      |> put_optional(:runtime_generation, Keyword.get(opts, :runtime_generation))
+      |> put_optional(:source_ref, Keyword.get(opts, :source_ref))
+      |> put_optional(:tool_config_path, Keyword.get(opts, :tool_config_path))
+      |> put_optional(:tool_config_sha256, Keyword.get(opts, :tool_config_sha256))
       |> put_optional(:process_ownership_env, Keyword.get(opts, :process_ownership_env))
       |> put_optional(:delegation_transport, Keyword.get(opts, :delegation_transport))
       |> put_optional(:delegation_transport_context, Keyword.get(opts, :delegation_transport_context))
