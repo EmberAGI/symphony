@@ -155,6 +155,7 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
     elixir_output=$(#{shell_word(command.elixir)} --version)
     erlang_output=$(#{shell_word(command.erlang)} -noshell -eval 'io:format("~s", [erlang:system_info(otp_release)]), halt().')
     dns_output=$(/usr/bin/getent ahosts example.com | /usr/bin/head -n 1)
+    if [ -z "$dns_output" ]; then exit 40; fi
     /usr/bin/printf '{"assignment":"%s","status":"completed"}\\n' #{shell_word(assignment)} > #{shell_word(event)}
     if /usr/bin/touch #{shell_word(denied_runtime_write)} 2>/dev/null; then exit 41; fi
     if /usr/bin/head -c 1 #{shell_word(denied_sibling)} >/dev/null 2>&1; then exit 42; fi
@@ -181,7 +182,7 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
     assert output =~ "ELIXIR=Erlang/OTP 28"
     assert output =~ "Elixir 1.19.5"
     assert output =~ "ERLANG=28"
-    assert output =~ "DNS="
+    assert output =~ ~r/^DNS=.+$/m
     assert File.read!(event) =~ assignment
     refute File.exists?(denied_runtime_write)
 
