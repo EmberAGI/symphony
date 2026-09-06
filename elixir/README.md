@@ -1,5 +1,10 @@
 # Symphony Elixir
 
+Agent-profile catalogs support the exact `claude-fable-5.1` model with `xhigh`
+and `max` reasoning, preserving existing Fable 5 entries. Unlisted models at
+restricted efforts remain rejected. Provider availability is validated
+separately from catalog loading.
+
 This directory contains the current Elixir/OTP implementation of Symphony, based on
 the canonical specs under [`../docs/specs/`](../docs/specs/). Start with
 [`../docs/specs/index.spec.html`](../docs/specs/index.spec.html) and the service spec at
