@@ -2516,9 +2516,17 @@ defmodule SymphonyElixir.HerdrTransportTest do
   end
 
   test "an ownership reference stops an abandoned run idempotently", context do
+    server_pid_file =
+      Path.join(System.tmp_dir!(), "symphony-herdr-abandoned-#{System.unique_integer([:positive])}.pid")
+
+    on_exit(fn -> File.rm(server_pid_file) end)
+
     adapter_context = %{
       herdr_bin: context.bin,
-      extra_env: [{"HERDR_FAKE_LOG", context.log}],
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_FAKE_SERVER_PID_FILE", server_pid_file}
+      ],
       start_timeout_ms: 2_000,
       poll_interval_ms: 10
     }
@@ -2529,6 +2537,9 @@ defmodule SymphonyElixir.HerdrTransportTest do
                adapter_context
              )
 
+    server_pid = File.read!(server_pid_file)
+    on_exit(fn -> if process_alive?(server_pid), do: System.cmd("kill", ["-KILL", String.trim(server_pid)]) end)
+
     ownership_ref = HerdrTransport.owned_session_ref(session, adapter_context)
 
     assert ownership_ref.kind == "herdr"
@@ -2537,6 +2548,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert :ok = HerdrTransport.cleanup_owned_session(ownership_ref)
 
     refute File.exists?(session.runtime_root)
+    refute process_alive?(server_pid)
 
     commands = File.read!(context.log)
     assert commands =~ "--session octo-emb-1141-abandoned server stop"
@@ -2613,6 +2625,39 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert Enum.count(commands, &String.contains?(&1, "--session octo-tur-844-default-preserved server stop")) == 1
   end
 
+  test "replay server exits when test teardown deletes its temporary root", context do
+    server_pid_file =
+      Path.join(System.tmp_dir!(), "symphony-herdr-server-#{System.unique_integer([:positive])}.pid")
+
+    on_exit(fn -> File.rm(server_pid_file) end)
+
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_FAKE_SERVER_PID_FILE", server_pid_file}
+      ],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 10
+    }
+
+    assert {:ok, session} =
+             HerdrTransport.start_session(
+               %{name: "octo-emb-test-teardown", isolated: true, workspace: "/tmp/selected-workspace"},
+               adapter_context
+             )
+
+    server_pid = File.read!(server_pid_file)
+    assert process_alive?(server_pid)
+
+    on_exit(fn ->
+      if process_alive?(server_pid), do: System.cmd("kill", ["-KILL", String.trim(server_pid)])
+    end)
+
+    File.rm_rf!(session.runtime_root)
+    assert await_process_exit?(server_pid, 1_000)
+  end
+
   test "an ownership reference recovers an explicitly owned custom socket root", context do
     runtime_root =
       Path.join(System.tmp_dir!(), "octo-herdr-custom-#{System.unique_integer([:positive])}")
@@ -2661,6 +2706,20 @@ defmodule SymphonyElixir.HerdrTransportTest do
     case System.cmd("kill", ["-0", String.trim(pid)], stderr_to_stdout: true) do
       {_output, 0} -> true
       {_output, _status} -> false
+    end
+  end
+
+  defp await_process_exit?(pid, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_await_process_exit?(pid, deadline)
+  end
+
+  defp do_await_process_exit?(pid, deadline) do
+    if process_alive?(pid) and System.monotonic_time(:millisecond) < deadline do
+      Process.sleep(10)
+      do_await_process_exit?(pid, deadline)
+    else
+      not process_alive?(pid)
     end
   end
 end

@@ -288,7 +288,7 @@ defmodule SymphonyElixir.TestSupport.HerdrReplayFixture do
         printf '%s\\n' "$$" > "$HERDR_FAKE_SERVER_PID_FILE"
       fi
       : > "$running"
-      while [ ! -f "$stopped" ]; do sleep 0.02; done
+      while [ -d "$state_root" ] && [ ! -f "$stopped" ]; do sleep 0.02; done
       rm -f "$running"
       exit 0
     fi
