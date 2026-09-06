@@ -581,6 +581,133 @@ accumulated issue-pass age, ownership state, retry or replacement reason, run/se
 identity, worker host, workspace path, app-server PID when available, and
 process cleanup/quarantine status.
 
+### Explicit deployment host resources
+
+TUR-877 defines this target consumer contract. Until implementation and its
+source gate pass, it is not an available configuration feature. The integrating
+deployment owns desired operation selection and generation materialization;
+Symphony owns strict validation, local resolution and both Codex launch paths.
+Host operations are not skill execution contracts, permission bypasses or
+automatic product-language discovery.
+
+`agent_runtime.host_resources` is an optional map in Workflow front matter.
+Omission or an empty map means no host operations and preserves current
+behavior. A nonempty map has exactly these fields:
+
+| Field | Required type and meaning |
+| --- | --- |
+| `schema_version` | Integer `1`; serialized consumer protocol, not a new operator version selector. |
+| `role` | Nonblank exact selected role name, matching the session's resolved role. |
+| `execution_generation` | Exact nonblank wrapper generation from existing accepted bootstrap. |
+| `runtime_generation` | Positive integer matching the accepted role configuration generation. |
+| `operations` | Nonempty map whose only permitted keys are `symphony_runtime_verification` and `host_dns`. |
+
+The runtime-verification operation has exactly `symphony_ref` (40 lowercase hex
+characters), `tool_config` (absolute path), `tool_config_sha256` (64 lowercase
+hex characters), `mise` (map), `elixir` (map) and `erlang` (map). The mise map
+has exactly `executable`, `target` and `sha256`; paths are absolute and the
+digest is 64 lowercase hex characters. Each installation map has exactly
+`version` (nonblank exact installed version) and `install_path` (absolute exact
+canonical version directory). The DNS operation has exactly `resolver_target`
+(absolute path). Unknown fields at every nesting level, wrong types, blank
+strings, malformed refs/digests and incomplete operations fail Config loading.
+No freeform read-root or arbitrary environment map is accepted.
+
+The producer derives generation/ref/config provenance from its existing
+accepted source and runtime state, not additional operator version knobs.
+Normal role startup supplies an explicit complete environment dependency;
+compare `execution_generation` with `SYMPHONY_EXECUTION_GENERATION`,
+`runtime_generation` with `OCTO_RUNTIME_CONFIG_GENERATION`, and `role` with the
+resolved session role. A missing or mismatched expected value fails before
+launch. Do not treat the declaration's own values as independent verification.
+The existing orchestration root and locked Symphony source identify the
+allowed tool-config path/ref; the integration supplies this expected source
+context through session options, with the normal startup caller deriving it
+from accepted materialization. An explicit supplied context never falls back
+to ambient HOME/PATH or another checkout. Direct Adapter callers must supply
+equivalent verified context when declaring operations.
+
+`Config.settings/0` validates strict input shape using the existing embedded
+schema conventions. At `AgentRuntime.start_session/2`, a focused
+`HostResourceContract.resolve/2` Module validates host-local resources before
+ordinary/Implementer dispatch and returns an immutable typed value containing
+the exact read paths, command selection and operation provenance. This is one
+small common Interface for the actual AppServer and Herdr launch Adapters;
+its internal path/hash logic is not duplicated in callers. Direct
+`Codex.AppServer.start_session/2` and `ImplementerDelegation.start_session/3`
+must resolve supplied raw declarations at the same Interface, not accept
+arbitrary maps labeled as validated. Per-session reuse is internal to the
+trusted call chain, not a public bypass flag.
+
+Only assigned operations are projected. Empty skills do not erase required
+host reads. Both Codex participants in a Herdr session use the same immutable
+result; mixed-provider sessions retain validation but add no Claude permission
+mode or gateway bypass. Ordinary Codex receives exact reads through its normal
+permission projection even without skill contracts. Existing workspace/.git
+writes, protected runtime roots, worker-event writes, exact Unix sockets,
+approval and network rules remain unchanged.
+
+Local validation and command-selection rules:
+
+- Require existing readable executable regular mise target and readable,
+  searchable canonical installation directories in the supported exact mise
+  version-directory layout. Match explicit version fields to directory/config
+  selection. Parse only plain pinned `[tools]` strings from the expected
+  Symphony config: exact Elixir selection and numeric Erlang major selection
+  are supported initially. Reject templates, dynamic selectors, arrays or
+  incompatible versions; do not evaluate project config or run discovery.
+- Launcher symlinks resolve at most 16 hops with cycle detection; final target
+  and digest must match. Installation root symlinks, dangling links, excessive
+  chains and wrong types fail. Internal escaping links never authorize extra
+  destinations; required unsupported closure fails real sandbox proof instead
+  of widening parent grants.
+- Reject filesystem/home roots, config/auth homes, orchestration state, caches,
+  shims and manager/installation collections as grants. Exact executable
+  permission does not imply permission for its containing PATH directory.
+- The DNS entry is fixed `/etc/resolv.conf`, either regular or a bounded link
+  chain ending at the declared target. Only that regular entry or exact
+  `/run/systemd/resolve/stub-resolv.conf` and
+  `/run/systemd/resolve/resolv.conf` targets are supported initially. Grant
+  only necessary exact files, not `/etc`, `/run` or resolver parents; do not
+  log resolver contents. Unsupported remote worker materialization fails
+  before a provider or Herdr server is created.
+- Preserve role-wrapper command precedence. Selected operation commands use
+  explicit canonical installed binaries or the verified bounded mise
+  invocation, never arbitrary project hooks, auto-trust or install behavior.
+  Permission projection alone does not prove command availability.
+- Resolve anew per session and generation; concurrent different-version
+  sessions retain distinct results. Managed resources must not change in place
+  during active sessions. A pathname/hash check is not a filesystem lock or
+  proof of complete dependency closure.
+
+Failures return `{:error, {:invalid_host_resource_contract, details}}`, with
+only operation/resource identity and an allowlisted redacted reason. The
+existing runtime failure classifier treats this as irrecoverable
+`missing_required_runtime_configuration`; no string-matched retry, secret
+payload or full environment may appear in status, pre-turn failures or logs.
+An unassigned non-Elixir product does not fail for missing Elixir installations.
+
+Acceptance evidence crosses Config/Workflow, public AgentRuntime dispatch,
+ordinary Codex and both Herdr participant launch paths. Use real owned Modules
+and substitute only the external provider/transport process Seam. RED/GREEN
+must cover absence, empty skills, mixed providers, sparse explicit environment,
+unknown/missing/type/provenance errors, unsafe symlinks, remote rejection,
+concurrent versions and no launch on failure. A bounded real installed Codex
+sandbox receives permissions through this new consumer, executes selected mise
+and Elixir/Erlang versions, resolves a bounded hostname under existing network
+policy, writes a correlated worker event and denies an unrelated runtime
+control write, sibling installation reads and private-home access. Readable
+resolver files are not DNS proof. No model call, credential change, installer,
+new network permission or production restart is needed for this evidence.
+
+The Octo wrapper source-promotion issue separately implements its producer and
+proves actual generated Workflow consumption before deployment. TUR-877
+source completion requires exact-head focused/full gates, Review/QA and
+recorded acceptance, not a production cutover. No older consumer may silently
+ignore this field when the producer is enabled. Product tool discovery,
+current-run activity repair, Herdr title normalization and post-canary model
+settings are separate scopes.
+
 ### Work admission
 
 The wrapper supplies the current execution generation through the
@@ -1577,6 +1704,8 @@ slices without weakening the skills/tools release gate.
   service, so no new Symphony ADR is required.
 
 ## References to source issues
+
+- [TUR-877: Explicit host resource runtime support](https://linear.app/martellventures/issue/TUR-877)
 
 - [TUR-834: Failed 142-only prompt-start canary](https://linear.app/martellventures/issue/TUR-834)
   provides the no-provider-session incident evidence for the prompt receipt

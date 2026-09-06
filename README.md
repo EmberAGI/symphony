@@ -45,6 +45,11 @@ bootstrap values, marker behavior, and close/open sequence.
 
 ---
 
+The TUR-877 [host-resource consumer contract](docs/specs/domains/agent-runtime.md#explicit-deployment-host-resources)
+specifies narrowly declared installed runtime and DNS resources shared by
+ordinary and delegated Codex launches. It is readiness documentation, not a
+currently enabled deployment feature or automatic product-tool installer.
+
 ## License
 
 This project is licensed under the [Apache License 2.0](LICENSE).

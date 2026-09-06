@@ -209,6 +209,18 @@ Notes:
   non-interactive. Invalid `effort` values and disabling thinking on a model
   that cannot (Fable 5) are rejected at config validation.
 
+### Deployment host resources (TUR-877 target)
+
+The optional `agent_runtime.host_resources` consumer is specified in
+[Agent Runtime](../docs/specs/domains/agent-runtime.md#explicit-deployment-host-resources).
+This readiness documentation does not enable it. The exact schema separates
+explicit installed runtime/DNS operations from skills, validates expected
+source and generation before provider launch, and reaches ordinary Codex plus
+both Herdr Codex participants. No new secret, installation, automatic project
+tool selection or broad host permission is authorized. Keep the field absent
+until implementation and integrating deployment materialization pass; source
+tests do not establish production activation.
+
 ### Irrecoverable runtime failures
 
 Symphony classifies runtime failures before ordinary retry scheduling. The
