@@ -161,7 +161,7 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
     if /usr/bin/head -c 1 #{shell_word(denied_private)} >/dev/null 2>&1; then exit 43; fi
     # Probe a real exact-read bind; an unbound sibling path is only writable in
     # Bubblewrap's namespace-local scaffold and does not exercise a host write.
-    if : >> #{shell_word(tool_config)} 2>/dev/null; then exit 44; fi
+    if ( : >> #{shell_word(tool_config)} ) 2>/dev/null; then exit 44; fi
     /usr/bin/printf 'MISE=%s\\nELIXIR=%s\\nERLANG=%s\\nDNS=%s\\n' "$mise_output" "$elixir_output" "$erlang_output" "$dns_output"
     """
 
