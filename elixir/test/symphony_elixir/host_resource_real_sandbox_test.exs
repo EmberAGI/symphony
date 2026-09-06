@@ -83,10 +83,8 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
     assignment = "TUR877-REAL-SANDBOX-#{System.unique_integer([:positive])}"
     event = Path.join(worker_events, "#{assignment}.json")
     denied_runtime_write = Path.join(runtime_root, "runtime-control.probe")
-    denied_host_write = Path.join(source_root, ".tur877-host-write.probe")
 
     on_exit(fn ->
-      File.rm(denied_host_write)
       File.rm_rf(root)
     end)
 
@@ -161,7 +159,9 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
     if /usr/bin/touch #{shell_word(denied_runtime_write)} 2>/dev/null; then exit 41; fi
     if /usr/bin/head -c 1 #{shell_word(denied_sibling)} >/dev/null 2>&1; then exit 42; fi
     if /usr/bin/head -c 1 #{shell_word(denied_private)} >/dev/null 2>&1; then exit 43; fi
-    if /usr/bin/touch #{shell_word(denied_host_write)} 2>/dev/null; then exit 44; fi
+    # Probe a real exact-read bind; an unbound sibling path is only writable in
+    # Bubblewrap's namespace-local scaffold and does not exercise a host write.
+    if : >> #{shell_word(tool_config)} 2>/dev/null; then exit 44; fi
     /usr/bin/printf 'MISE=%s\\nELIXIR=%s\\nERLANG=%s\\nDNS=%s\\n' "$mise_output" "$elixir_output" "$erlang_output" "$dns_output"
     """
 
@@ -184,7 +184,9 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
     assert output =~ "DNS="
     assert File.read!(event) =~ assignment
     refute File.exists?(denied_runtime_write)
-    refute File.exists?(denied_host_write)
+
+    assert digest(tool_config) ==
+             declaration["operations"]["symphony_runtime_verification"]["tool_config_sha256"]
 
     assert :ok = AgentRuntime.stop_session(session)
     assert_receive :session_stopped
