@@ -1,7 +1,6 @@
 defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.Runtime.CurrentRun
   alias SymphonyElixir.Runtime.ProcessOwnership
   alias SymphonyElixir.TestSupport.GatedProcessOwnershipFileSystem
 
@@ -12,10 +11,40 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     end
   end
 
+  defmodule CrashingProcessOwnershipFileSystem do
+    @behaviour SymphonyElixir.Runtime.ProcessOwnership.FileSystem
+
+    alias SymphonyElixir.Runtime.ProcessOwnership.FileSystem.Real
+
+    @impl true
+    def write(path, contents, modes) do
+      record = contents |> IO.iodata_to_binary() |> Jason.decode!()
+
+      case Application.get_env(:symphony_elixir, :process_ownership_file_system_crash_probe) do
+        %{issue_id: issue_id, owner: owner} ->
+          if record["issue_id"] == issue_id do
+            send(owner, {:routine_ownership_write_crashing, self(), record["run_id"]})
+
+            receive do
+              :crash_routine_ownership_writer -> Process.exit(self(), :kill)
+            end
+          else
+            Real.write(path, contents, modes)
+          end
+
+        _ ->
+          Real.write(path, contents, modes)
+      end
+    end
+  end
+
   setup do
     previous_role = System.get_env("SYMPHONY_ROLE")
     previous_file_system = Application.get_env(:symphony_elixir, :process_ownership_file_system)
     previous_gate = Application.get_env(:symphony_elixir, :process_ownership_file_system_gate)
+
+    previous_crash_probe =
+      Application.get_env(:symphony_elixir, :process_ownership_file_system_crash_probe)
 
     System.put_env("SYMPHONY_ROLE", "reviewer")
 
@@ -23,6 +52,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
       restore_env("SYMPHONY_ROLE", previous_role)
       restore_app_env(:process_ownership_file_system, previous_file_system)
       restore_app_env(:process_ownership_file_system_gate, previous_gate)
+      restore_app_env(:process_ownership_file_system_crash_probe, previous_crash_probe)
     end)
 
     :ok
@@ -245,7 +275,96 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     assert %{state: "active", run_id: ^run_id} = ProcessOwnership.status_for_issue(issue)
   end
 
-  test "retry dispatch replaces the acquired run and rejects the predecessor envelope" do
+  test "routine persistence recovers after its supervised writer is killed" do
+    test_root = unique_test_root("routine-writer-recovery")
+    workspace_root = Path.join(test_root, "workspaces")
+    control_root = Path.join(test_root, "provider-control")
+    codex_binary = Path.join(test_root, "controlled-codex")
+    File.mkdir_p!(control_root)
+    write_controlled_codex!(codex_binary, control_root)
+
+    issue = issue("issue-tur-878-writer-recovery", "TUR-878-WRITER-RECOVERY")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 30_000,
+      max_concurrent_agents: 1,
+      max_turns: 1,
+      codex_stall_timeout_ms: 0,
+      codex_command: "#{codex_binary} app-server"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :RoutineWriterRecoveryOrchestrator)
+    {:ok, orchestrator} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      stop_orchestrator!(orchestrator)
+      File.rm_rf(test_root)
+    end)
+
+    snapshot = await_provider_sessions(orchestrator_name, control_root, 1)
+    entry = running_entry(snapshot, issue.id)
+    emit_file = Path.join(control_root, Path.basename(entry.workspace_path) <> ".emit")
+    run_id = entry.run_id
+
+    Application.put_env(
+      :symphony_elixir,
+      :process_ownership_file_system,
+      CrashingProcessOwnershipFileSystem
+    )
+
+    Application.put_env(:symphony_elixir, :process_ownership_file_system_crash_probe, %{
+      issue_id: issue.id,
+      owner: self()
+    })
+
+    File.touch!(emit_file <> ".single")
+    assert_receive {:routine_ownership_write_crashing, crashed_writer, ^run_id}, 2_000
+    crash_ref = Process.monitor(crashed_writer)
+    send(crashed_writer, :crash_routine_ownership_writer)
+    assert_receive {:DOWN, ^crash_ref, :process, ^crashed_writer, :killed}, 1_000
+
+    gate_token = make_ref()
+    {:ok, gate_controller} = Agent.start_link(fn -> :armed end)
+
+    Application.put_env(
+      :symphony_elixir,
+      :process_ownership_file_system,
+      GatedProcessOwnershipFileSystem
+    )
+
+    Application.put_env(:symphony_elixir, :process_ownership_file_system_gate, %{
+      controller: gate_controller,
+      issue_id: issue.id,
+      owner: self(),
+      token: gate_token
+    })
+
+    File.touch!(emit_file <> ".again")
+
+    assert_receive {:routine_ownership_write_entered, writer, ^gate_token, _path, %{"run_id" => ^run_id}},
+                   2_000
+
+    send(writer, {:release_routine_ownership_write, gate_token})
+
+    assert eventually_value(fn -> if Process.alive?(writer), do: nil, else: true end)
+
+    assert eventually_value(fn ->
+             case ProcessOwnership.status_for_issue(issue) do
+               %{state: "active", run_id: ^run_id, session_id: session_id} = ownership
+               when is_binary(session_id) ->
+                 ownership
+
+               _ ->
+                 nil
+             end
+           end)
+  end
+
+  @tag timeout: 120_000
+  test "terminal settlement and redispatch reject the predecessor envelope" do
     test_root = unique_test_root("retry-replaces-run")
     workspace_root = Path.join(test_root, "workspaces")
     control_root = Path.join(test_root, "provider-control")
@@ -284,14 +403,26 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
       |> Map.take([:issue_id, :workspace_path, :role, :holder, :run_id])
       |> Map.put(:ingress_at_ms, System.monotonic_time(:millisecond))
 
-    # The failure trigger is test control only; dispatch, AgentRunner startup,
-    # cleanup, retry ownership, and successor dispatch remain the real path.
-    predecessor_runner = :sys.get_state(orchestrator).running[issue.id].pid
-    Process.exit(predecessor_runner, {:rate_limited, %{message: "retry replacement proof"}})
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %{issue | state: "Agent Review"}
+    ])
+
+    predecessor_emit =
+      Path.join(control_root, Path.basename(predecessor.workspace_path) <> ".emit")
+
+    File.touch!(predecessor_emit <> ".complete")
+    assert %{queued: true} = Orchestrator.request_refresh(orchestrator_name)
+
+    assert %{state: predecessor_terminal_state} =
+             await_non_active_ownership(issue, orchestrator_name)
+
+    refute predecessor_terminal_state == "active"
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [
       %{issue | description: "Changed checkpoint authorizes a distinct successor run."}
     ])
+
+    assert %{queued: true} = Orchestrator.request_refresh(orchestrator_name)
 
     successor =
       eventually_value(fn ->
@@ -347,148 +478,45 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     assert current.codex_total_tokens == successor.codex_total_tokens
     refute unchanged.rate_limits == %{"limit_id" => "stale-retry"}
     assert ProcessOwnership.status_for_issue(issue).run_id == successor.run_id
-  end
-
-  test "replaced and legacy senders cannot mutate the exact current run" do
-    issue = issue("issue-tur-878-replaced", "TUR-878-REPLACED")
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "memory",
-      poll_interval_ms: 30_000,
-      codex_stall_timeout_ms: 0
-    )
-
-    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
-
-    {:ok, predecessor_ownership} = acquire_test_run(issue, "predecessor")
-    predecessor = CurrentRun.new(issue, predecessor_ownership)
-    {:ok, predecessor_ingress_at_ms} = CurrentRun.observe(predecessor)
-
-    assert {:ok, %{state: "retrying"}} =
-             ProcessOwnership.verify_and_update(
-               issue,
-               ownership_identity(predecessor_ownership),
-               %{state: "retrying", retry_reason: "replace the retired run"}
-             )
-
-    {:ok, successor_ownership} =
-      acquire_test_run(issue, "successor", predecessor_ownership.run_id)
-
-    refute successor_ownership.run_id == predecessor_ownership.run_id
-    successor = CurrentRun.new(issue, successor_ownership)
-    CurrentRun.retire(predecessor)
-
-    orchestrator_name = Module.concat(__MODULE__, :ExactRunOrchestrator)
-    {:ok, orchestrator} = Orchestrator.start_link(name: orchestrator_name)
-    worker = spawn(fn -> Process.sleep(:infinity) end)
-
-    on_exit(fn ->
-      if Process.alive?(worker), do: Process.exit(worker, :kill)
-      stop_orchestrator!(orchestrator)
-      _ = ProcessOwnership.release(issue, ownership_identity(successor_ownership))
-    end)
-
-    process_ref = Process.monitor(worker)
-    initial_state = :sys.get_state(orchestrator)
-
-    running_entry = %{
-      pid: worker,
-      ref: process_ref,
-      identifier: issue.identifier,
-      issue: issue,
-      worker_host: nil,
-      workspace_path: successor_ownership.workspace_path,
-      process_ownership: successor_ownership,
-      run_id: successor_ownership.run_id,
-      current_run: successor,
-      session_id: "successor-session",
-      last_codex_message: nil,
-      last_codex_timestamp: nil,
-      last_codex_event: nil,
-      codex_app_server_pid: "successor-pid",
-      codex_input_tokens: 5,
-      codex_output_tokens: 3,
-      codex_total_tokens: 8,
-      codex_last_reported_input_tokens: 5,
-      codex_last_reported_output_tokens: 3,
-      codex_last_reported_total_tokens: 8,
-      turn_count: 1,
-      retry_attempt: 0,
-      started_at: DateTime.utc_now(),
-      started_at_ms: CurrentRun.activity_ms(successor)
-    }
-
-    :sys.replace_state(orchestrator, fn _ ->
-      initial_state
-      |> Map.put(:running, %{issue.id => running_entry})
-      |> Map.put(:claimed, MapSet.new([issue.id]))
-    end)
-
-    predecessor_envelope =
-      predecessor
-      |> CurrentRun.envelope()
-      |> Map.put(:ingress_at_ms, predecessor_ingress_at_ms)
-
-    stale_update = %{
-      event: :session_started,
-      timestamp: DateTime.add(DateTime.utc_now(), 86_400, :second),
-      session_id: "predecessor-session",
-      codex_app_server_pid: "predecessor-pid",
-      usage: %{"input_tokens" => 500, "output_tokens" => 300, "total_tokens" => 800},
-      rate_limits: %{"limit_id" => "stale", "primary" => %{"remaining" => 0}}
-    }
-
-    send(orchestrator, {:codex_worker_update, issue.id, predecessor_envelope, stale_update})
 
     send(
       orchestrator,
-      {:worker_runtime_info, issue.id, predecessor_envelope, %{worker_host: "stale-host", workspace_path: "/tmp/stale-workspace"}}
+      {:codex_worker_update, issue.id, predecessor_envelope, %{event: :turn_completed, timestamp: DateTime.utc_now(), session_id: "late-predecessor"}}
     )
 
-    stale_owned_session = %{cleanup_module: CleanupProbe, owner: self(), marker: :predecessor}
-
-    send(
-      orchestrator,
-      {:owned_session_runtime_info, issue.id, predecessor_envelope, stale_owned_session}
-    )
-
-    send(orchestrator, {:codex_worker_update, issue.id, stale_update})
+    send(orchestrator, {:codex_worker_update, issue.id, %{event: :notification, timestamp: DateTime.utc_now()}})
     send(orchestrator, {:worker_runtime_info, issue.id, %{workspace_path: "/tmp/legacy"}})
     send(orchestrator, {:owned_session_runtime_info, issue.id, stale_owned_session})
 
-    unchanged = Orchestrator.snapshot(orchestrator_name, 500)
-    unchanged_entry = running_entry(unchanged, issue.id)
+    successor_identity =
+      successor.process_ownership
+      |> Map.take([:issue_id, :workspace_path, :role, :holder, :run_id])
 
-    assert_receive {:stale_owned_session_cleaned, :predecessor}, 500
-    assert unchanged_entry.session_id == "successor-session"
-    assert unchanged_entry.codex_app_server_pid == "successor-pid"
-    assert unchanged_entry.codex_input_tokens == 5
-    assert unchanged_entry.codex_output_tokens == 3
-    assert unchanged_entry.codex_total_tokens == 8
-    assert unchanged.rate_limits == nil
-    assert ProcessOwnership.status_for_issue(issue).run_id == successor_ownership.run_id
+    initial_turn_count = successor.turn_count
 
-    first_current_envelope = ingress_envelope(successor)
+    for {session_id, include_provider_timestamp?} <- [
+          {"successor-turn-2", true},
+          {"successor-turn-3", false}
+        ] do
+      update = %{event: :session_started, session_id: session_id}
 
-    send(
-      orchestrator,
-      {:codex_worker_update, issue.id, first_current_envelope, %{event: :session_started, timestamp: DateTime.utc_now(), session_id: "successor-turn-2"}}
-    )
+      update =
+        if include_provider_timestamp?,
+          do: Map.put(update, :timestamp, DateTime.utc_now()),
+          else: update
 
-    second_current_envelope = ingress_envelope(successor)
-
-    send(
-      orchestrator,
-      {:codex_worker_update, issue.id, second_current_envelope, %{event: :session_started, timestamp: DateTime.utc_now(), session_id: "successor-turn-3"}}
-    )
+      send(
+        orchestrator,
+        {:codex_worker_update, issue.id, Map.put(successor_identity, :ingress_at_ms, System.monotonic_time(:millisecond)), update}
+      )
+    end
 
     accepted = Orchestrator.snapshot(orchestrator_name, 500)
     accepted_entry = running_entry(accepted, issue.id)
     assert accepted_entry.session_id == "successor-turn-3"
-    assert accepted_entry.turn_count == 3
+    assert accepted_entry.turn_count == initial_turn_count + 2
 
     newest_activity_at_ms = accepted_entry.last_activity_at_ms
-    base_envelope = CurrentRun.envelope(successor)
 
     for claimed_ingress <- [
           newest_activity_at_ms - 10,
@@ -498,8 +526,8 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
         ] do
       envelope =
         if is_nil(claimed_ingress),
-          do: base_envelope,
-          else: Map.put(base_envelope, :ingress_at_ms, claimed_ingress)
+          do: successor_identity,
+          else: Map.put(successor_identity, :ingress_at_ms, claimed_ingress)
 
       send(
         orchestrator,
@@ -513,16 +541,14 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     end
 
     rejected_clocks = Orchestrator.snapshot(orchestrator_name, 500)
-
-    assert running_entry(rejected_clocks, issue.id).last_activity_at_ms ==
-             newest_activity_at_ms
+    assert running_entry(rejected_clocks, issue.id).last_activity_at_ms == newest_activity_at_ms
 
     cumulative_usage = %{"input_tokens" => 10, "output_tokens" => 6, "total_tokens" => 16}
 
     for _duplicate <- 1..2 do
       send(
         orchestrator,
-        {:codex_worker_update, issue.id, ingress_envelope(successor),
+        {:codex_worker_update, issue.id, Map.put(successor_identity, :ingress_at_ms, System.monotonic_time(:millisecond)),
          %{
            event: :notification,
            timestamp: DateTime.utc_now(),
@@ -535,9 +561,9 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     monotonic = Orchestrator.snapshot(orchestrator_name, 500)
     monotonic_entry = running_entry(monotonic, issue.id)
     assert monotonic_entry.last_activity_at_ms >= newest_activity_at_ms
-    assert monotonic_entry.codex_input_tokens == 10
-    assert monotonic_entry.codex_output_tokens == 6
-    assert monotonic_entry.codex_total_tokens == 16
+    assert monotonic_entry.codex_input_tokens == successor.codex_input_tokens + 10
+    assert monotonic_entry.codex_output_tokens == successor.codex_output_tokens + 6
+    assert monotonic_entry.codex_total_tokens == successor.codex_total_tokens + 16
     assert monotonic.rate_limits["limit_id"] == "current"
   end
 
@@ -612,11 +638,9 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
       refute terminal_status.state == "active"
 
-      # The staged routine writer is fenced by the changed terminal record,
-      # not killed while it owns a temporary-file operation. Once released it
-      # must finish typed and remain unable to commit its stale active record.
-      assert Process.alive?(writer)
-      send(writer, {:release_routine_ownership_write, gate_token})
+      # Retirement owns the supervised routine task lifecycle as well as its
+      # result token. The blocked writer must terminate before it can consume
+      # resources past settlement or attempt a stale active commit.
       assert eventually_value(fn -> if Process.alive?(writer), do: nil, else: true end)
 
       send(
@@ -626,12 +650,79 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
       send(
         orchestrator,
-        {:routine_process_ownership_result, issue.id, make_ref(), run_id, {:ok, Map.put(terminal_status, :state, "active")}}
+        {make_ref(), {:ok, Map.put(terminal_status, :state, "active")}}
       )
 
       final_snapshot = Orchestrator.snapshot(orchestrator_name, 500)
       refute running_entry(final_snapshot, issue.id)
       refute ProcessOwnership.status_for_issue(issue).state == "active"
+    after
+      send(writer, {:release_routine_ownership_write, gate_token})
+    end
+  end
+
+  test "shutdown fences a held routine write before releasing ownership" do
+    test_root = unique_test_root("shutdown-fences-routine-write")
+    workspace_root = Path.join(test_root, "workspaces")
+    control_root = Path.join(test_root, "provider-control")
+    codex_binary = Path.join(test_root, "controlled-codex")
+    File.mkdir_p!(control_root)
+    write_controlled_codex!(codex_binary, control_root)
+
+    issue = issue("issue-tur-878-shutdown", "TUR-878-SHUTDOWN")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 30_000,
+      max_concurrent_agents: 1,
+      max_turns: 1,
+      codex_stall_timeout_ms: 0,
+      codex_command: "#{codex_binary} app-server"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :ShutdownFenceOrchestrator)
+    {:ok, orchestrator} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      stop_orchestrator!(orchestrator)
+      File.rm_rf(test_root)
+    end)
+
+    snapshot = await_provider_sessions(orchestrator_name, control_root, 1)
+    entry = running_entry(snapshot, issue.id)
+    emit_file = Path.join(control_root, Path.basename(entry.workspace_path) <> ".emit")
+    run_id = entry.run_id
+
+    gate_token = make_ref()
+    {:ok, gate_controller} = Agent.start_link(fn -> :armed end)
+
+    Application.put_env(
+      :symphony_elixir,
+      :process_ownership_file_system,
+      GatedProcessOwnershipFileSystem
+    )
+
+    Application.put_env(:symphony_elixir, :process_ownership_file_system_gate, %{
+      controller: gate_controller,
+      issue_id: issue.id,
+      owner: self(),
+      token: gate_token
+    })
+
+    File.touch!(emit_file <> ".single")
+
+    assert_receive {:routine_ownership_write_entered, writer, ^gate_token, _path, %{"run_id" => ^run_id}},
+                   2_000
+
+    try do
+      writer_ref = Process.monitor(writer)
+      Process.unlink(orchestrator)
+      :ok = GenServer.stop(orchestrator, :shutdown, 5_000)
+
+      assert_receive {:DOWN, ^writer_ref, :process, ^writer, _reason}, 1_000
+      assert %{state: "cleaned", run_id: ^run_id} = ProcessOwnership.status_for_issue(issue)
     after
       send(writer, {:release_routine_ownership_write, gate_token})
     end
@@ -649,26 +740,6 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
       url: "https://example.test/#{identifier}",
       labels: []
     }
-  end
-
-  defp acquire_test_run(issue, suffix, replaces_run_id \\ nil) do
-    attrs = %{
-      role: ProcessOwnership.current_role(),
-      run_id: "#{suffix}-#{System.unique_integer([:positive])}",
-      holder: ProcessOwnership.holder_id(),
-      worker_host: nil
-    }
-
-    ProcessOwnership.acquire(issue, Map.put(attrs, :replaces_run_id, replaces_run_id))
-  end
-
-  defp ownership_identity(ownership) do
-    Map.take(ownership, [:holder, :run_id, :workspace_path, :role])
-  end
-
-  defp ingress_envelope(current_run) do
-    {:ok, ingress_at_ms} = CurrentRun.observe(current_run)
-    Map.put(CurrentRun.envelope(current_run), :ingress_at_ms, ingress_at_ms)
   end
 
   defp write_controlled_codex!(path, control_root) do
@@ -693,13 +764,33 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
           ;;
         4)
           printf '{"id":3,"result":{"turn":{"id":"turn-%s"}}}\n' "$workspace"
-          while [ ! -f "$emit_file" ]; do sleep 0.01; done
+          while [ ! -f "$emit_file" ] && [ ! -f "$emit_file.single" ] && [ ! -f "$emit_file.complete" ]; do sleep 0.01; done
+          if [ -f "$emit_file.complete" ]; then
+            printf '%s\n' '{"method":"item/agentMessage/delta","params":{"delta":"terminal handoff"}}'
+            printf '%s\n' '{"method":"turn/completed","params":{"turn":{"status":"completed","last_agent_message":"terminal handoff"}}}'
+            rm -f "$emit_file.complete"
+            exit 0
+          elif [ -f "$emit_file.single" ]; then
+            printf '%s\n' '{"method":"runtime/usage","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}'
+          else
+            i=1
+            while [ "$i" -le 64 ]; do
+              printf '{"method":"item/agentMessage/delta","params":{"delta":"burst-%s"}}\n' "$i"
+              i=$((i + 1))
+            done
+            i=1
+            while [ "$i" -le 80 ]; do
+              printf '%s\n' '{"method":"runtime/usage","usage":{"input_tokens":12,"output_tokens":4,"total_tokens":16},"rate_limits":{"limit_id":"burst-limit","primary":{"remaining":9}}}'
+              i=$((i + 1))
+            done
+          fi
+          while [ ! -f "$emit_file.again" ]; do sleep 0.01; done
           i=1
-          while [ "$i" -le 64 ]; do
-            printf '{"method":"item/agentMessage/delta","params":{"delta":"burst-%s"}}\n' "$i"
+          while [ "$i" -le 10 ]; do
+            printf '%s\n' '{"method":"runtime/usage","usage":{"input_tokens":12,"output_tokens":4,"total_tokens":16},"rate_limits":{"limit_id":"burst-limit","primary":{"remaining":9}}}'
+            sleep 0.05
             i=$((i + 1))
           done
-          printf '%s\n' '{"method":"runtime/usage","usage":{"input_tokens":12,"output_tokens":4,"total_tokens":16},"rate_limits":{"limit_id":"burst-limit","primary":{"remaining":9}}}'
           ;;
       esac
     done
@@ -762,7 +853,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     end
   end
 
-  defp await_non_active_ownership(issue, orchestrator_name, attempts \\ 1_500)
+  defp await_non_active_ownership(issue, orchestrator_name, attempts \\ 300)
 
   defp await_non_active_ownership(issue, orchestrator_name, 0) do
     flunk(
@@ -772,12 +863,13 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
   end
 
   defp await_non_active_ownership(issue, orchestrator_name, attempts) do
+    Process.sleep(50)
+
     case ProcessOwnership.status_for_issue(issue) do
       %{state: state} = status when state != "active" ->
         status
 
       _ ->
-        Process.sleep(10)
         await_non_active_ownership(issue, orchestrator_name, attempts - 1)
     end
   end

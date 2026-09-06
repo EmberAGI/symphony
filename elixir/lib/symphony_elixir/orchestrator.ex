@@ -161,9 +161,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   @impl true
   def terminate(reason, %State{} = state) do
-    Enum.each(state.running, fn {_issue_id, running_entry} ->
-      retire_current_run(running_entry)
-    end)
+    state =
+      Enum.reduce(Map.keys(state.running), state, fn issue_id, state ->
+        fence_routine_process_ownership(state, issue_id)
+      end)
 
     Enum.each(state.running, fn {issue_id, running_entry} ->
       safely_settle_on_shutdown(issue_id, running_entry, reason)
@@ -290,7 +291,7 @@ defmodule SymphonyElixir.Orchestrator do
       ) do
     case find_issue_id_for_ref(running, ref) do
       nil ->
-        {:noreply, state}
+        {:noreply, finish_routine_process_ownership_exit(state, ref, reason)}
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
@@ -378,10 +379,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_info(
-        {:codex_worker_update, issue_id, envelope, %{event: _, timestamp: _} = update},
+        {:codex_worker_update, issue_id, envelope, update},
         %{running: running} = state
       )
-      when is_binary(issue_id) and is_map(envelope) do
+      when is_binary(issue_id) and is_map(envelope) and is_map(update) do
     case Map.get(running, issue_id) do
       nil ->
         {:noreply, state}
@@ -391,8 +392,16 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  def handle_info({:routine_process_ownership_result, issue_id, token, run_id, result}, state) do
-    {:noreply, finish_routine_process_ownership(state, issue_id, token, run_id, result)}
+  def handle_info({ref, result}, %State{} = state) when is_reference(ref) do
+    case Enum.find(state.routine_persistence, fn {_issue_id, routine} ->
+           Map.get(routine, :token) == ref
+         end) do
+      {issue_id, %{run_id: run_id}} ->
+        {:noreply, finish_routine_process_ownership(state, issue_id, ref, run_id, result)}
+
+      nil ->
+        {:noreply, state}
+    end
   end
 
   def handle_info({:codex_worker_update, _issue_id, _envelope, _update}, state),
@@ -430,7 +439,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp integrate_current_run_update(state, issue_id, running_entry, envelope, update) do
     if current_run_matches?(running_entry, envelope) do
-      CurrentRun.acknowledge_update(running_entry.current_run)
       activity_at_ms = accepted_activity_at_ms(running_entry.current_run, envelope)
 
       {updated_running_entry, token_delta} =
@@ -442,6 +450,7 @@ defmodule SymphonyElixir.Orchestrator do
         |> apply_codex_rate_limits(update)
 
       state = %{state | running: Map.put(state.running, issue_id, updated_running_entry)}
+      CurrentRun.acknowledge_update(running_entry.current_run)
       state = schedule_routine_process_ownership(state, issue_id)
 
       notify_dashboard()
@@ -3215,7 +3224,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   # Routine active-state refreshes run outside the serial Orchestrator path.
   # One exact-run writer per issue is in flight; additional updates only mark
-  # one follow-up snapshot dirty. Terminal paths retire the producer and stop
+  # one follow-up snapshot dirty. Terminal paths retire the producer and fence
   # this task before settlement can write a terminal ownership state.
   defp schedule_routine_process_ownership(%State{} = state, issue_id) when is_binary(issue_id) do
     case {Map.get(state.running, issue_id), Map.get(state.routine_persistence, issue_id)} do
@@ -3231,8 +3240,6 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp start_routine_process_ownership(%State{} = state, issue_id, running_entry) do
-    token = make_ref()
-    server = self()
     issue = Map.get(running_entry, :issue)
     ownership = Map.get(running_entry, :process_ownership)
     run_id = Map.get(running_entry, :run_id)
@@ -3240,33 +3247,32 @@ defmodule SymphonyElixir.Orchestrator do
 
     outcome =
       try do
-        Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-          result =
-            case {issue, ownership} do
-              {%Issue{} = owned_issue, %{holder: _holder}} ->
-                ProcessOwnership.refresh_active(
-                  owned_issue,
-                  ownership_identity(ownership),
-                  attrs
-                )
+        Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
+          case {issue, ownership} do
+            {%Issue{} = owned_issue, %{holder: _holder}} ->
+              ProcessOwnership.refresh_active(
+                owned_issue,
+                ownership_identity(ownership),
+                attrs
+              )
 
-              _ ->
-                {:error, :ownership_missing}
-            end
-
-          send(server, {:routine_process_ownership_result, issue_id, token, run_id, result})
+            _ ->
+              {:error, :ownership_missing}
+          end
         end)
       catch
         kind, reason -> {:error, {kind, reason}}
       end
 
     case outcome do
-      {:ok, task_pid} when is_pid(task_pid) ->
-        routine = %{task_pid: task_pid, token: token, run_id: run_id, dirty?: false}
-        %{state | routine_persistence: Map.put(state.routine_persistence, issue_id, routine)}
+      %Task{pid: task_pid, ref: task_ref} ->
+        routine = %{
+          task_pid: task_pid,
+          token: task_ref,
+          run_id: run_id,
+          dirty?: false
+        }
 
-      {:ok, task_pid, _info} when is_pid(task_pid) ->
-        routine = %{task_pid: task_pid, token: token, run_id: run_id, dirty?: false}
         %{state | routine_persistence: Map.put(state.routine_persistence, issue_id, routine)}
 
       failure ->
@@ -3279,6 +3285,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp finish_routine_process_ownership(state, issue_id, token, run_id, result) do
     case Map.get(state.routine_persistence, issue_id) do
       %{token: ^token, run_id: ^run_id} = routine ->
+        _ = Process.demonitor(routine.token, [:flush])
         state = %{state | routine_persistence: Map.delete(state.routine_persistence, issue_id)}
         state = apply_routine_process_ownership_result(state, issue_id, run_id, result)
 
@@ -3291,6 +3298,36 @@ defmodule SymphonyElixir.Orchestrator do
         end
 
       _stale_or_fenced ->
+        state
+    end
+  end
+
+  defp finish_routine_process_ownership_exit(state, ref, reason) when is_reference(ref) do
+    case Enum.find(state.routine_persistence, fn {_issue_id, routine} ->
+           Map.get(routine, :token) == ref
+         end) do
+      {issue_id, %{run_id: run_id} = routine} ->
+        Logger.warning("Routine process ownership refresh exited for issue_id=#{issue_id} run_id=#{run_id}: #{inspect(reason)}")
+
+        state = %{state | routine_persistence: Map.delete(state.routine_persistence, issue_id)}
+
+        state =
+          apply_routine_process_ownership_result(
+            state,
+            issue_id,
+            run_id,
+            {:error, {:task_exit, reason}}
+          )
+
+        case {routine.dirty?, Map.get(state.running, issue_id)} do
+          {true, %{run_id: ^run_id} = running_entry} ->
+            start_routine_process_ownership(state, issue_id, running_entry)
+
+          _ ->
+            state
+        end
+
+      nil ->
         state
     end
   end
@@ -3327,6 +3364,15 @@ defmodule SymphonyElixir.Orchestrator do
     state.running
     |> Map.get(issue_id)
     |> retire_current_run()
+
+    case Map.get(state.routine_persistence, issue_id) do
+      %{task_pid: task_pid, token: token} when is_pid(task_pid) and is_reference(token) ->
+        Process.exit(task_pid, :shutdown)
+        Process.demonitor(token, [:flush])
+
+      _ ->
+        :ok
+    end
 
     %{state | routine_persistence: Map.delete(state.routine_persistence, issue_id)}
   end
@@ -4151,9 +4197,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp integrate_codex_update(
          running_entry,
-         %{event: event, timestamp: timestamp} = update,
+         update,
          activity_at_ms
-       ) do
+       )
+       when is_map(update) do
+    event = Map.get(update, :event, Map.get(running_entry, :last_codex_event))
+
+    timestamp =
+      case Map.get(update, :timestamp) do
+        %DateTime{} = provider_timestamp -> provider_timestamp
+        _ -> Map.get(running_entry, :last_codex_timestamp)
+      end
+
     token_delta = extract_token_delta(running_entry, update)
     codex_input_tokens = Map.get(running_entry, :codex_input_tokens, 0)
     codex_output_tokens = Map.get(running_entry, :codex_output_tokens, 0)
@@ -4388,8 +4443,7 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp extract_token_delta(running_entry, %{event: _, timestamp: _} = update) do
-    running_entry = running_entry || %{}
+  defp extract_token_delta(running_entry, update) when is_map(update) do
     usage = extract_token_usage(update)
 
     {

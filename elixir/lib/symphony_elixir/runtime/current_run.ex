@@ -54,7 +54,7 @@ defmodule SymphonyElixir.Runtime.CurrentRun do
   @spec identity(t()) :: identity()
   def identity(%__MODULE__{identity: identity}), do: identity
 
-  @spec envelope(t()) :: identity()
+  @spec envelope(term()) :: identity()
   def envelope(%__MODULE__{} = current_run), do: identity(current_run)
 
   @spec observe(t()) :: {:ok, integer()} | :retired
@@ -73,10 +73,10 @@ defmodule SymphonyElixir.Runtime.CurrentRun do
   def accept_ingress(%__MODULE__{} = current_run, envelope) when is_map(envelope) do
     ingress_at_ms = Map.get(envelope, :ingress_at_ms)
     now_ms = System.monotonic_time(:millisecond)
+    observed_watermark = :atomics.get(current_run.signal, @watermark_slot)
 
     if matches?(current_run, envelope) and is_integer(ingress_at_ms) and ingress_at_ms <= now_ms and
-         active?(current_run.signal) do
-      advance(current_run.signal, ingress_at_ms)
+         ingress_at_ms <= observed_watermark and active?(current_run.signal) do
       {:ok, ingress_at_ms}
     else
       :invalid
@@ -85,12 +85,14 @@ defmodule SymphonyElixir.Runtime.CurrentRun do
 
   def accept_ingress(_current_run, _envelope), do: :invalid
 
-  @spec activity_ms(t()) :: integer() | nil
+  @spec activity_ms(term()) :: integer() | nil
   def activity_ms(%__MODULE__{signal: signal}) do
     if active?(signal), do: :atomics.get(signal, @watermark_slot), else: nil
   end
 
-  @spec matches?(t(), map()) :: boolean()
+  def activity_ms(_current_run), do: nil
+
+  @spec matches?(term(), map()) :: boolean()
   def matches?(%__MODULE__{identity: identity}, envelope) when is_map(envelope) do
     Enum.all?(identity, fn {key, expected} -> Map.get(envelope, key) == expected end)
   end
@@ -122,12 +124,14 @@ defmodule SymphonyElixir.Runtime.CurrentRun do
     :ok
   end
 
-  @spec retire(t()) :: :ok
+  @spec retire(term()) :: :ok
   def retire(%__MODULE__{signal: signal}) do
     :atomics.put(signal, @active_slot, 0)
     :atomics.put(signal, @notification_pending_slot, 0)
     :ok
   end
+
+  def retire(_current_run), do: :ok
 
   defp active?(signal), do: :atomics.get(signal, @active_slot) == 1
 

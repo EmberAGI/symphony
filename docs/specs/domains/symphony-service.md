@@ -916,11 +916,19 @@ Coalescing preserves the semantics of cumulative and incremental token usage,
 rate-limit observations, provider/session/PID changes and terminal events.
 Repeated cumulative totals are not counted twice; source duplicates follow
 their existing identity/accounting contract. Activity is not a license to drop
-critical events. With concurrent issues, scheduling must bound per-issue
-routine work so a burst cannot starve another issue, snapshot/admission calls,
-or reconciliation. Queues use bounded batching/backpressure, not unbounded
-growth or endless draining. Terminal control and exact-run accounting remain
-ordered when a routine write is delayed.
+critical events. With concurrent issues, the bounded slow-write/burst acceptance scenario must
+keep another issue, snapshot/admission calls and reconciliation serviceable.
+Terminal control and exact-run accounting remain ordered when a routine write
+is delayed.
+
+TUR-878 scope correction, operator direction 2026-09-06: this slice repairs
+demonstrated current-run freshness and routine-persistence failures while
+preserving existing accounting, exact-run isolation and cleanup. It does not
+require a new general critical-event backpressure/window protocol, exhaustive
+event permutation matrix, or broader scheduling redesign. Add such a mechanism
+only if an executed failure shows it is necessary for this repair's bounded
+serviceability or ownership/cleanup guarantees. Reuse valid existing regression
+evidence; static hardening concerns alone do not expand this slice.
 
 Genuine silence still crosses the unchanged configured timeout and follows
 normal exact-owned-process cleanup and retry settlement. Disabled stall
