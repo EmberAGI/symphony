@@ -29,7 +29,7 @@ defmodule SymphonyElixir.Runtime.CurrentRun do
           required(:run_id) => String.t()
         }
 
-  @opaque t :: %__MODULE__{identity: identity(), signal: :atomics.atomics_ref()}
+  @type t :: %__MODULE__{identity: identity(), signal: :atomics.atomics_ref()}
 
   @spec new(Issue.t(), map()) :: t()
   def new(%Issue{id: issue_id}, ownership) when is_map(ownership) do
@@ -54,7 +54,7 @@ defmodule SymphonyElixir.Runtime.CurrentRun do
   @spec identity(t()) :: identity()
   def identity(%__MODULE__{identity: identity}), do: identity
 
-  @spec envelope(term()) :: identity()
+  @spec envelope(t()) :: identity()
   def envelope(%__MODULE__{} = current_run), do: identity(current_run)
 
   @spec observe(t()) :: {:ok, integer()} | :retired
