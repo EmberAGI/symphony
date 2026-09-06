@@ -100,9 +100,11 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
     end)
 
     # The run owns a delegated session whose physical teardown succeeds.
+    envelope = current_run_envelope(orchestrator_name, issue.id)
+
     send(
       pid,
-      {:owned_session_runtime_info, issue.id,
+      {:owned_session_runtime_info, issue.id, envelope,
        %{
          kind: "test-owned-session",
          session_name: "octo-emb-1259-cancel",
@@ -243,9 +245,11 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
       )
     end)
 
+    envelope = current_run_envelope(orchestrator_name, issue.id)
+
     send(
       pid,
-      {:owned_session_runtime_info, issue.id,
+      {:owned_session_runtime_info, issue.id, envelope,
        %{
          kind: "test-owned-session",
          session_name: "octo-emb-1259-stall",
@@ -564,6 +568,17 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
       System.tmp_dir!(),
       "symphony-elixir-#{label}-#{System.unique_integer([:positive])}"
     )
+  end
+
+  defp current_run_envelope(orchestrator_name, issue_id) do
+    entry =
+      orchestrator_name
+      |> Orchestrator.snapshot(1_000)
+      |> Map.fetch!(:running)
+      |> Enum.find(&(&1.issue_id == issue_id))
+
+    entry.process_ownership
+    |> Map.take([:issue_id, :workspace_path, :role, :holder, :run_id])
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)

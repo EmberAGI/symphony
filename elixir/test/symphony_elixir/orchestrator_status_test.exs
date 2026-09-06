@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.OrchestratorStatusTest do
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.Runtime.CurrentRun
 
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
@@ -42,12 +43,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     initial_state = :sys.get_state(pid)
     started_at = DateTime.utc_now()
+    current_run = current_run(issue)
 
     running_entry = %{
       pid: self(),
       ref: make_ref(),
       identifier: issue.identifier,
       issue: issue,
+      current_run: current_run,
+      run_id: CurrentRun.identity(current_run).run_id,
       session_id: nil,
       turn_count: 0,
       last_codex_message: nil,
@@ -67,7 +71,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:codex_worker_update, issue_id, ingress_envelope(current_run),
        %{
          event: :session_started,
          session_id: "thread-live-turn-live",
@@ -77,7 +81,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:codex_worker_update, issue_id, ingress_envelope(current_run),
        %{
          event: :notification,
          payload: %{method: "some-event"},
@@ -346,12 +350,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
+    current_run = current_run(issue)
 
     running_entry = %{
       pid: self(),
       ref: process_ref,
       identifier: issue.identifier,
       issue: issue,
+      current_run: current_run,
+      run_id: CurrentRun.identity(current_run).run_id,
       session_id: nil,
       last_codex_message: nil,
       last_codex_timestamp: nil,
@@ -380,7 +387,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:codex_worker_update, issue_id, ingress_envelope(current_run),
        %{
          event: :notification,
          payload: %{
@@ -425,12 +432,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
+    current_run = current_run(issue)
 
     running_entry = %{
       pid: self(),
       ref: process_ref,
       identifier: issue.identifier,
       issue: issue,
+      current_run: current_run,
+      run_id: CurrentRun.identity(current_run).run_id,
       session_id: nil,
       last_codex_message: nil,
       last_codex_timestamp: nil,
@@ -452,7 +462,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:codex_worker_update, issue_id, ingress_envelope(current_run),
        %{
          event: :notification,
          payload: %{
@@ -511,12 +521,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
+    current_run = current_run(issue)
 
     running_entry = %{
       pid: self(),
       ref: process_ref,
       identifier: issue.identifier,
       issue: issue,
+      current_run: current_run,
+      run_id: CurrentRun.identity(current_run).run_id,
       session_id: nil,
       last_codex_message: nil,
       last_codex_timestamp: nil,
@@ -542,7 +555,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         ] do
       send(
         pid,
-        {:codex_worker_update, issue_id,
+        {:codex_worker_update, issue_id, ingress_envelope(current_run),
          %{
            event: :notification,
            payload: %{
@@ -583,12 +596,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
+    current_run = current_run(issue)
 
     running_entry = %{
       pid: self(),
       ref: process_ref,
       identifier: issue.identifier,
       issue: issue,
+      current_run: current_run,
+      run_id: CurrentRun.identity(current_run).run_id,
       session_id: nil,
       last_codex_message: nil,
       last_codex_timestamp: nil,
@@ -610,7 +626,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:codex_worker_update, issue_id, ingress_envelope(current_run),
        %{
          event: :notification,
          payload: %{
@@ -1420,6 +1436,20 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         do_wait_for_snapshot(pid, predicate, deadline_ms)
       end
     end
+  end
+
+  defp current_run(issue) do
+    CurrentRun.new(issue, %{
+      workspace_path: "/tmp/#{issue.identifier}",
+      role: "reviewer",
+      holder: "test-holder",
+      run_id: "test-run-#{System.unique_integer([:positive])}"
+    })
+  end
+
+  defp ingress_envelope(current_run) do
+    CurrentRun.envelope(current_run)
+    |> Map.put(:ingress_at_ms, System.monotonic_time(:millisecond))
   end
 
   defp graph_samples_from_rates(rates_per_bucket) do

@@ -2,9 +2,19 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.{Orchestrator, Runtime.ProcessOwnership}
+  alias SymphonyElixir.TestSupport.GatedProcessOwnershipFileSystem
+
+  defmodule FailingFileSystem do
+    @behaviour SymphonyElixir.Runtime.ProcessOwnership.FileSystem
+
+    @impl true
+    def write(_path, _contents, _modes), do: {:error, :enospc}
+  end
 
   setup do
     previous_role = System.get_env("SYMPHONY_ROLE")
+    previous_file_system = Application.get_env(:symphony_elixir, :process_ownership_file_system)
+    previous_gate = Application.get_env(:symphony_elixir, :process_ownership_file_system_gate)
     System.put_env("SYMPHONY_ROLE", "implementer")
 
     test_root =
@@ -25,6 +35,8 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
 
     on_exit(fn ->
       restore_env("SYMPHONY_ROLE", previous_role)
+      restore_app_env(:process_ownership_file_system, previous_file_system)
+      restore_app_env(:process_ownership_file_system_gate, previous_gate)
       File.rm_rf(test_root)
     end)
 
@@ -115,6 +127,90 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
 
     assert {:ok, %{state: "cleaned"}} =
              ProcessOwnership.release(issue, %{holder: "owned-holder", run_id: "owned-run"})
+  end
+
+  test "active refresh commits normally and a staged late refresh cannot resurrect terminal ownership", %{
+    issue: issue
+  } do
+    attrs = ownership_attrs("refresh-run", "refresh-holder")
+    assert {:ok, ownership} = ProcessOwnership.acquire(issue, attrs)
+
+    identity = %{
+      holder: ownership.holder,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path
+    }
+
+    ownership_path = ProcessOwnership.registry_path(issue, ownership.workspace_path)
+
+    assert {:ok, %{state: "active", session_id: "session-one"}} =
+             ProcessOwnership.refresh_active(issue, identity, %{session_id: "session-one"})
+
+    assert Path.wildcard(ownership_path <> ".tmp-*") == []
+
+    gate_token = make_ref()
+    {:ok, gate_controller} = Agent.start_link(fn -> :armed end)
+
+    Application.put_env(
+      :symphony_elixir,
+      :process_ownership_file_system,
+      GatedProcessOwnershipFileSystem
+    )
+
+    Application.put_env(:symphony_elixir, :process_ownership_file_system_gate, %{
+      controller: gate_controller,
+      issue_id: issue.id,
+      owner: self(),
+      token: gate_token
+    })
+
+    refresh =
+      Task.async(fn ->
+        ProcessOwnership.refresh_active(issue, identity, %{session_id: "staged-too-late"})
+      end)
+
+    assert_receive {:routine_ownership_write_entered, writer, ^gate_token, staged_path, %{"run_id" => "refresh-run"}},
+                   1_000
+
+    assert String.starts_with?(staged_path, ownership_path <> ".tmp-")
+
+    assert {:ok, %{state: "cleaned"}} = ProcessOwnership.release(issue, identity)
+
+    send(writer, {:release_routine_ownership_write, gate_token})
+    assert {:error, :ownership_not_active} = Task.await(refresh, 1_000)
+
+    assert %{state: "cleaned", session_id: "session-one"} =
+             ProcessOwnership.status_for_issue(issue)
+
+    assert Path.wildcard(ownership_path <> ".tmp-*") == []
+  end
+
+  test "routine refresh returns typed filesystem failure without changing active ownership", %{
+    issue: issue
+  } do
+    attrs = ownership_attrs("failed-refresh-run", "failed-refresh-holder")
+    assert {:ok, ownership} = ProcessOwnership.acquire(issue, attrs)
+    ownership_path = ProcessOwnership.registry_path(issue, ownership.workspace_path)
+
+    Application.put_env(
+      :symphony_elixir,
+      :process_ownership_file_system,
+      FailingFileSystem
+    )
+
+    assert {:error, :enospc} =
+             ProcessOwnership.refresh_active(
+               issue,
+               %{
+                 holder: ownership.holder,
+                 run_id: ownership.run_id,
+                 workspace_path: ownership.workspace_path
+               },
+               %{session_id: "not-persisted"}
+             )
+
+    assert %{state: "active", session_id: nil} = ProcessOwnership.status_for_issue(issue)
+    assert Path.wildcard(ownership_path <> ".tmp-*") == []
   end
 
   test "failed-run release refuses the same checkpoint and preserves evidence after reset", %{issue: issue} do
@@ -919,6 +1015,12 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
     assert {:error, :ownership_held} =
              ProcessOwnership.acquire(
                issue,
+               ownership_attrs("other-run", "owned-holder")
+             )
+
+    assert {:error, :ownership_held} =
+             ProcessOwnership.acquire(
+               issue,
                ownership_attrs("other-run", "other-holder")
              )
 
@@ -1327,4 +1429,7 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
   end
 
   defp assert_eventually(_fun, 0), do: flunk("condition not met in time")
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 end

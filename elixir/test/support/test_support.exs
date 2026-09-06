@@ -1,3 +1,46 @@
+defmodule SymphonyElixir.TestSupport.GatedProcessOwnershipFileSystem do
+  @moduledoc false
+
+  @behaviour SymphonyElixir.Runtime.ProcessOwnership.FileSystem
+
+  alias SymphonyElixir.Runtime.ProcessOwnership.FileSystem.Real
+
+  @impl true
+  def write(path, contents, modes) do
+    body = IO.iodata_to_binary(contents)
+    record = Jason.decode!(body)
+
+    case Application.get_env(:symphony_elixir, :process_ownership_file_system_gate) do
+      %{controller: controller, issue_id: issue_id} = gate ->
+        if record["issue_id"] == issue_id do
+          maybe_block(controller, gate, path, record)
+        end
+
+      _ ->
+        :ok
+    end
+
+    Real.write(path, contents, modes)
+  end
+
+  defp maybe_block(controller, %{owner: owner, token: token}, path, record) do
+    should_block? =
+      Agent.get_and_update(controller, fn
+        :armed -> {true, :entered}
+        state -> {false, state}
+      end)
+
+    if should_block? do
+      identity = Map.take(record, ["holder", "run_id"])
+      send(owner, {:routine_ownership_write_entered, self(), token, path, identity})
+
+      receive do
+        {:release_routine_ownership_write, ^token} -> :ok
+      end
+    end
+  end
+end
+
 defmodule SymphonyElixir.TestSupport do
   alias SymphonyElixir.AgentRunner
   alias SymphonyElixir.Runtime.ProcessOwnership
@@ -251,8 +294,8 @@ defmodule SymphonyElixir.TestSupport do
 
   defp forward_runner_updates(recipient) do
     receive do
-      {:owned_session_runtime_info, issue_id, ownership_ref, ack_recipient, ack_ref} ->
-        send(recipient, {:owned_session_runtime_info, issue_id, ownership_ref})
+      {:owned_session_runtime_info, issue_id, envelope, ownership_ref, ack_recipient, ack_ref} ->
+        send(recipient, {:owned_session_runtime_info, issue_id, envelope, ownership_ref})
         send(ack_recipient, {:owned_session_runtime_info_ack, ack_ref})
         forward_runner_updates(recipient)
 
