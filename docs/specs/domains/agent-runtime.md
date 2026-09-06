@@ -623,9 +623,13 @@ launch. Do not treat the declaration's own values as independent verification.
 The existing orchestration root and locked Symphony source identify the
 allowed tool-config path/ref; the integration supplies this expected source
 context through session options, with the normal startup caller deriving it
-from accepted materialization. An explicit supplied context never falls back
-to ambient HOME/PATH or another checkout. Direct Adapter callers must supply
-equivalent verified context when declaring operations.
+from accepted materialization. Concretely, normal startup reads the positive
+`OCTO_RUNTIME_CONFIG_GENERATION`, resolves the Git `HEAD` of the checkout that
+contains the active absolute Workflow path, and hashes that Workflow's sibling
+`mise.toml`; those independently observed values must match the declaration.
+An explicit supplied context never falls back to ambient HOME/PATH or another
+checkout. Direct Adapter callers must supply equivalent verified context when
+declaring operations.
 
 `Config.settings/0` validates strict input shape using the existing embedded
 schema conventions. At `AgentRuntime.start_session/2`, a focused

@@ -64,17 +64,26 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
-    worker_host = Keyword.get(opts, :worker_host)
-    skill_execution_contracts = Keyword.get(opts, :skill_execution_contracts, [])
     host_resources = host_resource_declaration(opts)
 
+    with {:ok, host_resource_contract} <-
+           HostResourceContract.resolve(host_resources, host_resource_context(opts)) do
+      start_resolved_session(workspace, host_resource_contract, opts)
+    end
+  end
+
+  @doc false
+  @spec start_resolved_session(Path.t(), HostResourceContract.t(), keyword()) ::
+          {:ok, session()} | {:error, term()}
+  def start_resolved_session(workspace, %HostResourceContract{} = host_resource_contract, opts)
+      when is_binary(workspace) and is_list(opts) do
+    worker_host = Keyword.get(opts, :worker_host)
+    skill_execution_contracts = Keyword.get(opts, :skill_execution_contracts, [])
     issue = Keyword.get(opts, :issue)
     role = Keyword.get(opts, :role, runtime_role())
+    skill_projection = skill_execution_projection(skill_execution_contracts, host_resource_contract)
 
-    with {:ok, host_resource_contract} <-
-           HostResourceContract.resolve(host_resources, host_resource_context(opts)),
-         skill_projection = skill_execution_projection(skill_execution_contracts, host_resource_contract),
-         {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
+    with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, launch} <- launch_config(issue, role),
          {:ok, command} <- project_skill_permissions(launch.command, skill_projection),
          bootstrap_env = issue_bootstrap_env(opts),
@@ -106,6 +115,9 @@ defmodule SymphonyElixir.Codex.AppServer do
       end
     end
   end
+
+  def start_resolved_session(_workspace, _host_resource_contract, _opts),
+    do: {:error, :invalid_resolved_host_resource_session}
 
   @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run_turn(

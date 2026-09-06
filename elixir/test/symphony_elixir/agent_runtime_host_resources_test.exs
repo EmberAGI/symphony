@@ -1,7 +1,8 @@
 defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation}
+  alias SymphonyElixir.{AgentRuntime, HostResourceContract, ImplementationEffort, ImplementerDelegation}
+  alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
 
   defmodule LaunchProbeTransport do
     def default_server_snapshot(%{owner: owner}) do
@@ -203,6 +204,103 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
     on_exit(fn -> File.rm_rf!(root) end)
   end
 
+  test "normal AgentRuntime startup derives independent provenance from its locked Workflow source" do
+    fixture = host_resource_fixture()
+    source_root = Path.dirname(fixture.context[:tool_config_path])
+    workflow_file = Path.join(source_root, "WORKFLOW.md")
+    workspace_root = Path.join(source_root, "workspaces")
+    workspace = Path.join(workspace_root, "TUR-877-NORMAL-START")
+    fake_codex = Path.join(source_root, "fake-codex")
+    trace = Path.join(source_root, "normal-start.trace")
+    File.mkdir_p!(workspace)
+
+    File.write!(fake_codex, """
+    #!/bin/sh
+    printf 'ARGV:%s\\n' "$*" >> "#{trace}"
+    count=0
+    while IFS= read -r line; do
+      count=$((count + 1))
+      case "$count" in
+        1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"host-resource-normal-start"}}}' ;;
+      esac
+    done
+    """)
+
+    File.chmod!(fake_codex, 0o755)
+    File.ln_s!("/bin/bash", Path.join(source_root, "bash"))
+    System.cmd("git", ["init", "-q", "-b", "main", source_root])
+    System.cmd("git", ["-C", source_root, "add", "mise.toml"])
+
+    {_, 0} =
+      System.cmd("git", [
+        "-C",
+        source_root,
+        "-c",
+        "user.name=Symphony Test",
+        "-c",
+        "user.email=symphony-test@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "locked source"
+      ])
+
+    {source_ref, 0} = System.cmd("git", ["-C", source_root, "rev-parse", "HEAD"])
+    source_ref = String.trim(source_ref)
+
+    declaration =
+      fixture.declaration
+      |> Map.put("role", "reviewer")
+      |> put_in(
+        ["operations", "symphony_runtime_verification", "symphony_ref"],
+        source_ref
+      )
+
+    write_workflow_file!(workflow_file,
+      workspace_root: workspace_root,
+      codex_command: "#{fake_codex} app-server",
+      agent_runtime_host_resources: declaration
+    )
+
+    Workflow.set_workflow_file_path(workflow_file)
+    previous_generation = System.get_env("OCTO_RUNTIME_CONFIG_GENERATION")
+    previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
+    previous_path = System.get_env("PATH")
+    previous_home = System.get_env("HOME")
+    System.put_env("OCTO_RUNTIME_CONFIG_GENERATION", "7")
+    System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
+    System.put_env("PATH", source_root)
+    System.put_env("HOME", Path.join(source_root, "unrelated-home"))
+
+    on_exit(fn ->
+      restore_env("OCTO_RUNTIME_CONFIG_GENERATION", previous_generation)
+      restore_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_provider)
+      restore_env("PATH", previous_path)
+      restore_env("HOME", previous_home)
+    end)
+
+    issue = %Issue{
+      id: "host-resource-normal-start",
+      identifier: "TUR-877-NORMAL-START",
+      title: "Normal host resource startup",
+      repository: "EmberAGI/symphony",
+      repository_source: "linear_label",
+      labels: ["implementation-effort:moderate"]
+    }
+
+    assert {:ok, session} =
+             AgentRuntime.start_session(workspace,
+               issue: issue,
+               role: "reviewer",
+               execution_generation: "exec-20260906"
+             )
+
+    assert session.host_resource_contract.provenance.symphony_ref == source_ref
+    assert File.read!(trace) =~ "default_permissions=symphony_skill_runtime"
+    assert :ok = AgentRuntime.stop_session(session)
+  end
+
   test "one resolved host contract projects exact reads to both Codex Herdr participants" do
     fixture = host_resource_fixture()
     issue = %Issue{id: "host-resource-projection", identifier: "TUR-877-PROJECT", labels: ["implementation-effort:moderate"]}
@@ -267,6 +365,41 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
     assert_receive {:host_resource_transport, :stop_session, _}
   end
 
+  test "direct entrypoints cannot bypass raw declaration validation with a typed-looking option" do
+    invalid_declaration = %{"unexpected" => true}
+    typed_looking = %HostResourceContract{}
+
+    assert {:error, {:invalid_host_resource_contract, %{resource: :declaration, reason: :invalid_fields}}} =
+             CodexAppServer.start_session(
+               "/tmp/selected-workspace",
+               host_resources: invalid_declaration,
+               resolved_host_resource_contract: typed_looking
+             )
+
+    issue = %Issue{
+      id: "host-resource-no-bypass",
+      identifier: "TUR-877-NO-BYPASS",
+      labels: ["implementation-effort:moderate"]
+    }
+
+    assert {:ok, runtime_contract} =
+             ImplementationEffort.runtime_profile_for_issue(:codex, issue, "implementer")
+
+    assert {:error, {:invalid_host_resource_contract, %{resource: :declaration, reason: :invalid_fields}}} =
+             ImplementerDelegation.start_session(
+               "/tmp/selected-workspace",
+               runtime_contract,
+               issue_identifier: issue.identifier,
+               run_id: "host-resource-no-bypass",
+               host_resources: invalid_declaration,
+               resolved_host_resource_contract: typed_looking,
+               transport: LaunchProbeTransport,
+               transport_context: %{owner: self()}
+             )
+
+    refute_received :host_resource_launch_started
+  end
+
   test "mixed Claude Implementer validation adds no Claude host permission or gateway mode" do
     fixture = host_resource_fixture()
 
@@ -286,7 +419,7 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
     end)
 
     System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "claude_code")
-    System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", "claude_code")
+    System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", "codex")
 
     assert {:ok, session} =
              AgentRuntime.start_session(
@@ -307,12 +440,14 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
     assert_receive {:host_resource_transport, :prepare_worker, _, worker_spec}
     assert_receive {:host_resource_transport, :start_agent, _, orchestrator_spec}
 
-    for spec <- [worker_spec, orchestrator_spec] do
-      assert spec.provider == "claude_code"
-      assert spec.env["SYMPHONY_HOST_RESOURCE_CONTRACT"] != nil
-      refute Enum.any?(spec.argv, &String.contains?(&1, "permissions.octo_herdr"))
-      refute Enum.any?(spec.argv, &String.contains?(&1, "gateway"))
-    end
+    assert worker_spec.provider == "codex"
+    assert worker_spec.env["SYMPHONY_HOST_RESOURCE_CONTRACT"] != nil
+    assert Enum.any?(worker_spec.argv, &String.contains?(&1, "permissions.octo_herdr"))
+
+    assert orchestrator_spec.provider == "claude_code"
+    assert orchestrator_spec.env["SYMPHONY_HOST_RESOURCE_CONTRACT"] != nil
+    refute Enum.any?(orchestrator_spec.argv, &String.contains?(&1, "permissions.octo_herdr"))
+    refute Enum.any?(orchestrator_spec.argv, &String.contains?(&1, "gateway"))
 
     assert Enum.map([worker_spec, orchestrator_spec], fn spec ->
              spec.env["SYMPHONY_HOST_RESOURCE_CONTRACT"]

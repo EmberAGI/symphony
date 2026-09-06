@@ -20,6 +20,7 @@ defmodule SymphonyElixir.AgentRuntime do
     ImplementationEffort,
     ImplementerDelegation,
     SkillExecutionContract,
+    Workflow,
     Workspace
   }
 
@@ -163,40 +164,43 @@ defmodule SymphonyElixir.AgentRuntime do
     role = Keyword.get(opts, :role, role_name())
     host_resources = host_resource_declaration(opts)
 
-    with :ok <- validate_host_resources_before_dispatch(provider, role, host_resources, opts),
+    with {:ok, host_resource_context} <-
+           expected_host_resource_context(role, host_resources, opts),
+         {:ok, host_resource_contract} <-
+           HostResourceContract.resolve(host_resources, host_resource_context),
          {:ok, skill_execution_contracts} <- resolve_skill_execution_contracts(workspace, opts),
          {:ok, issue_bootstrap_env} <- Workspace.issue_environment(Keyword.get(opts, :issue)) do
       opts =
         opts
+        |> Keyword.merge(host_resource_context)
         |> Keyword.put(:host_resources, host_resources)
         |> Keyword.put(:skill_execution_contracts, skill_execution_contracts)
         |> Keyword.put(:issue_bootstrap_env, issue_bootstrap_env)
 
       if role == "implementer" do
-        start_implementer_session(workspace, provider, role, opts)
+        start_implementer_session(workspace, provider, role, host_resource_contract, opts)
       else
-        adapter(provider).start_session(workspace, opts)
+        start_provider_session(provider, workspace, host_resource_contract, opts)
       end
     end
   end
+
+  defp start_provider_session(:codex, workspace, host_resource_contract, opts),
+    do: CodexAppServer.start_resolved_session(workspace, host_resource_contract, opts)
+
+  defp start_provider_session(provider, workspace, _host_resource_contract, opts),
+    do: adapter(provider).start_session(workspace, opts)
 
   defp host_resource_declaration(opts) do
     Keyword.get_lazy(opts, :host_resources, fn -> Config.settings!().agent_runtime.host_resources end)
   end
 
-  defp validate_host_resources_before_dispatch(:codex, _role, _declaration, _opts), do: :ok
-  defp validate_host_resources_before_dispatch(_provider, "implementer", _declaration, _opts), do: :ok
-
-  defp validate_host_resources_before_dispatch(_provider, role, declaration, opts) do
-    context =
-      opts
-      |> Keyword.take(@host_resource_context_keys)
-      |> Keyword.put(:role, role)
-
-    case HostResourceContract.resolve(declaration, context) do
-      {:ok, _contract} -> :ok
-      {:error, _reason} = error -> error
-    end
+  defp expected_host_resource_context(role, declaration, opts) do
+    opts
+    |> Keyword.take(@host_resource_context_keys)
+    |> Keyword.put(:role, role)
+    |> Keyword.put(:workflow_path, Workflow.workflow_file_path())
+    |> then(&HostResourceContract.expected_context(declaration, &1))
   end
 
   @doc """
@@ -266,7 +270,7 @@ defmodule SymphonyElixir.AgentRuntime do
 
   defp session_runtime_adapter(_session), do: adapter()
 
-  defp start_implementer_session(workspace, provider, role, opts) do
+  defp start_implementer_session(workspace, provider, role, host_resource_contract, opts) do
     issue = Keyword.get(opts, :issue)
     worker_host = Keyword.get(opts, :worker_host)
 
@@ -277,9 +281,10 @@ defmodule SymphonyElixir.AgentRuntime do
          {:ok, issue_identifier} <- required_issue_identifier(issue),
          {:ok, contract} <- resolve_profile(provider, issue, role),
          {:ok, transport_context} <- delegation_transport_context(opts, transport) do
-      ImplementerDelegation.start_session(
+      ImplementerDelegation.start_resolved_session(
         workspace,
         contract,
+        host_resource_contract,
         [
           issue_identifier: issue_identifier,
           run_id: run_id,

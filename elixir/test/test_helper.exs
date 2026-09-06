@@ -93,6 +93,11 @@ excluded_tags =
       do: tags,
       else: [:codex_real_sandbox_smoke | tags]
   end)
+  |> then(fn tags ->
+    if System.get_env("RUN_TUR877_HOST_RESOURCE_SANDBOX") == "1",
+      do: tags,
+      else: [:host_resource_real_sandbox | tags]
+  end)
 
 # All opt-in gates are decided at runtime on every invocation so a warm
 # _build can neither stale-skip nor stale-run any live contract test.

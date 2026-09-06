@@ -23,6 +23,7 @@ defmodule SymphonyElixir.HostResourceContract do
   ]
   @forbidden_launcher_collections ~w(shims)
   @context_keys ~w(role execution_generation runtime_generation source_ref tool_config_path tool_config_sha256 worker_host)a
+  @source_context_keys ~w(source_ref tool_config_path tool_config_sha256)a
 
   defstruct role: nil,
             execution_generation: nil,
@@ -54,6 +55,24 @@ defmodule SymphonyElixir.HostResourceContract do
 
       true ->
         invalid(:declaration, :malformed)
+    end
+  end
+
+  @doc """
+  Complete the independently expected context for a normal runtime session.
+
+  Runtime generation comes from the deployment generation environment when a
+  caller has not supplied it. Runtime-verification source provenance is either
+  supplied completely by a direct caller or derived completely from the locked
+  checkout containing the active Workflow; partial source context never falls
+  back to ambient process state.
+  """
+  @spec expected_context(nil | map(), keyword()) :: {:ok, keyword()} | {:error, term()}
+  def expected_context(declaration, opts) when is_list(opts) do
+    context = Keyword.take(opts, @context_keys)
+
+    with {:ok, context} <- maybe_put_runtime_generation(declaration, context) do
+      maybe_put_source_context(declaration, context, opts)
     end
   end
 
@@ -210,6 +229,108 @@ defmodule SymphonyElixir.HostResourceContract do
 
   defp resolve_runtime_verification(_operation, _opts),
     do: invalid(:symphony_runtime_verification, :map_required)
+
+  defp maybe_put_runtime_generation(declaration, context) do
+    cond do
+      not nonempty_declaration?(declaration) ->
+        {:ok, context}
+
+      Keyword.has_key?(context, :runtime_generation) ->
+        {:ok, context}
+
+      true ->
+        with {:ok, generation} <- runtime_generation_from_env() do
+          {:ok, Keyword.put(context, :runtime_generation, generation)}
+        end
+    end
+  end
+
+  defp runtime_generation_from_env do
+    case System.get_env("OCTO_RUNTIME_CONFIG_GENERATION") do
+      value when is_binary(value) -> parse_runtime_generation(value)
+      _other -> invalid(:runtime_generation, :missing_context)
+    end
+  end
+
+  defp parse_runtime_generation(value) do
+    case Integer.parse(value) do
+      {generation, ""} when generation > 0 -> {:ok, generation}
+      _other -> invalid(:runtime_generation, :invalid_context)
+    end
+  end
+
+  defp maybe_put_source_context(declaration, context, opts) do
+    if runtime_verification_declared?(declaration) do
+      case Enum.filter(@source_context_keys, &Keyword.has_key?(context, &1)) do
+        [] -> derive_source_context(context, Keyword.get(opts, :workflow_path))
+        @source_context_keys -> {:ok, context}
+        _partial -> {:ok, context}
+      end
+    else
+      {:ok, context}
+    end
+  end
+
+  defp derive_source_context(context, workflow_path) when is_binary(workflow_path) do
+    source_dir = Path.dirname(workflow_path)
+    tool_config_path = Path.join(source_dir, "mise.toml")
+
+    with true <- Path.type(workflow_path) == :absolute,
+         true <- Path.expand(workflow_path) == workflow_path,
+         {:ok, source_ref} <- locked_source_ref(source_dir),
+         {:ok, tool_config_sha256} <- file_digest(tool_config_path, :tool_config) do
+      {:ok,
+       context
+       |> Keyword.put(:source_ref, source_ref)
+       |> Keyword.put(:tool_config_path, tool_config_path)
+       |> Keyword.put(:tool_config_sha256, tool_config_sha256)}
+    else
+      {:error, _reason} = error -> error
+      _other -> invalid(:source_ref, :unavailable_context)
+    end
+  end
+
+  defp derive_source_context(_context, _workflow_path),
+    do: invalid(:source_ref, :missing_context)
+
+  defp locked_source_ref(source_dir) do
+    case System.cmd(
+           "/usr/bin/git",
+           ["-C", source_dir, "rev-parse", "--verify", "HEAD"],
+           stderr_to_stdout: true,
+           env: [
+             {"GIT_CONFIG_GLOBAL", "/dev/null"},
+             {"GIT_CONFIG_NOSYSTEM", "1"},
+             {"HOME", "/nonexistent"},
+             {"PATH", "/usr/bin:/bin"}
+           ]
+         ) do
+      {source_ref, 0} ->
+        source_ref = String.trim(source_ref)
+
+        if Regex.match?(~r/\A[0-9a-f]{40}\z/, source_ref),
+          do: {:ok, source_ref},
+          else: invalid(:source_ref, :unavailable_context)
+
+      _other ->
+        invalid(:source_ref, :unavailable_context)
+    end
+  rescue
+    _error -> invalid(:source_ref, :unavailable_context)
+  end
+
+  defp nonempty_declaration?(declaration) when is_map(declaration), do: map_size(declaration) > 0
+  defp nonempty_declaration?(_declaration), do: false
+
+  defp runtime_verification_declared?(declaration) when is_map(declaration) do
+    operations = Map.get(declaration, "operations") || Map.get(declaration, :operations)
+
+    is_map(operations) and
+      (Map.has_key?(operations, "symphony_runtime_verification") or
+         Map.has_key?(operations, :symphony_runtime_verification))
+  end
+
+  defp runtime_verification_declared?(_declaration), do: false
 
   defp resolve_host_dns(operation) when is_map(operation) do
     with :ok <- exact_keys(operation, @dns_fields, :host_dns),

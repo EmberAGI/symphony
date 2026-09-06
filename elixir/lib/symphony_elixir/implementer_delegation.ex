@@ -39,16 +39,28 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
   @spec start_session(Path.t(), map(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, contract, opts) when is_binary(workspace) and is_map(contract) and is_list(opts) do
+    host_resources = host_resource_declaration(opts)
+
+    with {:ok, host_resource_contract} <-
+           HostResourceContract.resolve(host_resources, host_resource_context(opts)) do
+      start_resolved_session(workspace, contract, host_resource_contract, opts)
+    end
+  end
+
+  def start_session(_workspace, _contract, _opts), do: {:error, :invalid_implementer_delegation_start}
+
+  @doc false
+  @spec start_resolved_session(Path.t(), map(), HostResourceContract.t(), keyword()) ::
+          {:ok, session()} | {:error, term()}
+  def start_resolved_session(workspace, contract, %HostResourceContract{} = host_resource_contract, opts)
+      when is_binary(workspace) and is_map(contract) and is_list(opts) do
     transport = Keyword.fetch!(opts, :transport)
     transport_context = Keyword.get(opts, :transport_context, %{})
     orchestrator_env = Keyword.get(opts, :orchestrator_env, %{})
     skill_execution_contracts = Keyword.get(opts, :skill_execution_contracts, [])
-    host_resources = host_resource_declaration(opts)
 
     with :ok <- validate_workspace(workspace),
          :ok <- validate_orchestrator_env(orchestrator_env),
-         {:ok, host_resource_contract} <-
-           HostResourceContract.resolve(host_resources, host_resource_context(opts)),
          permission_read_roots =
            Enum.uniq(
              SymphonyElixir.SkillExecutionContract.read_paths(skill_execution_contracts) ++
@@ -104,7 +116,8 @@ defmodule SymphonyElixir.ImplementerDelegation do
     end
   end
 
-  def start_session(_workspace, _contract, _opts), do: {:error, :invalid_implementer_delegation_start}
+  def start_resolved_session(_workspace, _contract, _host_resource_contract, _opts),
+    do: {:error, :invalid_resolved_host_resource_session}
 
   @doc false
   @spec skill_execution_projection_for_test(String.t(), list()) :: map()
