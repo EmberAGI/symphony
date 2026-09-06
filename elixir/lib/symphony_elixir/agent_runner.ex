@@ -136,7 +136,8 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp send_worker_runtime_info(recipient, %CurrentRun{} = current_run, worker_host, workspace)
+  @spec send_worker_runtime_info(pid(), CurrentRun.t(), term(), String.t()) :: :ok
+  defp send_worker_runtime_info(recipient, current_run, worker_host, workspace)
        when is_pid(recipient) and is_binary(workspace) do
     envelope = CurrentRun.envelope(current_run)
 
@@ -261,7 +262,8 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp checkpoint_blocked?(_reason), do: false
 
-  defp send_owned_session_runtime_info(recipient, %CurrentRun{} = current_run, session, true)
+  @spec send_owned_session_runtime_info(pid(), CurrentRun.t(), term(), boolean()) :: term()
+  defp send_owned_session_runtime_info(recipient, current_run, session, true)
        when is_pid(recipient) do
     case AgentRuntime.owned_session_ref(session) do
       ownership_ref when is_map(ownership_ref) ->
@@ -286,7 +288,7 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp send_owned_session_runtime_info(recipient, %CurrentRun{} = current_run, session, false)
+  defp send_owned_session_runtime_info(recipient, current_run, session, false)
        when is_pid(recipient) do
     case AgentRuntime.owned_session_ref(session) do
       ownership_ref when is_map(ownership_ref) ->
@@ -298,8 +300,6 @@ defmodule SymphonyElixir.AgentRunner do
         :ok
     end
   end
-
-  defp send_owned_session_runtime_info(_recipient, _issue, _session, _ack_required), do: :ok
 
   defp finish_start_result(
          {:error, {:herdr_agent_not_ready, %{owned_session_ref: ownership_ref}}} = result,
@@ -354,9 +354,10 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
+  @spec send_owned_session_runtime_info_ref(pid(), CurrentRun.t(), map(), boolean()) :: term()
   defp send_owned_session_runtime_info_ref(
          recipient,
-         %CurrentRun{} = current_run,
+         current_run,
          ownership_ref,
          true
        )
@@ -379,7 +380,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_owned_session_runtime_info_ref(
          recipient,
-         %CurrentRun{} = current_run,
+         current_run,
          ownership_ref,
          false
        )
