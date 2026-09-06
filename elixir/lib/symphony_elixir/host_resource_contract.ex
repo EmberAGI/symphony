@@ -344,10 +344,10 @@ defmodule SymphonyElixir.HostResourceContract do
       {:ok,
        %{
          values: %{"host_dns" => %{"resolver_target" => resolver_target}},
-         # Bubblewrap applies exact-file mounts in argument order. Mount the
-         # validated regular target before the fixed resolver symlink so its
-         # destination exists when the symlink grant is applied.
-         read_paths: Enum.uniq([resolver_target, "/etc/resolv.conf"]),
+         # The Codex minimal sandbox already carries the fixed resolver entry.
+         # Rebinding its symlink before the canonical target exists prevents
+         # Bubblewrap from starting, so grant only the validated regular target.
+         read_paths: [resolver_target],
          commands: %{},
          provenance: %{resolver_target: resolver_target}
        }}
