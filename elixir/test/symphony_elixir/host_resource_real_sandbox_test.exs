@@ -3,8 +3,8 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
   TUR-877 opt-in acceptance proof for the actual installed Codex sandbox.
 
   This test crosses the public Implementer delegation Interface to obtain the
-  ordinary generated Codex permission projection, then runs `codex sandbox
-  linux` directly. It makes no model request. The operator supplies only the
+  ordinary generated Codex permission projection, then runs `codex sandbox`
+  directly. It makes no model request. The operator supplies only the
   exact installed resources and two existing negative-read probes; the
   production consumer still validates every declared path, digest, version,
   generation, and source value before the sandbox command can run.
@@ -167,7 +167,7 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
 
     argv =
       projected_configs(worker_spec.argv) ++
-        ["sandbox", "linux", "--", "/bin/sh", "-c", script]
+        ["sandbox", "--", "/bin/sh", "-c", script]
 
     {output, status} =
       System.cmd("/usr/bin/timeout", ["60", codex_bin | argv],
