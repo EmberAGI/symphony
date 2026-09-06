@@ -416,6 +416,11 @@ admission opens.
   combinations, unsupported efforts, and empty reusable instructions fail
   closed during startup validation. The runtime has no parallel built-in
   production matrix.
+- The agent-profile catalog accepts the exact `claude-fable-5.1` model at
+  `xhigh` and `max`, alongside existing `claude-fable-5` support. Other
+  unlisted model IDs at these restricted efforts still fail closed. This
+  deployment-selected catalog compatibility is not live provider availability
+  or a revision to the historical CLI verification below.
 - The Orchestrator Module owns work admission. Its `close` and `open` calls,
   normal poll dispatch, and retry dispatch execute through the same GenServer
   mailbox. A successful close acknowledgement therefore occurs after any
