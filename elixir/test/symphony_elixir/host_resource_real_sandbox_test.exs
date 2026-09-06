@@ -93,7 +93,7 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
     declaration = %{
       "schema_version" => 1,
       "role" => "implementer",
-      "execution_generation" => required_env!("SYMPHONY_EXECUTION_GENERATION"),
+      "execution_generation" => required_execution_generation_fixture!(),
       "runtime_generation" => required_positive_integer!("OCTO_RUNTIME_CONFIG_GENERATION"),
       "operations" => %{
         "symphony_runtime_verification" => %{
@@ -205,6 +205,17 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
     case System.get_env(name) do
       value when is_binary(value) and value != "" -> value
       _other -> flunk("RUN_TUR877_HOST_RESOURCE_SANDBOX=1 requires #{name}")
+    end
+  end
+
+  defp required_execution_generation_fixture! do
+    case :persistent_term.get(:symphony_elixir_boot_seal, %{}) do
+      %{host_resource_real_sandbox_execution_generation: value}
+      when is_binary(value) and value != "" ->
+        value
+
+      _other ->
+        flunk("RUN_TUR877_HOST_RESOURCE_SANDBOX=1 requires SYMPHONY_EXECUTION_GENERATION")
     end
   end
 
