@@ -185,6 +185,52 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
     assert Path.wildcard(ownership_path <> ".tmp-*") == []
   end
 
+  test "a killed routine refresh task does not strand the scope lock", %{issue: issue} do
+    attrs = ownership_attrs("killed-refresh-run", "killed-refresh-holder")
+    assert {:ok, ownership} = ProcessOwnership.acquire(issue, attrs)
+
+    identity = %{
+      holder: ownership.holder,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path
+    }
+
+    gate_token = make_ref()
+    {:ok, gate_controller} = Agent.start_link(fn -> :armed end)
+
+    Application.put_env(:symphony_elixir, :process_ownership_file_system, GatedProcessOwnershipFileSystem)
+
+    Application.put_env(:symphony_elixir, :process_ownership_file_system_gate, %{
+      controller: gate_controller,
+      issue_id: issue.id,
+      owner: self(),
+      token: gate_token
+    })
+
+    task =
+      Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
+        ProcessOwnership.verify_and_update(issue, identity, %{session_id: "staged-before-kill"})
+      end)
+
+    assert_receive {:routine_ownership_write_entered, writer, ^gate_token, _staged_path, %{"run_id" => "killed-refresh-run"}},
+                   1_000
+
+    task_pid = task.pid
+    task_ref = task.ref
+    Process.exit(task.pid, :shutdown)
+
+    assert_receive {:DOWN, ^task_ref, :process, ^task_pid, _reason}, 1_000
+
+    lock_path = ProcessOwnership.registry_path(issue, ownership.workspace_path) <> ".lock"
+    assert File.exists?(Path.join(lock_path, "owner.json"))
+
+    Application.delete_env(:symphony_elixir, :process_ownership_file_system)
+    Application.delete_env(:symphony_elixir, :process_ownership_file_system_gate)
+    send(writer, {:release_routine_ownership_write, gate_token})
+
+    assert {:ok, %{state: "cleaned"}} = ProcessOwnership.release(issue, identity)
+  end
+
   test "routine refresh returns typed filesystem failure without changing active ownership", %{
     issue: issue
   } do

@@ -635,6 +635,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
           "token" => token,
           "worker_host_id" => current_host(),
           "owner_pid" => System.pid(),
+          "owner_process" => self() |> :erlang.pid_to_list() |> List.to_string(),
           "created_at_ms" => System.system_time(:millisecond)
         }
 
@@ -693,6 +694,9 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   defp stale_scope_lock?(lock_path) do
     case read_scope_lock_owner(Path.join(lock_path, @lock_owner_file)) do
+      {:ok, %{"version" => 1, "worker_host_id" => host, "owner_process" => owner_process}} ->
+        if host == current_host(), do: owner_process_stale?(owner_process), else: false
+
       {:ok, %{"version" => 1, "worker_host_id" => host, "owner_pid" => pid}} ->
         host == current_host() and not pid_live?(pid)
 
@@ -703,6 +707,17 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
         scope_lock_age_ms(lock_path) >= @malformed_lock_stale_after_ms
     end
   end
+
+  defp owner_process_stale?(owner_process) when is_binary(owner_process) do
+    owner_process
+    |> String.to_charlist()
+    |> :erlang.list_to_pid()
+    |> then(&(not Process.alive?(&1)))
+  rescue
+    _ -> false
+  end
+
+  defp owner_process_stale?(_owner_process), do: false
 
   defp read_scope_lock_owner(path) do
     with {:ok, body} <- File.read(path),
