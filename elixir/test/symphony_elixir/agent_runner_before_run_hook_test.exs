@@ -239,4 +239,83 @@ defmodule SymphonyElixir.AgentRunnerBeforeRunHookTest do
     assert Application.get_env(:symphony_elixir, :delegation_transport_module) ==
              SymphonyElixir.TestSupport.NonLiveDelegationTransport
   end
+
+  test "continuation preflight rejection preserves its typed failure and stops the owned session" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-continuation-reject-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(test_root)
+
+    try do
+      trace_file = Path.join(test_root, "codex.trace")
+      pid_file = Path.join(test_root, "codex.pid")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      # Bounded protocol fixture reused from the public continuation runner test;
+      # this proves hook sequencing and cleanup, not live provider availability.
+      File.write!(codex_binary, """
+      #!/bin/sh
+      printf '%s\\n' "$$" > "#{pid_file}"
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf '%s\\n' "$line" >> "#{trace_file}"
+        case "$count" in
+          1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+          2) ;;
+          3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-reject"}}}' ;;
+          *) printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-reject"}}}' '{"method":"item/agentMessage/delta","params":{"delta":"done"}}' '{"method":"turn/completed"}' ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: Path.join(test_root, "workspaces"),
+        hook_before_run: """
+        if [ "$SYMPHONY_ISSUE_STATE" = "In Progress" ]; then
+          printf '%s\\n' 'claude: command not found'
+          exit 127
+        fi
+        printf '%s\\n' "$SYMPHONY_ISSUE_STATE" > baseline
+        """,
+        hook_after_run: ~s|test "$(cat baseline)" = "$SYMPHONY_ISSUE_STATE"|,
+        codex_command: "#{codex_binary} app-server",
+        max_turns: 2
+      )
+
+      issue = %Issue{
+        id: "issue-continuation-reject",
+        identifier: "MT-248",
+        repository: "EmberAGI/scaling-octo-engine",
+        repository_source: "linear_label",
+        title: "Reject continuation preflight",
+        state: "Todo",
+        labels: []
+      }
+
+      assert {:irrecoverable_runtime_failed, failure} =
+               catch_exit(
+                 run_agent_with_ownership(issue, nil,
+                   role: "reviewer",
+                   issue_state_fetcher: fn [_] -> {:ok, [%{issue | state: "In Progress"}]} end
+                 )
+               )
+
+      assert failure.family == :missing_required_tool_or_cli
+      assert failure.retryable? == false
+
+      turns =
+        trace_file
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.filter(&(&1["method"] == "turn/start"))
+
+      assert length(turns) == 1
+      provider_pid = pid_file |> File.read!() |> String.trim()
+      assert {_output, 1} = System.cmd("kill", ["-0", provider_pid], stderr_to_stdout: true)
+    after
+      File.rm_rf(test_root)
+    end
+  end
 end

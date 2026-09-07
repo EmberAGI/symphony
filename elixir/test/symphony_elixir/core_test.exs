@@ -1817,6 +1817,8 @@ defmodule SymphonyElixir.CoreTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_before_run: ~s(printf '%s\\n' "$SYMPHONY_ISSUE_STATE" > baseline; printf 'before:%s\\n' "$SYMPHONY_ISSUE_STATE" >> #{Path.join(test_root, "hooks.trace")}),
+        hook_after_run: ~s|test "$(cat baseline)" = "$SYMPHONY_ISSUE_STATE" && printf 'after:%s\\n' "$SYMPHONY_ISSUE_STATE" >> #{Path.join(test_root, "hooks.trace")}|,
         codex_command: "#{codex_binary} app-server",
         max_turns: 3
       )
@@ -1856,7 +1858,7 @@ defmodule SymphonyElixir.CoreTest do
         repository_source: "linear_label",
         title: "Continue until done",
         description: "Still active after first turn",
-        state: "In Progress",
+        state: "Todo",
         url: "https://example.org/issues/MT-247",
         labels: []
       }
@@ -1887,6 +1889,9 @@ defmodule SymphonyElixir.CoreTest do
           get_in(payload, ["params", "input"])
           |> Enum.map_join("\n", &Map.get(&1, "text", ""))
         end)
+
+      assert File.read!(Path.join(test_root, "hooks.trace")) ==
+               "before:Todo\nafter:Todo\nbefore:In Progress\nafter:In Progress\n"
 
       assert length(turn_texts) == 2
       assert Enum.at(turn_texts, 0) =~ "You are an agent for this repository."
