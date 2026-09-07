@@ -423,7 +423,10 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     _handoff_snapshot =
       eventually_value(fn ->
         case Orchestrator.snapshot(orchestrator_name, 500) do
-          %{running: [%{issue_id: issue_id, state: "Agent Review"} | _], polling: %{last_poll_completed_at: completed_at}} = snapshot
+          %{
+            running: [%{issue_id: issue_id, state: "Agent Review"} | _],
+            polling: %{last_poll_completed_at: completed_at}
+          } = snapshot
           when issue_id == issue.id and completed_at != previous_poll_completed_at ->
             snapshot
 
