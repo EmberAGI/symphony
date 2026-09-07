@@ -75,8 +75,8 @@ defmodule SymphonyElixir.HostResourceContract do
   Runtime generation comes from the deployment generation environment when a
   caller has not supplied it. Runtime-verification source provenance is either
   supplied completely by a direct caller or derived completely from the locked
-  checkout containing the active Workflow; partial source context never falls
-  back to ambient process state.
+  checkout containing the trusted launcher's source working directory; partial
+  source context never falls back to the declaration or another checkout.
   """
   @spec expected_context(nil | map(), keyword()) :: {:ok, keyword()} | {:error, term()}
   def expected_context(declaration, opts) when is_list(opts) do
@@ -275,7 +275,7 @@ defmodule SymphonyElixir.HostResourceContract do
   defp maybe_put_source_context(declaration, context, opts) do
     if runtime_verification_declared?(declaration) do
       case Enum.filter(@source_context_keys, &Keyword.has_key?(context, &1)) do
-        [] -> derive_source_context(context, Keyword.get(opts, :workflow_path))
+        [] -> derive_source_context(context, Keyword.get(opts, :source_path))
         @source_context_keys -> {:ok, context}
         _partial -> {:ok, context}
       end
@@ -284,13 +284,11 @@ defmodule SymphonyElixir.HostResourceContract do
     end
   end
 
-  defp derive_source_context(context, workflow_path) when is_binary(workflow_path) do
-    source_dir = Path.dirname(workflow_path)
-    tool_config_path = Path.join(source_dir, "mise.toml")
-
-    with true <- Path.type(workflow_path) == :absolute,
-         true <- Path.expand(workflow_path) == workflow_path,
-         {:ok, source_ref} <- locked_source_ref(source_dir),
+  defp derive_source_context(context, source_path) when is_binary(source_path) do
+    with true <- Path.type(source_path) == :absolute,
+         true <- Path.expand(source_path) == source_path,
+         tool_config_path = Path.join(source_path, "mise.toml"),
+         {:ok, source_ref} <- locked_source_ref(source_path),
          {:ok, tool_config_sha256} <- file_digest(tool_config_path, :tool_config) do
       {:ok,
        context
@@ -303,7 +301,7 @@ defmodule SymphonyElixir.HostResourceContract do
     end
   end
 
-  defp derive_source_context(_context, _workflow_path),
+  defp derive_source_context(_context, _source_path),
     do: invalid(:source_ref, :missing_context)
 
   defp locked_source_ref(source_dir) do
