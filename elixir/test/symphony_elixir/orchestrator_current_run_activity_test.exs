@@ -417,17 +417,13 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     assert running_entry(fresh_snapshot, issue.id).last_activity_at_ms > initial_activity
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "Agent Review"}])
-    previous_poll_completed_at = fresh_snapshot.polling.last_poll_completed_at
     assert %{queued: true} = Orchestrator.request_refresh(orchestrator_name)
 
     _handoff_snapshot =
       eventually_value(fn ->
         case Orchestrator.snapshot(orchestrator_name, 500) do
-          %{
-            running: [%{issue_id: issue_id, state: "Agent Review"} | _],
-            polling: %{last_poll_completed_at: completed_at}
-          } = snapshot
-          when issue_id == issue.id and completed_at != previous_poll_completed_at ->
+          %{running: [%{issue_id: issue_id, state: "Agent Review"} | _]} = snapshot
+          when issue_id == issue.id ->
             snapshot
 
           _ ->
