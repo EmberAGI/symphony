@@ -32,26 +32,26 @@ defmodule SymphonyElixir.AgentProfileCatalogTest do
   end
 
   test "loads Fable 5.1 xhigh without blocking Codex profile resolution", %{root: root} do
-    write_profile!(root, "implementer-orchestrator", "orchestrator", "implementer", "gpt-6", "claude-fable-5.1")
+    write_profile!(root, "implementer-orchestrator", "orchestrator", "implementer", "gpt-6-astra", "claude-fable-5-1")
 
     assert {:ok, catalog} = AgentProfileCatalog.load(root)
     assert {:ok, claude} = AgentProfileCatalog.resolve(catalog, "implementer-orchestrator", "claude_code", "extreme", "default")
-    assert claude.model == "claude-fable-5.1"
+    assert claude.model == "claude-fable-5-1"
     assert claude.reasoning_effort == "xhigh"
     assert {:ok, codex} = AgentProfileCatalog.resolve(catalog, "implementer-orchestrator", "codex", nil, "default")
-    assert codex.model == "gpt-6"
+    assert codex.model == "gpt-6-astra"
     assert codex.reasoning_effort == "medium"
   end
 
   test "loads Fable 5.1 max while preserving Fable 5 max support", %{root: root} do
-    for {name, model} <- [{"new-fable", "claude-fable-5.1"}, {"old-fable", "claude-fable-5"}] do
-      path = write_profile!(root, name, "orchestrator", "implementer", "gpt-6", model)
+    for {name, model} <- [{"new-fable", "claude-fable-5-1"}, {"old-fable", "claude-fable-5"}] do
+      path = write_profile!(root, name, "orchestrator", "implementer", "gpt-6-astra", model)
       File.write!(path, String.replace(File.read!(path), "model = \"#{model}\", reasoning_effort = \"xhigh\"", "model = \"#{model}\", reasoning_effort = \"max\""))
     end
 
     assert {:ok, catalog} = AgentProfileCatalog.load(root)
     assert {:ok, current} = AgentProfileCatalog.resolve(catalog, "new-fable", "claude_code", "extreme", "default")
-    assert current.model == "claude-fable-5.1"
+    assert current.model == "claude-fable-5-1"
     assert current.reasoning_effort == "max"
     assert {:ok, previous} = AgentProfileCatalog.resolve(catalog, "old-fable", "claude_code", "extreme", "default")
     assert previous.model == "claude-fable-5"
@@ -107,7 +107,7 @@ defmodule SymphonyElixir.AgentProfileCatalogTest do
   for effort <- ["xhigh", "max"] do
     test "rejects an unlisted Fable version at #{effort}", %{root: root} do
       effort = unquote(effort)
-      path = write_profile!(root, "unknown-fable", "orchestrator", "implementer", "gpt-6", "claude-fable-5.2")
+      path = write_profile!(root, "unknown-fable", "orchestrator", "implementer", "gpt-6-astra", "claude-fable-5.2")
       File.write!(path, String.replace(File.read!(path), "model = \"claude-fable-5.2\", reasoning_effort = \"xhigh\"", "model = \"claude-fable-5.2\", reasoning_effort = \"#{effort}\""))
 
       assert {:error, {:invalid_agent_profile, ^path, {:unsupported_model_reasoning_effort, "claude_code", "extreme", "claude-fable-5.2", ^effort}}} =
