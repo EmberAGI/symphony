@@ -352,14 +352,23 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
     assert command =~ "permissions.symphony_skill_runtime.network={enabled=true}"
   end
 
-  test "normal AgentRuntime startup derives independent provenance from its locked Workflow source" do
+  test "normal AgentRuntime startup derives provenance from its locked launcher source" do
     fixture = host_resource_fixture()
     source_root = Path.dirname(fixture.context[:tool_config_path])
-    workflow_file = Path.join(source_root, "WORKFLOW.md")
-    workspace_root = Path.join(source_root, "workspaces")
+    source_path = Path.join(source_root, "elixir")
+    tool_config_path = Path.join(source_path, "mise.toml")
+
+    generated_root =
+      Path.join(System.tmp_dir!(), "host-resource-generated-workflow-#{System.unique_integer([:positive])}")
+
+    workflow_file = Path.join(generated_root, "WORKFLOW.md")
+    workspace_root = Path.join(generated_root, "workspaces")
     workspace = Path.join(workspace_root, "TUR-877-NORMAL-START")
-    fake_codex = Path.join(source_root, "fake-codex")
-    trace = Path.join(source_root, "normal-start.trace")
+    fake_codex = Path.join(generated_root, "fake-codex")
+    trace = Path.join(generated_root, "normal-start.trace")
+    File.mkdir_p!(source_path)
+    File.rename!(fixture.context[:tool_config_path], tool_config_path)
+    File.mkdir_p!(generated_root)
     File.mkdir_p!(workspace)
 
     File.write!(fake_codex, """
@@ -376,9 +385,31 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
     """)
 
     File.chmod!(fake_codex, 0o755)
-    File.ln_s!("/bin/bash", Path.join(source_root, "bash"))
+
+    File.write!(Path.join(generated_root, "wrapper-marker"), "generated Workflow wrapper\n")
+    File.ln_s!("/bin/bash", Path.join(generated_root, "bash"))
+    System.cmd("git", ["init", "-q", "-b", "main", generated_root])
+    System.cmd("git", ["-C", generated_root, "add", "wrapper-marker"])
+
+    {_, 0} =
+      System.cmd("git", [
+        "-C",
+        generated_root,
+        "-c",
+        "user.name=Symphony Test",
+        "-c",
+        "user.email=symphony-test@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "generated wrapper"
+      ])
+
+    {wrapper_ref, 0} = System.cmd("git", ["-C", generated_root, "rev-parse", "HEAD"])
+    wrapper_ref = String.trim(wrapper_ref)
+
     System.cmd("git", ["init", "-q", "-b", "main", source_root])
-    System.cmd("git", ["-C", source_root, "add", "mise.toml"])
+    System.cmd("git", ["-C", source_root, "add", "elixir/mise.toml"])
 
     {_, 0} =
       System.cmd("git", [
@@ -396,6 +427,7 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
 
     {source_ref, 0} = System.cmd("git", ["-C", source_root, "rev-parse", "HEAD"])
     source_ref = String.trim(source_ref)
+    assert wrapper_ref != source_ref
 
     declaration =
       fixture.declaration
@@ -403,6 +435,14 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
       |> put_in(
         ["operations", "symphony_runtime_verification", "symphony_ref"],
         source_ref
+      )
+      |> put_in(
+        ["operations", "symphony_runtime_verification", "tool_config"],
+        tool_config_path
+      )
+      |> put_in(
+        ["operations", "symphony_runtime_verification", "tool_config_sha256"],
+        digest(tool_config_path)
       )
 
     write_workflow_file!(workflow_file,
@@ -418,7 +458,7 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
     previous_home = System.get_env("HOME")
     System.put_env("OCTO_RUNTIME_CONFIG_GENERATION", "7")
     System.put_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", "codex")
-    System.put_env("PATH", source_root)
+    System.put_env("PATH", generated_root)
     System.put_env("HOME", Path.join(source_root, "unrelated-home"))
 
     on_exit(fn ->
@@ -426,6 +466,7 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
       restore_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_provider)
       restore_env("PATH", previous_path)
       restore_env("HOME", previous_home)
+      File.rm_rf!(generated_root)
     end)
 
     issue = %Issue{
@@ -438,11 +479,13 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
     }
 
     assert {:ok, session} =
-             AgentRuntime.start_session(workspace,
-               issue: issue,
-               role: "reviewer",
-               execution_generation: "exec-20260906"
-             )
+             File.cd!(source_path, fn ->
+               AgentRuntime.start_session(workspace,
+                 issue: issue,
+                 role: "reviewer",
+                 execution_generation: "exec-20260906"
+               )
+             end)
 
     assert session.host_resource_contract.provenance.symphony_ref == source_ref
     assert File.read!(trace) =~ "default_permissions=symphony_skill_runtime"

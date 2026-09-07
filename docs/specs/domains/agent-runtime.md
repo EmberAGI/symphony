@@ -628,10 +628,13 @@ launch. Do not treat the declaration's own values as independent verification.
 The existing orchestration root and locked Symphony source identify the
 allowed tool-config path/ref; the integration supplies this expected source
 context through session options, with the normal startup caller deriving it
-from accepted materialization. Concretely, normal startup reads the positive
-`OCTO_RUNTIME_CONFIG_GENERATION`, resolves the Git `HEAD` of the checkout that
-contains the active absolute Workflow path, and hashes that Workflow's sibling
-`mise.toml`; those independently observed values must match the declaration.
+from accepted materialization. Concretely, the trusted launcher starts Symphony
+in the independently locked source checkout; normal startup reads the positive
+`OCTO_RUNTIME_CONFIG_GENERATION`, resolves that working directory's Git
+`HEAD`, and hashes that exact working directory's `mise.toml`. The active
+absolute Workflow may be generated outside that checkout; its location
+supplies Config, not expected source provenance. Those independently observed
+values must match the declaration.
 An explicit supplied context never falls back to ambient HOME/PATH or another
 checkout. Direct Adapter callers must supply equivalent verified context when
 declaring operations.

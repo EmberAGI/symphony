@@ -20,7 +20,6 @@ defmodule SymphonyElixir.AgentRuntime do
     ImplementationEffort,
     ImplementerDelegation,
     SkillExecutionContract,
-    Workflow,
     Workspace
   }
 
@@ -197,12 +196,17 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   defp expected_host_resource_context(role, declaration, opts) do
-    opts
-    |> Keyword.take(@host_resource_context_keys)
-    |> maybe_put_orchestration_root()
-    |> Keyword.put(:role, role)
-    |> Keyword.put(:workflow_path, Workflow.workflow_file_path())
-    |> then(&HostResourceContract.expected_context(declaration, &1))
+    with {:ok, source_path} <- File.cwd() do
+      opts
+      |> Keyword.take(@host_resource_context_keys)
+      |> maybe_put_orchestration_root()
+      |> Keyword.put(:role, role)
+      |> Keyword.put(:source_path, source_path)
+      |> then(&HostResourceContract.expected_context(declaration, &1))
+    else
+      {:error, _reason} ->
+        {:error, {:invalid_host_resource_contract, %{resource: :source_ref, reason: :unavailable_context}}}
+    end
   end
 
   defp maybe_put_orchestration_root(context) do
