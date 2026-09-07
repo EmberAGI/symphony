@@ -414,9 +414,10 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
     assert running_entry(fresh_snapshot, issue.id).last_activity_at_ms > initial_activity
 
-    # Keep a bounded handoff window for the scheduler under full-suite load;
-    # the activity itself was already aged past the original 100 ms grace above.
-    Application.put_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms, 60_000)
+    # Retain the original bounded 100 ms handoff grace. The fresh sender event
+    # must be the reason reconciliation retains this run; widening the window
+    # would allow stale activity to pass without proving the refresh.
+    Application.put_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms, 100)
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "Agent Review"}])
     assert %{queued: true} = Orchestrator.request_refresh(orchestrator_name)
