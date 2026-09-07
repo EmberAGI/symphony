@@ -4,6 +4,49 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
   alias SymphonyElixir.Runtime.ProcessOwnership
   alias SymphonyElixir.TestSupport.GatedProcessOwnershipFileSystem
 
+  defmodule HandoffTransport do
+    def default_server_snapshot(_context), do: {:ok, %{status: "running", version: "0.8.2", protocol: 20}}
+
+    def start_session(spec, _context) do
+      {:ok, %{name: spec.name, socket: "/tmp/#{spec.name}/herdr.sock", runtime_root: "/tmp/#{spec.name}"}}
+    end
+
+    def prepare_worker(session, _spec, _context) do
+      {:ok, session |> Map.put(:worker_launcher, "/tmp/#{session.name}/launch-worker") |> Map.put(:orchestrator_bin, "/tmp/#{session.name}/orchestrator-bin")}
+    end
+
+    def start_agent(_session, spec, _context), do: {:ok, %{name: spec.name, pane_id: "w1:p1", profile: spec.profile}}
+    def stop_session(_session, _context), do: :ok
+
+    def owned_session_ref(session, _context) do
+      %{kind: "handoff-test", session_name: session.name, cleanup_module: __MODULE__, handoff_settlement: :implementer_turn}
+    end
+
+    def cleanup_owned_session(_ownership_ref), do: :ok
+
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      case Application.get_env(:symphony_elixir, :handoff_transport_gate) do
+        %{owner: owner, token: token} ->
+          send(owner, {:handoff_begin_entered, self(), token})
+
+          receive do
+            {:release_handoff_begin, ^token} -> :ok
+          end
+
+        _ ->
+          :ok
+      end
+
+      {:ok, %{phase: :working, agent: %{name: agent.name, pane_id: agent.pane_id, agent_status: "working", agent_session: %{value: "handoff-session"}}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      {:ok, %{name: agent.name, pane_id: agent.pane_id, agent_status: "working", agent_session: %{value: "handoff-session"}}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "HANDOFF_TEST"}}
+  end
+
   defmodule CleanupProbe do
     def cleanup_owned_session(%{owner: owner, marker: marker}) do
       send(owner, {:stale_owned_session_cleaned, marker})
@@ -42,6 +85,8 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     previous_role = System.get_env("SYMPHONY_ROLE")
     previous_file_system = Application.get_env(:symphony_elixir, :process_ownership_file_system)
     previous_gate = Application.get_env(:symphony_elixir, :process_ownership_file_system_gate)
+    previous_delegation_transport = Application.get_env(:symphony_elixir, :delegation_transport_module)
+    previous_handoff_gate = Application.get_env(:symphony_elixir, :handoff_transport_gate)
 
     previous_crash_probe =
       Application.get_env(:symphony_elixir, :process_ownership_file_system_crash_probe)
@@ -52,6 +97,8 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
       restore_env("SYMPHONY_ROLE", previous_role)
       restore_app_env(:process_ownership_file_system, previous_file_system)
       restore_app_env(:process_ownership_file_system_gate, previous_gate)
+      restore_app_env(:delegation_transport_module, previous_delegation_transport)
+      restore_app_env(:handoff_transport_gate, previous_handoff_gate)
       restore_app_env(:process_ownership_file_system_crash_probe, previous_crash_probe)
     end)
 
@@ -86,7 +133,17 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [hot_issue, quiet_issue])
 
     orchestrator_name = Module.concat(__MODULE__, :SlowPersistenceOrchestrator)
-    {:ok, orchestrator} = Orchestrator.start_link(name: orchestrator_name)
+    admission_marker = Path.join(test_root, "work-admission.json")
+
+    {:ok, orchestrator} =
+      Orchestrator.start_link(
+        name: orchestrator_name,
+        execution_generation: "generation-tur-878",
+        work_admission_marker_path: admission_marker
+      )
+
+    assert {:ok, %{status: "open"}} =
+             Orchestrator.open_work_admission(orchestrator_name, "generation-tur-878")
 
     on_exit(fn ->
       stop_orchestrator!(orchestrator)
@@ -162,6 +219,12 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
       assert is_map(serviceable_snapshot),
              "snapshot was blocked behind routine ownership persistence: #{inspect(serviceable_snapshot)}"
+
+      assert {:ok, %{status: "closed"}} =
+               Orchestrator.close_work_admission(orchestrator_name, "generation-tur-878")
+
+      assert {:ok, %{status: "open"}} =
+               Orchestrator.open_work_admission(orchestrator_name, "generation-tur-878")
 
       assert running_entry(serviceable_snapshot, hot_issue.id)
       assert running_entry(serviceable_snapshot, quiet_issue.id)
@@ -285,6 +348,99 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     assert accounted_entry.codex_output_tokens == 1
     assert accounted_entry.codex_total_tokens == 2
     assert accounted_entry.last_activity_at_ms == initial_activity_at_ms
+  end
+
+  test "default running Orchestrator handoff grace refreshes from a real implementer sender" do
+    previous_role = System.get_env("SYMPHONY_ROLE")
+    System.put_env("SYMPHONY_ROLE", "implementer")
+
+    test_root = unique_test_root("handoff-real-path")
+    workspace_root = Path.join(test_root, "workspaces")
+    control_root = Path.join(test_root, "provider-control")
+    codex_binary = Path.join(test_root, "controlled-codex")
+    File.mkdir_p!(control_root)
+    write_controlled_codex!(codex_binary, control_root)
+
+    issue = issue("issue-tur-878-handoff-real", "TUR-878-HANDOFF-REAL")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 30_000,
+      max_concurrent_agents: 1,
+      max_turns: 1,
+      codex_stall_timeout_ms: 0,
+      codex_command: "#{codex_binary} app-server"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :delegation_transport_module, HandoffTransport)
+    handoff_gate_token = make_ref()
+
+    Application.put_env(:symphony_elixir, :handoff_transport_gate, %{
+      owner: self(),
+      token: handoff_gate_token
+    })
+
+    orchestrator_name = Module.concat(__MODULE__, :HandoffRealOrchestrator)
+    {:ok, orchestrator} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_ROLE", previous_role)
+      stop_orchestrator!(orchestrator)
+      File.rm_rf(test_root)
+    end)
+
+    assert_receive {:handoff_begin_entered, runner, ^handoff_gate_token}, 2_000
+    initial_snapshot = Orchestrator.snapshot(orchestrator_name, 500)
+    initial_activity = running_entry(initial_snapshot, issue.id).last_activity_at_ms
+
+    Application.put_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms, 100)
+    wait_until_monotonic_deadline(initial_activity + 150)
+
+    send(runner, {:release_handoff_begin, handoff_gate_token})
+
+    fresh_snapshot =
+      eventually_value(fn ->
+        case Orchestrator.snapshot(orchestrator_name, 500) do
+          %{running: [%{issue_id: issue_id, last_activity_at_ms: activity} | _]} = snapshot
+          when issue_id == issue.id and is_integer(activity) and activity > initial_activity ->
+            snapshot
+
+          _ ->
+            nil
+        end
+      end)
+
+    assert running_entry(fresh_snapshot, issue.id).last_activity_at_ms > initial_activity
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "Agent Review"}])
+    assert %{queued: true} = Orchestrator.request_refresh(orchestrator_name)
+
+    _handoff_snapshot =
+      eventually_value(fn ->
+        case Orchestrator.snapshot(orchestrator_name, 500) do
+          %{running: [%{issue_id: issue_id, state: "Agent Review"} | _]} = snapshot
+          when issue_id == issue.id ->
+            snapshot
+
+          _ ->
+            nil
+        end
+      end)
+
+    refreshed_snapshot =
+      eventually_value(fn ->
+        case Orchestrator.snapshot(orchestrator_name, 500) do
+          %{running: [%{issue_id: issue_id} | _]} = snapshot when issue_id == issue.id ->
+            snapshot
+
+          _ ->
+            nil
+        end
+      end)
+
+    assert refreshed_snapshot.running != []
   end
 
   test "disabled stall detection leaves a silent real run owned" do
@@ -840,6 +996,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
             done
           fi
           while [ ! -f "$emit_file.again" ]; do sleep 0.01; done
+          printf '%s\n' '{"method":"item/agentMessage/delta","params":{"delta":"handoff heartbeat"}}'
           i=1
           while [ "$i" -le 10 ]; do
             printf '%s\n' '{"method":"runtime/usage","usage":{"input_tokens":12,"output_tokens":4,"total_tokens":16},"rate_limits":{"limit_id":"burst-limit","primary":{"remaining":9}}}'
