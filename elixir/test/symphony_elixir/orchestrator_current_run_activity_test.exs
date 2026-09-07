@@ -352,7 +352,12 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
   test "default running Orchestrator handoff grace refreshes from a real implementer sender" do
     previous_role = System.get_env("SYMPHONY_ROLE")
+
+    previous_grace =
+      Application.get_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms)
+
     System.put_env("SYMPHONY_ROLE", "implementer")
+    Application.put_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms, 2_000)
 
     test_root = unique_test_root("handoff-real-path")
     workspace_root = Path.join(test_root, "workspaces")
@@ -387,6 +392,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
     on_exit(fn ->
       restore_env("SYMPHONY_ROLE", previous_role)
+      restore_app_env(:implementer_handoff_settlement_grace_ms, previous_grace)
       stop_orchestrator!(orchestrator)
       File.rm_rf(test_root)
     end)
@@ -395,8 +401,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     initial_snapshot = Orchestrator.snapshot(orchestrator_name, 500)
     initial_activity = running_entry(initial_snapshot, issue.id).last_activity_at_ms
 
-    Application.put_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms, 100)
-    wait_until_monotonic_deadline(initial_activity + 150)
+    wait_until_monotonic_deadline(initial_activity + 2_050)
 
     # Release the real sender only after the run is stale under the same
     # bounded grace used for reconciliation.
@@ -419,7 +424,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "Agent Review"}])
     assert %{queued: true} = Orchestrator.request_refresh(orchestrator_name)
 
-    _handoff_snapshot =
+    handoff_snapshot =
       eventually_value(fn ->
         case Orchestrator.snapshot(orchestrator_name, 500) do
           %{running: [%{issue_id: issue_id, state: "Agent Review"} | _]} = snapshot
@@ -430,6 +435,9 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
             nil
         end
       end)
+
+    assert running_entry(handoff_snapshot, issue.id).run_id ==
+             running_entry(fresh_snapshot, issue.id).run_id
 
     refreshed_snapshot =
       eventually_value(fn ->
