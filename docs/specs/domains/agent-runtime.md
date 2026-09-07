@@ -162,6 +162,11 @@ admission opens.
   the native discovery, read, execute, environment, or launch projection
   required by the validated entries; they must not widen the contract to a
   convenient parent root.
+  With registered contracts and an explicit absolute `CODEX_HOME`, Codex
+  launch permissions also read `CODEX_HOME/skills` so native skill aliases are
+  visible in its sandbox. This applies to direct sessions and delegated
+  orchestrators/workers, without reading the rest of the provider home.
+  Empty contracts and callers without an explicit home retain existing grants.
 - Skill execution resources are read-only inputs. The selected product
   workspace remains the only writable repository root and the only source of
   Git `HEAD`, branch diff, changed-file, test, spec, and acceptance evidence.

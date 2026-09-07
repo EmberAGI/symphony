@@ -10,6 +10,8 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
   require Logger
 
+  alias SymphonyElixir.Codex.SkillPermissions
+
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
   alias SymphonyElixir.{Config, HostResourceContract, ImplementationEffort}
@@ -898,8 +900,16 @@ defmodule SymphonyElixir.ImplementerDelegation do
            runtime_root: runtime_root,
            socket: socket,
            permission_read_roots: permission_read_roots
-         }
+         } = session
        ) do
+    codex_home = Map.get(session.session_env, "CODEX_HOME", System.get_env("CODEX_HOME"))
+
+    permission_read_roots =
+      Enum.uniq(
+        permission_read_roots ++
+          SkillPermissions.read_paths(session.skill_execution_contracts, codex_home)
+      )
+
     [
       "codex",
       "--model",

@@ -485,6 +485,9 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     package_root = Path.join([orchestration_root, "skill-runtime", "linear"])
     runtime_input = Path.join(orchestration_root, "uv.lock")
     executable = Path.join(orchestration_root, "uv")
+    codex_home = Path.join(orchestration_root, ".runtime/codex/implementer")
+    previous_codex_home = System.get_env("CODEX_HOME")
+    System.put_env("CODEX_HOME", codex_home)
     previous_root = System.get_env("SYMPHONY_ORCHESTRATION_ROOT")
     previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
     previous_worker_provider = System.get_env("OCTO_RUNTIME_WORKER_PROVIDER")
@@ -498,6 +501,10 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     System.put_env("OCTO_RUNTIME_WORKER_PROVIDER", "codex")
 
     on_exit(fn ->
+      if previous_codex_home,
+        do: System.put_env("CODEX_HOME", previous_codex_home),
+        else: System.delete_env("CODEX_HOME")
+
       if previous_root,
         do: System.put_env("SYMPHONY_ORCHESTRATION_ROOT", previous_root),
         else: System.delete_env("SYMPHONY_ORCHESTRATION_ROOT")
@@ -557,6 +564,8 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert worker_spec.profile.model == "gpt-5.6-luna"
     assert herdr_session.permission_read_roots == [package_root, runtime_input, executable]
     assert worker_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] == encoded_contract
+    assert Enum.any?(worker_spec.argv, &String.contains?(&1, "#{inspect(Path.join(codex_home, "skills"))}=\"read\""))
+    refute Enum.any?(worker_spec.argv, &String.contains?(&1, "#{inspect(codex_home)}=\"read\""))
     assert Enum.any?(worker_spec.argv, &String.contains?(&1, "#{inspect(package_root)}=\"read\""))
 
     refute Enum.any?(
@@ -568,6 +577,8 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     assert orchestrator_spec.profile.name == "implementer-orchestrator"
     assert orchestrator_spec.profile.model == "gpt-5.6-sol"
     assert orchestrator_spec.env["SYMPHONY_SKILL_EXECUTION_CONTRACTS"] == encoded_contract
+    assert Enum.any?(orchestrator_spec.argv, &String.contains?(&1, "#{inspect(Path.join(codex_home, "skills"))}=\"read\""))
+    refute Enum.any?(orchestrator_spec.argv, &String.contains?(&1, "#{inspect(codex_home)}=\"read\""))
     assert Enum.any?(orchestrator_spec.argv, &String.contains?(&1, "#{inspect(package_root)}=\"read\""))
 
     refute Enum.any?(
