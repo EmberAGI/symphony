@@ -398,6 +398,8 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     Application.put_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms, 100)
     wait_until_monotonic_deadline(initial_activity + 150)
 
+    # Release the real sender only after the run is stale under the same
+    # bounded grace used for reconciliation.
     send(runner, {:release_handoff_begin, handoff_gate_token})
 
     fresh_snapshot =
@@ -414,19 +416,15 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
     assert running_entry(fresh_snapshot, issue.id).last_activity_at_ms > initial_activity
 
-    # Retain the original bounded 100 ms handoff grace. The fresh sender event
-    # must be the reason reconciliation retains this run; widening the window
-    # would allow stale activity to pass without proving the refresh.
-    Application.put_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms, 100)
-
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "Agent Review"}])
+    previous_poll_completed_at = fresh_snapshot.polling.last_poll_completed_at
     assert %{queued: true} = Orchestrator.request_refresh(orchestrator_name)
 
     _handoff_snapshot =
       eventually_value(fn ->
         case Orchestrator.snapshot(orchestrator_name, 500) do
-          %{running: [%{issue_id: issue_id, state: "Agent Review"} | _]} = snapshot
-          when issue_id == issue.id ->
+          %{running: [%{issue_id: issue_id, state: "Agent Review"} | _], polling: %{last_poll_completed_at: completed_at}} = snapshot
+          when issue_id == issue.id and completed_at != previous_poll_completed_at ->
             snapshot
 
           _ ->
