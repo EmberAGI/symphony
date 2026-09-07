@@ -1030,6 +1030,69 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
     refute File.exists?(lock_path)
   end
 
+  @tag timeout: 30_000
+  test "a live scope lock held by another BEAM cannot be stolen", %{issue: issue} do
+    dead_holder = "#{ProcessOwnership.current_host()}:999999:implementer"
+    attrs = ownership_attrs("cross-vm-held-run", dead_holder)
+    assert {:ok, ownership} = ProcessOwnership.acquire(issue, attrs)
+
+    identity = %{
+      holder: ownership.holder,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path
+    }
+
+    test_root = Path.dirname(Path.dirname(ownership.workspace_path))
+    ready_path = Path.join(test_root, "cross-vm-lock-ready")
+    release_path = Path.join(test_root, "cross-vm-lock-release")
+    workflow_path = Workflow.workflow_file_path()
+
+    holder_port =
+      start_external_lock_holder(
+        issue,
+        identity,
+        workflow_path,
+        ready_path,
+        release_path,
+        100
+      )
+
+    on_exit(fn ->
+      File.touch(release_path)
+      close_port(holder_port)
+    end)
+
+    assert_eventually(fn -> File.exists?(ready_path) end, 500)
+
+    lock_owner =
+      issue
+      |> ProcessOwnership.registry_path(ownership.workspace_path)
+      |> Kernel.<>(".lock/owner.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    refute lock_owner["owner_pid"] == System.pid()
+    assert os_process_alive?(String.to_integer(lock_owner["owner_pid"]))
+
+    assert {"", 0} =
+             external_acquire_result(
+               issue,
+               ownership.workspace_path,
+               workflow_path,
+               lock_owner["owner_process"]
+             )
+
+    holder_os_pid = String.to_integer(lock_owner["owner_pid"])
+    signal_test_pid(holder_os_pid, "KILL")
+    assert_eventually(fn -> not os_process_alive?(holder_os_pid) end)
+
+    assert {:ok, %{state: "active", run_id: "after-cross-vm-crash"}} =
+             ProcessOwnership.acquire(
+               issue,
+               ownership_attrs("after-cross-vm-crash", "replacement-holder")
+             )
+  end
+
   test "live and recent malformed scope locks fail closed", %{issue: issue} do
     lock_path = ProcessOwnership.registry_path(issue) <> ".lock"
     File.mkdir_p!(lock_path)
@@ -1437,6 +1500,141 @@ defmodule SymphonyElixir.ProcessOwnershipTest do
     port = Port.open({:spawn_executable, sleep}, [:binary, :exit_status, args: [~c"30"]])
     {:os_pid, os_pid} = :erlang.port_info(port, :os_pid)
     {port, os_pid}
+  end
+
+  defp start_external_lock_holder(
+         issue,
+         identity,
+         workflow_path,
+         ready_path,
+         release_path,
+         process_id_floor
+       ) do
+    code = """
+    defmodule TUR878CrossVmGate do
+      @behaviour SymphonyElixir.Runtime.ProcessOwnership.FileSystem
+
+      @impl true
+      def write(path, contents, modes) do
+        File.write!(System.fetch_env!("TUR878_READY_PATH"), "ready\n")
+
+        until_released(System.fetch_env!("TUR878_RELEASE_PATH"))
+        SymphonyElixir.Runtime.ProcessOwnership.FileSystem.Real.write(path, contents, modes)
+      end
+
+      defp until_released(path) do
+        if File.exists?(path) do
+          :ok
+        else
+          Process.sleep(10)
+          until_released(path)
+        end
+      end
+    end
+
+    SymphonyElixir.Workflow.set_workflow_file_path(System.fetch_env!("TUR878_WORKFLOW_PATH"))
+    Application.put_env(:symphony_elixir, :process_ownership_file_system, TUR878CrossVmGate)
+    floor = System.fetch_env!("TUR878_PROCESS_ID_FLOOR") |> String.to_integer()
+    Enum.each(1..floor, fn _ -> spawn(fn -> :ok end) end)
+
+    issue = %SymphonyElixir.Linear.Issue{
+      id: System.fetch_env!("TUR878_ISSUE_ID"),
+      identifier: System.fetch_env!("TUR878_ISSUE_IDENTIFIER"),
+      state: "In Progress"
+    }
+
+    identity = %{
+      holder: System.fetch_env!("TUR878_HOLDER"),
+      run_id: System.fetch_env!("TUR878_RUN_ID"),
+      workspace_path: System.fetch_env!("TUR878_WORKSPACE_PATH")
+    }
+
+    parent = self()
+
+    spawn(fn ->
+      send(parent, {:result, SymphonyElixir.Runtime.ProcessOwnership.verify_and_update(issue, identity, %{session_id: "cross-vm-held"})})
+    end)
+
+    receive do
+      {:result, {:ok, _ownership}} -> System.halt(0)
+      {:result, result} -> IO.puts(:stderr, inspect(result)); System.halt(1)
+    after
+      20_000 -> System.halt(2)
+    end
+    """
+
+    args =
+      ["--erl", "+S 1:1"] ++
+        Enum.flat_map(test_ebin_paths(), &["-pa", &1]) ++ ["-e", code]
+
+    env = [
+      {"TUR878_WORKFLOW_PATH", workflow_path},
+      {"TUR878_READY_PATH", ready_path},
+      {"TUR878_RELEASE_PATH", release_path},
+      {"TUR878_PROCESS_ID_FLOOR", Integer.to_string(process_id_floor)},
+      {"TUR878_ISSUE_ID", issue.id},
+      {"TUR878_ISSUE_IDENTIFIER", issue.identifier},
+      {"TUR878_HOLDER", identity.holder},
+      {"TUR878_RUN_ID", identity.run_id},
+      {"TUR878_WORKSPACE_PATH", identity.workspace_path}
+    ]
+
+    Port.open({:spawn_executable, System.find_executable("elixir")}, [
+      :binary,
+      :exit_status,
+      args: Enum.map(args, &String.to_charlist/1),
+      env: Enum.map(env, fn {key, value} -> {String.to_charlist(key), String.to_charlist(value)} end)
+    ])
+  end
+
+  defp test_ebin_paths do
+    Path.wildcard(Path.expand("_build/test/lib/*/ebin", File.cwd!()))
+  end
+
+  defp external_acquire_result(issue, workspace_path, workflow_path, owner_process) do
+    code = """
+    SymphonyElixir.Workflow.set_workflow_file_path(System.fetch_env!("TUR878_WORKFLOW_PATH"))
+
+    issue = %SymphonyElixir.Linear.Issue{
+      id: System.fetch_env!("TUR878_ISSUE_ID"),
+      identifier: System.fetch_env!("TUR878_ISSUE_IDENTIFIER"),
+      state: "In Progress"
+    }
+
+    attrs = %{
+      role: "implementer",
+      run_id: "must-not-steal-cross-vm-lock",
+      holder: "replacement-holder",
+      workspace_path: System.fetch_env!("TUR878_WORKSPACE_PATH")
+    }
+
+    owner_process =
+      System.fetch_env!("TUR878_OWNER_PROCESS")
+      |> String.to_charlist()
+      |> :erlang.list_to_pid()
+
+    if Process.alive?(owner_process), do: System.halt(4)
+
+    case SymphonyElixir.Runtime.ProcessOwnership.acquire(issue, attrs) do
+      {:error, :ownership_held} -> System.halt(0)
+      result -> IO.puts(:stderr, inspect(result)); System.halt(3)
+    end
+    """
+
+    args =
+      ["--erl", "+S 1:1"] ++
+        Enum.flat_map(test_ebin_paths(), &["-pa", &1]) ++ ["-e", code]
+
+    System.cmd(System.find_executable("elixir"), args,
+      stderr_to_stdout: true,
+      env: [
+        {"TUR878_WORKFLOW_PATH", workflow_path},
+        {"TUR878_ISSUE_ID", issue.id},
+        {"TUR878_ISSUE_IDENTIFIER", issue.identifier},
+        {"TUR878_WORKSPACE_PATH", workspace_path},
+        {"TUR878_OWNER_PROCESS", owner_process}
+      ]
+    )
   end
 
   # `ps` and `kill` are both resolved through PATH at call time, so shadowing

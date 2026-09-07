@@ -694,8 +694,14 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   defp stale_scope_lock?(lock_path) do
     case read_scope_lock_owner(Path.join(lock_path, @lock_owner_file)) do
-      {:ok, %{"version" => 1, "worker_host_id" => host, "owner_process" => owner_process}} ->
-        if host == current_host(), do: owner_process_stale?(owner_process), else: false
+      {:ok,
+       %{
+         "version" => 1,
+         "worker_host_id" => host,
+         "owner_pid" => owner_pid,
+         "owner_process" => owner_process
+       }} ->
+        host == current_host() and scope_lock_owner_stale?(owner_pid, owner_process)
 
       {:ok, %{"version" => 1, "worker_host_id" => host, "owner_pid" => pid}} ->
         host == current_host() and not pid_live?(pid)
@@ -705,6 +711,14 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
       {:error, _reason} ->
         scope_lock_age_ms(lock_path) >= @malformed_lock_stale_after_ms
+    end
+  end
+
+  defp scope_lock_owner_stale?(owner_pid, owner_process) do
+    if to_string(owner_pid) == System.pid() do
+      owner_process_stale?(owner_process)
+    else
+      not pid_live?(owner_pid)
     end
   end
 

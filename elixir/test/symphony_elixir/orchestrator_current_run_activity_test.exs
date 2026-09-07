@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Runtime.CurrentRun
   alias SymphonyElixir.Runtime.ProcessOwnership
   alias SymphonyElixir.TestSupport.GatedProcessOwnershipFileSystem
 
@@ -24,7 +25,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
     def cleanup_owned_session(_ownership_ref), do: :ok
 
-    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, context) do
       case Application.get_env(:symphony_elixir, :handoff_transport_gate) do
         %{owner: owner, token: token} ->
           send(owner, {:handoff_begin_entered, self(), token})
@@ -37,11 +38,14 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
           :ok
       end
 
-      {:ok, %{phase: :working, agent: %{name: agent.name, pane_id: agent.pane_id, agent_status: "working", agent_session: %{value: "handoff-session"}}}}
+      agent_status = Map.get(context, :agent_status, "working")
+      phase = if agent_status == "idle", do: :completed, else: :working
+
+      {:ok, %{phase: phase, agent: %{name: agent.name, pane_id: agent.pane_id, agent_status: agent_status, agent_session: %{value: "handoff-session"}}}}
     end
 
-    def get_agent(_session, agent, _timeout_ms, _context) do
-      {:ok, %{name: agent.name, pane_id: agent.pane_id, agent_status: "working", agent_session: %{value: "handoff-session"}}}
+    def get_agent(_session, agent, _timeout_ms, context) do
+      {:ok, %{name: agent.name, pane_id: agent.pane_id, agent_status: Map.get(context, :agent_status, "working"), agent_session: %{value: "handoff-session"}}}
     end
 
     def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "HANDOFF_TEST"}}
@@ -606,7 +610,10 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
       codex_command: "#{codex_binary} app-server"
     )
 
-    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    # Hold the tracker empty until the isolated OTP 28 trace session is
+    # attached to the existing TaskSupervisor. This removes the first-dispatch
+    # race while preserving normal Orchestrator -> AgentRunner composition.
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
     orchestrator_name = Module.concat(__MODULE__, :RetryReplacementOrchestrator)
     {:ok, orchestrator} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -615,14 +622,52 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
       File.rm_rf(test_root)
     end)
 
+    assert eventually_value(fn ->
+             case Orchestrator.snapshot(orchestrator_name, 500) do
+               %{running: [], polling: %{checking?: false, last_poll_completed_at: completed_at}}
+               when not is_nil(completed_at) ->
+                 true
+
+               _ ->
+                 nil
+             end
+           end)
+
+    trace_session = start_current_run_trace!()
+    on_exit(fn -> destroy_current_run_trace(trace_session) end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    assert %{queued: true} = Orchestrator.request_refresh(orchestrator_name)
+
     predecessor_snapshot = await_provider_sessions(orchestrator_name, control_root, 1)
     predecessor = running_entry(predecessor_snapshot, issue.id)
     predecessor_run_id = predecessor.run_id
 
-    predecessor_envelope =
-      predecessor.process_ownership
-      |> Map.take([:issue_id, :workspace_path, :role, :holder, :run_id])
-      |> Map.put(:ingress_at_ms, System.monotonic_time(:millisecond))
+    predecessor_sender_capture =
+      await_current_run_sender(trace_session, predecessor, orchestrator_name)
+
+    retained_predecessor_sender = predecessor_sender_capture.sender
+    retained_predecessor_recipient = predecessor_sender_capture.recipient
+    predecessor_envelope = CurrentRun.envelope(retained_predecessor_sender)
+
+    delayed_predecessor_envelope =
+      Map.put(predecessor_envelope, :ingress_at_ms, System.monotonic_time(:millisecond))
+
+    assert predecessor_sender_capture.trace_pid in Task.Supervisor.children(SymphonyElixir.TaskSupervisor)
+
+    assert predecessor_envelope ==
+             Map.take(predecessor.process_ownership, [
+               :issue_id,
+               :workspace_path,
+               :role,
+               :holder,
+               :run_id
+             ])
+
+    assert %{run_id: ^predecessor_run_id, session_id: predecessor_session_id, live?: true} =
+             await_durable_run_identity(issue, predecessor)
+
+    assert predecessor_session_id == predecessor.session_id
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [
       %{issue | state: "Agent Review"}
@@ -639,6 +684,12 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
     refute predecessor_terminal_state == "active"
 
+    # The controlled provider emits completion before removing its marker.
+    # Do not let the successor observe predecessor-owned fixture state.
+    assert eventually_value(fn ->
+             if File.exists?(predecessor_emit <> ".complete"), do: nil, else: true
+           end)
+
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [
       %{issue | description: "Changed checkpoint authorizes a distinct successor run."}
     ])
@@ -651,7 +702,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
           %{running: running} ->
             case Enum.find(running, &(&1.issue_id == issue.id)) do
               %{run_id: run_id, session_id: session_id} = entry
-              when run_id != predecessor_run_id and is_binary(session_id) ->
+              when run_id != predecessor_run_id and is_binary(session_id) and session_id != "n/a" ->
                 entry
 
               _ ->
@@ -663,11 +714,72 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
         end
       end)
 
+    successor_sender_capture =
+      await_current_run_sender(trace_session, successor, orchestrator_name)
+
+    retained_successor_sender = successor_sender_capture.sender
+    retained_successor_recipient = successor_sender_capture.recipient
+
+    assert CurrentRun.envelope(retained_successor_sender) ==
+             Map.take(successor.process_ownership, [
+               :issue_id,
+               :workspace_path,
+               :role,
+               :holder,
+               :run_id
+             ])
+
+    # The session has served its bounded provenance capture. Its destruction
+    # removes only this test's dynamic trace settings; the retained terms are
+    # the exact public recipient/capabilities observed from AgentRunner.
+    destroy_current_run_trace(trace_session)
+
     stale_owned_session = %{cleanup_module: CleanupProbe, owner: self(), marker: :retry_predecessor}
 
+    successor_before_late_ownership = await_durable_run_identity(issue, successor)
+
+    successor_before_late = Orchestrator.snapshot(orchestrator_name, 500)
+    successor_before_late_entry = running_entry(successor_before_late, issue.id)
+
+    assert durable_ownership_view(successor_before_late_entry.process_ownership) ==
+             durable_ownership_view(successor_before_late_ownership)
+
+    # This is the retained, dispatch-created public sender proof. Normal
+    # settlement retired its shared capability, so the late activity is a
+    # valid public call whose no-op must leave the successor untouched.
+    assert is_nil(CurrentRun.activity_ms(retained_predecessor_sender))
+
+    assert :ok =
+             CurrentRun.forward_update(
+               retained_predecessor_recipient,
+               retained_predecessor_sender,
+               %{
+                 event: :session_started,
+                 timestamp: DateTime.utc_now(),
+                 session_id: "stale-retry-session",
+                 codex_app_server_pid: "999999",
+                 usage: %{"input_tokens" => 900, "output_tokens" => 90, "total_tokens" => 990},
+                 rate_limits: %{"limit_id" => "stale-retry"}
+               }
+             )
+
+    assert :ok =
+             CurrentRun.forward_update(
+               retained_predecessor_recipient,
+               retained_predecessor_sender,
+               %{
+                 event: :turn_completed,
+                 timestamp: DateTime.utc_now(),
+                 session_id: "late-predecessor"
+               }
+             )
+
+    # The following three messages are explicitly delayed-envelope receiver
+    # checks. They are not retained-sender evidence: the real sender above is
+    # the only activity provenance path in this test.
     send(
       orchestrator,
-      {:codex_worker_update, issue.id, predecessor_envelope,
+      {:codex_worker_update, issue.id, delayed_predecessor_envelope,
        %{
          event: :session_started,
          timestamp: DateTime.utc_now(),
@@ -694,26 +806,59 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     assert_receive {:stale_owned_session_cleaned, :retry_predecessor}, 500
     refute current.run_id == predecessor_run_id
     assert current.run_id == successor.run_id
+    assert current.run_id == successor_before_late_entry.run_id
     assert current.session_id == successor.session_id
     assert current.codex_app_server_pid == successor.codex_app_server_pid
-    assert current.codex_total_tokens == successor.codex_total_tokens
-    refute unchanged.rate_limits == %{"limit_id" => "stale-retry"}
-    assert ProcessOwnership.status_for_issue(issue).run_id == successor.run_id
+    assert current.session_id == successor_before_late_entry.session_id
+    assert current.codex_app_server_pid == successor_before_late_entry.codex_app_server_pid
+    assert current.worker_host == successor_before_late_entry.worker_host
+    assert current.workspace_path == successor_before_late_entry.workspace_path
+    assert current.last_activity_at_ms == successor_before_late_entry.last_activity_at_ms
+    assert current.codex_input_tokens == successor_before_late_entry.codex_input_tokens
+    assert current.codex_output_tokens == successor_before_late_entry.codex_output_tokens
+    assert current.codex_total_tokens == successor_before_late_entry.codex_total_tokens
 
+    assert durable_ownership_view(current.process_ownership) ==
+             durable_ownership_view(successor_before_late_entry.process_ownership)
+
+    assert unchanged.rate_limits == successor_before_late.rate_limits
+    refute unchanged.rate_limits == %{"limit_id" => "stale-retry"}
+
+    assert durable_ownership_view(ProcessOwnership.status_for_issue(issue)) ==
+             durable_ownership_view(successor_before_late_ownership)
+
+    # Preserve the legacy issue-only/malformed-envelope receiver checks. These
+    # are delayed envelope probes only; they are not activity provenance.
     send(
       orchestrator,
-      {:codex_worker_update, issue.id, predecessor_envelope, %{event: :turn_completed, timestamp: DateTime.utc_now(), session_id: "late-predecessor"}}
+      {:codex_worker_update, issue.id, %{event: :notification, timestamp: DateTime.utc_now()}}
     )
 
-    send(orchestrator, {:codex_worker_update, issue.id, %{event: :notification, timestamp: DateTime.utc_now()}})
     send(orchestrator, {:worker_runtime_info, issue.id, %{workspace_path: "/tmp/legacy"}})
     send(orchestrator, {:owned_session_runtime_info, issue.id, stale_owned_session})
 
-    successor_identity =
-      successor.process_ownership
-      |> Map.take([:issue_id, :workspace_path, :role, :holder, :run_id])
+    legacy_unchanged = Orchestrator.snapshot(orchestrator_name, 500)
+    legacy_current = running_entry(legacy_unchanged, issue.id)
 
-    initial_turn_count = successor.turn_count
+    assert legacy_current.run_id == successor_before_late_entry.run_id
+    assert legacy_current.session_id == successor_before_late_entry.session_id
+    assert legacy_current.codex_app_server_pid == successor_before_late_entry.codex_app_server_pid
+    assert legacy_current.worker_host == successor_before_late_entry.worker_host
+    assert legacy_current.workspace_path == successor_before_late_entry.workspace_path
+    assert legacy_current.last_activity_at_ms == successor_before_late_entry.last_activity_at_ms
+    assert legacy_current.codex_input_tokens == successor_before_late_entry.codex_input_tokens
+    assert legacy_current.codex_output_tokens == successor_before_late_entry.codex_output_tokens
+    assert legacy_current.codex_total_tokens == successor_before_late_entry.codex_total_tokens
+
+    assert durable_ownership_view(legacy_current.process_ownership) ==
+             durable_ownership_view(successor_before_late_entry.process_ownership)
+
+    assert legacy_unchanged.rate_limits == successor_before_late.rate_limits
+
+    assert durable_ownership_view(ProcessOwnership.status_for_issue(issue)) ==
+             durable_ownership_view(successor_before_late_ownership)
+
+    initial_turn_count = legacy_current.turn_count
 
     for {session_id, include_provider_timestamp?} <- [
           {"successor-turn-2", true},
@@ -726,10 +871,12 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
           do: Map.put(update, :timestamp, DateTime.utc_now()),
           else: update
 
-      send(
-        orchestrator,
-        {:codex_worker_update, issue.id, Map.put(successor_identity, :ingress_at_ms, System.monotonic_time(:millisecond)), update}
-      )
+      assert :ok =
+               CurrentRun.forward_update(
+                 retained_successor_recipient,
+                 retained_successor_sender,
+                 update
+               )
     end
 
     accepted = Orchestrator.snapshot(orchestrator_name, 500)
@@ -738,7 +885,8 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     assert accepted_entry.turn_count == initial_turn_count + 2
 
     newest_activity_at_ms = accepted_entry.last_activity_at_ms
-
+    # These are receiver-side rejection probes for malformed/delayed
+    # envelopes; they do not stand in for the retained sender capability.
     for claimed_ingress <- [
           newest_activity_at_ms - 10,
           "malformed",
@@ -747,8 +895,8 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
         ] do
       envelope =
         if is_nil(claimed_ingress),
-          do: successor_identity,
-          else: Map.put(successor_identity, :ingress_at_ms, claimed_ingress)
+          do: CurrentRun.envelope(retained_successor_sender),
+          else: Map.put(CurrentRun.envelope(retained_successor_sender), :ingress_at_ms, claimed_ingress)
 
       send(
         orchestrator,
@@ -767,16 +915,17 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     cumulative_usage = %{"input_tokens" => 10, "output_tokens" => 6, "total_tokens" => 16}
 
     for _duplicate <- 1..2 do
-      send(
-        orchestrator,
-        {:codex_worker_update, issue.id, Map.put(successor_identity, :ingress_at_ms, System.monotonic_time(:millisecond)),
-         %{
-           event: :notification,
-           timestamp: DateTime.utc_now(),
-           usage: cumulative_usage,
-           rate_limits: %{"limit_id" => "current", "primary" => %{"remaining" => 9}}
-         }}
-      )
+      assert :ok =
+               CurrentRun.forward_update(
+                 retained_successor_recipient,
+                 retained_successor_sender,
+                 %{
+                   event: :notification,
+                   timestamp: DateTime.utc_now(),
+                   usage: cumulative_usage,
+                   rate_limits: %{"limit_id" => "current", "primary" => %{"remaining" => 9}}
+                 }
+               )
     end
 
     monotonic = Orchestrator.snapshot(orchestrator_name, 500)
@@ -786,6 +935,75 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     assert monotonic_entry.codex_output_tokens == successor.codex_output_tokens + 6
     assert monotonic_entry.codex_total_tokens == successor.codex_total_tokens + 16
     assert monotonic.rate_limits["limit_id"] == "current"
+  end
+
+  @tag timeout: 120_000
+  test "public AgentRunner publishes acquired identity for worker and owned-session startup" do
+    previous_role = System.get_env("SYMPHONY_ROLE")
+    test_root = unique_test_root("public-agent-runner-startup")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_ROLE", previous_role)
+      File.rm_rf(test_root)
+    end)
+
+    System.put_env("SYMPHONY_ROLE", "implementer")
+
+    workspace_root = Path.join(test_root, "workspaces")
+    File.mkdir_p!(workspace_root)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      max_concurrent_agents: 1,
+      max_turns: 1,
+      codex_stall_timeout_ms: 0
+    )
+
+    issue = issue("issue-tur-878-public-runner", "TUR-878-PUBLIC-RUNNER")
+    parent = self()
+    run_id = "public-agent-runner-#{System.unique_integer([:positive])}"
+
+    {:ok, runner} =
+      Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+        run_agent_with_ownership(issue, parent,
+          run_id: run_id,
+          delegation_transport: HandoffTransport,
+          delegation_transport_context: %{
+            assignments: [],
+            issue_id: issue.id,
+            test_pid: parent,
+            agent_status: "idle"
+          }
+        )
+      end)
+
+    monitor_ref = Process.monitor(runner)
+
+    on_exit(fn ->
+      if Process.alive?(runner), do: Process.exit(runner, :kill)
+    end)
+
+    assert_receive {:worker_runtime_info, issue_id, worker_envelope, runtime_info}, 5_000
+    assert issue_id == issue.id
+    assert worker_envelope.issue_id == issue.id
+    assert worker_envelope.run_id == run_id
+    assert runtime_info.workspace_path == worker_envelope.workspace_path
+
+    assert %{state: "active", run_id: ^run_id, workspace_path: workspace_path} =
+             ProcessOwnership.status_for_issue(issue)
+
+    assert workspace_path == worker_envelope.workspace_path
+
+    assert_receive {:owned_session_runtime_info, ^issue_id, owned_envelope, ownership_ref},
+                   5_000
+
+    assert owned_envelope == worker_envelope
+    assert is_binary(ownership_ref.session_name)
+    assert ownership_ref.cleanup_module == HandoffTransport
+    assert ownership_ref.handoff_settlement == :implementer_turn
+
+    assert_receive {:DOWN, ^monitor_ref, :process, ^runner, :normal}, 5_000
   end
 
   test "terminal reconciliation fences a held routine write and late activity" do
@@ -949,6 +1167,79 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
     end
   end
 
+  defp start_current_run_trace! do
+    task_supervisor = Process.whereis(SymphonyElixir.TaskSupervisor)
+
+    unless is_pid(task_supervisor) do
+      raise "TaskSupervisor is unavailable for the bounded OTP 28 trace session"
+    end
+
+    session = :trace.session_create(:tur878_current_run_trace, self(), [])
+
+    try do
+      unless :trace.function(session, {CurrentRun, :forward_update, 3}, [], [:local]) == 1 do
+        raise "OTP 28 trace session did not install CurrentRun.forward_update/3"
+      end
+
+      unless :trace.process(session, task_supervisor, true, [:call, :set_on_spawn]) == 1 do
+        raise "OTP 28 trace session did not attach to TaskSupervisor"
+      end
+
+      session
+    catch
+      kind, reason ->
+        _ = :trace.session_destroy(session)
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    end
+  end
+
+  defp destroy_current_run_trace(session) do
+    _ = :trace.session_destroy(session)
+    :ok
+  catch
+    _kind, _reason ->
+      :ok
+  end
+
+  defp await_current_run_sender(_trace_session, expected_entry, orchestrator_name, attempts \\ 500)
+
+  defp await_current_run_sender(_trace_session, _expected_entry, _orchestrator_name, 0) do
+    flunk("real AgentRunner did not produce a traceable CurrentRun.forward_update/3 call")
+  end
+
+  defp await_current_run_sender(
+         trace_session,
+         expected_entry,
+         orchestrator_name,
+         attempts
+       ) do
+    receive do
+      {:trace, trace_pid, :call, {CurrentRun, :forward_update, [recipient, %CurrentRun{} = sender, update]}}
+      when is_pid(recipient) and is_map(update) ->
+        expected_identity =
+          Map.take(expected_entry.process_ownership, [
+            :issue_id,
+            :workspace_path,
+            :role,
+            :holder,
+            :run_id
+          ])
+
+        identity = CurrentRun.envelope(sender)
+
+        if recipient == Process.whereis(orchestrator_name) and identity == expected_identity do
+          %{trace_pid: trace_pid, recipient: recipient, sender: sender, update: update}
+        else
+          await_current_run_sender(trace_session, expected_entry, orchestrator_name, attempts - 1)
+        end
+
+      _other ->
+        await_current_run_sender(trace_session, expected_entry, orchestrator_name, attempts - 1)
+    after
+      10 -> await_current_run_sender(trace_session, expected_entry, orchestrator_name, attempts - 1)
+    end
+  end
+
   defp issue(id, identifier) do
     %Issue{
       id: id,
@@ -1047,7 +1338,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
   defp await_provider_sessions(orchestrator_name, control_root, expected, attempts) do
     case Orchestrator.snapshot(orchestrator_name, 500) do
       %{running: running} = snapshot when length(running) == expected ->
-        if Enum.all?(running, &is_binary(&1.session_id)) and
+        if Enum.all?(running, &(is_binary(&1.session_id) and &1.session_id != "n/a")) and
              snapshot.polling.checking? == false do
           snapshot
         else
@@ -1094,6 +1385,42 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
       _ ->
         await_non_active_ownership(issue, orchestrator_name, attempts - 1)
     end
+  end
+
+  defp await_durable_run_identity(issue, expected_entry) do
+    eventually_value(fn ->
+      case ProcessOwnership.status_for_issue(issue) do
+        %{run_id: run_id, session_id: session_id, live?: true} = ownership
+        when run_id == expected_entry.run_id and session_id == expected_entry.session_id ->
+          ownership
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp durable_ownership_view(ownership) do
+    Map.take(ownership, [
+      :state,
+      :role,
+      :session_id,
+      :owned_session_ref,
+      :issue_id,
+      :cleanup_evidence,
+      :run_id,
+      :holder,
+      :worker_host,
+      :workspace_path,
+      :updated_at,
+      :cleanup_status,
+      :app_server_pid,
+      :worker_pid,
+      :issue_identifier,
+      :failure_observation,
+      :app_server_pgid,
+      :quarantine_reason
+    ])
   end
 
   defp wait_until_monotonic_age(age_ms) do
