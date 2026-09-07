@@ -4,7 +4,17 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.{AgentRuntime, Config, Linear.Issue, PromptBuilder, Runtime.ProcessOwnership, Tracker, Workspace}
+
+  alias SymphonyElixir.{
+    AgentRuntime,
+    Config,
+    Linear.Issue,
+    PromptBuilder,
+    Runtime.CurrentRun,
+    Runtime.ProcessOwnership,
+    Tracker,
+    Workspace
+  }
 
   @type worker_host :: String.t() | nil
   @owned_session_registration_timeout_ms 5_000
@@ -67,27 +77,28 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case Workspace.create_for_issue(issue, worker_host) do
-      {:ok, workspace} ->
-        send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
+    with {:ok, workspace} <- Workspace.create_for_issue(issue, worker_host),
+         {:ok, ownership_env} <- process_ownership_environment(issue, opts) do
+      opts =
+        Keyword.put_new_lazy(opts, :current_run, fn ->
+          CurrentRun.new(issue, Keyword.fetch!(opts, :process_ownership))
+        end)
 
-        case process_ownership_environment(issue, opts) do
-          {:ok, ownership_env} ->
-            run_with_workspace_hooks(
-              workspace,
-              issue,
-              codex_update_recipient,
-              opts,
-              worker_host,
-              ownership_env
-            )
+      send_worker_runtime_info(
+        codex_update_recipient,
+        Keyword.fetch!(opts, :current_run),
+        worker_host,
+        workspace
+      )
 
-          result ->
-            result
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+      run_with_workspace_hooks(
+        workspace,
+        issue,
+        codex_update_recipient,
+        opts,
+        worker_host,
+        ownership_env
+      )
     end
   end
 
@@ -119,25 +130,19 @@ defmodule SymphonyElixir.AgentRunner do
       :erlang.raise(kind, reason, __STACKTRACE__)
   end
 
-  defp codex_message_handler(recipient, issue) do
+  defp codex_message_handler(recipient, current_run) do
     fn message ->
-      send_codex_update(recipient, issue, message)
+      CurrentRun.forward_update(recipient, current_run, message)
     end
   end
 
-  defp send_codex_update(recipient, %Issue{id: issue_id}, message)
-       when is_binary(issue_id) and is_pid(recipient) do
-    send(recipient, {:codex_worker_update, issue_id, message})
-    :ok
-  end
+  defp send_worker_runtime_info(recipient, %CurrentRun{} = current_run, worker_host, workspace)
+       when is_pid(recipient) and is_binary(workspace) do
+    envelope = CurrentRun.envelope(current_run)
 
-  defp send_codex_update(_recipient, _issue, _message), do: :ok
-
-  defp send_worker_runtime_info(recipient, %Issue{id: issue_id}, worker_host, workspace)
-       when is_binary(issue_id) and is_pid(recipient) and is_binary(workspace) do
     send(
       recipient,
-      {:worker_runtime_info, issue_id,
+      {:worker_runtime_info, envelope.issue_id, envelope,
        %{
          worker_host: worker_host,
          workspace_path: workspace
@@ -147,7 +152,7 @@ defmodule SymphonyElixir.AgentRunner do
     :ok
   end
 
-  defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
+  defp send_worker_runtime_info(_recipient, _current_run, _worker_host, _workspace), do: :ok
 
   defp run_codex_turns(
          workspace,
@@ -180,7 +185,7 @@ defmodule SymphonyElixir.AgentRunner do
       {:ok, session} ->
         case send_owned_session_runtime_info(
                codex_update_recipient,
-               issue,
+               Keyword.fetch!(opts, :current_run),
                session,
                registration_ack_required?(opts)
              ) do
@@ -232,6 +237,7 @@ defmodule SymphonyElixir.AgentRunner do
         finish_start_result(result, %{
           recipient: codex_update_recipient,
           issue: issue,
+          current_run: Keyword.fetch!(opts, :current_run),
           registration_ack_required?: registration_ack_required?(opts),
           workspace: workspace,
           worker_host: worker_host,
@@ -260,15 +266,16 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp checkpoint_blocked?(_reason), do: false
 
-  defp send_owned_session_runtime_info(recipient, %Issue{id: issue_id}, session, true)
-       when is_binary(issue_id) and is_pid(recipient) do
+  defp send_owned_session_runtime_info(recipient, %CurrentRun{} = current_run, session, true)
+       when is_pid(recipient) do
     case AgentRuntime.owned_session_ref(session) do
       ownership_ref when is_map(ownership_ref) ->
         ack_ref = make_ref()
+        envelope = CurrentRun.envelope(current_run)
 
         send(
           recipient,
-          {:owned_session_runtime_info, issue_id, ownership_ref, self(), ack_ref}
+          {:owned_session_runtime_info, envelope.issue_id, envelope, ownership_ref, self(), ack_ref}
         )
 
         receive do
@@ -284,11 +291,12 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp send_owned_session_runtime_info(recipient, %Issue{id: issue_id}, session, false)
-       when is_binary(issue_id) and is_pid(recipient) do
+  defp send_owned_session_runtime_info(recipient, %CurrentRun{} = current_run, session, false)
+       when is_pid(recipient) do
     case AgentRuntime.owned_session_ref(session) do
       ownership_ref when is_map(ownership_ref) ->
-        send(recipient, {:owned_session_runtime_info, issue_id, ownership_ref})
+        envelope = CurrentRun.envelope(current_run)
+        send(recipient, {:owned_session_runtime_info, envelope.issue_id, envelope, ownership_ref})
         :ok
 
       _ ->
@@ -318,7 +326,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp finish_blocked_startup(result, ownership_ref, context) do
     case send_owned_session_runtime_info_ref(
            context.recipient,
-           context.issue,
+           context.current_run,
            ownership_ref,
            context.registration_ack_required?
          ) do
@@ -351,10 +359,20 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp send_owned_session_runtime_info_ref(recipient, %Issue{id: issue_id}, ownership_ref, true)
-       when is_binary(issue_id) and is_pid(recipient) and is_map(ownership_ref) do
+  defp send_owned_session_runtime_info_ref(
+         recipient,
+         %CurrentRun{} = current_run,
+         ownership_ref,
+         true
+       )
+       when is_pid(recipient) and is_map(ownership_ref) do
     ack_ref = make_ref()
-    send(recipient, {:owned_session_runtime_info, issue_id, ownership_ref, self(), ack_ref})
+    envelope = CurrentRun.envelope(current_run)
+
+    send(
+      recipient,
+      {:owned_session_runtime_info, envelope.issue_id, envelope, ownership_ref, self(), ack_ref}
+    )
 
     receive do
       {:owned_session_runtime_info_ack, ^ack_ref} -> :ok
@@ -364,9 +382,15 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp send_owned_session_runtime_info_ref(recipient, %Issue{id: issue_id}, ownership_ref, false)
-       when is_binary(issue_id) and is_pid(recipient) and is_map(ownership_ref) do
-    send(recipient, {:owned_session_runtime_info, issue_id, ownership_ref})
+  defp send_owned_session_runtime_info_ref(
+         recipient,
+         %CurrentRun{} = current_run,
+         ownership_ref,
+         false
+       )
+       when is_pid(recipient) and is_map(ownership_ref) do
+    envelope = CurrentRun.envelope(current_run)
+    send(recipient, {:owned_session_runtime_info, envelope.issue_id, envelope, ownership_ref})
     :ok
   end
 
@@ -396,7 +420,10 @@ defmodule SymphonyElixir.AgentRunner do
     turn_opts =
       opts
       |> Keyword.take(@delegation_turn_option_keys)
-      |> Keyword.put(:on_message, codex_message_handler(codex_update_recipient, issue))
+      |> Keyword.put(
+        :on_message,
+        codex_message_handler(codex_update_recipient, Keyword.fetch!(opts, :current_run))
+      )
 
     turn_result =
       AgentRuntime.run_turn(

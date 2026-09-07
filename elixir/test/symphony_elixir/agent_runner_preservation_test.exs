@@ -218,7 +218,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
 
     assert_received :checkpoint_read_failed
     refute_received {:stop_session, _name}
-    assert_received {:owned_session_runtime_info, "issue-preservation-blocked", %{kind: "preservation"}}
+    assert_received {:owned_session_runtime_info, "issue-preservation-blocked", _envelope, %{kind: "preservation"}}
     assert log =~ "destructive shutdown is blocked"
   end
 
@@ -247,7 +247,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
   test "a blocked startup registers its owned session before failure settlement" do
     _log = run_preservation_case("startup-blocked", true, StartupBlockedPreservationTransport)
 
-    assert_received {:owned_session_runtime_info, "issue-preservation-startup-blocked",
+    assert_received {:owned_session_runtime_info, "issue-preservation-startup-blocked", _envelope,
                      %{
                        kind: "preservation",
                        session_name: "octo-emb-1244-run-preserve-startup-blocked",
