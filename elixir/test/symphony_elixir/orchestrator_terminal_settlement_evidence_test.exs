@@ -259,21 +259,8 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
 
     assert_eventually(fn -> File.exists?(Path.join(workspace_path, ".hook-ready")) end)
 
-    # Arm the short stall only after the real before-run hook has started and
-    # published its readiness marker. Snapshot is the normal runtime-config
-    # refresh seam; no production-only test hook is introduced.
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "memory",
-      workspace_root: workspace_root,
-      poll_interval_ms: 200,
-      codex_stall_timeout_ms: 100,
-      hook_before_run: "touch .hook-ready; sleep 30"
-    )
-
-    assert %{running: [%{issue_id: "issue-emb-1259-stall"} | _]} =
-             Orchestrator.snapshot(orchestrator_name, 1_000)
-
     envelope = current_run_envelope(orchestrator_name, issue.id)
+    ack_ref = make_ref()
 
     send(
       pid,
@@ -283,7 +270,20 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
          session_name: "octo-emb-1259-stall",
          cleanup_module: CleanupProbe,
          notify_pid: self()
-       }}
+       }, self(), ack_ref}
+    )
+
+    assert_receive {:owned_session_runtime_info_ack, ^ack_ref}, 1_000
+
+    # Finish the real run-envelope and cleanup-probe setup while the generous
+    # arrangement timeout still applies. Only then arm the unchanged short
+    # stall threshold; the next normal poll refreshes this runtime config.
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 200,
+      codex_stall_timeout_ms: 100,
+      hook_before_run: "touch .hook-ready; sleep 30"
     )
 
     # The stall reconciler terminates the run once no codex activity lands
