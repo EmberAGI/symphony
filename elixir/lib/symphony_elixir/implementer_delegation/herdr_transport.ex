@@ -341,16 +341,37 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
     do: prompt_error(reason, agent.name)
 
   defp submit_prompt(context, session_name, env, agent_name, prompt, deadline) do
+    with {:ok, output} <-
+           command_before_deadline(context, ["--session", session_name, "agent", "get", agent_name], env, deadline),
+         {:ok, observed} <- decode_agent_response(output),
+         :ok <- validate_observed_agent_name(observed, agent_name),
+         {:ok, phase} <- prompt_outcome(observed, agent_name) do
+      args = ["--session", session_name, "agent", "prompt", agent_name, prompt]
+      submit_prompt_for_phase(phase, context, args, env, deadline)
+    end
+  end
+
+  defp submit_prompt_for_phase(:working, context, args, env, deadline) do
+    # An accepted prompt to an already-working target need not create another
+    # lifecycle edge. Its native acknowledgement proves the one submission.
+    with {:ok, output} <- command_before_deadline(context, args, env, deadline),
+         {:ok, %{"id" => "cli:agent:prompt", "result" => %{"type" => "agent_prompted"}}} <- Jason.decode(output) do
+      {:ok, output}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_herdr_agent_prompt_receipt}
+    end
+  end
+
+  defp submit_prompt_for_phase(:completed, context, args, env, deadline) do
     # The wait must exceed the 5000 ms prompt-effect window so an unchanged
-    # state_change_seq is the typed agent_prompt_stalled result, never an
-    # ordinary timeout. The until set is the upstream default settle set plus
-    # working, so a started turn is observed without waiting for completion.
-    args =
-      ["--session", session_name, "agent", "prompt", agent_name, prompt, "--wait"] ++
+    # state_change_seq remains the typed agent_prompt_stalled result.
+    wait_args =
+      ["--wait"] ++
         until_args(["working", "idle", "done", "blocked"]) ++
         ["--timeout", to_string(@prompt_effect_window_ms + 1)]
 
-    command_before_deadline(context, args, env, deadline)
+    command_before_deadline(context, args ++ wait_args, env, deadline)
   end
 
   defp observe_prompt_transition(

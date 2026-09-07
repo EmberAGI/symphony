@@ -960,7 +960,16 @@ string outside the five-state enum is a typed protocol/version error, never
 coerced to `unknown`; command failures remain a distinct error class.
 
 Symphony submits initial turns, assignments, worker results, and consultation responses
-through the same verified `agent prompt` operation. Prompt submissions settle
+through the same verified `agent prompt` operation. Before main transport
+submission, including continuation after a worker result, read the fresh native
+target name and status under the same derived deadline. An already-working
+target receives exactly one prompt without `--wait`: require its native
+`AgentPrompted` acknowledgement, then retain the existing receipt identity
+validation and post-submit confirmation when the receipt is settled. A new
+lifecycle edge is not required merely to acknowledge delivery to a working
+agent. Blocked and unknown targets fail typed without submission. Idle and
+done targets retain the waited path below, matching the generated worker-message
+helper's existing busy-target exception. Waited prompt submissions settle
 on the upstream default settle set (`idle`, `done`, `blocked`) plus `working`
 so a started turn and a turn that finishes before observation are both
 represented without revision heuristics; the settle set is never re-narrowed
