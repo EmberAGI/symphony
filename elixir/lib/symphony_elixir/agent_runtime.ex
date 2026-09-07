@@ -196,14 +196,15 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   defp expected_host_resource_context(role, declaration, opts) do
-    with {:ok, source_path} <- File.cwd() do
-      opts
-      |> Keyword.take(@host_resource_context_keys)
-      |> maybe_put_orchestration_root()
-      |> Keyword.put(:role, role)
-      |> Keyword.put(:source_path, source_path)
-      |> then(&HostResourceContract.expected_context(declaration, &1))
-    else
+    case File.cwd() do
+      {:ok, source_path} ->
+        opts
+        |> Keyword.take(@host_resource_context_keys)
+        |> maybe_put_orchestration_root()
+        |> Keyword.put(:role, role)
+        |> Keyword.put(:source_path, source_path)
+        |> then(&HostResourceContract.expected_context(declaration, &1))
+
       {:error, _reason} ->
         {:error, {:invalid_host_resource_contract, %{resource: :source_ref, reason: :unavailable_context}}}
     end
