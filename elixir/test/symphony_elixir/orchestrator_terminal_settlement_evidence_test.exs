@@ -224,8 +224,8 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
       tracker_kind: "memory",
       workspace_root: workspace_root,
       poll_interval_ms: 200,
-      codex_stall_timeout_ms: 100,
-      hook_before_run: "sleep 30"
+      codex_stall_timeout_ms: 60_000,
+      hook_before_run: "touch .hook-ready; sleep 30"
     )
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
@@ -244,6 +244,34 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
         Orchestrator.snapshot(orchestrator_name, 1_000)
       )
     end)
+
+    workspace_path =
+      assert_eventually_value(fn ->
+        case Orchestrator.snapshot(orchestrator_name, 1_000) do
+          %{running: [%{issue_id: issue_id, workspace_path: path} | _]} = _snapshot
+          when issue_id == issue.id and is_binary(path) ->
+            path
+
+          _ ->
+            nil
+        end
+      end)
+
+    assert_eventually(fn -> File.exists?(Path.join(workspace_path, ".hook-ready")) end)
+
+    # Arm the short stall only after the real before-run hook has started and
+    # published its readiness marker. Snapshot is the normal runtime-config
+    # refresh seam; no production-only test hook is introduced.
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 200,
+      codex_stall_timeout_ms: 100,
+      hook_before_run: "touch .hook-ready; sleep 30"
+    )
+
+    assert %{running: [%{issue_id: "issue-emb-1259-stall"} | _]} =
+             Orchestrator.snapshot(orchestrator_name, 1_000)
 
     envelope = current_run_envelope(orchestrator_name, issue.id)
 
