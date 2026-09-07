@@ -447,12 +447,7 @@ defmodule SymphonyElixir.AgentRunner do
           {:continue, refreshed_issue} when turn_number < max_turns ->
             Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
-            do_run_codex_turns(
-              next_session,
-              refreshed_issue,
-              turn_number + 1,
-              turn_context
-            )
+            continue_codex_turns(next_session, refreshed_issue, turn_number + 1, turn_context)
 
           {:continue, refreshed_issue} ->
             Logger.error("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; recording a typed failed run")
@@ -474,6 +469,21 @@ defmodule SymphonyElixir.AgentRunner do
 
       result ->
         result
+    end
+  end
+
+  defp continue_codex_turns(
+         session,
+         issue,
+         turn_number,
+         %{workspace: workspace, worker_host: worker_host, ownership_env: ownership_env} = turn_context
+       ) do
+    case Workspace.run_before_run_hook(workspace, issue, worker_host, ownership_env) do
+      :ok ->
+        do_run_codex_turns(session, issue, turn_number, turn_context)
+
+      result ->
+        finish_with_after_run_hook(result, workspace, issue, worker_host, ownership_env)
     end
   end
 

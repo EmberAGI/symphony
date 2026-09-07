@@ -396,8 +396,9 @@ Fields:
   - Runs only when a workspace directory is newly created.
   - Failure aborts workspace creation.
 - `before_run` (multiline shell script string, OPTIONAL)
-  - Runs before each agent attempt after workspace preparation and before launching the coding
-    agent.
+  - Runs before the first provider turn after workspace preparation and before session creation.
+    Runs again before each continuation provider turn, after trusted issue refresh and the
+    remaining-turn-budget check, with the refreshed issue and the existing session.
   - Failure aborts the current attempt.
 - `after_run` (multiline shell script string, OPTIONAL)
   - Runs after each provider turn, before tracker refresh can authorize a continuation turn, and
@@ -2083,6 +2084,11 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
     if turn_number >= max_turns:
       break
 
+    if run_hook("before_run", workspace.path, issue) failed:
+      run_hook("after_run", workspace.path, issue) # preserve the primary typed failure
+      app_server.stop_session(session)
+      fail_worker("before_run hook error")
+
     turn_number = turn_number + 1
 
   app_server.stop_session(session)
@@ -2195,7 +2201,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   implementation policy)
 - OPTIONAL workspace population/synchronization errors are surfaced
 - `after_create` hook runs only on new workspace creation
-- `before_run` hook runs before each attempt and failure/timeouts abort the current attempt
+- `before_run` hook runs before session creation and before each continuation provider turn, after
+  issue refresh and the remaining-turn-budget check; failure/timeouts abort the current attempt
 - `after_run` hook runs after each provider turn before tracker refresh or continuation; failure or
   timeout is a typed failed run and cannot authorize a continuation prompt
 - `before_remove` hook runs on cleanup and failures/timeouts are ignored
