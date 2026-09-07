@@ -151,6 +151,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
     on_exit(fn ->
       stop_orchestrator!(orchestrator)
+      finish_controlled_provider_sessions!(control_root, codex_binary)
       File.rm_rf(test_root)
     end)
 
@@ -325,6 +326,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
     on_exit(fn ->
       stop_orchestrator!(orchestrator)
+      finish_controlled_provider_sessions!(control_root, codex_binary)
       File.rm_rf(test_root)
     end)
 
@@ -398,6 +400,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
       restore_env("SYMPHONY_ROLE", previous_role)
       restore_app_env(:implementer_handoff_settlement_grace_ms, previous_grace)
       stop_orchestrator!(orchestrator)
+      finish_controlled_provider_sessions!(control_root, codex_binary)
       File.rm_rf(test_root)
     end)
 
@@ -483,6 +486,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
     on_exit(fn ->
       stop_orchestrator!(orchestrator)
+      finish_controlled_provider_sessions!(control_root, codex_binary)
       File.rm_rf(test_root)
     end)
 
@@ -526,6 +530,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
     on_exit(fn ->
       stop_orchestrator!(orchestrator)
+      finish_controlled_provider_sessions!(control_root, codex_binary)
       File.rm_rf(test_root)
     end)
 
@@ -619,6 +624,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
     on_exit(fn ->
       stop_orchestrator!(orchestrator)
+      finish_controlled_provider_sessions!(control_root, codex_binary)
       File.rm_rf(test_root)
     end)
 
@@ -1032,6 +1038,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
     on_exit(fn ->
       stop_orchestrator!(orchestrator)
+      finish_controlled_provider_sessions!(control_root, codex_binary)
       File.rm_rf(test_root)
     end)
 
@@ -1126,6 +1133,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
     on_exit(fn ->
       stop_orchestrator!(orchestrator)
+      finish_controlled_provider_sessions!(control_root, codex_binary)
       File.rm_rf(test_root)
     end)
 
@@ -1301,9 +1309,20 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
           i=1
           while [ "$i" -le 10 ]; do
             printf '%s\n' '{"method":"runtime/usage","usage":{"input_tokens":12,"output_tokens":4,"total_tokens":16},"rate_limits":{"limit_id":"burst-limit","primary":{"remaining":9}}}'
+            if [ -f "$emit_file.complete" ]; then
+              printf '%s\n' '{"method":"item/agentMessage/delta","params":{"delta":"terminal handoff"}}'
+              printf '%s\n' '{"method":"turn/completed","params":{"turn":{"status":"completed","last_agent_message":"terminal handoff"}}}'
+              rm -f "$emit_file.complete"
+              exit 0
+            fi
             sleep 0.05
             i=$((i + 1))
           done
+          while [ ! -f "$emit_file.complete" ]; do sleep 0.01; done
+          printf '%s\n' '{"method":"item/agentMessage/delta","params":{"delta":"terminal handoff"}}'
+          printf '%s\n' '{"method":"turn/completed","params":{"turn":{"status":"completed","last_agent_message":"terminal handoff"}}}'
+          rm -f "$emit_file.complete"
+          exit 0
           ;;
       esac
     done
@@ -1314,6 +1333,36 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
   defp running_entry(snapshot, issue_id) do
     Enum.find(snapshot.running, &(&1.issue_id == issue_id))
+  end
+
+  defp finish_controlled_provider_sessions!(control_root, codex_binary) do
+    emit_files =
+      (Path.wildcard(Path.join(control_root, "*.emit")) ++
+         Path.wildcard(Path.join(control_root, "*.trace")))
+      |> Enum.map(&(Path.rootname(&1) <> ".emit"))
+      |> Enum.uniq()
+
+    emit_files
+    |> Enum.each(fn emit_file ->
+      File.touch!(emit_file <> ".complete")
+      File.touch!(emit_file <> ".again")
+    end)
+
+    eventually_value(fn ->
+      if controlled_provider_alive?(codex_binary), do: nil, else: true
+    end)
+  end
+
+  defp controlled_provider_alive?(codex_binary) do
+    case System.cmd("ps", ["-eo", "args="], stderr_to_stdout: true) do
+      {output, 0} ->
+        output
+        |> String.split("\n")
+        |> Enum.any?(&String.contains?(&1, codex_binary))
+
+      {output, status} ->
+        raise "ps failed while awaiting controlled provider exit (status=#{status}): #{output}"
+    end
   end
 
   defp await_two_provider_sessions(orchestrator_name, control_root),
