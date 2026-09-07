@@ -5,6 +5,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   require Logger
 
+  alias SymphonyElixir.Codex.SkillPermissions
+
   alias SymphonyElixir.{
     Codex.DynamicTool,
     Config,
@@ -279,7 +281,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     do: skill_execution_projection(contracts, %HostResourceContract{})
 
   defp skill_execution_projection(contracts, %HostResourceContract{} = host_resource_contract) do
-    skill_read_paths = SkillExecutionContract.read_paths(contracts)
+    skill_read_paths = SkillPermissions.read_paths(contracts, System.get_env("CODEX_HOME"))
     read_paths = Enum.uniq(skill_read_paths ++ host_resource_contract.read_paths)
     exact_reads = Enum.map_join(read_paths, ",", &"#{inspect(&1)}=\"read\"")
 

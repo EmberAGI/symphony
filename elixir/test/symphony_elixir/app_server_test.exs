@@ -307,10 +307,14 @@ defmodule SymphonyElixir.AppServerTest do
     executable = Path.join(test_root, "uv")
     codex_binary = Path.join(test_root, "fake-codex")
     trace_file = Path.join(test_root, "codex.trace")
+    codex_home = Path.join(test_root, ".runtime/codex/reviewer")
+    previous_codex_home = System.get_env("CODEX_HOME")
+    System.put_env("CODEX_HOME", codex_home)
     previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
     previous_provider = System.get_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
 
     on_exit(fn ->
+      restore_env("CODEX_HOME", previous_codex_home)
       restore_env("SYMP_TEST_CODEx_TRACE", previous_trace)
       restore_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER", previous_provider)
       File.rm_rf(test_root)
@@ -379,6 +383,8 @@ defmodule SymphonyElixir.AppServerTest do
     assert length(Regex.scan(~r/^CONTRACT:/m, trace)) == 4
     assert trace =~ "default_permissions=symphony_skill_runtime"
     assert trace =~ "#{inspect(package_root)}=\"read\""
+    assert trace =~ "#{inspect(Path.join(codex_home, "skills"))}=\"read\""
+    refute trace =~ "#{inspect(codex_home)}=\"read\""
     assert trace =~ runtime_input
     assert trace =~ executable
     refute trace =~ "#{inspect(test_root)}=\"read\""
