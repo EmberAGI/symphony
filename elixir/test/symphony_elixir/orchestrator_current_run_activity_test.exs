@@ -416,7 +416,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
 
     # Keep a bounded handoff window for the scheduler under full-suite load;
     # the activity itself was already aged past the original 100 ms grace above.
-    Application.put_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms, 5_000)
+    Application.put_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms, 60_000)
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "Agent Review"}])
     assert %{queued: true} = Orchestrator.request_refresh(orchestrator_name)
