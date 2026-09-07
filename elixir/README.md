@@ -84,6 +84,8 @@ Pass a custom workflow file path to `./bin/symphony` when starting the service:
 
 If no path is passed, Symphony defaults to `./WORKFLOW.md`.
 
+Already-working Herdr continuation targets use one acknowledged native prompt without waiting for a new lifecycle edge; see the [native prompt contract](../docs/specs/domains/agent-runtime.md).
+
 ### Atomic cutover bootstrap
 
 When Octo performs an atomic cutover, its wrapper supplies

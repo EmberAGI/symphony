@@ -2218,7 +2218,7 @@ defmodule SymphonyElixir.HerdrTransportTest do
     commands = File.read!(context.log)
     assert length(:binary.matches(commands, "agent prompt implementer_orchestrator")) == 1
     assert length(:binary.matches(commands, "agent wait implementer_orchestrator")) == 1
-    assert length(:binary.matches(commands, "agent get implementer_orchestrator")) == 1
+    assert length(:binary.matches(commands, "agent get implementer_orchestrator")) == 2
     refute commands =~ "agent send-keys implementer_orchestrator"
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
@@ -2721,5 +2721,85 @@ defmodule SymphonyElixir.HerdrTransportTest do
     else
       not process_alive?(pid)
     end
+  end
+
+  test "begin_turn acknowledges an already-working target without waiting for another lifecycle edge", context do
+    working_get =
+      HerdrReplayFixture.write_replay_mutation!(
+        context.replay_dir,
+        "agent-get-idle",
+        "agent-get-working-continuation",
+        &String.replace(&1, ~s("agent_status":"idle"), ~s("agent_status":"working"))
+      )
+
+    adapter_context = %{
+      herdr_bin: context.bin,
+      extra_env: [
+        {"HERDR_FAKE_LOG", context.log},
+        {"HERDR_REPLAY_GET", working_get},
+        {"HERDR_FAKE_WORKING_PROMPT_WAIT_TIMEOUT", "1"}
+      ],
+      start_timeout_ms: 2_000,
+      poll_interval_ms: 5
+    }
+
+    assert {:ok, session} =
+             HerdrSessionFixture.start_transport_session(
+               %{name: "octo-tur-898-working", isolated: true, workspace: "/tmp/selected-workspace"},
+               adapter_context
+             )
+
+    ownership = HerdrTransport.owned_session_ref(session, adapter_context)
+    on_exit(fn -> HerdrTransport.cleanup_owned_session(ownership) end)
+
+    assert {:ok, agent} =
+             HerdrTransport.start_agent(
+               session,
+               %{name: "implementer_orchestrator", provider: "codex", cwd: "/tmp/selected-workspace", argv: ["codex", "--model", "gpt-5.6-sol"]},
+               adapter_context
+             )
+
+    File.write!(context.log, "")
+
+    assert {:ok, %{phase: :working, agent: acknowledged}} =
+             HerdrTransport.begin_turn(session, agent, "Integrate the correlated worker result.", 6_000, adapter_context)
+
+    assert acknowledged.name == agent.name
+    assert acknowledged.provider == agent.provider
+    commands = context.log |> File.read!() |> String.split("\n", trim: true)
+    assert Enum.count(commands, &String.contains?(&1, "agent get implementer_orchestrator")) == 1
+    assert [prompt] = Enum.filter(commands, &String.contains?(&1, "agent prompt implementer_orchestrator"))
+    refute prompt =~ "--wait"
+
+    no_receipt_context =
+      Map.update!(adapter_context, :extra_env, &(&1 ++ [{"HERDR_REPLAY_PROMPT", "agent-get-idle"}]))
+
+    assert {:ok, no_receipt_session} =
+             HerdrSessionFixture.start_transport_session(
+               %{name: "octo-tur-898-no-ack", isolated: true, workspace: "/tmp/selected-workspace"},
+               no_receipt_context
+             )
+
+    no_receipt_ownership = HerdrTransport.owned_session_ref(no_receipt_session, no_receipt_context)
+    on_exit(fn -> HerdrTransport.cleanup_owned_session(no_receipt_ownership) end)
+
+    assert {:ok, no_receipt_agent} =
+             HerdrTransport.start_agent(
+               no_receipt_session,
+               %{name: "implementer_orchestrator", provider: "codex", cwd: "/tmp/selected-workspace", argv: ["codex", "--model", "gpt-5.6-sol"]},
+               no_receipt_context
+             )
+
+    assert {:error, {:herdr_agent_prompt_failed, :invalid_herdr_agent_prompt_receipt}} =
+             HerdrTransport.begin_turn(
+               no_receipt_session,
+               no_receipt_agent,
+               "A get response cannot acknowledge delivery.",
+               6_000,
+               no_receipt_context
+             )
+
+    assert :ok = HerdrTransport.stop_session(no_receipt_session, no_receipt_context)
+    assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
 end
