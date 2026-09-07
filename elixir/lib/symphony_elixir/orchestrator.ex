@@ -439,7 +439,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp integrate_current_run_update(state, issue_id, running_entry, envelope, update) do
     if current_run_matches?(running_entry, envelope) do
-      activity_at_ms = accepted_activity_at_ms(running_entry.current_run, envelope)
+      activity_at_ms = accepted_activity_at_ms(running_entry.current_run, envelope, update)
 
       {updated_running_entry, token_delta} =
         integrate_codex_update(running_entry, update, activity_at_ms)
@@ -460,8 +460,8 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp accepted_activity_at_ms(current_run, envelope) do
-    case CurrentRun.accept_ingress(current_run, envelope) do
+  defp accepted_activity_at_ms(current_run, envelope, update) do
+    case CurrentRun.accepted_activity(current_run, envelope, update) do
       {:ok, ingress_at_ms} -> ingress_at_ms
       :invalid -> nil
     end

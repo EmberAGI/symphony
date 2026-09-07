@@ -232,6 +232,61 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
            end)
   end
 
+  test "token and rate-limit-only ingress is accounted without refreshing current-run activity" do
+    test_root = unique_test_root("token-only-activity")
+    workspace_root = Path.join(test_root, "workspaces")
+    control_root = Path.join(test_root, "provider-control")
+    codex_binary = Path.join(test_root, "controlled-codex")
+    File.mkdir_p!(control_root)
+    write_controlled_codex!(codex_binary, control_root)
+
+    issue = issue("issue-tur-878-token-only", "TUR-878-TOKEN-ONLY")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 30_000,
+      max_concurrent_agents: 1,
+      max_turns: 1,
+      codex_stall_timeout_ms: 0,
+      codex_command: "#{codex_binary} app-server"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :TokenOnlyActivityOrchestrator)
+    {:ok, orchestrator} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      stop_orchestrator!(orchestrator)
+      File.rm_rf(test_root)
+    end)
+
+    initial_snapshot = await_provider_sessions(orchestrator_name, control_root, 1)
+    initial_entry = running_entry(initial_snapshot, issue.id)
+    emit_file = Path.join(control_root, Path.basename(initial_entry.workspace_path) <> ".emit")
+    initial_activity_at_ms = initial_entry.last_activity_at_ms
+
+    File.touch!(emit_file <> ".single")
+
+    accounted_snapshot =
+      eventually_value(fn ->
+        case Orchestrator.snapshot(orchestrator_name, 500) do
+          %{rate_limits: %{"limit_id" => "single-limit"}} = snapshot ->
+            entry = running_entry(snapshot, issue.id)
+            if entry.codex_total_tokens == 2, do: snapshot
+
+          _ ->
+            nil
+        end
+      end)
+
+    accounted_entry = running_entry(accounted_snapshot, issue.id)
+    assert accounted_entry.codex_input_tokens == 1
+    assert accounted_entry.codex_output_tokens == 1
+    assert accounted_entry.codex_total_tokens == 2
+    assert accounted_entry.last_activity_at_ms == initial_activity_at_ms
+  end
+
   test "disabled stall detection leaves a silent real run owned" do
     test_root = unique_test_root("disabled-stall-detection")
     workspace_root = Path.join(test_root, "workspaces")
@@ -771,7 +826,7 @@ defmodule SymphonyElixir.OrchestratorCurrentRunActivityTest do
             rm -f "$emit_file.complete"
             exit 0
           elif [ -f "$emit_file.single" ]; then
-            printf '%s\n' '{"method":"runtime/usage","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}'
+            printf '%s\n' '{"method":"runtime/usage","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"rate_limits":{"limit_id":"single-limit","primary":{"remaining":8}}}'
           else
             i=1
             while [ "$i" -le 64 ]; do

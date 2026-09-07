@@ -15,8 +15,9 @@ defmodule SymphonyElixir.Runtime.CurrentRun do
   alias SymphonyElixir.Linear.Issue
 
   @active_slot 1
-  @watermark_slot 2
-  @notification_pending_slot 3
+  @activity_watermark_slot 2
+  @ingress_watermark_slot 3
+  @notification_pending_slot 4
 
   @enforce_keys [:identity, :signal]
   defstruct [:identity, :signal]
@@ -45,9 +46,11 @@ defmodule SymphonyElixir.Runtime.CurrentRun do
       raise ArgumentError, "current run requires exact issue/workspace/role/holder/run identity"
     end
 
-    signal = :atomics.new(3, signed: true)
+    signal = :atomics.new(4, signed: true)
+    started_at_ms = System.monotonic_time(:millisecond)
     :atomics.put(signal, @active_slot, 1)
-    :atomics.put(signal, @watermark_slot, System.monotonic_time(:millisecond))
+    :atomics.put(signal, @activity_watermark_slot, started_at_ms)
+    :atomics.put(signal, @ingress_watermark_slot, started_at_ms)
     %__MODULE__{identity: identity, signal: signal}
   end
 
@@ -58,22 +61,13 @@ defmodule SymphonyElixir.Runtime.CurrentRun do
   def envelope(%__MODULE__{} = current_run), do: identity(current_run)
 
   @spec observe(t()) :: {:ok, integer()} | :retired
-  def observe(%__MODULE__{signal: signal}) do
-    if active?(signal) do
-      observed_at_ms = System.monotonic_time(:millisecond)
-      advance(signal, observed_at_ms)
-
-      if active?(signal), do: {:ok, observed_at_ms}, else: :retired
-    else
-      :retired
-    end
-  end
+  def observe(%__MODULE__{} = current_run), do: record_ingress(current_run, true)
 
   @spec accept_ingress(t(), map()) :: {:ok, integer()} | :invalid
   def accept_ingress(%__MODULE__{} = current_run, envelope) when is_map(envelope) do
     ingress_at_ms = Map.get(envelope, :ingress_at_ms)
     now_ms = System.monotonic_time(:millisecond)
-    observed_watermark = :atomics.get(current_run.signal, @watermark_slot)
+    observed_watermark = :atomics.get(current_run.signal, @ingress_watermark_slot)
 
     if matches?(current_run, envelope) and is_integer(ingress_at_ms) and ingress_at_ms <= now_ms and
          ingress_at_ms <= observed_watermark and active?(current_run.signal) do
@@ -85,9 +79,28 @@ defmodule SymphonyElixir.Runtime.CurrentRun do
 
   def accept_ingress(_current_run, _envelope), do: :invalid
 
+  @doc """
+  Accepts an ingress envelope and returns its timestamp only when the update
+  carries provider activity. Accounting and rate-limit-only notifications are
+  valid ingress for their independent consumers but do not refresh freshness.
+  """
+  @spec accepted_activity(t(), map(), map()) :: {:ok, integer()} | :invalid
+  def accepted_activity(%__MODULE__{} = current_run, envelope, update)
+      when is_map(envelope) and is_map(update) do
+    case accept_ingress(current_run, envelope) do
+      {:ok, ingress_at_ms} ->
+        if token_or_rate_limit_only?(update), do: :invalid, else: {:ok, ingress_at_ms}
+
+      _ ->
+        :invalid
+    end
+  end
+
+  def accepted_activity(_current_run, _envelope, _update), do: :invalid
+
   @spec activity_ms(term()) :: integer() | nil
   def activity_ms(%__MODULE__{signal: signal}) do
-    if active?(signal), do: :atomics.get(signal, @watermark_slot), else: nil
+    if active?(signal), do: :atomics.get(signal, @activity_watermark_slot), else: nil
   end
 
   def activity_ms(_current_run), do: nil
@@ -102,7 +115,7 @@ defmodule SymphonyElixir.Runtime.CurrentRun do
   @spec forward_update(pid(), t(), map()) :: :ok
   def forward_update(recipient, %__MODULE__{} = current_run, update)
       when is_pid(recipient) and is_map(update) do
-    case observe(current_run) do
+    case record_ingress(current_run, not token_or_rate_limit_only?(update)) do
       {:ok, ingress_at_ms} ->
         if critical_update?(update) or claim_plain_notification(current_run.signal) do
           envelope = Map.put(current_run.identity, :ingress_at_ms, ingress_at_ms)
@@ -135,18 +148,30 @@ defmodule SymphonyElixir.Runtime.CurrentRun do
 
   defp active?(signal), do: :atomics.get(signal, @active_slot) == 1
 
-  defp advance(signal, observed_at_ms) do
-    previous = :atomics.get(signal, @watermark_slot)
+  defp record_ingress(%__MODULE__{signal: signal}, advance_activity?) do
+    if active?(signal) do
+      ingress_at_ms = System.monotonic_time(:millisecond)
+      advance(signal, @ingress_watermark_slot, ingress_at_ms)
+      if advance_activity?, do: advance(signal, @activity_watermark_slot, ingress_at_ms)
+
+      if active?(signal), do: {:ok, ingress_at_ms}, else: :retired
+    else
+      :retired
+    end
+  end
+
+  defp advance(signal, slot, observed_at_ms) do
+    previous = :atomics.get(signal, slot)
 
     cond do
       observed_at_ms <= previous ->
         :ok
 
-      :atomics.compare_exchange(signal, @watermark_slot, previous, observed_at_ms) == :ok ->
+      :atomics.compare_exchange(signal, slot, previous, observed_at_ms) == :ok ->
         :ok
 
       true ->
-        advance(signal, observed_at_ms)
+        advance(signal, slot, observed_at_ms)
     end
   end
 
@@ -160,6 +185,18 @@ defmodule SymphonyElixir.Runtime.CurrentRun do
         [:usage, :rate_limits, :session_id, :codex_app_server_pid],
         &Map.has_key?(update, &1)
       ) or contains_accounting_data?(Map.get(update, :payload))
+  end
+
+  defp token_or_rate_limit_only?(update) do
+    Map.get(update, :event) == :notification and
+      (has_accounting_key?(update) or
+         contains_accounting_data?(Map.get(update, :payload)) or
+         contains_accounting_data?(Map.get(update, "payload"))) and
+      not Enum.any?([:session_id, "session_id"], &Map.has_key?(update, &1))
+  end
+
+  defp has_accounting_key?(update) do
+    Enum.any?([:usage, :rate_limits, "usage", "rate_limits"], &Map.has_key?(update, &1))
   end
 
   defp contains_accounting_data?(payload) when is_map(payload) do
