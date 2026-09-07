@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.Runtime.ProcessOwnership
+  alias SymphonyElixir.Runtime.{CurrentRun, ProcessOwnership}
 
   defmodule RecordingOwnedSessionCleanup do
     def cleanup_owned_session(%{owner: owner, agent_pid: agent_pid, session_name: session_name}) do
@@ -482,6 +482,15 @@ defmodule SymphonyElixir.CoreTest do
 
   test "records a run-owned session cleanup capability before cancellation" do
     issue_id = "issue-owned-session"
+    issue = %Issue{id: issue_id, identifier: "MT-OWNED"}
+
+    current_run =
+      CurrentRun.new(issue, %{
+        workspace_path: "/tmp/MT-OWNED",
+        role: "implementer",
+        holder: "test-holder",
+        run_id: "run-owned-session"
+      })
 
     ownership_ref = %{
       cleanup_module: RecordingOwnedSessionCleanup,
@@ -492,7 +501,8 @@ defmodule SymphonyElixir.CoreTest do
     state = %Orchestrator.State{
       running: %{
         issue_id => %{
-          issue: %Issue{id: issue_id, identifier: "MT-OWNED"},
+          issue: issue,
+          current_run: current_run,
           run_id: "run-owned-session"
         }
       },
@@ -502,7 +512,7 @@ defmodule SymphonyElixir.CoreTest do
 
     assert {:noreply, updated_state} =
              Orchestrator.handle_info(
-               {:owned_session_runtime_info, issue_id, ownership_ref},
+               {:owned_session_runtime_info, issue_id, CurrentRun.envelope(current_run), ownership_ref},
                state
              )
 
@@ -1595,7 +1605,7 @@ defmodule SymphonyElixir.CoreTest do
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
                )
 
-      assert_receive {:codex_worker_update, "issue-live-updates",
+      assert_receive {:codex_worker_update, "issue-live-updates", envelope,
                       %{
                         event: :session_started,
                         timestamp: %DateTime{},
@@ -1603,6 +1613,7 @@ defmodule SymphonyElixir.CoreTest do
                       }},
                      500
 
+      assert envelope.run_id =~ "test-run-"
       assert session_id == "thread-live-turn-live"
     after
       File.rm_rf(test_root)

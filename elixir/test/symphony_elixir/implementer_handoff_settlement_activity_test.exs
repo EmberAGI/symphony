@@ -27,6 +27,7 @@ defmodule SymphonyElixir.ImplementerHandoffSettlementActivityTest do
   behaviorally rather than only structurally.
   """
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.Runtime.CurrentRun
 
   # The tests never sleep: every anchor is placed explicitly on the same
   # monotonic clock the Orchestrator reads, and the inactivity used is an order
@@ -44,7 +45,9 @@ defmodule SymphonyElixir.ImplementerHandoffSettlementActivityTest do
   end
 
   setup do
-    previous_grace = Application.get_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms)
+    previous_grace =
+      Application.get_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms)
+
     Application.put_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms, @grace_ms)
 
     on_exit(fn ->
@@ -56,13 +59,13 @@ defmodule SymphonyElixir.ImplementerHandoffSettlementActivityTest do
 
   describe "runtime activity keeps a settling turn alive" do
     test "a turn_heartbeat past the grace resets the anchor and retains the turn" do
-      %{state: state, agent_pid: agent_pid, issue_id: issue_id} =
+      %{state: state, agent_pid: agent_pid, issue_id: issue_id, current_run: current_run} =
         settling_state("MT-1307A", @long_inactivity_ms)
 
       stale_anchor = state.running[issue_id].handoff_settlement_last_activity_at_ms
 
       assert {:noreply, active_state} =
-               Orchestrator.handle_info(turn_heartbeat_update(issue_id), state)
+               Orchestrator.handle_info(turn_heartbeat_update(issue_id, current_run), state)
 
       refreshed_anchor = active_state.running[issue_id].handoff_settlement_last_activity_at_ms
 
@@ -73,7 +76,10 @@ defmodule SymphonyElixir.ImplementerHandoffSettlementActivityTest do
                "no-activity anchor, not merely record last_codex_timestamp"
 
       reconciled =
-        Orchestrator.reconcile_issue_states_for_test([handed_off_issue(issue_id, "MT-1307A")], active_state)
+        Orchestrator.reconcile_issue_states_for_test(
+          [handed_off_issue(issue_id, "MT-1307A")],
+          active_state
+        )
 
       assert Map.has_key?(reconciled.running, issue_id),
              "a turn that reported activity inside the grace was force-cleaned anyway"
@@ -84,21 +90,22 @@ defmodule SymphonyElixir.ImplementerHandoffSettlementActivityTest do
     end
 
     test "repeated activity keeps the turn retained across many settlement observations" do
-      %{state: state, agent_pid: agent_pid, issue_id: issue_id} =
+      %{state: state, agent_pid: agent_pid, issue_id: issue_id, current_run: current_run} =
         settling_state("MT-1307B", @long_inactivity_ms)
 
       issue = handed_off_issue(issue_id, "MT-1307B")
 
       final_state =
         Enum.reduce(1..5, state, fn _cycle, acc ->
-          assert {:noreply, active} = Orchestrator.handle_info(turn_heartbeat_update(issue_id), acc)
+          assert {:noreply, active} =
+                   Orchestrator.handle_info(turn_heartbeat_update(issue_id, current_run), acc)
 
           # Age the freshly reset anchor past the grace again, exactly as a
           # long-running turn does between two supervision heartbeats.
           aged = age_anchor(active, issue_id, @long_inactivity_ms)
 
           assert {:noreply, refreshed} =
-                   Orchestrator.handle_info(turn_heartbeat_update(issue_id), aged)
+                   Orchestrator.handle_info(turn_heartbeat_update(issue_id, current_run), aged)
 
           reconciled = Orchestrator.reconcile_issue_states_for_test([issue], refreshed)
 
@@ -113,15 +120,47 @@ defmodule SymphonyElixir.ImplementerHandoffSettlementActivityTest do
       assert Process.alive?(agent_pid)
       refute_receive {:owned_session_cleanup, "octo-mt-1307b", _alive?}
     end
+
+    test "the run watermark refreshes handoff grace before its detailed event dequeues" do
+      %{
+        state: state,
+        agent_pid: agent_pid,
+        issue_id: issue_id,
+        current_run: current_run
+      } = settling_state("MT-1307W", @long_inactivity_ms)
+
+      assert {:ok, ingress_at_ms} = CurrentRun.observe(current_run)
+
+      reconciled =
+        Orchestrator.reconcile_issue_states_for_test(
+          [handed_off_issue(issue_id, "MT-1307W")],
+          state
+        )
+
+      assert reconciled.running[issue_id].handoff_settlement_last_activity_at_ms ==
+               ingress_at_ms
+
+      assert Process.alive?(agent_pid)
+      refute_receive {:owned_session_cleanup, "octo-mt-1307w", _alive?}
+    end
   end
 
   describe "silence still expires" do
     test "no newer activity beyond the grace takes the existing forced-cleanup path" do
-      %{state: state, agent_pid: agent_pid, issue_id: issue_id} =
+      %{state: state, agent_pid: agent_pid, issue_id: issue_id, current_run: current_run} =
         settling_state("MT-1307C", @long_inactivity_ms)
 
+      # CurrentRun creation is itself fresh run activity. Give that real
+      # watermark a finite grace and cross it without fabricating a regressed
+      # atomic clock value.
+      Application.put_env(:symphony_elixir, :implementer_handoff_settlement_grace_ms, 1)
+      wait_until_after(CurrentRun.activity_ms(current_run))
+
       reconciled =
-        Orchestrator.reconcile_issue_states_for_test([handed_off_issue(issue_id, "MT-1307C")], state)
+        Orchestrator.reconcile_issue_states_for_test(
+          [handed_off_issue(issue_id, "MT-1307C")],
+          state
+        )
 
       refute Map.has_key?(reconciled.running, issue_id),
              "an activity-anchored grace must still be a finite grace"
@@ -134,7 +173,8 @@ defmodule SymphonyElixir.ImplementerHandoffSettlementActivityTest do
 
   describe "settlement tracking is scoped to a settling turn" do
     test "returning to an active state clears all settlement tracking fields" do
-      %{state: state, issue_id: issue_id} = settling_state("MT-1307D", 0)
+      %{state: state, issue_id: issue_id, current_run: current_run} =
+        settling_state("MT-1307D", 0)
 
       assert is_integer(state.running[issue_id].handoff_settlement_last_activity_at_ms)
 
@@ -152,7 +192,7 @@ defmodule SymphonyElixir.ImplementerHandoffSettlementActivityTest do
                "settlement anchor into a later handoff"
 
       assert {:noreply, after_activity} =
-               Orchestrator.handle_info(turn_heartbeat_update(issue_id), reactivated)
+               Orchestrator.handle_info(turn_heartbeat_update(issue_id, current_run), reactivated)
 
       refute Map.has_key?(
                after_activity.running[issue_id],
@@ -171,6 +211,15 @@ defmodule SymphonyElixir.ImplementerHandoffSettlementActivityTest do
 
     agent_pid = spawn(fn -> Process.sleep(:infinity) end)
     on_exit(fn -> if Process.alive?(agent_pid), do: Process.exit(agent_pid, :kill) end)
+    issue = %Issue{id: issue_id, state: "In Progress", identifier: identifier}
+
+    current_run =
+      CurrentRun.new(issue, %{
+        workspace_path: "/tmp/#{identifier}",
+        role: "implementer",
+        holder: "test-holder",
+        run_id: "run-#{identifier}"
+      })
 
     state = %Orchestrator.State{
       running: %{
@@ -178,7 +227,9 @@ defmodule SymphonyElixir.ImplementerHandoffSettlementActivityTest do
           pid: agent_pid,
           ref: nil,
           identifier: identifier,
-          issue: %Issue{id: issue_id, state: "In Progress", identifier: identifier},
+          issue: issue,
+          current_run: current_run,
+          run_id: CurrentRun.identity(current_run).run_id,
           started_at: DateTime.utc_now(),
           session_id: nil,
           handoff_settlement_last_activity_at_ms: System.monotonic_time(:millisecond) - inactive_ms,
@@ -196,13 +247,16 @@ defmodule SymphonyElixir.ImplementerHandoffSettlementActivityTest do
       retry_attempts: %{}
     }
 
-    %{state: state, agent_pid: agent_pid, issue_id: issue_id}
+    %{state: state, agent_pid: agent_pid, issue_id: issue_id, current_run: current_run}
   end
 
   # The exact worker update delegation supervision emits from `on_heartbeat`
   # while the Herdr orchestrator reads `working`.
-  defp turn_heartbeat_update(issue_id) do
-    {:codex_worker_update, issue_id,
+  defp turn_heartbeat_update(issue_id, current_run) do
+    {:ok, ingress_at_ms} = CurrentRun.observe(current_run)
+    envelope = Map.put(CurrentRun.envelope(current_run), :ingress_at_ms, ingress_at_ms)
+
+    {:codex_worker_update, issue_id, envelope,
      %{
        event: :turn_heartbeat,
        timestamp: DateTime.utc_now(),
@@ -217,6 +271,15 @@ defmodule SymphonyElixir.ImplementerHandoffSettlementActivityTest do
       Map.update!(running_entry, :handoff_settlement_last_activity_at_ms, &(&1 - by_ms))
 
     %{state | running: Map.put(state.running, issue_id, aged_entry)}
+  end
+
+  defp wait_until_after(activity_at_ms) do
+    if System.monotonic_time(:millisecond) > activity_at_ms do
+      :ok
+    else
+      Process.sleep(1)
+      wait_until_after(activity_at_ms)
+    end
   end
 
   defp handed_off_issue(issue_id, identifier) do

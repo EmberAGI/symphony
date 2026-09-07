@@ -200,6 +200,10 @@ defmodule SymphonyElixir.WorkAdmissionTest do
     drain_retry_refreshes(retry_issue.id)
 
     assert {:ok, %{status: "closed"}} = Orchestrator.close_work_admission(orchestrator_name, "generation-old")
+    # A retry fetch processed before the close call can notify this test after
+    # the earlier zero-time drain. The close acknowledgement is the public
+    # serialization boundary; observe only fetches produced while closed.
+    drain_retry_refreshes(retry_issue.id)
     Process.sleep(1_100)
     refute_receive {:memory_tracker_fetch_issue_states_by_ids, [^retry_issue_id]}, 20
 

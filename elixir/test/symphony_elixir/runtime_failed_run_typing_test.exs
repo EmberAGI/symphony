@@ -297,10 +297,11 @@ defmodule SymphonyElixir.RuntimeFailedRunTypingTest do
 
     monitor_ref = Process.monitor(pid)
 
-    assert_receive {:owned_session_runtime_info, issue_id, ownership_ref, ack_recipient, ack_ref},
+    assert_receive {:owned_session_runtime_info, issue_id, envelope, ownership_ref, ack_recipient, ack_ref},
                    1_000
 
     assert issue_id == issue.id
+    assert envelope.run_id == "run-owned-session-ack"
     assert ownership_ref.issue_id == issue.id
     assert ownership_ref.session_name =~ "octo-emb-hotfix"
     refute_receive {:worker_outcome_turn_started, _prompt}, 100

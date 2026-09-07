@@ -100,9 +100,11 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
     end)
 
     # The run owns a delegated session whose physical teardown succeeds.
+    envelope = current_run_envelope(orchestrator_name, issue.id)
+
     send(
       pid,
-      {:owned_session_runtime_info, issue.id,
+      {:owned_session_runtime_info, issue.id, envelope,
        %{
          kind: "test-owned-session",
          session_name: "octo-emb-1259-cancel",
@@ -222,8 +224,8 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
       tracker_kind: "memory",
       workspace_root: workspace_root,
       poll_interval_ms: 200,
-      codex_stall_timeout_ms: 100,
-      hook_before_run: "sleep 30"
+      codex_stall_timeout_ms: 60_000,
+      hook_before_run: "touch .hook-ready; sleep 30"
     )
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
@@ -243,15 +245,45 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
       )
     end)
 
+    workspace_path =
+      assert_eventually_value(fn ->
+        case Orchestrator.snapshot(orchestrator_name, 1_000) do
+          %{running: [%{issue_id: issue_id, workspace_path: path} | _]} = _snapshot
+          when issue_id == issue.id and is_binary(path) ->
+            path
+
+          _ ->
+            nil
+        end
+      end)
+
+    assert_eventually(fn -> File.exists?(Path.join(workspace_path, ".hook-ready")) end)
+
+    envelope = current_run_envelope(orchestrator_name, issue.id)
+    ack_ref = make_ref()
+
     send(
       pid,
-      {:owned_session_runtime_info, issue.id,
+      {:owned_session_runtime_info, issue.id, envelope,
        %{
          kind: "test-owned-session",
          session_name: "octo-emb-1259-stall",
          cleanup_module: CleanupProbe,
          notify_pid: self()
-       }}
+       }, self(), ack_ref}
+    )
+
+    assert_receive {:owned_session_runtime_info_ack, ^ack_ref}, 1_000
+
+    # Finish the real run-envelope and cleanup-probe setup while the generous
+    # arrangement timeout still applies. Only then arm the unchanged short
+    # stall threshold; the next normal poll refreshes this runtime config.
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 200,
+      codex_stall_timeout_ms: 100,
+      hook_before_run: "touch .hook-ready; sleep 30"
     )
 
     # The stall reconciler terminates the run once no codex activity lands
@@ -564,6 +596,17 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
       System.tmp_dir!(),
       "symphony-elixir-#{label}-#{System.unique_integer([:positive])}"
     )
+  end
+
+  defp current_run_envelope(orchestrator_name, issue_id) do
+    entry =
+      orchestrator_name
+      |> Orchestrator.snapshot(1_000)
+      |> Map.fetch!(:running)
+      |> Enum.find(&(&1.issue_id == issue_id))
+
+    entry.process_ownership
+    |> Map.take([:issue_id, :workspace_path, :role, :holder, :run_id])
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)

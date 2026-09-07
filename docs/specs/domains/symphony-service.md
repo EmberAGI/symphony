@@ -860,9 +860,10 @@ Reconciliation runs every tick and has two parts.
 
 Part A: Stall detection
 
-- For each running issue, compute `elapsed_ms` since:
-  - `last_codex_timestamp` if any event has been seen, else
-  - `started_at`
+- For each running issue, compute `elapsed_ms` from the accepted current-run
+  monotonic activity watermark specified below, or the run's monotonic start
+  anchor before its first accepted event. The displayed `last_codex_timestamp`
+  is observability metadata, not an unchecked provider-supplied clock authority.
 - If `elapsed_ms > codex.stall_timeout_ms`, terminate the worker and queue a retry.
 - If `stall_timeout_ms <= 0`, skip stall detection entirely.
 
@@ -874,6 +875,107 @@ Part B: Tracker state refresh
   - If tracker state is still active: update the in-memory issue snapshot.
   - If tracker state is neither active nor terminal: terminate worker without workspace cleanup.
 - If state refresh fails, keep workers running and try again on the next tick.
+
+#### 8.5.1 Current-run activity and persistence serviceability
+
+The AgentRunner-to-Orchestrator Interface preserves the exact acquired
+issue/workspace/role/holder/run identity on all activity, session, worker-PID,
+and owned-session notifications. Provider session or turn IDs may change inside
+one acquired run; neither substitutes for the run identity. An event from an
+old, unknown, terminal, or replaced run cannot change another run's activity,
+provider identity, PID, accounting, rate limits, or durable ownership. Legacy
+issue-ID-only notifications do not silently acquire the current run's identity.
+
+The trusted runtime ingress stamps a normalized provider observation once,
+using the local monotonic clock before mailbox enqueue or routine persistence.
+That original observation time is retained through batching and delayed
+delivery. Provider timestamps remain diagnostic data and cannot extend a
+deadline. Missing, malformed, or future purported ingress times are rejected
+as activity; the consumer never substitutes dequeue time. Wall-clock changes
+cannot increase or decrease elapsed inactivity. Validated source identity and
+ordering still govern any independent accounting or terminal processing.
+
+Accepted activity is a per-owned-run nondecreasing maximum of valid ingress
+observations. Duplicate and out-of-order delivery cannot move it backward or
+make an old event newly fresh. A bounded run-scoped watermark is visible to
+reconciliation independently of routine ownership persistence and the detailed
+event backlog. It must not require draining an unbounded mailbox before a
+stall decision. Retiring a run invalidates its watermark producer before
+replacement; late asynchronous persistence completion cannot recreate active
+ownership after settlement or overwrite a newer holder/run.
+
+Orchestrator owns acceptance, stall decisions and fairness. AgentRunner owns
+run-correlated ingress forwarding. ProcessOwnership retains atomic acquisition,
+verified identity updates, durable initial provider identity, settlement,
+quarantine, and release. Routine refresh may be coalesced or moved off the
+Orchestrator request path, but it cannot become an alternate ownership
+authority or weaken terminal write ordering. Persistence failure remains a
+typed existing ownership failure, not fabricated progress or silent success.
+
+Coalescing preserves the semantics of cumulative and incremental token usage,
+rate-limit observations, provider/session/PID changes and terminal events.
+Repeated cumulative totals are not counted twice; source duplicates follow
+their existing identity/accounting contract. Activity is not a license to drop
+critical events. With concurrent issues, the bounded slow-write/burst acceptance scenario must
+keep another issue, snapshot/admission calls and reconciliation serviceable.
+Terminal control and exact-run accounting remain ordered when a routine write
+is delayed.
+
+TUR-878 scope correction, operator direction 2026-09-06: this slice repairs
+demonstrated current-run freshness and routine-persistence failures while
+preserving existing accounting, exact-run isolation and cleanup. It does not
+require a new general critical-event backpressure/window protocol, exhaustive
+event permutation matrix, or broader scheduling redesign. Add such a mechanism
+only if an executed failure shows it is necessary for this repair's bounded
+serviceability or ownership/cleanup guarantees. Reuse valid existing regression
+evidence; static hardening concerns alone do not expand this slice.
+
+Genuine silence still crosses the unchanged configured timeout and follows
+normal exact-owned-process cleanup and retry settlement. Disabled stall
+detection remains disabled. Implementer handoff inactivity grace uses the same
+accepted original-observation clock; queued old events do not reset grace at
+dequeue, and fresh current-run activity preserves a legitimately settling turn.
+PID liveness, token volume, request polling, and persistence completion alone
+are not provider activity. No runtime timeout or secret/configuration knob is
+introduced by this contract.
+
+Validation crosses real dispatch, AgentRunner, a running Orchestrator and real
+ProcessOwnership, using controlled external provider/tracker inputs and actual
+temporary ownership files. To stage slow storage deterministically, a test
+Adapter may gate a filesystem primitive then delegate that same primitive to
+the real filesystem. The external I/O Seam must not implement ownership,
+serialization, retry, atomic-file naming, or validation policy. A fake owned
+Module, invented running map, private callback invocation, or timeout-only
+change is not the race proof.
+Introducing a necessary external-I/O Seam must first preserve the ordinary
+filesystem behavior. The required behavioral RED then demonstrates the
+activity or serviceability violation before its repair; a missing helper or
+uninitialized test dependency is not that evidence.
+
+The required race admits at least two issues, holds one routine ownership
+write after initial identity is durable and lets prior activity age beyond the
+unchanged timeout. Use the existing Workflow polling interval to keep automatic
+ticks outside this bounded arrangement phase, identically in RED and GREEN.
+Deliver fresh events through the real runner and acknowledge
+their trusted ingress with an explicit barrier before requesting reconciliation,
+while the write remains held. Do not depend on blocked persistence to prevent
+a tick from deciding before fresh ingress; writing provider stdout alone is
+not an ingress acknowledgement. The active run survives
+and the other issue remains serviceable without releasing the write to make
+the assertion pass. A companion with only old queued activity times out.
+Exact-run replacement, reordered events, accounting and terminal-write races
+are separate public-Interface cases. Evidence records bounded run identifiers,
+event age, barrier/tick ordering and decisions, never provider payloads or env.
+
+This contract is the working theory for TUR-878. The historical TUR-839
+activity discrepancy does not prove that slow persistence caused that incident.
+The RED must establish the claimed local scheduling failure; if it does not,
+investigate and reconcile the cause before claiming the incident repaired.
+Production activation and canary observation are separately owned by TUR-845.
+
+Source: [TUR-878](https://linear.app/martellventures/issue/TUR-878).
+Decision: refine existing activity and ownership semantics under ADR 0001;
+no new ownership authority or global persistence subsystem is selected.
 
 ### 8.6 Startup Terminal Workspace Cleanup
 

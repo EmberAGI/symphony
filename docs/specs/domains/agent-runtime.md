@@ -1197,6 +1197,37 @@ genuine inability — owned processes that actually survive the bounded
 TERM/KILL sequence, or settlement evidence that truly cannot be captured or
 written — never for evidence unavailability the teardown ordering itself
 caused.
+### Current-run activity and routine persistence
+
+The normative inactivity and event-arrival contract is
+[Symphony Service section 8.5.1](symphony-service.md#851-current-run-activity-and-persistence-serviceability).
+AgentRunner binds every event and runtime-identity notification to the acquired
+holder/run, not only issue ID or provider session. All provider Adapters and
+both Implementer participants preserve that envelope through same-run
+continuations. Delayed notifications from a predecessor cannot mutate the
+replacement's activity, identity, accounting, PID or ownership.
+
+The run-scoped activity watermark is an in-memory observation, not a second
+ownership record. ProcessOwnership remains the sole authority. A routine
+asynchronous/coalesced update carries the exact immutable identity and must
+not cross terminal settlement or replacement. Initial provider identity,
+ownership acquisition, cleanup evidence, quarantine and release retain their
+durable ordering and typed failures. A stalled persistence task does not keep
+a silent provider alive; an active provider does not excuse an unverified
+terminal ownership write. Completion drains or fences obsolete routine work
+before releasing its ownership scope, with the existing bounded settlement
+failure path if it cannot do so safely.
+
+The selected test Seam is external filesystem latency beneath the real
+ProcessOwnership Module: a gated primitive delegates to the real filesystem
+without recreating any owned policy. It is injected as a bounded test/composition
+dependency with an ordinary real-filesystem default, not a deployment setting,
+production pause hook, substitute ProcessOwnership, or general persistence
+framework. Normal callers must share the same Interface and policy under test.
+Source: [TUR-878](https://linear.app/martellventures/issue/TUR-878).
+
+### Terminal settlement serviceability
+
 Terminal settlement must not run on the Orchestrator's serial request path
 (EMB-1260). The expensive teardown, liveness, and ownership-record writes
 execute off that path so the Orchestrator keeps serving state snapshots and

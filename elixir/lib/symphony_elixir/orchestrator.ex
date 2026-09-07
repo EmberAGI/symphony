@@ -14,6 +14,7 @@ defmodule SymphonyElixir.Orchestrator do
     ImplementationEffort,
     RoleTurnRecovery,
     RunLog,
+    Runtime.CurrentRun,
     Runtime.ProcessOwnership,
     StatusDashboard,
     Tracker,
@@ -25,7 +26,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
-  @process_ownership_refresh_interval_ms 30_000
   # Terminal settlement runs off the serial path but must still reach a typed
   # outcome in bounded time: on timeout the settlement task is killed and the
   # ownership record is quarantined typed via one cheap write, never left
@@ -102,6 +102,9 @@ defmodule SymphonyElixir.Orchestrator do
       # settling so it cannot be re-dispatched, and the expensive OS teardown
       # runs in a supervised task while the GenServer keeps answering.
       settlements: %{},
+      # At most one routine durable refresh runs per issue. New observations
+      # coalesce into one follow-up snapshot while the exact-run task is busy.
+      routine_persistence: %{},
       codex_totals: nil,
       codex_rate_limits: nil,
       work_admission: %{status: "open", target_generation: nil},
@@ -158,6 +161,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   @impl true
   def terminate(reason, %State{} = state) do
+    state =
+      Enum.reduce(Map.keys(state.running), state, fn issue_id, state ->
+        fence_routine_process_ownership(state, issue_id)
+      end)
+
     Enum.each(state.running, fn {issue_id, running_entry} ->
       safely_settle_on_shutdown(issue_id, running_entry, reason)
     end)
@@ -283,7 +291,7 @@ defmodule SymphonyElixir.Orchestrator do
       ) do
     case find_issue_id_for_ref(running, ref) do
       nil ->
-        {:noreply, state}
+        {:noreply, finish_routine_process_ownership_exit(state, ref, reason)}
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
@@ -317,32 +325,39 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, time_out_terminal_settlement(state, token)}
   end
 
-  def handle_info({:worker_runtime_info, issue_id, runtime_info}, %{running: running} = state)
-      when is_binary(issue_id) and is_map(runtime_info) do
+  def handle_info(
+        {:worker_runtime_info, issue_id, envelope, runtime_info},
+        %{running: running} = state
+      )
+      when is_binary(issue_id) and is_map(envelope) and is_map(runtime_info) do
     case Map.get(running, issue_id) do
       nil ->
         {:noreply, state}
 
       running_entry ->
-        updated_running_entry =
-          running_entry
-          |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
-          |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
-          |> record_process_ownership(issue_id)
-          |> maybe_refresh_process_ownership(issue_id, true)
+        if current_run_matches?(running_entry, envelope) do
+          updated_running_entry =
+            running_entry
+            |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
+            |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
+            |> record_process_ownership(issue_id)
+            |> Map.put(:process_ownership_refreshed_at_ms, System.monotonic_time(:millisecond))
 
-        notify_dashboard()
-        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+          notify_dashboard()
+          {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+        else
+          {:noreply, state}
+        end
     end
   end
 
   def handle_info(
-        {:owned_session_runtime_info, issue_id, ownership_ref, ack_recipient, ack_ref},
+        {:owned_session_runtime_info, issue_id, envelope, ownership_ref, ack_recipient, ack_ref},
         %{running: running} = state
       )
-      when is_binary(issue_id) and is_map(ownership_ref) and is_pid(ack_recipient) and
-             is_reference(ack_ref) do
-    case record_owned_session_runtime_info(running, state, issue_id, ownership_ref) do
+      when is_binary(issue_id) and is_map(envelope) and is_map(ownership_ref) and
+             is_pid(ack_recipient) and is_reference(ack_ref) do
+    case record_owned_session_runtime_info(running, state, issue_id, envelope, ownership_ref) do
       {:registered, state} ->
         send(ack_recipient, {:owned_session_runtime_info_ack, ack_ref})
         {:noreply, state}
@@ -353,42 +368,47 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_info(
-        {:owned_session_runtime_info, issue_id, ownership_ref},
+        {:owned_session_runtime_info, issue_id, envelope, ownership_ref},
         %{running: running} = state
       )
-      when is_binary(issue_id) and is_map(ownership_ref) do
+      when is_binary(issue_id) and is_map(envelope) and is_map(ownership_ref) do
     {_registration, state} =
-      record_owned_session_runtime_info(running, state, issue_id, ownership_ref)
+      record_owned_session_runtime_info(running, state, issue_id, envelope, ownership_ref)
 
     {:noreply, state}
   end
 
   def handle_info(
-        {:codex_worker_update, issue_id, %{event: _, timestamp: _} = update},
+        {:codex_worker_update, issue_id, envelope, update},
         %{running: running} = state
-      ) do
+      )
+      when is_binary(issue_id) and is_map(envelope) and is_map(update) do
     case Map.get(running, issue_id) do
       nil ->
         {:noreply, state}
 
       running_entry ->
-        {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
-
-        state =
-          state
-          |> apply_codex_token_delta(token_delta)
-          |> apply_codex_rate_limits(update)
-
-        updated_running_entry =
-          updated_running_entry
-          |> record_process_ownership(issue_id)
-          |> maybe_refresh_process_ownership(issue_id)
-
-        notify_dashboard()
-        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+        {:noreply, integrate_current_run_update(state, issue_id, running_entry, envelope, update)}
     end
   end
 
+  def handle_info({ref, result}, %State{} = state) when is_reference(ref) do
+    case Enum.find(state.routine_persistence, fn {_issue_id, routine} ->
+           Map.get(routine, :token) == ref
+         end) do
+      {issue_id, %{run_id: run_id}} ->
+        {:noreply, finish_routine_process_ownership(state, issue_id, ref, run_id, result)}
+
+      nil ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:codex_worker_update, _issue_id, _envelope, _update}, state),
+    do: {:noreply, state}
+
+  # Issue-only notifications are intentionally not upgraded to whichever run
+  # happens to own the issue when they finally leave the mailbox.
   def handle_info({:codex_worker_update, _issue_id, _update}, state), do: {:noreply, state}
 
   def handle_info(
@@ -417,7 +437,37 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, state}
   end
 
-  defp record_owned_session_runtime_info(running, state, issue_id, ownership_ref) do
+  defp integrate_current_run_update(state, issue_id, running_entry, envelope, update) do
+    if current_run_matches?(running_entry, envelope) do
+      activity_at_ms = accepted_activity_at_ms(running_entry.current_run, envelope, update)
+
+      {updated_running_entry, token_delta} =
+        integrate_codex_update(running_entry, update, activity_at_ms)
+
+      state =
+        state
+        |> apply_codex_token_delta(token_delta)
+        |> apply_codex_rate_limits(update)
+
+      state = %{state | running: Map.put(state.running, issue_id, updated_running_entry)}
+      CurrentRun.acknowledge_update(running_entry.current_run)
+      state = schedule_routine_process_ownership(state, issue_id)
+
+      notify_dashboard()
+      state
+    else
+      state
+    end
+  end
+
+  defp accepted_activity_at_ms(current_run, envelope, update) do
+    case CurrentRun.accepted_activity(current_run, envelope, update) do
+      {:ok, ingress_at_ms} -> ingress_at_ms
+      :invalid -> nil
+    end
+  end
+
+  defp record_owned_session_runtime_info(running, state, issue_id, envelope, ownership_ref) do
     case Map.get(running, issue_id) do
       nil ->
         # The issue can leave the active state between session startup and this
@@ -426,14 +476,19 @@ defmodule SymphonyElixir.Orchestrator do
         {:missing, state}
 
       running_entry ->
-        ownership_ref = Map.put_new(ownership_ref, :issue_id, issue_id)
+        if current_run_matches?(running_entry, envelope) do
+          ownership_ref = Map.put_new(ownership_ref, :issue_id, issue_id)
 
-        updated_running_entry =
-          running_entry
-          |> Map.put(:owned_session_ref, ownership_ref)
-          |> record_process_ownership(issue_id)
+          updated_running_entry =
+            running_entry
+            |> Map.put(:owned_session_ref, ownership_ref)
+            |> record_process_ownership(issue_id)
 
-        {:registered, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+          {:registered, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+        else
+          _ = AgentRuntime.cleanup_owned_session(ownership_ref)
+          {:missing, state}
+        end
     end
   end
 
@@ -458,7 +513,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_candidates(%State{} = state) do
-    RoleTurnRecovery.recover_pending_turns(active_state_set(), terminal_state_set(), Map.keys(state.running))
+    RoleTurnRecovery.recover_pending_turns(
+      active_state_set(),
+      terminal_state_set(),
+      Map.keys(state.running)
+    )
+
     state = reconcile_running_issues(state)
     state = reconcile_orphaned_claims(state)
 
@@ -469,11 +529,19 @@ defmodule SymphonyElixir.Orchestrator do
       else
         {:error, :missing_linear_api_token} ->
           Logger.error("Linear API token missing in WORKFLOW.md")
-          record_dispatch_summary(state, candidate_fetch_failure_summary(:missing_linear_api_token))
+
+          record_dispatch_summary(
+            state,
+            candidate_fetch_failure_summary(:missing_linear_api_token)
+          )
 
         {:error, :missing_linear_project_slug} ->
           Logger.error("Linear project slug missing in WORKFLOW.md")
-          record_dispatch_summary(state, candidate_fetch_failure_summary(:missing_linear_project_slug))
+
+          record_dispatch_summary(
+            state,
+            candidate_fetch_failure_summary(:missing_linear_project_slug)
+          )
 
         {:error, :missing_tracker_kind} ->
           Logger.error("Tracker kind missing in WORKFLOW.md")
@@ -483,11 +551,18 @@ defmodule SymphonyElixir.Orchestrator do
         {:error, {:unsupported_tracker_kind, kind}} ->
           Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
 
-          record_dispatch_summary(state, candidate_fetch_failure_summary(:unsupported_tracker_kind))
+          record_dispatch_summary(
+            state,
+            candidate_fetch_failure_summary(:unsupported_tracker_kind)
+          )
 
         {:error, {:invalid_workflow_config, message}} ->
           Logger.error("Invalid WORKFLOW.md config: #{message}")
-          record_dispatch_summary(state, candidate_fetch_failure_summary(:invalid_workflow_config))
+
+          record_dispatch_summary(
+            state,
+            candidate_fetch_failure_summary(:invalid_workflow_config)
+          )
 
         {:error, {:missing_workflow_file, path, reason}} ->
           Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
@@ -495,7 +570,11 @@ defmodule SymphonyElixir.Orchestrator do
 
         {:error, :workflow_front_matter_not_a_map} ->
           Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
-          record_dispatch_summary(state, candidate_fetch_failure_summary(:workflow_front_matter_not_a_map))
+
+          record_dispatch_summary(
+            state,
+            candidate_fetch_failure_summary(:workflow_front_matter_not_a_map)
+          )
 
         {:error, {:workflow_parse_error, reason}} ->
           Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
@@ -503,7 +582,11 @@ defmodule SymphonyElixir.Orchestrator do
 
         {:error, reason} ->
           Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
-          record_dispatch_summary(state, candidate_fetch_failure_summary(:tracker_candidate_fetch_failure))
+
+          record_dispatch_summary(
+            state,
+            candidate_fetch_failure_summary(:tracker_candidate_fetch_failure)
+          )
       end
     else
       record_dispatch_summary(state, empty_dispatch_summary("admission_closed"))
@@ -560,7 +643,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
-  @spec handle_retry_issue_for_test(term(), String.t(), pos_integer(), map()) :: {:noreply, term()}
+  @spec handle_retry_issue_for_test(term(), String.t(), pos_integer(), map()) ::
+          {:noreply, term()}
   def handle_retry_issue_for_test(%State{} = state, issue_id, attempt, metadata)
       when is_binary(issue_id) and is_integer(attempt) and is_map(metadata) do
     handle_retry_issue(state, issue_id, attempt, metadata)
@@ -590,11 +674,18 @@ defmodule SymphonyElixir.Orchestrator do
         record_dispatch_result(acc, issue, dispatch_result)
       end)
 
-    dispatch_cycle_summary(issues, result.skipped, result.dispatched, result.failed, result.attempted)
+    dispatch_cycle_summary(
+      issues,
+      result.skipped,
+      result.dispatched,
+      result.failed,
+      result.attempted
+    )
   end
 
   @doc false
-  @spec select_worker_host_for_test(term(), String.t() | nil) :: String.t() | nil | :no_worker_capacity
+  @spec select_worker_host_for_test(term(), String.t() | nil) ::
+          String.t() | nil | :no_worker_capacity
   def select_worker_host_for_test(%State{} = state, preferred_worker_host) do
     select_worker_host(state, preferred_worker_host)
   end
@@ -754,7 +845,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp settle_or_expire_implementer_handoff(state, issue, running_entry) do
     now_ms = System.monotonic_time(:millisecond)
-    last_activity_at_ms = Map.get(running_entry, :handoff_settlement_last_activity_at_ms)
+
+    last_activity_at_ms =
+      nondecreasing_activity_ms(
+        Map.get(running_entry, :handoff_settlement_last_activity_at_ms),
+        current_run_activity_ms(running_entry)
+      )
+
     grace_ms = implementer_handoff_settlement_grace_ms()
 
     cond do
@@ -799,7 +896,12 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace, release_issue \\ nil) do
+  defp terminate_running_issue(
+         %State{} = state,
+         issue_id,
+         cleanup_workspace,
+         release_issue \\ nil
+       ) do
     {state, _termination_outcome} =
       terminate_running_issue_with_result(state, issue_id, cleanup_workspace, release_issue)
 
@@ -824,7 +926,13 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp terminate_running_entry(state, issue_id, cleanup_workspace, %{pid: pid, ref: ref} = running_entry) do
+  defp terminate_running_entry(
+         state,
+         issue_id,
+         cleanup_workspace,
+         %{pid: pid, ref: ref} = running_entry
+       ) do
+    state = fence_routine_process_ownership(state, issue_id)
     state = record_session_completion_totals(state, running_entry)
     worker_host = Map.get(running_entry, :worker_host)
     issue_or_identifier = Map.get(running_entry, :issue) || Map.get(running_entry, :identifier)
@@ -844,7 +952,12 @@ defmodule SymphonyElixir.Orchestrator do
     termination_outcome =
       classify_forced_terminal_cleanup(cleanup_result, running_entry, issue_id, state)
 
-    record_forced_process_completion(running_entry, termination_reason, termination_outcome, cleanup_evidence)
+    record_forced_process_completion(
+      running_entry,
+      termination_reason,
+      termination_outcome,
+      cleanup_evidence
+    )
 
     if is_reference(ref) do
       Process.demonitor(ref, [:flush])
@@ -874,7 +987,12 @@ defmodule SymphonyElixir.Orchestrator do
          {_classification, failure, failure_observation},
          cleanup_evidence
        ) do
-    quarantine_forced_terminal_cleanup_failure(running_entry, failure, failure_observation, cleanup_evidence)
+    quarantine_forced_terminal_cleanup_failure(
+      running_entry,
+      failure,
+      failure_observation,
+      cleanup_evidence
+    )
   end
 
   defp classify_forced_terminal_cleanup(:ok, _running_entry, _issue_id, _state), do: :ok
@@ -944,23 +1062,27 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       true ->
-        now = DateTime.utc_now()
+        now_ms = System.monotonic_time(:millisecond)
 
         Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
-          restart_stalled_issue(state_acc, issue_id, running_entry, now, timeout_ms)
+          restart_stalled_issue(state_acc, issue_id, running_entry, now_ms, timeout_ms)
         end)
     end
   end
 
-  defp restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
-    elapsed_ms = stall_elapsed_ms(running_entry, now)
+  defp restart_stalled_issue(state, issue_id, running_entry, now_ms, timeout_ms) do
+    elapsed_ms = stall_elapsed_ms(running_entry, now_ms)
 
     if is_integer(elapsed_ms) and elapsed_ms > timeout_ms do
       identifier = Map.get(running_entry, :identifier, issue_id)
       session_id = running_entry_session_id(running_entry)
 
       Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; restarting with backoff")
-      maybe_notify_agent_failed(running_entry, "stalled for #{elapsed_ms}ms without codex activity")
+
+      maybe_notify_agent_failed(
+        running_entry,
+        "stalled for #{elapsed_ms}ms without codex activity"
+      )
 
       next_attempt = next_retry_attempt_from_running(running_entry)
 
@@ -1046,23 +1168,34 @@ defmodule SymphonyElixir.Orchestrator do
     |> block_irrecoverable_runtime_failure(issue_id, running_entry, failure)
   end
 
-  defp stall_elapsed_ms(running_entry, now) do
-    running_entry
-    |> last_activity_timestamp()
-    |> case do
+  defp stall_elapsed_ms(running_entry, now_ms) when is_integer(now_ms) do
+    case current_run_activity_ms(running_entry) do
+      activity_at_ms when is_integer(activity_at_ms) -> max(0, now_ms - activity_at_ms)
+      _ -> legacy_stall_elapsed_ms(running_entry)
+    end
+  end
+
+  defp legacy_stall_elapsed_ms(running_entry) do
+    case Map.get(running_entry, :last_codex_timestamp) || Map.get(running_entry, :started_at) do
       %DateTime{} = timestamp ->
-        max(0, DateTime.diff(now, timestamp, :millisecond))
+        max(0, DateTime.diff(DateTime.utc_now(), timestamp, :millisecond))
 
       _ ->
         nil
     end
   end
 
-  defp last_activity_timestamp(running_entry) when is_map(running_entry) do
-    Map.get(running_entry, :last_codex_timestamp) || Map.get(running_entry, :started_at)
-  end
+  defp current_run_activity_ms(%{current_run: %CurrentRun{} = current_run}),
+    do: CurrentRun.activity_ms(current_run)
 
-  defp last_activity_timestamp(_running_entry), do: nil
+  defp current_run_activity_ms(%{last_activity_at_ms: activity_at_ms})
+       when is_integer(activity_at_ms),
+       do: activity_at_ms
+
+  defp current_run_activity_ms(%{started_at_ms: started_at_ms}) when is_integer(started_at_ms),
+    do: started_at_ms
+
+  defp current_run_activity_ms(_running_entry), do: nil
 
   defp terminate_task(pid) when is_pid(pid) do
     case Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) do
@@ -1253,7 +1386,8 @@ defmodule SymphonyElixir.Orchestrator do
   # The OS-heavy half that needs no State: physical teardown, liveness against
   # the pre-teardown snapshot, and the terminal ownership record write.
   defp run_terminal_settlement(running_entry, reason, snapshot, execution_generation) do
-    {cleanup_result, cleanup_evidence} = cleanup_terminal_owned_runtime(running_entry, false, snapshot)
+    {cleanup_result, cleanup_evidence} =
+      cleanup_terminal_owned_runtime(running_entry, false, snapshot)
 
     {adjusted_reason, completion_attrs} =
       reason
@@ -1310,7 +1444,13 @@ defmodule SymphonyElixir.Orchestrator do
 
       {settlement, settlements} ->
         cancel_settlement_timer(settlement)
-        finalize_terminal_settlement(%{state | settlements: settlements}, token, result, settlement)
+
+        finalize_terminal_settlement(
+          %{state | settlements: settlements},
+          token,
+          result,
+          settlement
+        )
     end
   end
 
@@ -1326,6 +1466,7 @@ defmodule SymphonyElixir.Orchestrator do
       case classify_task_exit(reason, running_entry, issue_id, state) do
         :normal ->
           Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
           RoleTurnRecovery.clear_turn(issue_id)
 
           state
@@ -1357,6 +1498,7 @@ defmodule SymphonyElixir.Orchestrator do
           exit_reason = retryable_task_exit_reason(reason, failure)
 
           Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{exit_reason}; scheduling retry")
+
           maybe_notify_agent_failed(running_entry, reason)
 
           next_attempt = next_retry_attempt_from_running(running_entry)
@@ -1406,16 +1548,34 @@ defmodule SymphonyElixir.Orchestrator do
         # with a fabricated timeout failure.
         case settled_settlement_record(running_entry) do
           {:settled, record_state} ->
-            settle_late_terminal_settlement(state, issue_id, running_entry, record_state, elapsed_ms)
+            settle_late_terminal_settlement(
+              state,
+              issue_id,
+              running_entry,
+              record_state,
+              elapsed_ms
+            )
 
           :unsettled ->
-            quarantine_timed_out_settlement(state, issue_id, running_entry, settlement, elapsed_ms)
+            quarantine_timed_out_settlement(
+              state,
+              issue_id,
+              running_entry,
+              settlement,
+              elapsed_ms
+            )
         end
     end
   end
 
   # The record is still active/retrying at the deadline: settle it typed.
-  defp quarantine_timed_out_settlement(%State{} = state, issue_id, running_entry, settlement, elapsed_ms) do
+  defp quarantine_timed_out_settlement(
+         %State{} = state,
+         issue_id,
+         running_entry,
+         settlement,
+         elapsed_ms
+       ) do
     Logger.error(
       "Terminal settlement timed out issue_id=#{issue_id} " <>
         "session_id=#{running_entry_session_id(running_entry)} elapsed_ms=#{elapsed_ms}; " <>
@@ -1456,14 +1616,21 @@ defmodule SymphonyElixir.Orchestrator do
   # settlement landed late. (The task is killed either way; its
   # {:settlement_result, ...} may still race the kill and arrive afterwards,
   # where finalize_terminal_settlement/3 no-ops on the now-unknown token.)
-  defp settle_late_terminal_settlement(%State{} = state, issue_id, running_entry, record_state, elapsed_ms) do
+  defp settle_late_terminal_settlement(
+         %State{} = state,
+         issue_id,
+         running_entry,
+         record_state,
+         elapsed_ms
+       ) do
     Logger.warning(
       "Terminal settlement completed at its deadline issue_id=#{issue_id} " <>
         "session_id=#{running_entry_session_id(running_entry)} elapsed_ms=#{elapsed_ms} " <>
         "record_state=#{record_state}; keeping the settled record and scheduling retry"
     )
 
-    late_reason = "terminal_settlement_completed_late elapsed_ms=#{elapsed_ms} record_state=#{record_state}"
+    late_reason =
+      "terminal_settlement_completed_late elapsed_ms=#{elapsed_ms} record_state=#{record_state}"
 
     finalize_settlement_deadline(
       state,
@@ -1497,7 +1664,13 @@ defmodule SymphonyElixir.Orchestrator do
   # fresh work. The lease reflects what the record actually shows — quarantined
   # for a genuinely unsettled record, a plain retry lease for one the settlement
   # already completed.
-  defp finalize_settlement_deadline(%State{} = state, issue_id, running_entry, {_tag, reason_text} = typed_reason, lease_state) do
+  defp finalize_settlement_deadline(
+         %State{} = state,
+         issue_id,
+         running_entry,
+         {_tag, reason_text} = typed_reason,
+         lease_state
+       ) do
     maybe_notify_agent_failed(running_entry, reason_text)
     RoleTurnRecovery.clear_turn(issue_id)
 
@@ -1549,7 +1722,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp timed_out_settlement_evidence(_settlement) do
-    %{owned_pids: [], live_after: 0, verified: false, captured_at: nil, evidence_status: :unavailable}
+    %{
+      owned_pids: [],
+      live_after: 0,
+      verified: false,
+      captured_at: nil,
+      evidence_status: :unavailable
+    }
   end
 
   defp cancel_settlement_timer(%{timer_ref: timer_ref}) when is_reference(timer_ref) do
@@ -1624,7 +1803,11 @@ defmodule SymphonyElixir.Orchestrator do
   # already took before teardown, so one settlement reads the process table
   # once. Every other caller (including cancelled_terminal_cleanup/1) passes
   # nil and captures here exactly as before.
-  defp cleanup_terminal_owned_runtime(running_entry, require_ownership \\ false, pre_captured \\ nil)
+  defp cleanup_terminal_owned_runtime(
+         running_entry,
+         require_ownership \\ false,
+         pre_captured \\ nil
+       )
        when is_map(running_entry) do
     snapshot = pre_captured || capture_settlement_snapshot(running_entry)
     session_result = teardown_owned_session(running_entry)
@@ -1662,7 +1845,13 @@ defmodule SymphonyElixir.Orchestrator do
         {cleanup_result, evidence, liveness}
 
       {:error, reason} ->
-        unavailable_settlement_evidence(cleanup_result, :liveness, reason, snapshot.owned_pids, snapshot.captured_at)
+        unavailable_settlement_evidence(
+          cleanup_result,
+          :liveness,
+          reason,
+          snapshot.owned_pids,
+          snapshot.captured_at
+        )
     end
   end
 
@@ -1709,7 +1898,11 @@ defmodule SymphonyElixir.Orchestrator do
       [Map.get(running_entry, :codex_app_server_pid)]
       |> Enum.filter(&is_integer/1)
 
-    ProcessOwnership.settlement_snapshot(issue, Map.get(running_entry, :process_ownership), extra_pids)
+    ProcessOwnership.settlement_snapshot(
+      issue,
+      Map.get(running_entry, :process_ownership),
+      extra_pids
+    )
   end
 
   defp teardown_owned_session(%{owned_session_ref: ownership_ref}) when is_map(ownership_ref) do
@@ -1719,13 +1912,19 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.warning("Failed to clean up run-owned runtime during terminal settlement: #{inspect(reason)}")
+
         {:error, reason}
     end
   end
 
   defp teardown_owned_session(_running_entry), do: :ok
 
-  defp log_terminal_cleanup_evidence(running_entry, _outcome, %{evidence_status: :unavailable} = evidence, _liveness) do
+  defp log_terminal_cleanup_evidence(
+         running_entry,
+         _outcome,
+         %{evidence_status: :unavailable} = evidence,
+         _liveness
+       ) do
     Logger.error(
       "Run-owned runtime cleanup evidence unavailable " <>
         "issue_id=#{settlement_issue_id(running_entry)} " <>
@@ -1806,6 +2005,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:ok, count} ->
         Logger.info("Recovered #{count} stale run-owned runtime session(s) from a previous role generation")
+
         :ok
     end
   end
@@ -1851,7 +2051,12 @@ defmodule SymphonyElixir.Orchestrator do
 
     summary =
       sorted_issues
-      |> dispatch_cycle_summary(result.skipped, result.dispatched, result.failed, result.attempted)
+      |> dispatch_cycle_summary(
+        result.skipped,
+        result.dispatched,
+        result.failed,
+        result.attempted
+      )
 
     record_dispatch_summary(result.state, summary)
   end
@@ -2088,6 +2293,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
+
         {state, :attempted}
 
       {:skip, %Issue{} = refreshed_issue} ->
@@ -2097,6 +2303,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
+
         {state, {:failed, "issue_refresh_failed"}}
     end
   end
@@ -2107,10 +2314,12 @@ defmodule SymphonyElixir.Orchestrator do
     case select_worker_host(state, preferred_worker_host) do
       :no_worker_capacity ->
         Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
+
         {state, {:skipped, skipped_candidate_summary(issue, "worker_capacity_blocked")}}
 
       worker_host when is_binary(worker_host) and worker_host != "" ->
         Logger.warning("Skipping dispatch; remote worker ownership is unsupported for #{issue_context(issue)} worker_host=#{worker_host}")
+
         {state, {:failed, "remote_worker_not_supported"}}
 
       worker_host ->
@@ -2121,7 +2330,8 @@ defmodule SymphonyElixir.Orchestrator do
             issue,
             run_id,
             worker_host,
-            current_failure_reset_marker(state, issue)
+            current_failure_reset_marker(state, issue),
+            retry_predecessor_run_id(issue, attempt)
           )
 
         case ProcessOwnership.acquire(issue, ownership_attrs) do
@@ -2137,6 +2347,7 @@ defmodule SymphonyElixir.Orchestrator do
 
           {:error, reason} ->
             Logger.warning("Skipping dispatch; process ownership acquisition failed for #{issue_context(issue)}: #{inspect(reason)}")
+
             {state, {:failed, "process_ownership_acquire_failed"}}
         end
     end
@@ -2151,6 +2362,7 @@ defmodule SymphonyElixir.Orchestrator do
          process_ownership
        ) do
     record_pending_turn_start(issue, worker_host)
+    current_run = CurrentRun.new(issue, process_ownership)
 
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
            AgentRunner.run(issue, recipient,
@@ -2159,7 +2371,8 @@ defmodule SymphonyElixir.Orchestrator do
              role: ProcessOwnership.current_role(),
              execution_generation: state.execution_generation,
              run_id: process_ownership.run_id,
-             process_ownership: process_ownership
+             process_ownership: process_ownership,
+             current_run: current_run
            )
          end) do
       {:ok, pid} ->
@@ -2177,6 +2390,7 @@ defmodule SymphonyElixir.Orchestrator do
             workspace_path: nil,
             process_ownership: process_ownership,
             run_id: process_ownership.run_id,
+            current_run: current_run,
             session_id: nil,
             last_codex_message: nil,
             last_codex_timestamp: nil,
@@ -2190,7 +2404,8 @@ defmodule SymphonyElixir.Orchestrator do
             codex_last_reported_total_tokens: 0,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
-            started_at: DateTime.utc_now()
+            started_at: DateTime.utc_now(),
+            started_at_ms: CurrentRun.activity_ms(current_run)
           })
 
         %{
@@ -2230,7 +2445,12 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp revalidate_issue_for_dispatch(%Issue{id: issue_id}, issue_fetcher, terminal_states, retry_dispatch?)
+  defp revalidate_issue_for_dispatch(
+         %Issue{id: issue_id},
+         issue_fetcher,
+         terminal_states,
+         retry_dispatch?
+       )
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do
     case issue_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
@@ -2249,7 +2469,8 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states, _retry_dispatch?), do: {:ok, issue}
+  defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states, _retry_dispatch?),
+    do: {:ok, issue}
 
   defp complete_issue(%State{} = state, issue_id) do
     %{
@@ -2287,13 +2508,19 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{retry_context.identifier} in #{delay_ms}ms (attempt #{next_attempt})#{retry_error_suffix(retry_context.error)}")
 
-    RunLog.record_agent_retry_scheduled(issue_id, retry_context, retry_process_ownership, metadata, %{
-      attempt: next_attempt,
-      delay_ms: delay_ms,
-      due_at_ms: due_at_ms,
-      scheduled_for: DateTime.add(DateTime.utc_now(), delay_ms, :millisecond),
-      lease_state: metadata[:lease_state] || "retrying"
-    })
+    RunLog.record_agent_retry_scheduled(
+      issue_id,
+      retry_context,
+      retry_process_ownership,
+      metadata,
+      %{
+        attempt: next_attempt,
+        delay_ms: delay_ms,
+        due_at_ms: due_at_ms,
+        scheduled_for: DateTime.add(DateTime.utc_now(), delay_ms, :millisecond),
+        lease_state: metadata[:lease_state] || "retrying"
+      }
+    )
 
     %{
       state
@@ -2301,12 +2528,20 @@ defmodule SymphonyElixir.Orchestrator do
           Map.put(
             state.retry_attempts,
             issue_id,
-            retry_entry(next_attempt, timer_ref, retry_token, due_at_ms, retry_context, retry_process_ownership)
+            retry_entry(
+              next_attempt,
+              timer_ref,
+              retry_token,
+              due_at_ms,
+              retry_context,
+              retry_process_ownership
+            )
           )
     }
   end
 
-  defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
+  defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token)
+       when is_reference(retry_token) do
     case Map.get(state.retry_attempts, issue_id) do
       %{attempt: attempt, retry_token: ^retry_token} = retry_entry ->
         metadata = %{
@@ -2331,7 +2566,8 @@ defmodule SymphonyElixir.Orchestrator do
   # A closed admission only holds a retry after its own timer has fired.  Other
   # queued retries keep their original timer and deadline while admission is
   # closed, so reopening cannot turn an unexpired backoff into immediate work.
-  defp hold_fired_retry_attempt(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
+  defp hold_fired_retry_attempt(%State{} = state, issue_id, retry_token)
+       when is_reference(retry_token) do
     case Map.get(state.retry_attempts, issue_id) do
       %{retry_token: ^retry_token} = retry ->
         held_retry =
@@ -2352,6 +2588,7 @@ defmodule SymphonyElixir.Orchestrator do
     cond do
       Map.has_key?(state.retry_attempts, issue_id) ->
         Logger.warning("Dropping stale retry timer for issue_id=#{issue_id}; newer retry entry is still queued")
+
         state
 
       Map.has_key?(state.running, issue_id) ->
@@ -2360,6 +2597,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       MapSet.member?(state.claimed, issue_id) ->
         Logger.warning("Retry chain missing for claimed issue_id=#{issue_id}; releasing leaked claim")
+
         release_issue_claim(state, issue_id)
 
       true ->
@@ -2505,7 +2743,10 @@ defmodule SymphonyElixir.Orchestrator do
     running_entry =
       metadata
       |> Map.put(:issue, issue)
-      |> Map.put(:workspace_path, metadata[:workspace_path] || Map.get(durable_ownership || %{}, :workspace_path))
+      |> Map.put(
+        :workspace_path,
+        metadata[:workspace_path] || Map.get(durable_ownership || %{}, :workspace_path)
+      )
 
     context = runtime_failure_context(issue.id, running_entry, state.execution_generation)
 
@@ -2542,7 +2783,9 @@ defmodule SymphonyElixir.Orchestrator do
          issue: issue,
          identifier: issue.identifier,
          error: metadata[:error] || "process ownership blocks retry dispatch",
-         retry_reason: metadata[:retry_reason] || metadata[:error] || "process ownership blocks retry dispatch",
+         retry_reason:
+           metadata[:retry_reason] || metadata[:error] ||
+             "process ownership blocks retry dispatch",
          lease_state: lease_state,
          process_ownership: process_ownership
        })
@@ -2641,7 +2884,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp runtime_input_fingerprint(_issue, _workspace_path), do: nil
 
-  defp put_failure_observation(%State{} = state, issue_id, observation) when is_binary(issue_id) and is_map(observation) do
+  defp put_failure_observation(%State{} = state, issue_id, observation)
+       when is_binary(issue_id) and is_map(observation) do
     %{state | failure_observations: Map.put(state.failure_observations, issue_id, observation)}
   end
 
@@ -2670,7 +2914,13 @@ defmodule SymphonyElixir.Orchestrator do
         failure_observation
       )
 
-    RunLog.record_irrecoverable_runtime_failure(issue_id, running_entry, blocked_ownership, failure)
+    RunLog.record_irrecoverable_runtime_failure(
+      issue_id,
+      running_entry,
+      blocked_ownership,
+      failure
+    )
+
     maybe_escalate_irrecoverable_runtime_failure(issue_id, issue, failure)
 
     Logger.error("Irrecoverable runtime failure for issue_id=#{issue_id} issue_identifier=#{identifier}; blocked ordinary retry family=#{failure.family} summary=#{summary}")
@@ -2706,7 +2956,8 @@ defmodule SymphonyElixir.Orchestrator do
     })
   end
 
-  defp maybe_escalate_irrecoverable_runtime_failure(issue_id, %Issue{} = issue, _failure) when is_binary(issue_id) do
+  defp maybe_escalate_irrecoverable_runtime_failure(issue_id, %Issue{} = issue, _failure)
+       when is_binary(issue_id) do
     label_result = Tracker.add_issue_label(issue_id, "Human Escalation")
     state_result = Tracker.update_issue_state(issue_id, "Human Escalation")
 
@@ -2842,7 +3093,8 @@ defmodule SymphonyElixir.Orchestrator do
     %{state | claimed: MapSet.delete(state.claimed, issue_id)}
   end
 
-  defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
+  defp retry_delay(attempt, metadata)
+       when is_integer(attempt) and attempt > 0 and is_map(metadata) do
     if metadata[:delay_type] == :continuation and attempt == 1 do
       @continuation_retry_delay_ms
     else
@@ -2852,7 +3104,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp failure_retry_delay(attempt) do
     max_delay_power = min(attempt - 1, 10)
-    min(@failure_retry_base_ms * (1 <<< max_delay_power), Config.settings!().agent.max_retry_backoff_ms)
+
+    min(
+      @failure_retry_base_ms * (1 <<< max_delay_power),
+      Config.settings!().agent.max_retry_backoff_ms
+    )
   end
 
   defp normalize_retry_attempt(attempt) when is_integer(attempt) and attempt > 0, do: attempt
@@ -2898,7 +3154,14 @@ defmodule SymphonyElixir.Orchestrator do
   defp retry_error_suffix(error) when is_binary(error), do: " error=#{error}"
   defp retry_error_suffix(_error), do: ""
 
-  defp retry_entry(next_attempt, timer_ref, retry_token, due_at_ms, retry_context, process_ownership) do
+  defp retry_entry(
+         next_attempt,
+         timer_ref,
+         retry_token,
+         due_at_ms,
+         retry_context,
+         process_ownership
+       ) do
     %{
       attempt: next_attempt,
       timer_ref: timer_ref,
@@ -2961,29 +3224,173 @@ defmodule SymphonyElixir.Orchestrator do
     update_owned_state(issue, metadata, state, attrs)
   end
 
-  defp maybe_refresh_process_ownership(running_entry, issue_id, force \\ false)
+  # Routine active-state refreshes run outside the serial Orchestrator path.
+  # One exact-run writer per issue is in flight; additional updates only mark
+  # one follow-up snapshot dirty. Terminal paths retire the producer and fence
+  # this task before settlement can write a terminal ownership state.
+  defp schedule_routine_process_ownership(%State{} = state, issue_id) when is_binary(issue_id) do
+    case {Map.get(state.running, issue_id), Map.get(state.routine_persistence, issue_id)} do
+      {%{run_id: run_id}, %{run_id: run_id} = routine} ->
+        put_in(state.routine_persistence[issue_id], %{routine | dirty?: true})
 
-  defp maybe_refresh_process_ownership(%{issue: %Issue{} = issue} = running_entry, issue_id, force)
-       when is_binary(issue_id) do
-    refreshed_at_ms = Map.get(running_entry, :process_ownership_refreshed_at_ms)
+      {%{run_id: _run_id} = running_entry, nil} ->
+        start_routine_process_ownership(state, issue_id, running_entry)
 
-    if force or !is_integer(refreshed_at_ms) or
-         System.monotonic_time(:millisecond) - refreshed_at_ms >= @process_ownership_refresh_interval_ms do
-      case update_owned_state(issue, running_entry, "active", process_ownership_attrs(running_entry)) do
-        nil ->
-          running_entry
-
-        process_ownership ->
-          running_entry
-          |> Map.put(:process_ownership, process_ownership)
-          |> Map.put(:process_ownership_refreshed_at_ms, System.monotonic_time(:millisecond))
-      end
-    else
-      running_entry
+      _ ->
+        state
     end
   end
 
-  defp maybe_refresh_process_ownership(running_entry, _issue_id, _force), do: running_entry
+  defp start_routine_process_ownership(%State{} = state, issue_id, running_entry) do
+    issue = Map.get(running_entry, :issue)
+    ownership = Map.get(running_entry, :process_ownership)
+    run_id = Map.get(running_entry, :run_id)
+    attrs = Map.put(process_ownership_attrs(running_entry), :state, "active")
+
+    outcome =
+      try do
+        Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
+          case {issue, ownership} do
+            {%Issue{} = owned_issue, %{holder: _holder}} ->
+              ProcessOwnership.refresh_active(
+                owned_issue,
+                ownership_identity(ownership),
+                attrs
+              )
+
+            _ ->
+              {:error, :ownership_missing}
+          end
+        end)
+      catch
+        kind, reason -> {:error, {kind, reason}}
+      end
+
+    case outcome do
+      %Task{pid: task_pid, ref: task_ref} ->
+        routine = %{
+          task_pid: task_pid,
+          token: task_ref,
+          run_id: run_id,
+          dirty?: false
+        }
+
+        %{state | routine_persistence: Map.put(state.routine_persistence, issue_id, routine)}
+
+      failure ->
+        Logger.warning("Failed to start routine process ownership refresh for issue_id=#{issue_id}: #{inspect(failure)}")
+
+        state
+    end
+  end
+
+  defp finish_routine_process_ownership(state, issue_id, token, run_id, result) do
+    case Map.get(state.routine_persistence, issue_id) do
+      %{token: ^token, run_id: ^run_id} = routine ->
+        _ = Process.demonitor(routine.token, [:flush])
+        state = %{state | routine_persistence: Map.delete(state.routine_persistence, issue_id)}
+        state = apply_routine_process_ownership_result(state, issue_id, run_id, result)
+
+        case {routine.dirty?, Map.get(state.running, issue_id)} do
+          {true, %{run_id: ^run_id} = running_entry} ->
+            start_routine_process_ownership(state, issue_id, running_entry)
+
+          _ ->
+            state
+        end
+
+      _stale_or_fenced ->
+        state
+    end
+  end
+
+  defp finish_routine_process_ownership_exit(state, ref, reason) when is_reference(ref) do
+    case Enum.find(state.routine_persistence, fn {_issue_id, routine} ->
+           Map.get(routine, :token) == ref
+         end) do
+      {issue_id, %{run_id: run_id} = routine} ->
+        Logger.warning("Routine process ownership refresh exited for issue_id=#{issue_id} run_id=#{run_id}: #{inspect(reason)}")
+
+        state = %{state | routine_persistence: Map.delete(state.routine_persistence, issue_id)}
+
+        state =
+          apply_routine_process_ownership_result(
+            state,
+            issue_id,
+            run_id,
+            {:error, {:task_exit, reason}}
+          )
+
+        case {routine.dirty?, Map.get(state.running, issue_id)} do
+          {true, %{run_id: ^run_id} = running_entry} ->
+            start_routine_process_ownership(state, issue_id, running_entry)
+
+          _ ->
+            state
+        end
+
+      nil ->
+        state
+    end
+  end
+
+  defp apply_routine_process_ownership_result(
+         state,
+         issue_id,
+         run_id,
+         {:ok, process_ownership}
+       ) do
+    case Map.get(state.running, issue_id) do
+      %{run_id: ^run_id} = running_entry ->
+        updated =
+          running_entry
+          |> Map.put(:process_ownership, process_ownership)
+          |> Map.put(:process_ownership_refreshed_at_ms, System.monotonic_time(:millisecond))
+
+        %{state | running: Map.put(state.running, issue_id, updated)}
+
+      _ ->
+        state
+    end
+  end
+
+  defp apply_routine_process_ownership_result(state, issue_id, run_id, {:error, reason}) do
+    Logger.warning("Failed routine process ownership refresh for issue_id=#{issue_id} run_id=#{run_id}: #{inspect(reason)}")
+
+    state
+  end
+
+  defp apply_routine_process_ownership_result(state, _issue_id, _run_id, _result), do: state
+
+  defp fence_routine_process_ownership(%State{} = state, issue_id) do
+    state.running
+    |> Map.get(issue_id)
+    |> retire_current_run()
+
+    case Map.get(state.routine_persistence, issue_id) do
+      %{task_pid: task_pid, token: token} when is_pid(task_pid) and is_reference(token) ->
+        Process.exit(task_pid, :shutdown)
+
+        receive do
+          {:DOWN, ^token, :process, ^task_pid, _reason} -> :ok
+        end
+
+      _ ->
+        :ok
+    end
+
+    %{state | routine_persistence: Map.delete(state.routine_persistence, issue_id)}
+  end
+
+  defp retire_current_run(%{current_run: %CurrentRun{} = current_run}),
+    do: CurrentRun.retire(current_run)
+
+  defp retire_current_run(_running_entry), do: :ok
+
+  defp current_run_matches?(%{current_run: %CurrentRun{} = current_run}, envelope),
+    do: CurrentRun.matches?(current_run, envelope)
+
+  defp current_run_matches?(_running_entry, _envelope), do: false
 
   defp maybe_release_process_ownership(%Issue{} = issue) do
     case ProcessOwnership.status_for_issue(issue) do
@@ -2997,8 +3404,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp release_current_ownership(issue, ownership) do
     if ownership.holder == ProcessOwnership.holder_id() do
       case ProcessOwnership.release(issue, ownership_identity(ownership)) do
-        {:ok, _released} -> :ok
-        {:error, reason} -> Logger.warning("Failed to release process ownership for #{issue_context(issue)}: #{inspect(reason)}")
+        {:ok, _released} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Failed to release process ownership for #{issue_context(issue)}: #{inspect(reason)}")
       end
     else
       :ok
@@ -3035,25 +3445,35 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.warning("Failed to update process ownership for #{issue_context(issue)}: #{inspect(reason)}")
+
         nil
     end
   end
 
   defp process_ownership_allows_dispatch?(%Issue{}, _retry_dispatch?), do: true
 
-  defp dispatch_run_id(%Issue{} = issue, attempt) when is_integer(attempt) do
+  defp dispatch_run_id(%Issue{} = issue, _attempt), do: new_run_id(issue)
+
+  defp retry_predecessor_run_id(%Issue{} = issue, attempt) when is_integer(attempt) do
     case ProcessOwnership.status_for_issue(issue) do
-      %{state: "retrying", holder: holder, run_id: run_id} when is_binary(run_id) ->
-        if holder == ProcessOwnership.holder_id(), do: run_id, else: new_run_id(issue)
+      %{state: state, holder: holder, run_id: run_id}
+      when state in ["retrying", "quarantined"] and is_binary(run_id) ->
+        if holder == ProcessOwnership.holder_id(), do: run_id
 
       _ ->
-        new_run_id(issue)
+        nil
     end
   end
 
-  defp dispatch_run_id(%Issue{} = issue, _attempt), do: new_run_id(issue)
+  defp retry_predecessor_run_id(%Issue{}, _attempt), do: nil
 
-  defp dispatch_ownership_attrs(%Issue{} = issue, run_id, worker_host, reset_marker) do
+  defp dispatch_ownership_attrs(
+         %Issue{} = issue,
+         run_id,
+         worker_host,
+         reset_marker,
+         replaces_run_id
+       ) do
     %{
       issue_id: issue.id,
       issue_identifier: issue.identifier,
@@ -3062,7 +3482,8 @@ defmodule SymphonyElixir.Orchestrator do
       holder: ProcessOwnership.holder_id(),
       worker_host: worker_host,
       workspace_path: expected_workspace_path(issue),
-      reset_marker: reset_marker
+      reset_marker: reset_marker,
+      replaces_run_id: replaces_run_id
     }
   end
 
@@ -3078,7 +3499,10 @@ defmodule SymphonyElixir.Orchestrator do
   defp expected_workspace_path(%Issue{} = issue) do
     case issue.identifier || issue.id do
       identifier when is_binary(identifier) and identifier != "" ->
-        Path.join(Config.settings!().workspace.root, workspace_basename(identifier, issue.repository))
+        Path.join(
+          Config.settings!().workspace.root,
+          workspace_basename(identifier, issue.repository)
+        )
 
       _ ->
         nil
@@ -3102,11 +3526,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp repository_workspace_suffix(_repository), do: nil
 
-  defp safe_workspace_name(value) when is_binary(value), do: String.replace(value, ~r/[^a-zA-Z0-9._-]/, "_")
+  defp safe_workspace_name(value) when is_binary(value),
+    do: String.replace(value, ~r/[^a-zA-Z0-9._-]/, "_")
+
   defp safe_workspace_name(_value), do: nil
 
   defp record_process_ownership(%{issue: %Issue{} = issue} = running_entry, _issue_id) do
-    case update_owned_state(issue, running_entry, "active", process_ownership_attrs(running_entry)) do
+    case update_owned_state(
+           issue,
+           running_entry,
+           "active",
+           process_ownership_attrs(running_entry)
+         ) do
       nil -> running_entry
       process_ownership -> Map.put(running_entry, :process_ownership, process_ownership)
     end
@@ -3136,7 +3567,11 @@ defmodule SymphonyElixir.Orchestrator do
             issue,
             running_entry,
             "quarantined",
-            Map.put(attrs, :quarantine_reason, "remote worker completion cannot be verified locally")
+            Map.put(
+              attrs,
+              :quarantine_reason,
+              "remote worker completion cannot be verified locally"
+            )
           )
 
         :quarantined
@@ -3147,7 +3582,11 @@ defmodule SymphonyElixir.Orchestrator do
             issue,
             running_entry,
             "quarantined",
-            Map.put(attrs, :quarantine_reason, "app-server process remained live after normal worker exit")
+            Map.put(
+              attrs,
+              :quarantine_reason,
+              "app-server process remained live after normal worker exit"
+            )
           )
 
         :quarantined
@@ -3189,7 +3628,11 @@ defmodule SymphonyElixir.Orchestrator do
             issue,
             running_entry,
             "quarantined",
-            Map.put(attrs, :quarantine_reason, "agent exited before app-server process cleaned: #{inspect(reason)}")
+            Map.put(
+              attrs,
+              :quarantine_reason,
+              "agent exited before app-server process cleaned: #{inspect(reason)}"
+            )
           )
 
         :quarantined
@@ -3203,7 +3646,11 @@ defmodule SymphonyElixir.Orchestrator do
             issue,
             running_entry,
             "quarantined",
-            Map.put(attrs, :quarantine_reason, "#{@settlement_evidence_unavailable_reason}: #{inspect(reason)}")
+            Map.put(
+              attrs,
+              :quarantine_reason,
+              "#{@settlement_evidence_unavailable_reason}: #{inspect(reason)}"
+            )
           )
 
         :quarantined
@@ -3216,7 +3663,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   # Evidence with no survivor count observed nothing; it is handled by
   # `settlement_evidence_unavailable?/1`, never read as "no survivors".
-  defp settlement_processes_remain?(%{live_after: live_after}) when is_integer(live_after), do: live_after > 0
+  defp settlement_processes_remain?(%{live_after: live_after}) when is_integer(live_after),
+    do: live_after > 0
+
   defp settlement_processes_remain?(_cleanup_evidence), do: false
 
   defp settlement_evidence_unavailable?(%{evidence_status: :unavailable}), do: true
@@ -3228,14 +3677,18 @@ defmodule SymphonyElixir.Orchestrator do
   defp retry_lease_state_from_process_ownership(%{state: "quarantined"}), do: "quarantined"
   defp retry_lease_state_from_process_ownership(_process_ownership), do: "retrying"
 
-  defp retry_process_ownership_status(%{issue: %Issue{} = issue}), do: ProcessOwnership.status_for_issue(issue)
+  defp retry_process_ownership_status(%{issue: %Issue{} = issue}),
+    do: ProcessOwnership.status_for_issue(issue)
+
   defp retry_process_ownership_status(_running_entry), do: nil
 
   defp retry_process_ownership_snapshot(%{process_ownership: process_ownership})
        when is_map(process_ownership),
        do: process_ownership
 
-  defp retry_process_ownership_snapshot(%{issue: %Issue{} = issue}), do: ProcessOwnership.status_for_issue(issue)
+  defp retry_process_ownership_snapshot(%{issue: %Issue{} = issue}),
+    do: ProcessOwnership.status_for_issue(issue)
+
   defp retry_process_ownership_snapshot(_retry), do: nil
 
   # Prefer the running entry's cached ownership (refreshed on the codex-update
@@ -3246,7 +3699,9 @@ defmodule SymphonyElixir.Orchestrator do
        when is_map(process_ownership),
        do: process_ownership
 
-  defp snapshot_process_ownership(%{issue: %Issue{} = issue}), do: ProcessOwnership.status_for_issue(issue)
+  defp snapshot_process_ownership(%{issue: %Issue{} = issue}),
+    do: ProcessOwnership.status_for_issue(issue)
+
   defp snapshot_process_ownership(_metadata), do: nil
 
   defp process_ownership_attrs(running_entry) when is_map(running_entry) do
@@ -3276,7 +3731,8 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp release_completed_owned_state(%Issue{} = issue, context, extra_attrs) when is_map(context) do
+  defp release_completed_owned_state(%Issue{} = issue, context, extra_attrs)
+       when is_map(context) do
     ownership = Map.get(context, :process_ownership) || ProcessOwnership.status_for_issue(issue)
 
     case ownership do
@@ -3340,7 +3796,8 @@ defmodule SymphonyElixir.Orchestrator do
     |> elem(0)
   end
 
-  defp running_worker_host_count(running, worker_host) when is_map(running) and is_binary(worker_host) do
+  defp running_worker_host_count(running, worker_host)
+       when is_map(running) and is_binary(worker_host) do
     Enum.count(running, fn
       {_issue_id, %{worker_host: ^worker_host}} -> true
       _ -> false
@@ -3537,6 +3994,7 @@ defmodule SymphonyElixir.Orchestrator do
           # staleness is acceptable; a snapshot that head-of-line blocks behind
           # per-issue OS scans is the wedge this contract forbids (EMB-1260).
           process_ownership: snapshot_process_ownership(metadata),
+          run_id: Map.get(metadata, :run_id),
           session_id: metadata.session_id,
           codex_app_server_pid: metadata.codex_app_server_pid,
           codex_input_tokens: metadata.codex_input_tokens,
@@ -3545,6 +4003,7 @@ defmodule SymphonyElixir.Orchestrator do
           turn_count: Map.get(metadata, :turn_count, 0),
           started_at: metadata.started_at,
           last_codex_timestamp: metadata.last_codex_timestamp,
+          last_activity_at_ms: current_run_activity_ms(metadata),
           last_codex_message: metadata.last_codex_message,
           last_codex_event: metadata.last_codex_event,
           runtime_seconds: running_seconds(metadata.started_at, now)
@@ -3699,7 +4158,10 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp latest_poll_result(%State{latest_dispatch_summary: summary, last_poll_result: last_poll_result}) do
+  defp latest_poll_result(%State{
+         latest_dispatch_summary: summary,
+         last_poll_result: last_poll_result
+       }) do
     case summary do
       %{result: result} when is_binary(result) -> result
       _ -> last_poll_result
@@ -3718,7 +4180,9 @@ defmodule SymphonyElixir.Orchestrator do
     %{issue_id: nil, issue_identifier: nil, reason_family: reason_family}
   end
 
-  defp safe_issue_identifier(%Issue{identifier: identifier}) when is_binary(identifier) and identifier != "", do: identifier
+  defp safe_issue_identifier(%Issue{identifier: identifier})
+       when is_binary(identifier) and identifier != "", do: identifier
+
   defp safe_issue_identifier(%Issue{id: id}) when is_binary(id) and id != "", do: id
   defp safe_issue_identifier(_issue), do: nil
 
@@ -3736,7 +4200,20 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp iso8601(_datetime), do: nil
 
-  defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
+  defp integrate_codex_update(
+         running_entry,
+         update,
+         activity_at_ms
+       )
+       when is_map(update) do
+    event = Map.get(update, :event, Map.get(running_entry, :last_codex_event))
+
+    timestamp =
+      case Map.get(update, :timestamp) do
+        %DateTime{} = provider_timestamp -> provider_timestamp
+        _ -> Map.get(running_entry, :last_codex_timestamp)
+      end
+
     token_delta = extract_token_delta(running_entry, update)
     codex_input_tokens = Map.get(running_entry, :codex_input_tokens, 0)
     codex_output_tokens = Map.get(running_entry, :codex_output_tokens, 0)
@@ -3760,9 +4237,10 @@ defmodule SymphonyElixir.Orchestrator do
         codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
-        turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
+        turn_count: turn_count_for_update(turn_count, running_entry.session_id, update),
+        last_activity_at_ms: nondecreasing_activity_ms(Map.get(running_entry, :last_activity_at_ms), activity_at_ms)
       })
-      |> refresh_handoff_settlement_activity(),
+      |> refresh_handoff_settlement_activity(activity_at_ms),
       token_delta
     }
   end
@@ -3778,15 +4256,26 @@ defmodule SymphonyElixir.Orchestrator do
   # The anchor is only ever REFRESHED here, never created: settlement tracking
   # starts at the first eligible non-active reconciliation, and activity on a
   # turn that is not settling must not enrol it.
-  defp refresh_handoff_settlement_activity(%{handoff_settlement_last_activity_at_ms: _} = running_entry) do
+  defp refresh_handoff_settlement_activity(
+         %{handoff_settlement_last_activity_at_ms: existing} = running_entry,
+         activity_at_ms
+       )
+       when is_integer(activity_at_ms) do
     Map.put(
       running_entry,
       :handoff_settlement_last_activity_at_ms,
-      System.monotonic_time(:millisecond)
+      nondecreasing_activity_ms(existing, activity_at_ms)
     )
   end
 
-  defp refresh_handoff_settlement_activity(running_entry), do: running_entry
+  defp refresh_handoff_settlement_activity(running_entry, _activity_at_ms), do: running_entry
+
+  defp nondecreasing_activity_ms(existing, observed)
+       when is_integer(existing) and is_integer(observed),
+       do: max(existing, observed)
+
+  defp nondecreasing_activity_ms(_existing, observed) when is_integer(observed), do: observed
+  defp nondecreasing_activity_ms(existing, _observed), do: existing
 
   defp codex_app_server_pid_for_update(_existing, %{codex_app_server_pid: pid})
        when is_binary(pid),
@@ -3860,7 +4349,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp pop_running_entry(state, issue_id) do
-    {Map.get(state.running, issue_id), %{state | running: Map.delete(state.running, issue_id)}}
+    running_entry = Map.get(state.running, issue_id)
+    state = fence_routine_process_ownership(state, issue_id)
+    {running_entry, %{state | running: Map.delete(state.running, issue_id)}}
   end
 
   defp record_session_completion_totals(state, running_entry) when is_map(running_entry) do
@@ -3957,8 +4448,7 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp extract_token_delta(running_entry, %{event: _, timestamp: _} = update) do
-    running_entry = running_entry || %{}
+  defp extract_token_delta(running_entry, update) when is_map(update) do
     usage = extract_token_usage(update)
 
     {
@@ -4355,6 +4845,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Work admission marker is unreadable; starting closed reason=#{inspect(reason)}")
+
         %{status: "closed", target_generation: default_target}
     end
   end
@@ -4400,6 +4891,7 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when marker_generation != execution_generation do
     Logger.error("Open work admission marker targets a different execution generation; starting closed")
+
     %{marker | status: "closed"}
   end
 
@@ -4461,7 +4953,14 @@ defmodule SymphonyElixir.Orchestrator do
       Enum.into(state.retry_attempts, %{}, fn {issue_id, retry} ->
         if Map.get(retry, :held_by_admission, false) do
           retry_token = make_ref()
-          delay_ms = max(Map.get(retry, :due_at_ms, System.monotonic_time(:millisecond)) - System.monotonic_time(:millisecond), 0)
+
+          delay_ms =
+            max(
+              Map.get(retry, :due_at_ms, System.monotonic_time(:millisecond)) -
+                System.monotonic_time(:millisecond),
+              0
+            )
+
           timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
 
           {issue_id,

@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   require Logger
 
   alias SymphonyElixir.{Config, Linear.Issue}
+  alias SymphonyElixir.Runtime.ProcessOwnership.FileSystem
 
   @registry_dir ".symphony/process-ownership"
   @lock_owner_file "owner.json"
@@ -69,6 +70,52 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
   rescue
     error ->
       Logger.warning("Failed to update process ownership for issue_id=#{issue.id}: #{Exception.message(error)}")
+      {:error, error}
+  end
+
+  @doc """
+  Stages a routine active-state refresh before entering the ownership lock,
+  then commits only if the exact active record observed during staging is
+  still current.
+
+  This is the narrow serviceability path for non-terminal refreshes. Terminal,
+  acquisition, settlement, quarantine, and release writes continue to use the
+  ordinary locked replacement path.
+  """
+  @spec refresh_active(Issue.t(), map(), map()) :: {:ok, map()} | {:error, term()}
+  def refresh_active(%Issue{} = issue, expected, attrs)
+      when is_map(expected) and is_map(attrs) do
+    expected = scope_attrs(issue, normalize_attrs(expected))
+    update_attrs = normalize_attrs(attrs)
+    workspace_path = expected.workspace_path || update_attrs.workspace_path
+    path = scoped_registry_path(issue, %{expected | workspace_path: workspace_path})
+
+    with :ok <- validate_identity(expected),
+         {:ok, observed_record} <- read_exact_record(path),
+         :ok <- verify_owner(observed_record, expected),
+         :ok <- validate_identity_updates(observed_record, attrs),
+         :ok <- require_active_record(observed_record),
+         merged_attrs <- merge_record_attrs(observed_record, attrs),
+         :ok <- validate_local_attrs(merged_attrs),
+         {:ok, staged_path, staged_record} <- stage_record(path, issue, merged_attrs, "active") do
+      try do
+        with_scope_lock(path, fn ->
+          commit_staged_active_record(
+            path,
+            staged_path,
+            observed_record,
+            staged_record,
+            expected
+          )
+        end)
+      after
+        _ = File.rm(staged_path)
+      end
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to refresh active process ownership for issue_id=#{issue.id}: #{Exception.message(error)}")
+
       {:error, error}
   end
 
@@ -461,7 +508,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     temporary_path = path <> ".tmp-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
 
     with {:ok, body} <- Jason.encode(record),
-         :ok <- File.write(temporary_path, body <> "\n", [:exclusive, :sync]),
+         :ok <- FileSystem.write(temporary_path, body <> "\n", [:exclusive, :sync]),
          :ok <- File.rename(temporary_path, path) do
       {:ok, record}
     else
@@ -470,6 +517,42 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
         {:error, reason}
     end
   end
+
+  defp stage_record(path, %Issue{} = issue, attrs, state) do
+    record = build_record(issue, attrs, state)
+    temporary_path = path <> ".tmp-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+
+    with {:ok, body} <- Jason.encode(record),
+         :ok <- FileSystem.write(temporary_path, body <> "\n", [:exclusive, :sync]) do
+      {:ok, temporary_path, record}
+    else
+      {:error, reason} ->
+        _ = File.rm(temporary_path)
+        {:error, reason}
+    end
+  end
+
+  defp commit_staged_active_record(
+         path,
+         staged_path,
+         observed_record,
+         staged_record,
+         expected
+       ) do
+    with {:ok, current_record} <- read_exact_record(path),
+         :ok <- verify_owner(current_record, expected),
+         :ok <- require_active_record(current_record),
+         :ok <- require_unchanged_record(current_record, observed_record),
+         :ok <- File.rename(staged_path, path) do
+      {:ok, normalize_status(staged_record)}
+    end
+  end
+
+  defp require_active_record(%{"state" => "active"}), do: :ok
+  defp require_active_record(_record), do: {:error, :ownership_not_active}
+
+  defp require_unchanged_record(current_record, current_record), do: :ok
+  defp require_unchanged_record(_current_record, _observed_record), do: {:error, :ownership_changed}
 
   defp build_record(%Issue{} = issue, attrs, state) do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
@@ -552,6 +635,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
           "token" => token,
           "worker_host_id" => current_host(),
           "owner_pid" => System.pid(),
+          "owner_process" => self() |> :erlang.pid_to_list() |> List.to_string(),
           "created_at_ms" => System.system_time(:millisecond)
         }
 
@@ -610,6 +694,15 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
 
   defp stale_scope_lock?(lock_path) do
     case read_scope_lock_owner(Path.join(lock_path, @lock_owner_file)) do
+      {:ok,
+       %{
+         "version" => 1,
+         "worker_host_id" => host,
+         "owner_pid" => owner_pid,
+         "owner_process" => owner_process
+       }} ->
+        host == current_host() and scope_lock_owner_stale?(owner_pid, owner_process)
+
       {:ok, %{"version" => 1, "worker_host_id" => host, "owner_pid" => pid}} ->
         host == current_host() and not pid_live?(pid)
 
@@ -620,6 +713,25 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
         scope_lock_age_ms(lock_path) >= @malformed_lock_stale_after_ms
     end
   end
+
+  defp scope_lock_owner_stale?(owner_pid, owner_process) do
+    if to_string(owner_pid) == System.pid() do
+      owner_process_stale?(owner_process)
+    else
+      not pid_live?(owner_pid)
+    end
+  end
+
+  defp owner_process_stale?(owner_process) when is_binary(owner_process) do
+    owner_process
+    |> String.to_charlist()
+    |> :erlang.list_to_pid()
+    |> then(&(not Process.alive?(&1)))
+  rescue
+    _ -> false
+  end
+
+  defp owner_process_stale?(_owner_process), do: false
 
   defp read_scope_lock_owner(path) do
     with {:ok, body} <- File.read(path),
@@ -752,11 +864,26 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
     do: blocked_reacquisition_allowed?(record, attrs)
 
   defp reacquirable_record?(%{"state" => state} = record, attrs)
-       when state in ["active", "retrying", "quarantined"],
-       do: stale_in_flight_reacquisition_allowed?(record, attrs)
+       when state in ["retrying", "quarantined"] do
+    retry_successor_reacquisition_allowed?(record, attrs) or
+      stale_in_flight_reacquisition_allowed?(record, attrs)
+  end
+
+  defp reacquirable_record?(%{"state" => "active"} = record, attrs),
+    do: stale_in_flight_reacquisition_allowed?(record, attrs)
 
   defp reacquirable_record?(record, attrs),
     do: stale_record?(record) and failure_observation_allows_reacquisition?(record, attrs)
+
+  defp retry_successor_reacquisition_allowed?(record, attrs) do
+    record["holder"] == attrs.holder and
+      record["run_id"] != attrs.run_id and
+      record["run_id"] == attrs.replaces_run_id and
+      record["role"] == attrs.role and
+      optional_workspace_equal?(attrs.workspace_path, record["workspace_path"]) and
+      blank_string?(record["worker_host"]) and
+      blank_string?(attrs.worker_host)
+  end
 
   defp holder_has_dead_pid?(holder) when is_binary(holder) do
     case holder |> String.split(":") |> Enum.reverse() do
@@ -904,6 +1031,7 @@ defmodule SymphonyElixir.Runtime.ProcessOwnership do
       cleanup_evidence: settlement_evidence_value(attrs),
       failure_observation: failure_observation_value(attrs),
       reset_marker: reset_marker_value(attrs),
+      replaces_run_id: attr_string(attrs, :replaces_run_id),
       worker_pid: attr_pid(attrs, :worker_pid),
       app_server_pid: attr_pid(attrs, :app_server_pid),
       app_server_pgid: attr_pid(attrs, :app_server_pgid),
