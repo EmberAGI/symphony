@@ -54,6 +54,13 @@ codex:
 #   .runtime/symphony/work-admission.json beneath that root.
 # Configured missing, unreadable, malformed, unsupported, or generation-mismatched
 # markers start closed before the first poll. The Orchestrator alone writes them.
+# TUR-877 target interface, not enabled by this example: optional
+# agent_runtime.host_resources carries strictly validated deployment-selected
+# host operations, distinct from skill_execution_contracts. Its exact schema,
+# source/generation context and fail-closed launch contract live in
+# ../docs/specs/domains/agent-runtime.md#explicit-deployment-host-resources.
+# Do not add active values until consumer support and wrapper materialization
+# are both validated; omission preserves existing behavior.
 # Runtime selection. Codex is the default and reference runtime; set the
 # provider to claude_code to run role turns through the first-party Claude Code
 # shim (claude-app-server) instead. Codex-backed workflows are unchanged when

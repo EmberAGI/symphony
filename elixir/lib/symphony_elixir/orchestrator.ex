@@ -2156,6 +2156,8 @@ defmodule SymphonyElixir.Orchestrator do
            AgentRunner.run(issue, recipient,
              attempt: attempt,
              worker_host: worker_host,
+             role: ProcessOwnership.current_role(),
+             execution_generation: state.execution_generation,
              run_id: process_ownership.run_id,
              process_ownership: process_ownership
            )

@@ -3,6 +3,12 @@
 # would silently flip provider-dependent defaults, so the suite always starts
 # from the unset baseline; tests that exercise the overrides set and restore
 # them explicitly.
+# The opt-in host-resource proof still needs its explicitly supplied generation
+# after this seal, so preserve that one value only in the immutable test fixture.
+host_resource_real_sandbox_execution_generation =
+  if System.get_env("RUN_TUR877_HOST_RESOURCE_SANDBOX") == "1",
+    do: System.get_env("SYMPHONY_EXECUTION_GENERATION")
+
 System.delete_env("OCTO_RUNTIME_ORCHESTRATOR_PROVIDER")
 System.delete_env("OCTO_RUNTIME_WORKER_PROVIDER")
 System.delete_env("SYMPHONY_ORCHESTRATION_ROOT")
@@ -71,7 +77,8 @@ boot_delegation_transport = Application.get_env(:symphony_elixir, :delegation_tr
   linear_client_module_installed_before_boot: Application.get_env(:symphony_elixir, :linear_client_module),
   delegation_transport_module_installed_before_boot: boot_delegation_transport,
   boot_workflow_file_path: boot_workflow_file,
-  boot_role_turn_recovery_dir: boot_role_turn_recovery_dir
+  boot_role_turn_recovery_dir: boot_role_turn_recovery_dir,
+  host_resource_real_sandbox_execution_generation: host_resource_real_sandbox_execution_generation
 })
 
 SymphonyElixir.TestSupport.LinearTrafficSentinel.install!()
@@ -92,6 +99,11 @@ excluded_tags =
     if System.get_env("RUN_CODEX_REAL_SANDBOX_SMOKE") == "1",
       do: tags,
       else: [:codex_real_sandbox_smoke | tags]
+  end)
+  |> then(fn tags ->
+    if System.get_env("RUN_TUR877_HOST_RESOURCE_SANDBOX") == "1",
+      do: tags,
+      else: [:host_resource_real_sandbox | tags]
   end)
 
 # All opt-in gates are decided at runtime on every invocation so a warm
