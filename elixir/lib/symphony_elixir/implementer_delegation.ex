@@ -25,6 +25,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
     tool_config_path
     tool_config_sha256
     worker_host
+    orchestration_root
   )a
 
   @type session :: %{

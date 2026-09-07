@@ -85,6 +85,7 @@ defmodule SymphonyElixir.AgentRuntime do
     tool_config_path
     tool_config_sha256
     worker_host
+    orchestration_root
   )a
 
   @doc """
@@ -198,9 +199,17 @@ defmodule SymphonyElixir.AgentRuntime do
   defp expected_host_resource_context(role, declaration, opts) do
     opts
     |> Keyword.take(@host_resource_context_keys)
+    |> maybe_put_orchestration_root()
     |> Keyword.put(:role, role)
     |> Keyword.put(:workflow_path, Workflow.workflow_file_path())
     |> then(&HostResourceContract.expected_context(declaration, &1))
+  end
+
+  defp maybe_put_orchestration_root(context) do
+    case Keyword.get(context, :orchestration_root) || System.get_env("SYMPHONY_ORCHESTRATION_ROOT") do
+      root when is_binary(root) and root != "" -> Keyword.put(context, :orchestration_root, root)
+      _other -> context
+    end
   end
 
   @doc """

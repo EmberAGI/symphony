@@ -21,8 +21,19 @@ defmodule SymphonyElixir.HostResourceContract do
     "/run/systemd/resolve/stub-resolv.conf",
     "/run/systemd/resolve/resolv.conf"
   ]
-  @forbidden_launcher_collections ~w(shims)
-  @context_keys ~w(role execution_generation runtime_generation source_ref tool_config_path tool_config_sha256 worker_host)a
+  @broad_filesystem_roots ~w(
+    / /bin /boot /dev /etc /home /lib /lib64 /media /mnt /opt /proc /root /run /sbin /srv /sys /tmp
+    /usr /var
+  )
+  @config_auth_cache_components ~w(
+    .agents .aws .cache .claude .codex .config .gnupg .kube .runtime .ssh cache caches shims
+  )
+  @orchestration_subtrees ~w(.runtime .codex .claude config)
+  @manager_collection_names ~w(.asdf .mise asdf installs installations mise rtx targets versions)
+  @context_keys ~w(
+    role execution_generation runtime_generation source_ref tool_config_path tool_config_sha256 worker_host
+    orchestration_root
+  )a
   @source_context_keys ~w(source_ref tool_config_path tool_config_sha256)a
 
   defstruct role: nil,
@@ -86,6 +97,7 @@ defmodule SymphonyElixir.HostResourceContract do
 
   defp resolve_nonempty(declaration, opts) do
     with :ok <- validate_context_keys(opts),
+         :ok <- validate_orchestration_root(opts),
          :ok <- validate_worker_host(opts),
          {:ok, declaration} <- normalize_map(declaration),
          :ok <- exact_keys(declaration, @top_level_fields, :declaration),
@@ -184,16 +196,17 @@ defmodule SymphonyElixir.HostResourceContract do
          :ok <- compare_context(:tool_config_path, tool_config, opts, [:tool_config_path]),
          :ok <- compare_context(:tool_config_sha256, tool_config_sha256, opts, [:tool_config_sha256]),
          {:ok, mise} <- validate_mise(operation["mise"]),
-         {:ok, elixir} <- validate_installation(operation["elixir"], :elixir),
-         {:ok, erlang} <- validate_installation(operation["erlang"], :erlang),
+         {:ok, elixir} <- validate_installation(operation["elixir"], :elixir, opts),
+         {:ok, erlang} <- validate_installation(operation["erlang"], :erlang, opts),
          :ok <- validate_version_relationship(elixir.version, erlang.version),
+         :ok <- reject_forbidden_grant(tool_config, :tool_config, opts),
          {:ok, tool_config_canonical} <- canonical_regular_file(tool_config, :tool_config),
          :ok <- validate_tool_config(tool_config_canonical, elixir.version, erlang.version),
          {:ok, tool_config_digest} <- file_digest(tool_config_canonical, :tool_config),
          :ok <- compare_digest(tool_config_digest, tool_config_sha256, :tool_config_sha256),
-         {:ok, mise_result} <- resolve_mise(mise),
-         {:ok, elixir_result} <- resolve_installation(elixir, :elixir),
-         {:ok, erlang_result} <- resolve_installation(erlang, :erlang) do
+         {:ok, mise_result} <- resolve_mise(mise, opts),
+         {:ok, elixir_result} <- resolve_installation(elixir, :elixir, opts),
+         {:ok, erlang_result} <- resolve_installation(erlang, :erlang, opts) do
       values = %{
         "symphony_runtime_verification" => %{
           "symphony_ref" => symphony_ref,
@@ -371,16 +384,17 @@ defmodule SymphonyElixir.HostResourceContract do
 
   defp validate_mise(_value), do: invalid(:mise, :map_required)
 
-  defp validate_installation(value, kind) when is_map(value) do
+  defp validate_installation(value, kind, opts) when is_map(value) do
     with :ok <- exact_keys(value, @installation_fields, kind),
          {:ok, version} <- installed_version(value["version"], kind),
          {:ok, install_path} <- absolute_path(value["install_path"], {kind, :install_path}),
+         :ok <- reject_forbidden_grant(install_path, {kind, :install_path}, opts),
          :ok <- validate_install_layout(install_path, version, kind) do
       {:ok, %{version: version, install_path: install_path}}
     end
   end
 
-  defp validate_installation(_value, kind), do: invalid(kind, :map_required)
+  defp validate_installation(_value, kind, _opts), do: invalid(kind, :map_required)
 
   defp validate_install_layout(path, version, kind) do
     expected_parent = Atom.to_string(kind)
@@ -453,9 +467,9 @@ defmodule SymphonyElixir.HostResourceContract do
 
   defp pinned_tool(_value, kind), do: invalid(kind, :pinned_string_required)
 
-  defp resolve_mise(%{executable: executable, target: target, sha256: expected_digest}) do
-    with :ok <- reject_forbidden_launcher_collection(executable, :mise_executable),
-         :ok <- reject_forbidden_launcher_collection(target, :mise_target),
+  defp resolve_mise(%{executable: executable, target: target, sha256: expected_digest}, opts) do
+    with :ok <- reject_forbidden_grant(executable, :mise_executable, opts),
+         :ok <- reject_forbidden_grant(target, :mise_target, opts),
          {:ok, executable_canonical} <- canonical_path(executable, :mise_executable),
          {:ok, target_canonical} <- canonical_path(target, :mise_target),
          :ok <- if(target_canonical == target, do: :ok, else: invalid(:mise_target, :not_canonical)),
@@ -467,14 +481,55 @@ defmodule SymphonyElixir.HostResourceContract do
     end
   end
 
-  defp reject_forbidden_launcher_collection(path, resource) do
-    if Enum.any?(Path.split(path), &(&1 in @forbidden_launcher_collections)),
-      do: invalid(resource, :unsafe_root),
-      else: :ok
+  defp reject_forbidden_grant(path, resource, opts) do
+    cond do
+      path in @broad_filesystem_roots -> invalid(resource, :unsafe_root)
+      home_root?(path) -> invalid(resource, :unsafe_root)
+      sensitive_collection?(path) -> invalid(resource, :unsafe_root)
+      orchestration_resource?(path, opts) -> invalid(resource, :unsafe_root)
+      manager_collection_root?(path) -> invalid(resource, :unsafe_root)
+      true -> :ok
+    end
   end
 
-  defp resolve_installation(%{version: version, install_path: install_path}, kind) do
-    with {:ok, canonical_install_path} <- canonical_path(install_path, {kind, :install_path}),
+  defp home_root?(path) do
+    path == System.user_home!() or
+      case Path.split(path) do
+        ["/", "home", _user] -> true
+        ["/", "Users", _user] -> true
+        _segments -> false
+      end
+  end
+
+  defp sensitive_collection?(path) do
+    Enum.any?(Path.split(path), &(&1 in @config_auth_cache_components))
+  end
+
+  defp orchestration_resource?(path, opts) do
+    case Keyword.get(opts, :orchestration_root) do
+      root when is_binary(root) and root != "" ->
+        path == root or
+          Enum.any?(@orchestration_subtrees, &within?(path, Path.join(root, &1)))
+
+      _other ->
+        false
+    end
+  end
+
+  defp within?(path, root), do: path == root or String.starts_with?(path, root <> "/")
+
+  defp manager_collection_root?(path) do
+    segments = Path.split(path)
+    basename = List.last(segments)
+    parent = segments |> Enum.reverse() |> Enum.at(1)
+
+    (basename in @manager_collection_names and File.dir?(path)) or
+      (parent in ~w(installs installations versions) and File.dir?(path))
+  end
+
+  defp resolve_installation(%{version: version, install_path: install_path}, kind, opts) do
+    with :ok <- reject_forbidden_grant(install_path, {kind, :install_path}, opts),
+         {:ok, canonical_install_path} <- canonical_path(install_path, {kind, :install_path}),
          :ok <-
            if(canonical_install_path == install_path,
              do: :ok,
@@ -686,6 +741,21 @@ defmodule SymphonyElixir.HostResourceContract do
       :ok
     else
       invalid(:context, :unsupported_context_key)
+    end
+  end
+
+  defp validate_orchestration_root(opts) do
+    case Keyword.get(opts, :orchestration_root) do
+      nil -> :ok
+      root when is_binary(root) and root != "" -> validate_canonical_absolute(root, :orchestration_root)
+      _other -> invalid(:orchestration_root, :invalid_context)
+    end
+  end
+
+  defp validate_canonical_absolute(path, resource) do
+    case absolute_path(path, resource) do
+      {:ok, _path} -> :ok
+      {:error, _reason} -> invalid(resource, :invalid_context)
     end
   end
 

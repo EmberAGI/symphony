@@ -178,10 +178,15 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
       )
 
     assert status == 0, "real Codex sandbox proof failed with status #{status}:\n#{output}"
-    assert output =~ "MISE="
-    assert output =~ "ELIXIR=Erlang/OTP 28"
-    assert output =~ "Elixir 1.19.5"
-    assert output =~ "ERLANG=28"
+    observed_mise = capture_version!(output, ~r/^MISE=.*?\b([0-9]+\.[0-9]+\.[0-9]+)\b/m, "mise")
+    observed_elixir = capture_version!(output, ~r/^Elixir ([0-9]+\.[0-9]+\.[0-9]+)\b/m, "Elixir")
+    observed_erlang = capture_version!(output, ~r/^ERLANG=([0-9]+)\s*$/m, "Erlang")
+    declared_elixir = declaration["operations"]["symphony_runtime_verification"]["elixir"]["version"]
+    declared_erlang = declaration["operations"]["symphony_runtime_verification"]["erlang"]["version"]
+
+    assert output =~ "ELIXIR=Erlang/OTP #{observed_erlang}"
+    assert observed_elixir == declared_elixir |> String.split("-otp-", parts: 2) |> hd()
+    assert observed_erlang == declared_erlang |> String.split(".", parts: 2) |> hd()
     assert output =~ ~r/^DNS=.+$/m
     assert File.read!(event) =~ assignment
     refute File.exists?(denied_runtime_write)
@@ -189,10 +194,40 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
     assert digest(tool_config) ==
              declaration["operations"]["symphony_runtime_verification"]["tool_config_sha256"]
 
+    proof_record = %{
+      "schema" => "tur877-host-proof/v1",
+      "source_head" => source_ref,
+      "declared_versions" => %{"elixir" => declared_elixir, "erlang" => declared_erlang},
+      "observed_versions" => %{
+        "mise" => observed_mise,
+        "elixir" => observed_elixir,
+        "erlang" => observed_erlang
+      },
+      "provenance" => %{
+        "symphony_ref" => source_ref,
+        "tool_config" => "[REDACTED]/mise.toml",
+        "tool_config_sha256" => declaration["operations"]["symphony_runtime_verification"]["tool_config_sha256"],
+        "mise_target" => "[REDACTED]/mise",
+        "mise_sha256" => declaration["operations"]["symphony_runtime_verification"]["mise"]["sha256"]
+      },
+      "command" => "codex sandbox -- /bin/sh -c [REDACTED]",
+      "dns" => "nonempty",
+      "worker_event" => "assignment_correlated",
+      "denials" => [
+        "runtime_control_write",
+        "sibling_installation_read",
+        "private_home_read",
+        "host_write"
+      ],
+      "outcome" => "pass"
+    }
+
     assert :ok = AgentRuntime.stop_session(session)
     assert_receive :session_stopped
     assert {:ok, _removed} = File.rm_rf(root)
     refute File.exists?(root)
+
+    IO.puts("TUR877_HOST_PROOF=" <> Jason.encode!(proof_record))
   end
 
   defp projected_configs(argv) do
@@ -249,6 +284,13 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
 
   defp digest(path) do
     path |> File.read!() |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
+  end
+
+  defp capture_version!(output, pattern, label) do
+    case Regex.run(pattern, output, capture: :all_but_first) do
+      [value] when value != "" -> value
+      _other -> flunk("real Codex sandbox proof did not record an allowlisted #{label} version")
+    end
   end
 
   defp shell_word(value), do: "'" <> String.replace(to_string(value), "'", "'\\''") <> "'"

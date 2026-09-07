@@ -85,6 +85,12 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
     fixture = host_resource_fixture()
     verification_path = ["operations", "symphony_runtime_verification"]
     tool_config_sha256 = fixture.context[:tool_config_sha256]
+    config_home_file = Path.join([fixture.root, ".config", "symphony", "mise.toml"])
+    auth_home_file = Path.join([fixture.root, ".codex", "auth", "mise.toml"])
+    cache_file = Path.join([fixture.root, ".cache", "symphony", "mise.toml"])
+    orchestration_state_file = Path.join([fixture.root, ".runtime", "symphony", "mise.toml"])
+    orchestration_root = Path.join(fixture.root, "octo")
+    orchestration_config_file = Path.join([orchestration_root, "config", "mise.toml"])
     shims_dir = Path.join(fixture.root, "shims")
     shim = Path.join(shims_dir, "mise")
 
@@ -97,6 +103,17 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
         Path.basename(fixture.elixir_install)
       ])
 
+    for path <- [
+          config_home_file,
+          auth_home_file,
+          cache_file,
+          orchestration_state_file,
+          orchestration_config_file
+        ] do
+      File.mkdir_p!(Path.dirname(path))
+      File.cp!(fixture.tool_config, path)
+    end
+
     File.mkdir_p!(shims_dir)
     File.mkdir_p!(Path.dirname(install_alias))
     File.ln_s!(fixture.mise_target, shim)
@@ -108,35 +125,67 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
       |> put_in(verification_path ++ ["tool_config_sha256"], tool_config_sha256)
     end
 
+    tool_config_case = fn path, reason ->
+      {replace_tool_config.(path), [tool_config_path: path], :tool_config, reason}
+    end
+
+    noncanonical_tool_config = Path.join(fixture.root, "nested/../mise.toml")
+    shim_declaration = put_in(fixture.declaration, verification_path ++ ["mise", "executable"], shim)
+    manager_root = Path.dirname(fixture.mise_target)
+
+    manager_declaration =
+      fixture.declaration
+      |> put_in(verification_path ++ ["mise", "executable"], manager_root)
+      |> put_in(verification_path ++ ["mise", "target"], manager_root)
+
+    installation_collection_declaration =
+      put_in(
+        fixture.declaration,
+        verification_path ++ ["elixir", "install_path"],
+        Path.dirname(fixture.elixir_install)
+      )
+
+    installation_alias_declaration =
+      put_in(
+        fixture.declaration,
+        verification_path ++ ["elixir", "install_path"],
+        install_alias
+      )
+
+    orchestration_config_case =
+      {
+        replace_tool_config.(orchestration_config_file),
+        [tool_config_path: orchestration_config_file, orchestration_root: orchestration_root],
+        :tool_config,
+        :unsafe_root
+      }
+
     invalid_cases = [
-      {replace_tool_config.("/"), [tool_config_path: "/"]},
-      {replace_tool_config.(System.user_home!()), [tool_config_path: System.user_home!()]},
-      {replace_tool_config.(Path.join(fixture.root, "nested/../mise.toml")), [tool_config_path: Path.join(fixture.root, "nested/../mise.toml")]},
-      {put_in(fixture.declaration, verification_path ++ ["mise", "executable"], shim), []},
-      {fixture.declaration
-       |> put_in(verification_path ++ ["mise", "executable"], Path.dirname(fixture.mise_target))
-       |> put_in(verification_path ++ ["mise", "target"], Path.dirname(fixture.mise_target)), []},
-      {put_in(
-         fixture.declaration,
-         verification_path ++ ["elixir", "install_path"],
-         Path.dirname(fixture.elixir_install)
-       ), []},
-      {put_in(
-         fixture.declaration,
-         verification_path ++ ["elixir", "install_path"],
-         install_alias
-       ), []},
-      {fixture.declaration, [worker_host: "remote-worker"]}
+      tool_config_case.(config_home_file, :unsafe_root),
+      tool_config_case.(auth_home_file, :unsafe_root),
+      tool_config_case.(cache_file, :unsafe_root),
+      tool_config_case.(orchestration_state_file, :unsafe_root),
+      orchestration_config_case,
+      tool_config_case.("/", :unsafe_root),
+      tool_config_case.("/home/blocked-user", :unsafe_root),
+      tool_config_case.(System.user_home!(), :unsafe_root),
+      tool_config_case.(noncanonical_tool_config, :not_canonical),
+      {shim_declaration, [], :mise_executable, :unsafe_root},
+      {manager_declaration, [], :mise_executable, :unsafe_root},
+      {installation_collection_declaration, [], {:elixir, :install_path}, :unsafe_root},
+      {installation_alias_declaration, [], {:elixir, :install_path}, :not_canonical},
+      {fixture.declaration, [worker_host: "remote-worker"], :worker_host, :remote_unsupported}
     ]
 
     issue = %Issue{
       id: "host-resource-unsafe-roots",
       identifier: "TUR-877-UNSAFE-ROOTS",
       title: "Host resource unsafe roots",
-      repository: "EmberAGI/symphony"
+      repository: "EmberAGI/symphony",
+      labels: ["implementation-effort:moderate"]
     }
 
-    for {declaration, extra_opts} <- invalid_cases do
+    for {declaration, extra_opts, resource, reason} <- invalid_cases do
       opts =
         [
           issue: issue,
@@ -153,7 +202,7 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
         ]
         |> Keyword.merge(extra_opts)
 
-      assert {:error, {:invalid_host_resource_contract, _details}} =
+      assert {:error, {:invalid_host_resource_contract, %{resource: ^resource, reason: ^reason}}} =
                AgentRuntime.start_session("/tmp/selected-workspace", opts)
     end
 
@@ -785,6 +834,7 @@ defmodule SymphonyElixir.AgentRuntimeHostResourcesTest do
       declaration: declaration,
       context: context,
       root: root,
+      tool_config: tool_config,
       mise_target: mise_target,
       elixir_install: elixir_install
     }
