@@ -61,3 +61,27 @@ Module `ImplementerDelegation.Supervision`, Adapter `HerdrTransport`.
   `working` on `tur1006-green-1` (title "progress_cursor in supervision").
   Resume protocol: `git pull`, re-issue the SAME token `tur1006-green-1` with
   remaining scope, poll with single `herdr agent get implementer_worker` calls.
+
+## Session 4 notes (2026-09-16 17:36Z–17:51Z)
+
+- Worker result `tur1006-green-1 status=completed` integrated and committed at
+  4911275 (transport `progress_cursor/3`, supervision prefers it, RED (a)/(b)
+  + refused-read-no-work test). Targeted 5-suite run: 106 tests / 1 failure;
+  the failure is pre-existing on baseline (`implementer_delegation_test.exs:221`
+  expects the Codex permission map without this host's
+  `/home/admin/scaling-octo-engine/.runtime/codex/implementer/skills`; it is
+  host-environment dependent, not this change). Supervision + herdr_transport
+  suites alone: 75 tests / 0 failures.
+- Deployed-code RED evidence (branch tests vs c05566e module code): 28 tests /
+  3 failures — (a) `left: {:ok, %{agent_status: "done"}}` vs
+  `right: {:error, {:implementer_agent_stalled, ... progress_cursor: :unavailable,
+  shutdown_reason: :stale_working}}`; (b) `implementer_hard_budget_exhausted`
+  with churning pane hash `{148, 89980895}`; (c) `:unavailable` vs
+  `{:provider_transcript, 7}`.
+- Worker discovery accepted: real-work items = tool_use, tool_result, non-blank
+  text in user/assistant records (string content counts as one text item);
+  system/retry/usage-only/isApiErrorMessage/blank/malformed score 0.
+- Remaining (orchestrator-owned): AC4 `agent_runtime.stale_working_ms` config
+  field (schema + AgentRunner `Keyword.put_new` like `turn_timeout_ms`, default
+  900_000, config test), agent-runtime.md spec section (real work vs UI churn
+  vs read failure; field), service spec config list, `make all`, PR, handoff.
