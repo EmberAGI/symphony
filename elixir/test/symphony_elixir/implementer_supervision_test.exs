@@ -480,6 +480,55 @@ defmodule SymphonyElixir.ImplementerSupervisionTest do
     assert count_received(:recovery_probe) == 2
   end
 
+  defmodule RefusedReadNoWorkTransport do
+    # The worst observable case: the pane read is refused for the whole turn and
+    # the real-work evidence behind it never advances either. Neither signal
+    # justifies extending the turn.
+    @stalled_cursor {:provider_transcript, 7}
+
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      {:ok, %{name: agent.name, agent_status: "working", agent_session: %{value: "refused-read-session"}}}
+    end
+
+    def await_agent(_session, agent, _statuses, _timeout_ms, %{owner: owner}) do
+      send(owner, :recovery_probe)
+      {:error, {:herdr_agent_status_timeout, agent.name, ["idle", "done", "blocked"]}}
+    end
+
+    def read_agent(_session, agent, %{source: :recent_unwrapped, lines: _lines}, _context) do
+      {:error, {:herdr_agent_read_failed, {:herdr_cli_error, "agent_not_idle", "cannot read 40 lines while #{agent.name} is working"}}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "refused pane"}}
+
+    def progress_cursor(_session, _agent, _context), do: {:ok, @stalled_cursor}
+  end
+
+  test "a refused pane read with unchanged real-work evidence is stale after bounded recovery" do
+    session = %{
+      supervised_session(RefusedReadNoWorkTransport)
+      | contract: %{provider: "claude_code"}
+    }
+
+    assert {:error, {:implementer_agent_stalled, evidence}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Do bounded work.",
+               %{},
+               supervision_opts(stale_working_ms: 5, heartbeat_interval_ms: 2, max_recovery_attempts: 2)
+             )
+
+    assert [%{result: {:failed, _}}, %{result: {:failed, _}}] = evidence.recovery_history
+    assert {:ok, checkpoint} = evidence.checkpoint
+    assert checkpoint.shutdown_reason == :stale_working
+    assert checkpoint.progress_cursor == {:provider_transcript, 7}
+    assert count_received(:recovery_probe) == 2
+  end
+
   defmodule StaleThenRecoveredTransport do
     def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
       {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
