@@ -106,3 +106,11 @@ Module `ImplementerDelegation.Supervision`, Adapter `HerdrTransport`.
   RED at the public `run_turn` seam: orchestrator idle immediately, worker
   `working` with advancing transcript real-work items and constant
   `activity_revision` → heartbeats must arrive; no-work worker → none.
+- 18:03Z checkpoint: AC4 config field landed at da58f8b (RED 3/3 failures →
+  GREEN 9 tests/0 failures incl. settlement-config suite); spec section at
+  dccff0b. Worker `tur1006-green-2` still `working` (editing
+  implementer_delegation.ex + new implementer_worker_settlement_activity_test.exs,
+  uncommitted, in the shared working tree — do NOT discard). Turn ended under
+  the 10-min operating rule. Resume: `git pull`, poll `herdr agent get
+  implementer_worker`, integrate the `kind=result` for `tur1006-green-2`,
+  then `make all`, PR, handoff to Agent Review.
