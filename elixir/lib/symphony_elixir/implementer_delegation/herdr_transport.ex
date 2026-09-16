@@ -781,7 +781,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
         {:ok, path}
 
       nil ->
-        {:error, {:herdr_provider_transcript_unavailable, %{agent: agent_name, path: transcripts_root, reason: :no_provider_transcript}}}
+        details = %{agent: agent_name, path: transcripts_root, reason: :no_provider_transcript}
+        {:error, {:herdr_provider_transcript_unavailable, details}}
     end
   end
 
