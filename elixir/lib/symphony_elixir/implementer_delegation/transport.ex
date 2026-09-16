@@ -50,6 +50,19 @@ defmodule SymphonyElixir.ImplementerDelegation.Transport do
               {:ok, agent_ref()} | {:error, term()}
   @callback read_agent(session_ref(), agent_ref(), map(), context()) :: {:ok, map()} | {:error, term()}
   @doc """
+  Observe the agent's real-work progress, independently of its pane.
+
+  A cursor is opaque: supervision only compares it for equality, so an
+  unchanged cursor means no real work has happened since the last observation.
+  It must therefore move only on real work — never on UI churn (spinners,
+  elapsed timers, token counters), retries, or error events.
+
+  `{:error, :not_applicable}` means this transport has no real-work evidence
+  for that agent and the caller should fall back to its pane observation. Any
+  other error is an unusable probe, not evidence of a stall.
+  """
+  @callback progress_cursor(session_ref(), agent_ref(), context()) :: {:ok, term()} | {:error, term()}
+  @doc """
   Snapshot the authoritative worker state and recorder cursor before a turn.
 
   A transport implementing this callback must pair it with
@@ -69,6 +82,7 @@ defmodule SymphonyElixir.ImplementerDelegation.Transport do
   @callback stop_session(session_ref(), context()) :: :ok | {:error, term()}
 
   @optional_callbacks begin_worker_assignment_observation: 3,
+                      progress_cursor: 3,
                       worker_assignments: 2,
                       worker_assignments: 3
 end

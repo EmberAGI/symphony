@@ -2802,4 +2802,96 @@ defmodule SymphonyElixir.HerdrTransportTest do
     assert :ok = HerdrTransport.stop_session(no_receipt_session, no_receipt_context)
     assert :ok = HerdrTransport.stop_session(session, adapter_context)
   end
+
+  test "the Claude progress cursor counts real-work transcript items and ignores churn", context do
+    session = %{name: "octo-tur-1006-progress", runtime_root: context.runtime_root, workspace: "/tmp/selected-workspace"}
+    orchestrator = %{name: "implementer_orchestrator", provider: "claude_code"}
+
+    transcript =
+      claude_transcript_path(
+        context.runtime_root,
+        "implementer_orchestrator",
+        "-tmp-selected-workspace",
+        "37a1c0de-real-work"
+      )
+
+    append_transcript!(transcript, [
+      ~s({"type":"user","message":{"role":"user","content":"Do bounded work."}}),
+      ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Reading the plan."}]}}),
+      ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"/x"}}]}}),
+      ~s({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"ok"}]}})
+    ])
+
+    assert {:ok, cursor} = HerdrTransport.progress_cursor(session, orchestrator, %{})
+    assert cursor == {:provider_transcript, 4}
+
+    # Every one of these grows the file and moves its mtime while the agent does
+    # no work at all: a heartbeat, a token-count-only usage record, a retry and
+    # the API error it retries.
+    append_transcript!(transcript, [
+      ~s({"type":"system","subtype":"progress","content":"still working"}),
+      ~s({"type":"assistant","message":{"role":"assistant","content":[],"usage":{"input_tokens":11100,"output_tokens":0}}}),
+      ~s({"type":"system","subtype":"retry","attempt":2}),
+      ~s({"type":"assistant","isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"API Error: 500 · Retrying in 1s"}]}}),
+      ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"   "}]}}),
+      "not json at all"
+    ])
+
+    assert {:ok, ^cursor} = HerdrTransport.progress_cursor(session, orchestrator, %{})
+
+    append_transcript!(transcript, [
+      ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu2","name":"Bash","input":{}}]}})
+    ])
+
+    assert {:ok, {:provider_transcript, 5}} = HerdrTransport.progress_cursor(session, orchestrator, %{})
+  end
+
+  test "the Claude progress cursor reads the most recently modified transcript", context do
+    session = %{name: "octo-tur-1006-resume", runtime_root: context.runtime_root, workspace: "/tmp/selected-workspace"}
+    orchestrator = %{name: "implementer_orchestrator", provider: "claude_code"}
+
+    tool_use = ~s({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"Bash","input":{}}]}})
+
+    abandoned =
+      claude_transcript_path(context.runtime_root, "implementer_orchestrator", "-tmp-selected-workspace", "aaaa-older")
+
+    append_transcript!(abandoned, List.duplicate(tool_use, 9))
+    File.touch!(abandoned, System.os_time(:second) - 3_600)
+
+    live = claude_transcript_path(context.runtime_root, "implementer_orchestrator", "-tmp-selected-workspace", "bbbb-live")
+    append_transcript!(live, List.duplicate(tool_use, 2))
+
+    assert {:ok, {:provider_transcript, 2}} = HerdrTransport.progress_cursor(session, orchestrator, %{})
+  end
+
+  test "a non-Claude orchestrator has no provider-transcript progress evidence", context do
+    session = %{name: "octo-tur-1006-codex", runtime_root: context.runtime_root, workspace: "/tmp/selected-workspace"}
+
+    assert {:error, :not_applicable} =
+             HerdrTransport.progress_cursor(
+               session,
+               %{name: "implementer_orchestrator", provider: "codex"},
+               %{}
+             )
+  end
+
+  test "a Claude orchestrator with no transcript yet is an unusable probe, not a stall", context do
+    session = %{name: "octo-tur-1006-empty", runtime_root: context.runtime_root, workspace: "/tmp/selected-workspace"}
+
+    assert {:error, {:herdr_provider_transcript_unavailable, _details}} =
+             HerdrTransport.progress_cursor(
+               session,
+               %{name: "implementer_orchestrator", provider: "claude_code"},
+               %{}
+             )
+  end
+
+  defp claude_transcript_path(runtime_root, agent_name, workspace_slug, session_id) do
+    Path.join([runtime_root, "provider-session", agent_name, "projects", workspace_slug, "#{session_id}.jsonl"])
+  end
+
+  defp append_transcript!(path, lines) do
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, Enum.map_join(lines, "", &(&1 <> "\n")), [:append])
+  end
 end
