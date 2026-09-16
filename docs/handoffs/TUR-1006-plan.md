@@ -85,3 +85,24 @@ Module `ImplementerDelegation.Supervision`, Adapter `HerdrTransport`.
   field (schema + AgentRunner `Keyword.put_new` like `turn_timeout_ms`, default
   900_000, config test), agent-runtime.md spec section (real work vs UI churn
   vs read failure; field), service spec config list, `make all`, PR, handoff.
+
+## Session 5 notes (2026-09-16 17:54Z–)
+
+- Slice 2 (`tur1006-green-2`, delegated): orchestrator-level idle clock.
+  `orchestrator.ex` `reconcile_stalled_running_issues` measures
+  `codex.stall_timeout_ms` (300 s) against `CurrentRun.activity_ms`, which only
+  advances on `forward_update` of non-accounting runtime messages. Delegation
+  emits `:turn_heartbeat` on every supervision observation while the
+  orchestrator is `working` (supervision `on_heartbeat`), and while a delegated
+  worker is `working` only when its `activity_revision`
+  (`{revision, state_change_seq}`) changes — which the live evidence shows does
+  NOT advance during real worker work. Fix shape, bounded to
+  `implementer_delegation.ex` + `herdr_transport.ex`: the working-worker
+  settlement fingerprint includes the worker's real-work progress cursor
+  (`transport.progress_cursor/3` for the claude_code worker; `:not_applicable`
+  keeps the Codex `activity_revision` fingerprint), so a silent orchestrator
+  with an actively working claude_code worker keeps emitting `:turn_heartbeat`
+  and the run activity clock advances; Codex path behavior-identical.
+  RED at the public `run_turn` seam: orchestrator idle immediately, worker
+  `working` with advancing transcript real-work items and constant
+  `activity_revision` → heartbeats must arrive; no-work worker → none.
