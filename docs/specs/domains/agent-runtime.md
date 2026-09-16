@@ -1130,8 +1130,38 @@ out-of-enum status is a typed protocol error, never coerced to `unknown` and
 never retried.
 
 Progress is distinct from status: `working` can persist without progress, so
-the supervisor consumes an observable progress cursor (recent agent output)
-alongside each working read. Wall-clock time is never the sole stuck signal.
+the supervisor consumes an observable progress cursor alongside each working
+read. Wall-clock time is never the sole stuck signal. The cursor is drawn
+from real-work evidence wherever the transport has it (TUR-1006):
+
+- Real work. For a `claude_code` orchestrator the Herdr transport counts
+  `tool_use`, `tool_result`, and non-blank message-text items in the run-owned
+  provider transcript (`<runtime_root>/provider-session/<agent>/projects/
+  <workspace-slug>/*.jsonl`, most recently modified file). Only a new item
+  since the last observation advances the cursor. Transcript byte size or
+  mtime growth alone, heartbeat-only or usage/token-count-only appends,
+  provider retries, and API error records are transport activity, not real
+  work, and never advance it. A Codex orchestrator has no such transcript;
+  its cursor stays the bounded pane hash (`recent-unwrapped`, 40 lines) and
+  its supervision outcomes are unchanged.
+- UI churn. Visible-pane content that changes only in spinner glyphs,
+  elapsed timers, token counters, or tip lines is not progress. The
+  claude_code path never consults the pane while real-work evidence is
+  readable, so churn cannot mask a genuinely silent turn.
+- Read failure. A refused pane read (Herdr `agent_not_idle` for an
+  alternate-screen agent) or an unreadable transcript yields an
+  `:unavailable` cursor, which never advances progress; it is not itself a
+  stall signal, and a later successful read resumes ordinary observation.
+
+A delegated worker's real work counts as the run's real work: while the
+orchestrator agent is already idle and its run-owned worker is `working`, the
+same real-work cursor for the worker keeps the turn's heartbeat, and therefore
+the Orchestrator's run activity clock (`codex.stall_timeout_ms`), advancing;
+Herdr `revision`/`state_change_seq` alone do not, because they track status
+changes rather than output. The stale-working bound is the production
+configuration value `agent_runtime.stale_working_ms`, a positive integer
+defaulting to `900000` (fifteen minutes); it is a documented tunable, not a
+substitute for real-work detection, and the default is unchanged.
 The supervision transitions are: an observed `working` with progress
 continues; `blocked` is preserved and surfaced as a typed blocked outcome —
 the runtime never auto-answers a permission or question prompt absent an
