@@ -469,7 +469,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
       [%{assignment_id: assignment_id} | _] = working
       {:error, {:implementer_worker_timed_out, %{assignment_id: assignment_id}}}
     else
-      activity = worker_activity_fingerprint(working)
+      activity = worker_activity_fingerprint(state, working)
 
       if activity != previous_activity do
         worker = Map.get(state.herdr_session, :worker, %{name: "implementer_worker"})
@@ -489,10 +489,31 @@ defmodule SymphonyElixir.ImplementerDelegation do
     end
   end
 
+  # Herdr's `activity_revision` is pane and state bookkeeping: it does not move
+  # while a Claude Code worker edits files and answers tool calls. Where the
+  # transport can read that worker's real work, its progress cursor joins the
+  # fingerprint so a silent orchestrator with a working worker still advances
+  # the run's activity clock. A provider without that evidence answers
+  # `{:error, :not_applicable}` and keeps the revision-only fingerprint.
+  defp worker_activity_fingerprint(state, assignments) do
+    {worker_progress_cursor(state), worker_activity_fingerprint(assignments)}
+  end
+
   defp worker_activity_fingerprint(assignments) do
     assignments
     |> Enum.map(&{Map.get(&1, :assignment_id), Map.get(&1, :activity_revision)})
     |> Enum.sort()
+  end
+
+  defp worker_progress_cursor(state) do
+    worker = Map.get(state.herdr_session, :worker)
+
+    if is_map(worker) and function_exported?(state.transport, :progress_cursor, 3) do
+      case state.transport.progress_cursor(state.herdr_session, worker, state.transport_context) do
+        {:ok, cursor} -> cursor
+        {:error, _reason} -> nil
+      end
+    end
   end
 
   # Unobservable is only benign where there is provably nothing to observe: a
