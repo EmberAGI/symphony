@@ -114,3 +114,22 @@ Module `ImplementerDelegation.Supervision`, Adapter `HerdrTransport`.
   the 10-min operating rule. Resume: `git pull`, poll `herdr agent get
   implementer_worker`, integrate the `kind=result` for `tur1006-green-2`,
   then `make all`, PR, handoff to Agent Review.
+
+## Session 6 notes (2026-09-16 18:14Z–18:26Z)
+
+- `make -C elixir all` on head 2ba3901 (detached, `/tmp/tur1006-make-all-2.log`):
+  setup/build/fmt-check/lint passed; `mix test --cover` 890 tests / 4 failures /
+  2 skipped (371.7 s), coverage 84.43 %, so `coverage` exited 2 and dialyzer
+  did not run. None of the four failures touches branch-changed files:
+  1. `skill_execution_contract_test.exs:173` and 3. `implementer_delegation_test.exs:221`
+     expect Codex read paths without this run's `CODEX_HOME/skills`
+     (`/home/admin/scaling-octo-engine/.runtime/codex/implementer/skills`,
+     appended by untouched `codex/skill_permissions.ex`); both pass with
+     `env -u CODEX_HOME` (2 tests / 0 failures).
+  2. `role_bootstrap_environment_test.exs:237` expects an empty
+     `SYMPHONY_ISSUE_REPOSITORY`; this run exports `EmberAGI/symphony`; passes with
+     `env -u SYMPHONY_ISSUE_REPOSITORY` (1 test / 0 failures).
+  4. `orchestrator_current_run_activity_test.exs:507` on_exit `File.touch` race in
+     a tmp dir already removed; passes alone (1 test / 0 failures); branch does not
+     touch orchestrator files.
+- Turn ended under the deployed 15-min detector; PR opened and routed to Agent Review.
