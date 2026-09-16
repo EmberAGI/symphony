@@ -133,3 +133,30 @@ Module `ImplementerDelegation.Supervision`, Adapter `HerdrTransport`.
      a tmp dir already removed; passes alone (1 test / 0 failures); branch does not
      touch orchestrator files.
 - Turn ended under the deployed 15-min detector; PR opened and routed to Agent Review.
+
+## Session 7 notes (2026-09-16 18:29Z–18:38Z, Agent Fixes)
+
+- Reviewer blocked only on incomplete exact-head `make all` evidence
+  (4 host failures, dialyzer not run). Operator steering 18:31Z/18:35Z: the
+  clean-environment gate is PR CI; do not rerun the full suite or dialyzer on
+  the shared 4 GB host (a host `mix dialyzer` started 18:32Z was SIGTERMed by
+  the operator at 18:33Z as a capacity decision, not a dialyzer result).
+- Exact-head full gate (clean GitHub runner): workflow `make-all` run
+  `35134364398`, head `0dc7f526ca4b4230ee9fb4daddbc9c372ff460cc`,
+  `completed` / `success`. Steps: `make -C elixir all` (setup, build,
+  fmt-check, lint, `mix test --cover`: 890 tests / 0 failures / 2 skipped,
+  coverage 84.51 %, `mix dialyzer --format short`: done, passed successfully)
+  and `mix specs.check`, all `success`.
+  https://github.com/EmberAGI/symphony/actions/runs/35134364398
+- Host controlled-env rerun of the four session-6 failing files, one file at
+  a time with `env -u CODEX_HOME -u SYMPHONY_ISSUE_REPOSITORY mix test <file>`
+  at head 0dc7f52: `skill_execution_contract_test.exs` exit 0 (6 tests /
+  0 failures); `implementer_delegation_test.exs` exit 0 (14 / 0);
+  `role_bootstrap_environment_test.exs` exit 0 (5 / 0);
+  `orchestrator_current_run_activity_test.exs` exit 0 (9 / 0). Combined run
+  of the same four files: exit 0, 34 tests / 0 failures.
+- Classification: the four session-6 host failures are environment-injected
+  (role-run `CODEX_HOME` skills root appended to Codex read paths; exported
+  `SYMPHONY_ISSUE_REPOSITORY`; tmp-dir teardown race under host memory
+  pressure), not branch defects; none touches branch-changed files.
+- AC1–AC4 implementation, tests, and spec evidence unchanged from session 6.
