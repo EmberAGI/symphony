@@ -418,6 +418,12 @@ defmodule SymphonyElixir.Config.Schema do
       # reach a typed outcome. Production surface for the value the orchestrator
       # previously exposed only through an app-env test seam (EMB-1260).
       field(:terminal_settlement_timeout_ms, :integer, default: 60_000)
+      # Implementer delegation stale-working bound: how long a `working`
+      # orchestrator may go without real-work progress before bounded recovery
+      # and the typed stalled escalation (TUR-1006). A documented tunable with
+      # the long-standing 900000 ms default; it is never a substitute for
+      # correct progress detection.
+      field(:stale_working_ms, :integer, default: 900_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -425,12 +431,19 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:provider, :skill_execution_contracts, :host_resources, :terminal_settlement_timeout_ms],
+        [
+          :provider,
+          :skill_execution_contracts,
+          :host_resources,
+          :terminal_settlement_timeout_ms,
+          :stale_working_ms
+        ],
         empty_values: []
       )
       |> validate_host_resources()
-      |> validate_required([:provider, :terminal_settlement_timeout_ms])
+      |> validate_required([:provider, :terminal_settlement_timeout_ms, :stale_working_ms])
       |> validate_number(:terminal_settlement_timeout_ms, greater_than: 0)
+      |> validate_number(:stale_working_ms, greater_than: 0)
       |> validate_inclusion(:provider, @supported_providers, message: "must be one of: #{Enum.join(@supported_providers, ", ")}")
     end
 
