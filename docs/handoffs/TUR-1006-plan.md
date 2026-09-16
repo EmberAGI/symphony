@@ -57,3 +57,7 @@ Module `ImplementerDelegation.Supervision`, Adapter `HerdrTransport`.
   before the pane-hash fallback, fixture fix, RED (b) + no-work tests.
 - Orchestrator still owns: `stale_working_ms` config field (AC4), spec
   section in `docs/specs/domains/agent-runtime.md`, full gate, PR.
+- 17:35Z: turn ending under the deployed 15-min detector. Worker still
+  `working` on `tur1006-green-1` (title "progress_cursor in supervision").
+  Resume protocol: `git pull`, re-issue the SAME token `tur1006-green-1` with
+  remaining scope, poll with single `herdr agent get implementer_worker` calls.
