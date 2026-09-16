@@ -39,3 +39,21 @@ Module `ImplementerDelegation.Supervision`, Adapter `HerdrTransport`.
   recovery probe (added, expected RED until 1–2 land).
 - (b) UI-churn-only pane change + unchanged real-work evidence → bounded
   recovery then `:stale_working` after the bound (to add).
+
+## Session 3 notes (2026-09-16 17:23Z–17:31Z)
+
+- Deployed-code RED run (`mix test test/symphony_elixir/implementer_supervision_test.exs`,
+  exit 1, 26 tests / 1 failure): the new test fails as
+  `{:error, {:herdr_agent_read_failed, {:herdr_cli_error, "agent_not_idle", ...}}}`
+  because the fixture refuses the post-turn response read too. The fixture
+  must refuse only while `working` so the deployed code shows the target false
+  `:stale_working`/recovery-probe failure (assigned to the worker).
+- Operator constraint (17:28Z): real work = new `tool_use`/`tool_result`
+  items in the provider transcript; size, mtime, heartbeats, retries and
+  spinner churn never advance the cursor.
+- Worker assignment `tur1006-green-1` sent 17:31Z to `implementer_worker`:
+  transport `progress_cursor/3` optional callback (claude_code only, counts
+  real-work items; `{:error, :not_applicable}` for Codex), supervision uses it
+  before the pane-hash fallback, fixture fix, RED (b) + no-work tests.
+- Orchestrator still owns: `stale_working_ms` config field (AC4), spec
+  section in `docs/specs/domains/agent-runtime.md`, full gate, PR.
