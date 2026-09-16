@@ -233,22 +233,40 @@ defmodule SymphonyElixir.ImplementerDelegation.Supervision do
     )
   end
 
-  defp annotate_progress(config, {:ok, %{agent_status: "working"} = agent}) do
-    cursor =
-      case config.transport.read_agent(
-             config.session,
-             config.orchestrator,
-             %{source: :recent_unwrapped, lines: 40},
-             config.context
-           ) do
-        {:ok, %{text: text}} -> {byte_size(text), :erlang.phash2(text)}
-        {:error, _reason} -> :unavailable
-      end
-
-    {:ok, Map.put(agent, :progress_cursor, cursor)}
-  end
+  defp annotate_progress(config, {:ok, %{agent_status: "working"} = agent}),
+    do: {:ok, Map.put(agent, :progress_cursor, progress_cursor(config))}
 
   defp annotate_progress(_config, observation), do: observation
+
+  # Real-work evidence outranks the pane wherever the transport has it: an
+  # alternate-screen pane refuses the bounded read while working, and the text
+  # it does return churns (spinner, elapsed timer, token counter) without any
+  # work happening. Transports without that evidence keep the pane hash.
+  defp progress_cursor(config) do
+    transport = config.transport
+
+    if function_exported?(transport, :progress_cursor, 3) do
+      case transport.progress_cursor(config.session, config.orchestrator, config.context) do
+        {:ok, cursor} -> cursor
+        {:error, :not_applicable} -> pane_cursor(config)
+        {:error, _reason} -> :unavailable
+      end
+    else
+      pane_cursor(config)
+    end
+  end
+
+  defp pane_cursor(config) do
+    case config.transport.read_agent(
+           config.session,
+           config.orchestrator,
+           %{source: :recent_unwrapped, lines: 40},
+           config.context
+         ) do
+      {:ok, %{text: text}} -> {byte_size(text), :erlang.phash2(text)}
+      {:error, _reason} -> :unavailable
+    end
+  end
 
   defp heartbeat(config, %{last_status: "working"}), do: config.on_heartbeat.(%{agent_status: "working"})
   defp heartbeat(_config, _state), do: :ok

@@ -358,6 +358,177 @@ defmodule SymphonyElixir.ImplementerSupervisionTest do
     refute_received :recovery_probe
   end
 
+  defmodule AlternateScreenProgressTransport do
+    # Claude Code runs on the alternate screen: while working, Herdr rejects a
+    # line-bounded pane read with `agent_not_idle`. Real-work evidence (the
+    # provider transcript growing with every tool call) advances independently.
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      reads = Process.get({__MODULE__, :reads}, 0) + 1
+      Process.put({__MODULE__, :reads}, reads)
+      status = if reads < 6, do: "working", else: "done"
+      {:ok, %{name: agent.name, agent_status: status, agent_session: %{value: "alt-screen-session"}}}
+    end
+
+    def await_agent(_session, _agent, _statuses, _timeout_ms, %{owner: owner}) do
+      send(owner, :recovery_probe)
+      {:error, {:herdr_agent_status_timeout, "implementer_orchestrator", ["idle", "done", "blocked"]}}
+    end
+
+    # Herdr refuses the line-bounded read only while the agent is working; the
+    # post-turn response read happens once it has settled, and succeeds.
+    def read_agent(_session, agent, %{source: :recent_unwrapped, lines: _lines}, %{owner: owner}) do
+      if Process.get({__MODULE__, :reads}, 0) < 6 do
+        send(owner, :alternate_screen_read_refused)
+
+        {:error,
+         {:herdr_agent_read_failed,
+          {:herdr_cli_error, "agent_not_idle", "cannot read 40 lines while #{agent.name} is working: its alternate-screen history can only be captured by scrolling while idle"}}}
+      else
+        {:ok, %{text: "ALT_SCREEN_COMPLETE"}}
+      end
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "ALT_SCREEN_COMPLETE"}}
+
+    def progress_cursor(_session, _agent, _context) do
+      {:ok, {:provider_transcript, Process.get({__MODULE__, :reads}, 0)}}
+    end
+  end
+
+  test "a working claude_code agent whose pane read is refused as agent_not_idle is never stale while real-work evidence advances" do
+    Process.delete({AlternateScreenProgressTransport, :reads})
+
+    session = %{
+      supervised_session(AlternateScreenProgressTransport)
+      | contract: %{provider: "claude_code"}
+    }
+
+    assert {:ok, %{agent_status: "done"}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Do bounded work.",
+               %{},
+               supervision_opts(stale_working_ms: 5, heartbeat_interval_ms: 2)
+             )
+
+    refute_received :recovery_probe
+  end
+
+  defmodule UiChurnOnlyTransport do
+    # The pane read succeeds on every attempt and its text differs every time,
+    # but only in UI churn: spinner glyph, elapsed timer, token counter, tip
+    # line. The real-work evidence behind it never advances.
+    @stalled_cursor {:provider_transcript, 41}
+
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      {:ok, %{name: agent.name, agent_status: "working", agent_session: %{value: "ui-churn-session"}}}
+    end
+
+    def await_agent(_session, agent, _statuses, _timeout_ms, %{owner: owner}) do
+      send(owner, :recovery_probe)
+      {:error, {:herdr_agent_status_timeout, agent.name, ["idle", "done", "blocked"]}}
+    end
+
+    def read_agent(_session, _agent, %{source: :recent_unwrapped, lines: _lines}, _context) do
+      churn = Process.get({__MODULE__, :churn}, 0) + 1
+      Process.put({__MODULE__, :churn}, churn)
+
+      {:ok,
+       %{
+         text: """
+         ✻ Deciphering… (#{churn}m #{churn}s · ↓ #{churn}.1k tokens)
+           ⎿  Running hook PreToolUse:Bash… (#{churn}s)
+         ? for shortcuts (ctrl+b to run in background)
+         """
+       }}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "frozen pane"}}
+
+    def progress_cursor(_session, _agent, _context), do: {:ok, @stalled_cursor}
+  end
+
+  test "a pane that changes only in UI churn is stale when real-work evidence does not advance" do
+    Process.delete({UiChurnOnlyTransport, :churn})
+
+    session = %{
+      supervised_session(UiChurnOnlyTransport)
+      | contract: %{provider: "claude_code"}
+    }
+
+    assert {:error, {:implementer_agent_stalled, evidence}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Do bounded work.",
+               %{},
+               supervision_opts(stale_working_ms: 5, heartbeat_interval_ms: 2, max_recovery_attempts: 2)
+             )
+
+    assert [%{result: {:failed, _}}, %{result: {:failed, _}}] = evidence.recovery_history
+    assert {:ok, checkpoint} = evidence.checkpoint
+    assert checkpoint.shutdown_reason == :stale_working
+    assert checkpoint.pane_tail == "frozen pane"
+    assert checkpoint.progress_cursor == {:provider_transcript, 41}
+    assert count_received(:recovery_probe) == 2
+  end
+
+  defmodule RefusedReadNoWorkTransport do
+    # The worst observable case: the pane read is refused for the whole turn and
+    # the real-work evidence behind it never advances either. Neither signal
+    # justifies extending the turn.
+    @stalled_cursor {:provider_transcript, 7}
+
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}
+    end
+
+    def get_agent(_session, agent, _timeout_ms, _context) do
+      {:ok, %{name: agent.name, agent_status: "working", agent_session: %{value: "refused-read-session"}}}
+    end
+
+    def await_agent(_session, agent, _statuses, _timeout_ms, %{owner: owner}) do
+      send(owner, :recovery_probe)
+      {:error, {:herdr_agent_status_timeout, agent.name, ["idle", "done", "blocked"]}}
+    end
+
+    def read_agent(_session, agent, %{source: :recent_unwrapped, lines: _lines}, _context) do
+      {:error, {:herdr_agent_read_failed, {:herdr_cli_error, "agent_not_idle", "cannot read 40 lines while #{agent.name} is working"}}}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: "refused pane"}}
+
+    def progress_cursor(_session, _agent, _context), do: {:ok, @stalled_cursor}
+  end
+
+  test "a refused pane read with unchanged real-work evidence is stale after bounded recovery" do
+    session = %{
+      supervised_session(RefusedReadNoWorkTransport)
+      | contract: %{provider: "claude_code"}
+    }
+
+    assert {:error, {:implementer_agent_stalled, evidence}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Do bounded work.",
+               %{},
+               supervision_opts(stale_working_ms: 5, heartbeat_interval_ms: 2, max_recovery_attempts: 2)
+             )
+
+    assert [%{result: {:failed, _}}, %{result: {:failed, _}}] = evidence.recovery_history
+    assert {:ok, checkpoint} = evidence.checkpoint
+    assert checkpoint.shutdown_reason == :stale_working
+    assert checkpoint.progress_cursor == {:provider_transcript, 7}
+    assert count_received(:recovery_probe) == 2
+  end
+
   defmodule StaleThenRecoveredTransport do
     def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
       {:ok, %{phase: :working, agent: %{name: agent.name, agent_status: "working", agent_session: nil}}}

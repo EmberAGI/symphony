@@ -730,6 +730,99 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
 
   def read_agent(_session, _agent, _opts, _context), do: {:error, :invalid_herdr_agent_read}
 
+  @doc """
+  Count the real work recorded in a Claude Code agent's provider transcript.
+
+  Claude Code runs on the alternate screen: its pane refuses a line-bounded
+  read while the agent works, and the visible text it does return churns
+  (spinner, elapsed timer, token counter) without any work happening. The
+  run-owned `CLAUDE_CONFIG_DIR` transcript is the independent evidence: every
+  tool call and every answered tool call appends an item to it. Only those
+  items and non-blank message text count, so heartbeats, usage-only records,
+  retries, API errors, and file growth alone never advance the cursor.
+
+  Any other provider has no such evidence and returns `{:error,
+  :not_applicable}` so supervision keeps its pane observation.
+  """
+  @impl true
+  def progress_cursor(session, %{name: agent_name, provider: "claude_code"}, _context)
+      when is_binary(agent_name) and agent_name != "" do
+    with {:ok, transcripts_root} <- provider_transcripts_root(session, agent_name),
+         {:ok, transcript} <- latest_provider_transcript(transcripts_root, agent_name) do
+      {:ok, {:provider_transcript, count_real_work_items(transcript)}}
+    end
+  end
+
+  def progress_cursor(_session, _agent, _context), do: {:error, :not_applicable}
+
+  defp provider_transcripts_root(%{runtime_root: runtime_root, workspace: workspace}, agent_name)
+       when is_binary(runtime_root) and is_binary(workspace) and workspace != "" do
+    {:ok, Path.join([runtime_root, "provider-session", agent_name, "projects", workspace_slug(workspace)])}
+  end
+
+  defp provider_transcripts_root(session, agent_name) do
+    {:error, {:herdr_provider_transcript_unavailable, %{agent: agent_name, session: Map.get(session, :name), reason: :session_transcript_location_unknown}}}
+  end
+
+  # Claude Code names a project directory after its workspace path with every
+  # non-alphanumeric character replaced by a dash.
+  defp workspace_slug(workspace), do: String.replace(workspace, ~r/[^A-Za-z0-9]/, "-")
+
+  # A resumed agent leaves older transcripts behind in the same project
+  # directory; only the one it is currently appending to is evidence.
+  defp latest_provider_transcript(transcripts_root, agent_name) do
+    transcripts_root
+    |> Path.join("*.jsonl")
+    |> Path.wildcard()
+    |> Enum.map(fn path -> {transcript_mtime(path), path} end)
+    |> Enum.max(fn -> nil end)
+    |> case do
+      {_mtime, path} ->
+        {:ok, path}
+
+      nil ->
+        details = %{agent: agent_name, path: transcripts_root, reason: :no_provider_transcript}
+        {:error, {:herdr_provider_transcript_unavailable, details}}
+    end
+  end
+
+  defp transcript_mtime(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{mtime: mtime}} -> mtime
+      {:error, _reason} -> 0
+    end
+  end
+
+  defp count_real_work_items(path) do
+    path
+    |> File.stream!()
+    |> Enum.reduce(0, fn line, count -> count + real_work_items(line) end)
+  end
+
+  # A partially written trailing line is ordinary while the provider appends.
+  defp real_work_items(line) do
+    case Jason.decode(line) do
+      {:ok, record} -> record_real_work_items(record)
+      {:error, _reason} -> 0
+    end
+  end
+
+  defp record_real_work_items(%{"isApiErrorMessage" => true}), do: 0
+
+  defp record_real_work_items(%{"type" => type, "message" => %{"content" => content}})
+       when type in ["user", "assistant"],
+       do: content |> List.wrap() |> Enum.count(&real_work_item?/1)
+
+  defp record_real_work_items(_record), do: 0
+
+  defp real_work_item?(%{"type" => type}) when type in ["tool_use", "tool_result"], do: true
+  defp real_work_item?(%{"type" => "text", "text" => text}), do: non_blank_text?(text)
+  defp real_work_item?(text) when is_binary(text), do: non_blank_text?(text)
+  defp real_work_item?(_item), do: false
+
+  defp non_blank_text?(text) when is_binary(text), do: String.trim(text) != ""
+  defp non_blank_text?(_text), do: false
+
   @doc false
   @impl true
   def begin_worker_assignment_observation(
