@@ -129,6 +129,18 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     end
   end
 
+  defmodule EmptyTerminalTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok,
+       %{
+         phase: :completed,
+         agent: %{name: agent.name, agent_status: "done", agent_session: %{value: "empty-session"}}
+       }}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: " \n\t "}}
+  end
+
   defmodule HeartbeatTransport do
     def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
       {:ok,
@@ -1054,6 +1066,24 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     assert_receive {:prompt_stall, :begin_turn, _agent}
     refute_receive {:prompt_stall, :read_agent}
+  end
+
+  test "blank terminal output preserves the retryable empty-turn failure" do
+    session = %{
+      transport: EmptyTerminalTransport,
+      transport_context: %{},
+      contract: %{provider: "codex"},
+      herdr_session: %{name: "octo-emb-1141-empty"},
+      orchestrator: %{name: "implementer_orchestrator", pane_id: "w1:p1"}
+    }
+
+    assert {:error, {:empty_turn_completed, %{reason: "empty_agent_response", message: "agent completed without any terminal output"}}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Complete the bounded assignment.",
+               %{identifier: "EMB-1141"},
+               turn_timeout_ms: 100
+             )
   end
 
   test "long working turns emit bounded heartbeats while awaiting semantic completion" do

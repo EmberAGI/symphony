@@ -1051,7 +1051,17 @@ defmodule SymphonyElixir.ImplementerDelegation do
   defp contract_provider(contract, :worker),
     do: Map.get(contract, :worker_provider) || Map.get(contract, :provider)
 
-  defp terminal_turn_status("claude_code", response) when is_binary(response) do
+  defp terminal_turn_status(provider, response) when is_binary(response) do
+    if String.trim(response) == "" do
+      {:error, {:empty_turn_completed, %{reason: "empty_agent_response", message: "agent completed without any terminal output"}}}
+    else
+      terminal_turn_status_for_provider(provider, response)
+    end
+  end
+
+  defp terminal_turn_status(_provider, _response), do: :ok
+
+  defp terminal_turn_status_for_provider("claude_code", response) do
     case Regex.run(
            ~r/API Error:\s*(401|403)\b[^\n]*(?:auth|credential|unauthor|forbidden)/i,
            response,
@@ -1074,7 +1084,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
     end
   end
 
-  defp terminal_turn_status(_provider, _response), do: :ok
+  defp terminal_turn_status_for_provider(_provider, _response), do: :ok
 
   defp session_name(opts) do
     with issue when is_binary(issue) and issue != "" <- Keyword.get(opts, :issue_identifier),
