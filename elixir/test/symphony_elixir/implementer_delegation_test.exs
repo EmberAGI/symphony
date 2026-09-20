@@ -2,6 +2,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
   use ExUnit.Case, async: false
 
   alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation, SkillExecutionContract}
+  alias SymphonyElixir.Codex.SkillPermissions
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Runtime.ProcessOwnership
   alias SymphonyElixir.TestSupport.{HerdrReplayFixture, HerdrSessionFixture}
@@ -805,6 +806,11 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     on_message = fn
       %{event: :session_started} ->
         File.write!(
+          Path.join(worker_events, "observed.test"),
+          "worker-event-recorder-attested\n"
+        )
+
+        File.write!(
           Path.join(worker_events, "assignment.test"),
           "OCTO_MSG/1 kind=assignment assignment=default-herdr-assignment deliverable=bounded\n"
         )
@@ -1173,6 +1179,12 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     read_roots =
       [runtime_root | Map.get(herdr_session, :permission_read_roots, [])]
+      |> Kernel.++(
+        SkillPermissions.read_paths(
+          Map.get(herdr_session, :skill_execution_contracts, []),
+          Map.get(Map.get(herdr_session, :session_env, %{}), "CODEX_HOME", System.get_env("CODEX_HOME"))
+        )
+      )
       |> Enum.uniq()
       |> Enum.map_join(",", &"#{inspect(&1)}=\"read\"")
 
