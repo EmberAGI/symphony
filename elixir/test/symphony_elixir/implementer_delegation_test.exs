@@ -278,7 +278,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
            )
 
     assert Enum.any?(orchestrator_spec.argv, fn arg ->
-             String.contains?(arg, "\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"}")
+             String.contains?(arg, "\":workspace_roots\"={\".\"=\"write\",\".agents\"=\"write\",\".git\"=\"write\"}")
            end)
 
     assert orchestrator_spec.env["OCTO_HERDR_WORKER_LAUNCHER"] ==
@@ -1189,7 +1189,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       |> Enum.map_join(",", &"#{inspect(&1)}=\"read\"")
 
     filesystem_permission =
-      ~s|permissions.octo_herdr.filesystem={":minimal"="read",":workspace_roots"={"."="write",".git"="write"},| <>
+      ~s|permissions.octo_herdr.filesystem={":minimal"="read",":workspace_roots"={"."="write",".agents"="write",".git"="write"},| <>
         ~s|#{read_roots},#{inspect(Path.join(runtime_root, "worker-events"))}="write"}|
 
     [

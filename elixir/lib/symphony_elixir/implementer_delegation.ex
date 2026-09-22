@@ -1019,7 +1019,7 @@ defmodule SymphonyElixir.ImplementerDelegation do
 
     worker_events = config_value(worker_events_root(runtime_root))
 
-    "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"},#{read_roots},#{worker_events}=\"write\"}"
+    "permissions.octo_herdr.filesystem={\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"write\",\".agents\"=\"write\",\".git\"=\"write\"},#{read_roots},#{worker_events}=\"write\"}"
   end
 
   # Must stay the same directory `HerdrTransport` materializes and its role
