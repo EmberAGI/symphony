@@ -218,11 +218,11 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
       "command" => "codex sandbox -- /bin/sh -c [REDACTED]",
       "dns" => "nonempty",
       "worker_event" => "assignment_correlated",
+      "allowed_writes" => ["workspace_agents_write"],
       "denials" => [
         "runtime_control_write",
         "sibling_installation_read",
         "private_home_read",
-        "workspace_agents_write",
         "host_write"
       ],
       "outcome" => "pass"
