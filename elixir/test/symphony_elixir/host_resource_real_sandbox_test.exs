@@ -77,7 +77,10 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
     workspace = Path.join(root, "workspace")
     runtime_root = Path.join(root, "runtime")
     worker_events = Path.join(runtime_root, "worker-events")
+    workspace_agents = Path.join(workspace, ".agents")
+    workspace_agents_probe = Path.join(workspace_agents, "sandbox-write.probe")
     File.mkdir_p!(Path.join(workspace, ".git"))
+    File.mkdir_p!(workspace_agents)
     File.mkdir_p!(worker_events)
 
     assignment = "TUR877-REAL-SANDBOX-#{System.unique_integer([:positive])}"
@@ -156,6 +159,7 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
     erlang_output=$(#{shell_word(command.erlang)} -noshell -eval 'io:format("~s", [erlang:system_info(otp_release)]), halt().')
     dns_output=$(/usr/bin/getent ahosts example.com | /usr/bin/head -n 1)
     if [ -z "$dns_output" ]; then exit 40; fi
+    /usr/bin/touch #{shell_word(workspace_agents_probe)}
     /usr/bin/printf '{"assignment":"%s","status":"completed"}\\n' #{shell_word(assignment)} > #{shell_word(event)}
     if /usr/bin/touch #{shell_word(denied_runtime_write)} 2>/dev/null; then exit 41; fi
     if /usr/bin/head -c 1 #{shell_word(denied_sibling)} >/dev/null 2>&1; then exit 42; fi
@@ -189,6 +193,7 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
     assert observed_erlang == declared_erlang |> String.split(".", parts: 2) |> hd()
     assert output =~ ~r/^DNS=.+$/m
     assert File.read!(event) =~ assignment
+    assert File.exists?(workspace_agents_probe)
     refute File.exists?(denied_runtime_write)
 
     assert digest(tool_config) ==
@@ -217,6 +222,7 @@ defmodule SymphonyElixir.HostResourceRealSandboxTest do
         "runtime_control_write",
         "sibling_installation_read",
         "private_home_read",
+        "workspace_agents_write",
         "host_write"
       ],
       "outcome" => "pass"
