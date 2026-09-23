@@ -73,6 +73,43 @@ defmodule SymphonyElixir.RunLog do
       :ok
   end
 
+  @spec record_non_blocking_runtime_diagnostic(String.t(), map(), map()) :: :ok
+  def record_non_blocking_runtime_diagnostic(issue_id, running_entry, diagnostic)
+      when is_binary(issue_id) and is_map(running_entry) and is_map(diagnostic) do
+    case {configured_root(), run_id(running_entry, nil)} do
+      {root, run_id} when is_binary(root) and is_binary(run_id) ->
+        issue_identifier = issue_identifier(issue_id, running_entry, nil)
+        path = Path.join([root, safe_segment(issue_identifier), "#{safe_segment(run_id)}.jsonl"])
+
+        payload = %{
+          event: "non_blocking_runtime_diagnostic",
+          timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
+          issue_id: issue_id,
+          issue_identifier: issue_identifier,
+          issue_state: issue_state(running_entry),
+          role: ProcessOwnership.current_role(),
+          run_id: run_id,
+          session_id: Map.get(running_entry, :session_id),
+          assignment: %{
+            family: atom_or_string(diagnostic[:family]),
+            subtype: diagnostic[:subtype],
+            reason: redact_runtime_text(diagnostic[:retry_reason] || diagnostic[:summary])
+          }
+        }
+
+        :ok = File.mkdir_p(Path.dirname(path))
+        :ok = File.write(path, Jason.encode!(payload) <> "\n", [:append])
+        :ok
+
+      _ ->
+        :ok
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to write non-blocking run diagnostic for issue_id=#{issue_id}: #{Exception.message(error)}")
+      :ok
+  end
+
   defp configured_root do
     case Application.get_env(:symphony_elixir, :run_log_root) do
       root when is_binary(root) ->
