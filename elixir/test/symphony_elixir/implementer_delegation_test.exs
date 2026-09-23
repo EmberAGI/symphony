@@ -2,6 +2,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
   use ExUnit.Case, async: false
 
   alias SymphonyElixir.{AgentRuntime, ImplementationEffort, ImplementerDelegation, SkillExecutionContract}
+  alias SymphonyElixir.Codex.SkillPermissions
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Runtime.ProcessOwnership
   alias SymphonyElixir.TestSupport.{HerdrReplayFixture, HerdrSessionFixture}
@@ -127,6 +128,18 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
       send(owner, {:prompt_stall, :read_agent})
       {:ok, %{text: "PROMPT_STALL_MUST_NOT_COMPLETE"}}
     end
+  end
+
+  defmodule EmptyTerminalTransport do
+    def begin_turn(_session, agent, _prompt, _timeout_ms, _context) do
+      {:ok,
+       %{
+         phase: :completed,
+         agent: %{name: agent.name, agent_status: "done", agent_session: %{value: "empty-session"}}
+       }}
+    end
+
+    def read_agent(_session, _agent, _opts, _context), do: {:ok, %{text: " \n\t "}}
   end
 
   defmodule HeartbeatTransport do
@@ -265,7 +278,7 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
            )
 
     assert Enum.any?(orchestrator_spec.argv, fn arg ->
-             String.contains?(arg, "\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\"}")
+             String.contains?(arg, "\":workspace_roots\"={\".\"=\"write\",\".agents\"=\"write\",\".git\"=\"write\"}")
            end)
 
     assert orchestrator_spec.env["OCTO_HERDR_WORKER_LAUNCHER"] ==
@@ -793,6 +806,11 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     on_message = fn
       %{event: :session_started} ->
         File.write!(
+          Path.join(worker_events, "observed.test"),
+          "worker-event-recorder-attested\n"
+        )
+
+        File.write!(
           Path.join(worker_events, "assignment.test"),
           "OCTO_MSG/1 kind=assignment assignment=default-herdr-assignment deliverable=bounded\n"
         )
@@ -1056,6 +1074,24 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
     refute_receive {:prompt_stall, :read_agent}
   end
 
+  test "blank terminal output preserves the retryable empty-turn failure" do
+    session = %{
+      transport: EmptyTerminalTransport,
+      transport_context: %{},
+      contract: %{provider: "codex"},
+      herdr_session: %{name: "octo-emb-1141-empty"},
+      orchestrator: %{name: "implementer_orchestrator", pane_id: "w1:p1"}
+    }
+
+    assert {:error, {:empty_turn_completed, %{reason: "empty_agent_response", message: "agent completed without any terminal output"}}} =
+             ImplementerDelegation.run_turn(
+               session,
+               "Complete the bounded assignment.",
+               %{identifier: "EMB-1141"},
+               turn_timeout_ms: 100
+             )
+  end
+
   test "long working turns emit bounded heartbeats while awaiting semantic completion" do
     Process.delete({HeartbeatTransport, :attempt})
 
@@ -1143,11 +1179,17 @@ defmodule SymphonyElixir.ImplementerDelegationTest do
 
     read_roots =
       [runtime_root | Map.get(herdr_session, :permission_read_roots, [])]
+      |> Kernel.++(
+        SkillPermissions.read_paths(
+          Map.get(herdr_session, :skill_execution_contracts, []),
+          Map.get(Map.get(herdr_session, :session_env, %{}), "CODEX_HOME", System.get_env("CODEX_HOME"))
+        )
+      )
       |> Enum.uniq()
       |> Enum.map_join(",", &"#{inspect(&1)}=\"read\"")
 
     filesystem_permission =
-      ~s|permissions.octo_herdr.filesystem={":minimal"="read",":workspace_roots"={"."="write",".git"="write"},| <>
+      ~s|permissions.octo_herdr.filesystem={":minimal"="read",":workspace_roots"={"."="write",".agents"="write",".git"="write"},| <>
         ~s|#{read_roots},#{inspect(Path.join(runtime_root, "worker-events"))}="write"}|
 
     [

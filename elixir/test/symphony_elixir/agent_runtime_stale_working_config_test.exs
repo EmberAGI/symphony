@@ -10,6 +10,21 @@ defmodule SymphonyElixir.AgentRuntimeStaleWorkingConfigTest do
   alias SymphonyElixir.Config
   alias SymphonyElixir.Workflow
 
+  describe "agent_runtime.registration_ack_timeout_ms" do
+    test "defaults to a bounded 30 second registration deadline" do
+      write_stale_working_workflow_file!("registration-ack-default", nil)
+
+      assert Config.settings!().agent_runtime.registration_ack_timeout_ms == 30_000
+    end
+
+    test "a non-positive registration deadline is rejected" do
+      write_registration_ack_timeout_workflow_file!(0)
+
+      assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+      assert message =~ "agent_runtime.registration_ack_timeout_ms"
+    end
+  end
+
   describe "agent_runtime.stale_working_ms" do
     test "defaults to the existing 900000 ms supervision bound" do
       write_stale_working_workflow_file!("default", nil)
@@ -75,5 +90,36 @@ defmodule SymphonyElixir.AgentRuntimeStaleWorkingConfigTest do
 
   defp unique_test_root(label) do
     Path.join(System.tmp_dir!(), "symphony-elixir-#{label}-#{System.unique_integer([:positive])}")
+  end
+
+  defp write_registration_ack_timeout_workflow_file!(registration_ack_timeout_ms) do
+    test_root = unique_test_root("registration-ack-timeout")
+    File.mkdir_p!(Path.join(test_root, "workspaces"))
+    workflow_path = Path.join(test_root, "workflow.yaml")
+    previous_path = Workflow.workflow_file_path()
+
+    on_exit(fn ->
+      Workflow.set_workflow_file_path(previous_path)
+      File.rm_rf(test_root)
+    end)
+
+    write_workflow_file!(workflow_path,
+      tracker_kind: "memory",
+      workspace_root: Path.join(test_root, "workspaces"),
+      agent_runtime_provider: "claude_code"
+    )
+
+    body = File.read!(workflow_path)
+
+    body =
+      String.replace(
+        body,
+        ~r/^agent_runtime:$/m,
+        "agent_runtime:\n  registration_ack_timeout_ms: #{registration_ack_timeout_ms}",
+        global: false
+      )
+
+    File.write!(workflow_path, body)
+    Workflow.set_workflow_file_path(workflow_path)
   end
 end

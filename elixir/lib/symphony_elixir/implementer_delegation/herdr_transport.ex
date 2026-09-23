@@ -979,7 +979,8 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
                },
                observed_assignments,
                context
-             ) do
+             ),
+           :ok <- validate_worker_event_recorder_attestation(turn_paths, session) do
         {:ok, observed_assignments}
       else
         {:error, {:worker_assignments_unobservable, _details} = reason} ->
@@ -2504,12 +2505,26 @@ defmodule SymphonyElixir.ImplementerDelegation.HerdrTransport do
   end
 
   defp validate_worker_event_recorder_attestation(worker_events, %{worker: worker})
-       when is_map(worker) do
+       when is_binary(worker_events) and is_map(worker) do
     case Path.wildcard(Path.join(worker_events, "observed.*")) do
       [] ->
         {:error, {:worker_assignments_unobservable, %{reason: :worker_event_recorder_unattested}}}
 
       [_first | _rest] ->
+        :ok
+    end
+  end
+
+  defp validate_worker_event_recorder_attestation(event_paths, %{worker: worker})
+       when is_struct(event_paths, MapSet) and is_map(worker) do
+    case {MapSet.size(event_paths), worker_event_paths(event_paths, "observed.")} do
+      {0, []} ->
+        :ok
+
+      {_event_count, []} ->
+        {:error, {:worker_assignments_unobservable, %{reason: :worker_event_recorder_unattested}}}
+
+      {_event_count, [_first | _rest]} ->
         :ok
     end
   end
