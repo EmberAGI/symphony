@@ -510,6 +510,14 @@ defmodule SymphonyElixir.CoreTest do
       retry_attempts: %{}
     }
 
+    assert {:ok, _ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: "run-owned-session",
+               holder: ProcessOwnership.holder_id(),
+               owned_session_ref: ownership_ref
+             })
+
     assert {:noreply, updated_state} =
              Orchestrator.handle_info(
                {:owned_session_runtime_info, issue_id, CurrentRun.envelope(current_run), ownership_ref},
