@@ -734,8 +734,11 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp provider_turn_reason(error) do
+    response_too_many_failed_attempts =
+      value_at_path(error, ["codexErrorInfo", "responseTooManyFailedAttempts"])
+
     status =
-      value_at_path(error, ["codexErrorInfo", "responseTooManyFailedAttempts", "httpStatusCode"]) ||
+      value_at_path(response_too_many_failed_attempts || %{}, ["httpStatusCode"]) ||
         value_at_path(error, ["httpStatusCode"]) ||
         value_at_path(error, ["status"])
 
@@ -747,7 +750,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       |> String.downcase()
 
     cond do
-      status == 429 -> {:rate_limited, status}
+      is_map(response_too_many_failed_attempts) or status == 429 -> {:rate_limited, status}
       String.contains?(message, "at capacity") -> {:capacity_unavailable, status}
       status == 503 or String.contains?(message, "overloaded") -> {:service_unavailable, status}
       true -> :error

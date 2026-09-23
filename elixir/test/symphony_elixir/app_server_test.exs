@@ -936,6 +936,7 @@ defmodule SymphonyElixir.AppServerTest do
   test "app server classifies failed provider turns separately from empty completions" do
     cases = [
       {%{"status" => "failed", "error" => %{"codexErrorInfo" => %{"responseTooManyFailedAttempts" => %{"httpStatusCode" => 429}}}}, :rate_limited},
+      {%{"status" => "failed", "error" => %{"codexErrorInfo" => %{"responseTooManyFailedAttempts" => %{}}}}, :rate_limited},
       {%{"status" => "failed", "error" => %{"message" => "Selected model is at capacity"}}, :capacity_unavailable},
       {%{"status" => "failed", "error" => %{"message" => "503 Service Unavailable: server_is_overloaded"}}, :service_unavailable},
       {%{"status" => "completed", "last_agent_message" => nil}, :empty_turn_completed}

@@ -299,6 +299,27 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     end
   end
 
+  test "provider throttle classifications stay outside no-progress failure families" do
+    provider_failures = [
+      {:rate_limited, %{status: 429}},
+      {:capacity_unavailable, %{message: "Selected model is at capacity"}},
+      {:service_unavailable, %{status: 503, message: "server_is_overloaded"}}
+    ]
+
+    for reason <- provider_failures do
+      assert {:retryable, failure} = AgentRuntime.classify_failure(reason, @context)
+      assert failure.family == :transient_runtime_failure
+      assert failure.retryable? == true
+      refute failure.family == :repeated_identical_no_progress_failure
+
+      {observation, {:retryable, _}} =
+        AgentRuntime.record_failure_observation(nil, reason, @context)
+
+      assert observation.count == 1
+      assert observation.fingerprint.family == :transient_runtime_failure
+    end
+  end
+
   test "fails closed for unknown failures and timeout-shaped prose outside the allowlist" do
     for reason <- [
           :unknown_runtime_failure,
