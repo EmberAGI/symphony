@@ -162,7 +162,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
 
     assert {:retryable, _failure, observation} =
              Orchestrator.classify_task_exit_for_test(
-               {:network_error, :econnreset},
+               {:empty_turn_completed, %{message: "Codex completed without agent output"}},
                running_entry,
                issue_id,
                state
@@ -196,6 +196,43 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     refute Map.has_key?(blocked.retry_attempts, issue_id)
     assert blocked.blocked_failures[issue_id].family == :repeated_identical_no_progress_failure
     assert ProcessOwnership.status_for_issue(issue).state == "blocked"
+  end
+
+  test "provider throttle failures enter the bounded retry classification" do
+    issue_id = "issue-provider-retry-classification-#{System.unique_integer([:positive])}"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PROVIDER-RETRY",
+      title: "Provider retry classification",
+      description: "provider failure",
+      state: "In Progress"
+    }
+
+    running_entry = %{
+      identifier: issue.identifier,
+      issue: issue,
+      run_id: "run-provider-retry",
+      workspace_path: "/tmp/provider-retry",
+      process_ownership: %{run_id: "run-provider-retry"}
+    }
+
+    state = %Orchestrator.State{execution_generation: "generation-provider-retry"}
+
+    for reason <- [
+          {:rate_limited, %{status: 429}},
+          {:capacity_unavailable, %{message: "Selected model is at capacity"}},
+          {:service_unavailable, %{status: 503, message: "server_is_overloaded"}}
+        ] do
+      assert {:retryable, failure, observation} =
+               Orchestrator.classify_task_exit_for_test(reason, running_entry, issue_id, state)
+
+      assert failure.retryable? == true
+      assert failure.family == :transient_runtime_failure
+      assert observation.count == 1
+      refute failure.retry_reason =~ "empty_turn_completed"
+      refute failure.family == :repeated_identical_no_progress_failure
+    end
   end
 
   test "an attempt-zero normal exit after failure preserves the typed failure" do
