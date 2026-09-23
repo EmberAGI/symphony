@@ -93,7 +93,8 @@ defmodule SymphonyElixir.RunLog do
           assignment: %{
             family: atom_or_string(diagnostic[:family]),
             subtype: diagnostic[:subtype],
-            reason: redact_runtime_text(diagnostic[:retry_reason] || diagnostic[:summary])
+            reason: redact_runtime_text(diagnostic[:retry_reason] || diagnostic[:summary]),
+            evidence: diagnostic[:worker_assignment_evidence]
           }
         }
 

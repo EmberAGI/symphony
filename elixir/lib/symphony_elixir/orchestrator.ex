@@ -2972,7 +2972,11 @@ defmodule SymphonyElixir.Orchestrator do
     if worker_assignment_failure?(failure) do
       case Tracker.fetch_issue_states_by_ids([issue_id]) do
         {:ok, [%Issue{state: state} = issue]} ->
-          if active_issue_state?(state, active_state_set()), do: :active, else: {:routed, issue}
+          cond do
+            active_issue_state?(state, active_state_set()) -> :active
+            supported_implementer_handoff_state?(state) -> {:routed, issue}
+            true -> :active
+          end
 
         _ ->
           :active
@@ -2983,11 +2987,22 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp worker_assignment_failure?(failure) when is_map(failure) do
-    failure[:subtype] in ["implementer_worker_result_failed", "implementer_worker_result_missing"] or
-      (is_binary(failure[:retry_reason]) and String.contains?(failure[:retry_reason], "implementer_worker_result_"))
+    failure[:subtype] in [
+      "implementer_worker_result_failed",
+      "implementer_worker_result_missing",
+      "implementer_worker_result_mismatch",
+      "implementer_worker_assignment_unrecorded",
+      "implementer_worker_delivery_unrecorded"
+    ]
   end
 
   defp worker_assignment_failure?(_failure), do: false
+
+  defp supported_implementer_handoff_state?(state_name) when is_binary(state_name) do
+    normalize_issue_state(state_name) == "agent review"
+  end
+
+  defp supported_implementer_handoff_state?(_state_name), do: false
 
   defp update_irrecoverable_blocked_ownership(
          %Issue{} = issue,

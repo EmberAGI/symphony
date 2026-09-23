@@ -1332,11 +1332,12 @@ defmodule SymphonyElixir.OrchestratorPostHandoffWorkerFailureTest do
 
   test "worker result failure after fresh onward route releases claim without escalation", %{root: root} do
     issue_id = "issue-post-handoff-routed"
+    running_issue = %Issue{id: issue_id, identifier: "TUR-ROUTED", state: "In Progress"}
     issue = %Issue{id: issue_id, identifier: "TUR-ROUTED", state: "Agent Review"}
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
     state = %Orchestrator.State{
-      running: %{issue_id => running_entry(issue, "run-routed")},
+      running: %{issue_id => running_entry(running_issue, "run-routed")},
       claimed: MapSet.new([issue_id]),
       retry_attempts: %{issue_id => %{attempt: 1}}
     }
@@ -1346,7 +1347,8 @@ defmodule SymphonyElixir.OrchestratorPostHandoffWorkerFailureTest do
     refute Map.has_key?(result.blocked_failures, issue_id)
     refute MapSet.member?(result.claimed, issue_id)
     refute Map.has_key?(result.running, issue_id)
-    assert [%{"event" => "non_blocking_runtime_diagnostic", "issue_id" => ^issue_id}] = read_events(root, issue)
+    assert [%{"event" => "non_blocking_runtime_diagnostic", "issue_id" => ^issue_id, "assignment" => %{"evidence" => %{"assignment_id" => "audit-01"}}}] = read_events(root, issue)
+    assert_received {:memory_tracker_fetch_issue_states_by_ids, [^issue_id]}
     refute_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}
     refute_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}
   end
@@ -1374,7 +1376,12 @@ defmodule SymphonyElixir.OrchestratorPostHandoffWorkerFailureTest do
   end
 
   defp worker_failure do
-    %{family: :unclassified_runtime_failure, subtype: "implementer_worker_result_missing", retry_reason: "implementer_worker_result_missing"}
+    %{
+      family: :unclassified_runtime_failure,
+      subtype: "implementer_worker_result_missing",
+      retry_reason: "implementer_worker_result_missing",
+      worker_assignment_evidence: %{assignment_id: "audit-01", result_status: "missing"}
+    }
   end
 
   defp read_events(root, issue) do
