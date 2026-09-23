@@ -216,18 +216,10 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
       end)
 
     load_processes =
-      for _ <- if(load_process_count > 0, do: 1..load_process_count, else: []) do
-        spawn(fn ->
-          load_loop = fn load_loop ->
-            receive do
-              :stop -> :ok
-            after
-              1 -> load_loop.(load_loop)
-            end
-          end
-
-          load_loop.(load_loop)
-        end)
+      if load_process_count > 0 do
+        Enum.map(1..load_process_count, fn _ -> spawn(&run_load_loop/0) end)
+      else
+        []
       end
 
     try do
@@ -252,6 +244,14 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
         })
 
       File.rm_rf(test_root)
+    end
+  end
+
+  defp run_load_loop do
+    receive do
+      :stop -> :ok
+    after
+      1 -> run_load_loop()
     end
   end
 
