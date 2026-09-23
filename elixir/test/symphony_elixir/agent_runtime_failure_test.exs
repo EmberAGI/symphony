@@ -220,8 +220,7 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
 
   test "preserves bounded worker assignment evidence for unclassified failures" do
     reason =
-      {:implementer_worker_result_missing,
-       %{assignment_id: "audit-01", status: "missing", result: %{summary: "not returned"}}}
+      {:implementer_worker_result_missing, %{assignment_id: "audit-01", status: "missing", result: %{summary: "not returned"}}}
 
     assert {:irrecoverable, failure} = AgentRuntime.classify_failure(reason, @context)
 

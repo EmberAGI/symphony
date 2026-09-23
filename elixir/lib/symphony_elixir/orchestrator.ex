@@ -2969,20 +2969,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp implementer_worker_failure_after_handoff(issue_id, _issue, failure) do
-    if worker_assignment_failure?(failure) do
-      case Tracker.fetch_issue_states_by_ids([issue_id]) do
-        {:ok, [%Issue{state: state} = issue]} ->
-          cond do
-            active_issue_state?(state, active_state_set()) -> :active
-            supported_implementer_handoff_state?(state) -> {:routed, issue}
-            true -> :active
-          end
-
-        _ ->
-          :active
+    with true <- worker_assignment_failure?(failure),
+         {:ok, [%Issue{state: state} = issue]} <- Tracker.fetch_issue_states_by_ids([issue_id]) do
+      cond do
+        active_issue_state?(state, active_state_set()) -> :active
+        supported_implementer_handoff_state?(state) -> {:routed, issue}
+        true -> :active
       end
     else
-      :active
+      _ -> :active
     end
   end
 
