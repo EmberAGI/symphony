@@ -110,6 +110,7 @@ defmodule SymphonyElixir.AgentRuntimeStaleWorkingConfigTest do
     )
 
     body = File.read!(workflow_path)
+
     body =
       String.replace(
         body,
@@ -117,6 +118,7 @@ defmodule SymphonyElixir.AgentRuntimeStaleWorkingConfigTest do
         "agent_runtime:\n  registration_ack_timeout_ms: #{registration_ack_timeout_ms}",
         global: false
       )
+
     File.write!(workflow_path, body)
     Workflow.set_workflow_file_path(workflow_path)
   end

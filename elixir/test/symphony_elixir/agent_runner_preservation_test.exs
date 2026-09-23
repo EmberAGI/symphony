@@ -163,6 +163,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
 
     workspace_root = Path.join(test_root, "workspaces")
     File.mkdir_p!(workspace_root)
+
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: workspace_root,
       agent_runtime_provider: "claude_code"
@@ -170,6 +171,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
 
     workflow_path = Workflow.workflow_file_path()
     workflow = File.read!(workflow_path)
+
     workflow =
       String.replace(
         workflow,
@@ -177,6 +179,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
         "agent_runtime:\n  registration_ack_timeout_ms: #{ack_timeout_ms}\n",
         global: false
       )
+
     File.write!(workflow_path, workflow)
 
     issue = %Issue{
