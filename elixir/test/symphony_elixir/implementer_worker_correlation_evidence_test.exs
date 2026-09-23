@@ -739,6 +739,31 @@ defmodule SymphonyElixir.ImplementerWorkerCorrelationEvidenceTest do
     stop(session)
   end
 
+  test "a turn-scoped observation with only stale recorder attestation is unobservable", context do
+    session = start_implementer_session(context, "worker-stale-attestation-empty-turn")
+
+    assert {:ok, observation} =
+             HerdrTransport.begin_worker_assignment_observation(
+               Map.put(session.herdr_session, :orchestrator, session.orchestrator),
+               1_000,
+               session.transport_context
+             )
+
+    File.write!(
+      Path.join(session.herdr_session.runtime_root, "worker-events/probe.000001.stale"),
+      "recorder-bypassed turn"
+    )
+
+    assert {:error, {:worker_assignments_unobservable, %{reason: :worker_event_recorder_unattested}}} =
+             HerdrTransport.worker_assignments(
+               Map.put(session.herdr_session, :orchestrator, session.orchestrator),
+               observation,
+               session.transport_context
+             )
+
+    stop(session)
+  end
+
   test "a delegation spelled with Herdr's global --session option is correlated end to end", context do
     session = start_implementer_session(context, "evidence-global-session")
 

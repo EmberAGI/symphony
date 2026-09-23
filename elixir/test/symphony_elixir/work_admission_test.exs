@@ -278,6 +278,8 @@ defmodule SymphonyElixir.WorkAdmissionTest do
       orchestrator_name =
         Module.concat(__MODULE__, String.to_atom("Startup#{String.capitalize(case_name)}Orchestrator"))
 
+      drain_candidate_issue_events()
+
       {:ok, pid} =
         Orchestrator.start_link(
           name: orchestrator_name,
@@ -649,6 +651,14 @@ defmodule SymphonyElixir.WorkAdmissionTest do
       _ ->
         Process.sleep(10)
         wait_for_completed_poll(pid, attempts - 1)
+    end
+  end
+
+  defp drain_candidate_issue_events do
+    receive do
+      {:memory_tracker_fetch_candidate_issues, _issues} -> drain_candidate_issue_events()
+    after
+      0 -> :ok
     end
   end
 

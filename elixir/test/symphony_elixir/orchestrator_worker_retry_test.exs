@@ -1280,7 +1280,8 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     end
   end
 
-  defp wait_for_orchestrator_state(pid, predicate, timeout_ms \\ 5_000) when is_function(predicate, 1) do
+  defp wait_for_orchestrator_state(pid, predicate, timeout_ms \\ 5_000)
+       when is_function(predicate, 1) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_orchestrator_state(pid, predicate, deadline_ms)
   end
@@ -1308,4 +1309,128 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
       end
     end
   end
+end
+
+defmodule SymphonyElixir.OrchestratorPostHandoffWorkerFailureTest do
+  use SymphonyElixir.TestSupport
+
+  alias SymphonyElixir.Linear.Issue
+
+  setup do
+    previous_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_root = Application.get_env(:symphony_elixir, :run_log_root)
+
+    root =
+      Path.join(System.tmp_dir!(), "symphony-post-handoff-#{System.unique_integer([:positive])}")
+
+    Application.put_env(:symphony_elixir, :run_log_root, root)
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_issues, previous_issues)
+      restore_app_env(:memory_tracker_recipient, previous_recipient)
+      restore_app_env(:run_log_root, previous_root)
+      File.rm_rf(root)
+    end)
+
+    {:ok, root: root}
+  end
+
+  test "worker result failure after fresh onward route releases claim without escalation", %{
+    root: root
+  } do
+    issue_id = "issue-post-handoff-routed"
+    running_issue = %Issue{id: issue_id, identifier: "TUR-ROUTED", state: "In Progress"}
+    issue = %Issue{id: issue_id, identifier: "TUR-ROUTED", state: "Agent Review"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    state = %Orchestrator.State{
+      running: %{issue_id => running_entry(running_issue, "run-routed")},
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{issue_id => %{attempt: 1}},
+      blocked_failures: %{issue_id => %{family: :stale}},
+      failure_observations: %{issue_id => %{summary: "stale observation"}}
+    }
+
+    result =
+      Orchestrator.block_irrecoverable_runtime_failure_for_test(
+        state,
+        issue_id,
+        state.running[issue_id],
+        worker_failure()
+      )
+
+    refute Map.has_key?(result.blocked_failures, issue_id)
+    refute Map.has_key?(result.failure_observations, issue_id)
+    refute MapSet.member?(result.claimed, issue_id)
+    refute Map.has_key?(result.running, issue_id)
+
+    assert [
+             %{
+               "event" => "non_blocking_runtime_diagnostic",
+               "issue_id" => ^issue_id,
+               "issue_state" => "Agent Review",
+               "assignment" => %{"evidence" => %{"assignment_id" => "audit-01"}}
+             }
+           ] =
+             read_events(root, issue)
+
+    assert_received {:memory_tracker_fetch_issue_states_by_ids, [^issue_id]}
+    refute_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}
+    refute_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}
+  end
+
+  test "worker result failure while still active remains fail-closed", %{root: _root} do
+    issue_id = "issue-post-handoff-active"
+    issue = %Issue{id: issue_id, identifier: "TUR-ACTIVE", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    state = %Orchestrator.State{
+      running: %{issue_id => running_entry(issue, "run-active")},
+      claimed: MapSet.new([issue_id])
+    }
+
+    result =
+      Orchestrator.block_irrecoverable_runtime_failure_for_test(
+        state,
+        issue_id,
+        state.running[issue_id],
+        worker_failure()
+      )
+
+    assert Map.has_key?(result.blocked_failures, issue_id)
+    assert MapSet.member?(result.claimed, issue_id)
+    assert_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}
+  end
+
+  defp running_entry(issue, run_id) do
+    %{
+      identifier: issue.identifier,
+      issue: issue,
+      run_id: run_id,
+      retry_attempt: 1,
+      session_id: "session-#{run_id}"
+    }
+  end
+
+  defp worker_failure do
+    %{
+      family: :unclassified_runtime_failure,
+      subtype: "implementer_worker_result_missing",
+      retry_reason: "implementer_worker_result_missing",
+      worker_assignment_evidence: %{assignment_id: "audit-01", result_status: "missing"}
+    }
+  end
+
+  defp read_events(root, issue) do
+    Path.join([root, issue.identifier, "run-routed.jsonl"])
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&Jason.decode!/1)
+  end
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 end
