@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.AgentRunnerPreservationTest do
   use SymphonyElixir.TestSupport
 
+  @moduletag :capture_log
+
   alias SymphonyElixir.Runtime.ProcessOwnership
 
   @moduledoc """
@@ -154,7 +156,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
     end
   end
 
-  defp run_startup_ack_case(ack_timeout_ms, ack_delay_ms) do
+  defp run_startup_ack_case(ack_timeout_ms, ack_delay_ms, load_process_count \\ 0) do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -213,6 +215,21 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
         end
       end)
 
+    load_processes =
+      for _ <- if(load_process_count > 0, do: 1..load_process_count, else: []) do
+        spawn(fn ->
+          load_loop = fn load_loop ->
+            receive do
+              :stop -> :ok
+            after
+              1 -> load_loop.(load_loop)
+            end
+          end
+
+          load_loop.(load_loop)
+        end)
+      end
+
     try do
       catch_exit(
         AgentRunner.run(issue, delayed_recipient,
@@ -225,6 +242,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
       )
     after
       Process.exit(delayed_recipient, :kill)
+      Enum.each(load_processes, &send(&1, :stop))
 
       _ =
         ProcessOwnership.release(issue, %{
@@ -296,7 +314,15 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
 
   @tag timeout: 10_000
   test "a delayed startup registration ack within the configured deadline avoids ack timeout" do
-    result = run_startup_ack_case(100, 20)
+    result = run_startup_ack_case(1_000, 200)
+
+    refute inspect(result) =~ "owned_session_registration_failed"
+    refute_received {:cleanup_owned_session, _session_name}
+  end
+
+  @tag timeout: 10_000
+  test "a delayed startup registration ack survives bounded concurrent host load" do
+    result = run_startup_ack_case(30_000, 250, 32)
 
     refute inspect(result) =~ "owned_session_registration_failed"
     refute_received {:cleanup_owned_session, _session_name}

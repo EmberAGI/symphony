@@ -47,6 +47,13 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
     def cleanup_owned_session(_ownership_ref), do: :ok
   end
 
+  defmodule FailingProcessOwnershipFileSystem do
+    @behaviour SymphonyElixir.Runtime.ProcessOwnership.FileSystem
+
+    @impl true
+    def write(_path, _contents, _modes), do: {:error, :eio}
+  end
+
   setup do
     previous_role = System.get_env("SYMPHONY_ROLE")
     System.put_env("SYMPHONY_ROLE", "implementer")
@@ -161,6 +168,84 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
       refute owned_pids == [],
              "the capture must record the hook processes this run owned before teardown"
     end
+  end
+
+  test "owned-session registration suppresses ack when durable ownership persistence fails" do
+    test_root = unique_test_root("registration-persistence-failure")
+    workspace_root = Path.join(test_root, "workspaces")
+
+    issue = %Issue{
+      id: "issue-emb-1058-registration-persistence",
+      identifier: "TUR-1058P",
+      title: "Registration persistence failure",
+      state: "In Progress",
+      repository: "EmberAGI/demo-repo"
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 30_000,
+      hook_before_run: "sleep 30"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :RegistrationPersistenceFailureOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      stop_orchestrator!(pid)
+      File.rm_rf(test_root)
+    end)
+
+    assert_eventually(fn ->
+      match?(
+        %{running: [%{issue_id: "issue-emb-1058-registration-persistence"} | _]},
+        Orchestrator.snapshot(orchestrator_name, 1_000)
+      )
+    end)
+
+    envelope = current_run_envelope(orchestrator_name, issue.id)
+    previous_file_system =
+      Application.get_env(:symphony_elixir, :process_ownership_file_system)
+
+    Application.put_env(
+      :symphony_elixir,
+      :process_ownership_file_system,
+      FailingProcessOwnershipFileSystem
+    )
+
+    on_exit(fn -> restore_app_env(:process_ownership_file_system, previous_file_system) end)
+
+    ack_ref = make_ref()
+
+    send(
+      pid,
+      {:owned_session_runtime_info, issue.id, envelope,
+       %{
+         kind: "test-owned-session",
+         session_name: "octo-tur-1058-registration-persistence",
+         cleanup_module: CleanupProbe,
+         notify_pid: self()
+       }, self(), ack_ref}
+    )
+
+    refute_receive {:owned_session_runtime_info_ack, ^ack_ref}, 500
+
+    assert_eventually(fn ->
+      case Orchestrator.snapshot(orchestrator_name, 1_000) do
+        %{running: running} ->
+          case Enum.find(running, &(&1.issue_id == issue.id)) do
+            entry when is_map(entry) -> is_nil(Map.get(entry, :owned_session_ref))
+            _ -> false
+          end
+
+        _ -> false
+      end
+    end)
+
+    refute_received {:cleanup_probe_ran, "octo-tur-1058-registration-persistence"}
   end
 
   # Terminal settlement must RELEASE the ownership record, not merely stop
