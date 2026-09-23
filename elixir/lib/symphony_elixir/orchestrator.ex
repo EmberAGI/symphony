@@ -340,11 +340,22 @@ defmodule SymphonyElixir.Orchestrator do
             running_entry
             |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
             |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
-            |> record_process_ownership(issue_id)
-            |> Map.put(:process_ownership_refreshed_at_ms, System.monotonic_time(:millisecond))
 
-          notify_dashboard()
-          {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+          case record_process_ownership(updated_running_entry, issue_id) do
+            {:ok, updated_running_entry} ->
+              updated_running_entry =
+                Map.put(
+                  updated_running_entry,
+                  :process_ownership_refreshed_at_ms,
+                  System.monotonic_time(:millisecond)
+                )
+
+              notify_dashboard()
+              {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+
+            {:error, _reason} ->
+              {:noreply, state}
+          end
         else
           {:noreply, state}
         end
@@ -363,6 +374,9 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, state}
 
       {:missing, state} ->
+        {:noreply, state}
+
+      {:registration_failed, state} ->
         {:noreply, state}
     end
   end
@@ -479,12 +493,15 @@ defmodule SymphonyElixir.Orchestrator do
         if current_run_matches?(running_entry, envelope) do
           ownership_ref = Map.put_new(ownership_ref, :issue_id, issue_id)
 
-          updated_running_entry =
-            running_entry
-            |> Map.put(:owned_session_ref, ownership_ref)
-            |> record_process_ownership(issue_id)
+          updated_running_entry = Map.put(running_entry, :owned_session_ref, ownership_ref)
 
-          {:registered, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+          case record_process_ownership(updated_running_entry, issue_id) do
+            {:ok, updated_running_entry} ->
+              {:registered, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+
+            {:error, _reason} ->
+              {:registration_failed, state}
+          end
         else
           _ = AgentRuntime.cleanup_owned_session(ownership_ref)
           {:missing, state}
@@ -3538,12 +3555,12 @@ defmodule SymphonyElixir.Orchestrator do
            "active",
            process_ownership_attrs(running_entry)
          ) do
-      nil -> running_entry
-      process_ownership -> Map.put(running_entry, :process_ownership, process_ownership)
+      nil -> {:error, :ownership_persistence_failed}
+      process_ownership -> {:ok, Map.put(running_entry, :process_ownership, process_ownership)}
     end
   end
 
-  defp record_process_ownership(running_entry, _issue_id), do: running_entry
+  defp record_process_ownership(running_entry, _issue_id), do: {:ok, running_entry}
 
   defp record_process_completion(running_entry, reason, cleanup_evidence) do
     record_process_completion(running_entry, reason, cleanup_evidence, %{})
