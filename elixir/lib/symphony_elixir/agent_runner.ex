@@ -17,7 +17,6 @@ defmodule SymphonyElixir.AgentRunner do
   }
 
   @type worker_host :: String.t() | nil
-  @owned_session_registration_timeout_ms 5_000
   @delegation_turn_option_keys [
     :turn_timeout_ms,
     :start_timeout_ms,
@@ -286,7 +285,7 @@ defmodule SymphonyElixir.AgentRunner do
           {:owned_session_runtime_info_ack, ^ack_ref} ->
             :ok
         after
-          @owned_session_registration_timeout_ms ->
+          Config.settings!().agent_runtime.registration_ack_timeout_ms ->
             {:error, {:owned_session_registration_failed, :ack_timeout}}
         end
 
@@ -381,7 +380,7 @@ defmodule SymphonyElixir.AgentRunner do
     receive do
       {:owned_session_runtime_info_ack, ^ack_ref} -> :ok
     after
-      @owned_session_registration_timeout_ms ->
+      Config.settings!().agent_runtime.registration_ack_timeout_ms ->
         {:error, {:owned_session_registration_failed, :ack_timeout}}
     end
   end

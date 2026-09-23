@@ -424,6 +424,9 @@ defmodule SymphonyElixir.Config.Schema do
       # the long-standing 900000 ms default; it is never a substitute for
       # correct progress detection.
       field(:stale_working_ms, :integer, default: 900_000)
+      # Bounded deadline for the orchestrator to durably record owned-session
+      # registration before acknowledging it to the runner.
+      field(:registration_ack_timeout_ms, :integer, default: 30_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -436,14 +439,21 @@ defmodule SymphonyElixir.Config.Schema do
           :skill_execution_contracts,
           :host_resources,
           :terminal_settlement_timeout_ms,
-          :stale_working_ms
+          :stale_working_ms,
+          :registration_ack_timeout_ms
         ],
         empty_values: []
       )
       |> validate_host_resources()
-      |> validate_required([:provider, :terminal_settlement_timeout_ms, :stale_working_ms])
+      |> validate_required([
+        :provider,
+        :terminal_settlement_timeout_ms,
+        :stale_working_ms,
+        :registration_ack_timeout_ms
+      ])
       |> validate_number(:terminal_settlement_timeout_ms, greater_than: 0)
       |> validate_number(:stale_working_ms, greater_than: 0)
+      |> validate_number(:registration_ack_timeout_ms, greater_than: 0)
       |> validate_inclusion(:provider, @supported_providers, message: "must be one of: #{Enum.join(@supported_providers, ", ")}")
     end
 

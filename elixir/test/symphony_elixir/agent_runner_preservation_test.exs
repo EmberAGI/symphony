@@ -163,7 +163,21 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
 
     workspace_root = Path.join(test_root, "workspaces")
     File.mkdir_p!(workspace_root)
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      agent_runtime_provider: "claude_code"
+    )
+
+    workflow_path = Workflow.workflow_file_path()
+    workflow = File.read!(workflow_path)
+    workflow =
+      String.replace(
+        workflow,
+        "agent_runtime:\n",
+        "agent_runtime:\n  registration_ack_timeout_ms: 1\n",
+        global: false
+      )
+    File.write!(workflow_path, workflow)
 
     issue = %Issue{
       id: "issue-preservation-startup-ack-timeout",
@@ -187,11 +201,18 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
         holder: ProcessOwnership.holder_id()
       })
 
-    silent_recipient = spawn(fn -> Process.sleep(:infinity) end)
+    delayed_recipient =
+      spawn(fn ->
+        receive do
+          {:owned_session_runtime_info, _issue_id, _envelope, _ownership_ref, runner, ack_ref} ->
+            Process.sleep(20)
+            send(runner, {:owned_session_runtime_info_ack, ack_ref})
+        end
+      end)
 
     try do
       catch_exit(
-        AgentRunner.run(issue, silent_recipient,
+        AgentRunner.run(issue, delayed_recipient,
           run_id: run_id,
           role: "implementer",
           process_ownership: ownership,
@@ -200,7 +221,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
         )
       )
     after
-      Process.exit(silent_recipient, :kill)
+      Process.exit(delayed_recipient, :kill)
 
       _ =
         ProcessOwnership.release(issue, %{
