@@ -1278,7 +1278,7 @@ defmodule SymphonyElixir.AgentRuntime do
     evidence = %{
       assignment_id: Map.get(details, :assignment_id),
       observed_assignment_id: Map.get(details, :observed_assignment_id),
-      result: Map.get(details, :result),
+      result: bounded_worker_result(Map.get(details, :result)),
       status: Map.get(details, :status)
     }
 
@@ -1292,6 +1292,19 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   defp worker_assignment_evidence(_details), do: nil
+
+  defp bounded_worker_result(result) when is_map(result) do
+    result
+    |> Map.take([:assignment_id, :status, :summary])
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+    |> case do
+      %{} = bounded when map_size(bounded) > 0 -> bounded
+      _ -> nil
+    end
+  end
+
+  defp bounded_worker_result(_result), do: nil
 
   defp failure_fingerprint(family, provider, subtype, summary, context) do
     %{
