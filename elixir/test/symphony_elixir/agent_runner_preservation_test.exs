@@ -154,7 +154,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
     end
   end
 
-  defp run_startup_ack_timeout_case do
+  defp run_startup_ack_case(ack_timeout_ms, ack_delay_ms) do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -174,7 +174,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
       String.replace(
         workflow,
         "agent_runtime:\n",
-        "agent_runtime:\n  registration_ack_timeout_ms: 1\n",
+        "agent_runtime:\n  registration_ack_timeout_ms: #{ack_timeout_ms}\n",
         global: false
       )
     File.write!(workflow_path, workflow)
@@ -205,7 +205,7 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
       spawn(fn ->
         receive do
           {:owned_session_runtime_info, _issue_id, _envelope, _ownership_ref, runner, ack_ref} ->
-            Process.sleep(20)
+            Process.sleep(ack_delay_ms)
             send(runner, {:owned_session_runtime_info_ack, ack_ref})
         end
       end)
@@ -232,6 +232,10 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
 
       File.rm_rf(test_root)
     end
+  end
+
+  defp run_startup_ack_timeout_case do
+    run_startup_ack_case(1, 20)
   end
 
   test "a typed checkpoint failure blocks the runner's destructive session stop" do
@@ -285,5 +289,13 @@ defmodule SymphonyElixir.AgentRunnerPreservationTest do
     assert_received {:cleanup_owned_session, session_name}
     assert String.starts_with?(session_name, "octo-emb-1244-")
     refute_received {:stop_session, _name}
+  end
+
+  @tag timeout: 10_000
+  test "a delayed startup registration ack within the configured deadline avoids ack timeout" do
+    result = run_startup_ack_case(100, 20)
+
+    refute inspect(result) =~ "owned_session_registration_failed"
+    refute_received {:cleanup_owned_session, _session_name}
   end
 end
