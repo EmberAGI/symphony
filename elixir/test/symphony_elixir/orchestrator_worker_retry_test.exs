@@ -1348,7 +1348,9 @@ defmodule SymphonyElixir.OrchestratorPostHandoffWorkerFailureTest do
     state = %Orchestrator.State{
       running: %{issue_id => running_entry(running_issue, "run-routed")},
       claimed: MapSet.new([issue_id]),
-      retry_attempts: %{issue_id => %{attempt: 1}}
+      retry_attempts: %{issue_id => %{attempt: 1}},
+      blocked_failures: %{issue_id => %{family: :stale}},
+      failure_observations: %{issue_id => %{summary: "stale observation"}}
     }
 
     result =
@@ -1360,6 +1362,7 @@ defmodule SymphonyElixir.OrchestratorPostHandoffWorkerFailureTest do
       )
 
     refute Map.has_key?(result.blocked_failures, issue_id)
+    refute Map.has_key?(result.failure_observations, issue_id)
     refute MapSet.member?(result.claimed, issue_id)
     refute Map.has_key?(result.running, issue_id)
 

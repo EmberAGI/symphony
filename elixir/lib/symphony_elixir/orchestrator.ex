@@ -2915,6 +2915,7 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.warning("Ignoring post-handoff Implementer worker assignment failure for issue_id=#{issue_id} issue_identifier=#{identifier} state=#{routed_issue.state} summary=#{summary}")
 
         state
+        |> clear_failure_observation(issue_id)
         |> Map.update!(:running, &Map.delete(&1, issue_id))
         |> Map.update!(:claimed, &MapSet.delete(&1, issue_id))
         |> Map.update!(:retry_attempts, &Map.delete(&1, issue_id))
@@ -2991,13 +2992,9 @@ defmodule SymphonyElixir.Orchestrator do
     ]
   end
 
-  defp worker_assignment_failure?(_failure), do: false
-
   defp supported_implementer_handoff_state?(state_name) when is_binary(state_name) do
     normalize_issue_state(state_name) == "agent review"
   end
-
-  defp supported_implementer_handoff_state?(_state_name), do: false
 
   defp update_irrecoverable_blocked_ownership(
          %Issue{} = issue,
