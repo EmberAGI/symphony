@@ -1429,10 +1429,17 @@ defmodule SymphonyElixir.AgentRuntime do
   defp recoverable_failure?(_reason), do: false
 
   defp unclassified_failure_details(reason) do
+    details =
+      case reason do
+        {_subtype, details} when is_map(details) -> details
+        _ -> %{}
+      end
+
     %{
       subtype: failure_reason_subtype(reason),
       message: detail_summary(reason)
     }
+    |> Map.merge(worker_assignment_evidence(details) || %{})
   end
 
   defp failure_reason_subtype(reason) when is_atom(reason), do: Atom.to_string(reason)
