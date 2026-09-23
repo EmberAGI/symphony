@@ -207,6 +207,7 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
     end)
 
     envelope = current_run_envelope(orchestrator_name, issue.id)
+
     previous_file_system =
       Application.get_env(:symphony_elixir, :process_ownership_file_system)
 
@@ -241,7 +242,8 @@ defmodule SymphonyElixir.OrchestratorTerminalSettlementEvidenceTest do
             _ -> false
           end
 
-        _ -> false
+        _ ->
+          false
       end
     end)
 
