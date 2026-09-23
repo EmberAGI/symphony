@@ -933,6 +933,67 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server classifies failed provider turns separately from empty completions" do
+    cases = [
+      {%{"status" => "failed", "error" => %{"codexErrorInfo" => %{"responseTooManyFailedAttempts" => %{"httpStatusCode" => 429}}}}, :rate_limited},
+      {%{"status" => "failed", "error" => %{"message" => "Selected model is at capacity"}}, :capacity_unavailable},
+      {%{"status" => "failed", "error" => %{"message" => "503 Service Unavailable: server_is_overloaded"}}, :service_unavailable},
+      {%{"status" => "completed", "last_agent_message" => nil}, :empty_turn_completed}
+    ]
+
+    for {turn, expected_reason} <- cases do
+      assert {:error, {^expected_reason, details}} = run_turn_completion_case(turn)
+      assert is_map(details)
+
+      if expected_reason == :empty_turn_completed do
+        assert details["method"] == "turn/completed"
+      else
+        assert details["reason"] == Atom.to_string(expected_reason)
+      end
+
+      refute inspect(details) =~ "provider-token"
+    end
+  end
+
+  defp run_turn_completion_case(turn) do
+    test_root = Path.join(System.tmp_dir!(), "symphony-elixir-provider-turn-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1063")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+      completion = Jason.encode!(%{"method" => "turn/completed", "params" => %{"turn" => turn}})
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+        case "$count" in
+          1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+          2) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1063"}}}' ;;
+          3) printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1063"}}}' ;;
+          4) printf '%s\\n' '#{completion}' ; exit 0 ;;
+          *) exit 0 ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{id: "issue-provider-turn", identifier: "MT-1063", title: "Provider turn", description: "", state: "In Progress", url: "https://example.org/issues/MT-1063", labels: []}
+      AppServer.run(workspace, "Provider turn", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server classifies Codex revoked-token completion as provider auth failure" do
     test_root =
       Path.join(
