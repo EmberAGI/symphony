@@ -73,8 +73,8 @@ defmodule SymphonyElixir.RunLog do
       :ok
   end
 
-  @spec record_non_blocking_runtime_diagnostic(String.t(), map(), map()) :: :ok
-  def record_non_blocking_runtime_diagnostic(issue_id, running_entry, diagnostic)
+  @spec record_non_blocking_runtime_diagnostic(String.t(), map(), map(), Issue.t() | nil) :: :ok
+  def record_non_blocking_runtime_diagnostic(issue_id, running_entry, diagnostic, routed_issue \\ nil)
       when is_binary(issue_id) and is_map(running_entry) and is_map(diagnostic) do
     case {configured_root(), run_id(running_entry, nil)} do
       {root, run_id} when is_binary(root) and is_binary(run_id) ->
@@ -86,7 +86,7 @@ defmodule SymphonyElixir.RunLog do
           timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
           issue_id: issue_id,
           issue_identifier: issue_identifier,
-          issue_state: issue_state(running_entry),
+          issue_state: issue_state(routed_issue || running_entry),
           role: ProcessOwnership.current_role(),
           run_id: run_id,
           session_id: Map.get(running_entry, :session_id),

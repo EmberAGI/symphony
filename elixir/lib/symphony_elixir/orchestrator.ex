@@ -2911,7 +2911,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     case implementer_worker_failure_after_handoff(issue_id, issue, failure) do
       {:routed, routed_issue} ->
-        RunLog.record_non_blocking_runtime_diagnostic(issue_id, running_entry, failure)
+        RunLog.record_non_blocking_runtime_diagnostic(issue_id, running_entry, failure, routed_issue)
         Logger.warning("Ignoring post-handoff Implementer worker assignment failure for issue_id=#{issue_id} issue_identifier=#{identifier} state=#{routed_issue.state} summary=#{summary}")
 
         state

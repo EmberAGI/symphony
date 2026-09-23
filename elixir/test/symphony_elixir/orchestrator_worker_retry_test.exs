@@ -1347,7 +1347,7 @@ defmodule SymphonyElixir.OrchestratorPostHandoffWorkerFailureTest do
     refute Map.has_key?(result.blocked_failures, issue_id)
     refute MapSet.member?(result.claimed, issue_id)
     refute Map.has_key?(result.running, issue_id)
-    assert [%{"event" => "non_blocking_runtime_diagnostic", "issue_id" => ^issue_id, "assignment" => %{"evidence" => %{"assignment_id" => "audit-01"}}}] = read_events(root, issue)
+    assert [%{"event" => "non_blocking_runtime_diagnostic", "issue_id" => ^issue_id, "issue_state" => "Agent Review", "assignment" => %{"evidence" => %{"assignment_id" => "audit-01"}}}] = read_events(root, issue)
     assert_received {:memory_tracker_fetch_issue_states_by_ids, [^issue_id]}
     refute_receive {:memory_tracker_label_add, ^issue_id, "Human Escalation"}
     refute_receive {:memory_tracker_state_update, ^issue_id, "Human Escalation"}
