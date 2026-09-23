@@ -335,30 +335,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, state}
 
       running_entry ->
-        if current_run_matches?(running_entry, envelope) do
-          updated_running_entry =
-            running_entry
-            |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
-            |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
-
-          case record_process_ownership(updated_running_entry, issue_id) do
-            {:ok, updated_running_entry} ->
-              updated_running_entry =
-                Map.put(
-                  updated_running_entry,
-                  :process_ownership_refreshed_at_ms,
-                  System.monotonic_time(:millisecond)
-                )
-
-              notify_dashboard()
-              {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
-
-            {:error, _reason} ->
-              {:noreply, state}
-          end
-        else
-          {:noreply, state}
-        end
+        handle_runtime_info_update(running, state, issue_id, envelope, runtime_info, running_entry)
     end
   end
 
@@ -490,22 +467,52 @@ defmodule SymphonyElixir.Orchestrator do
         {:missing, state}
 
       running_entry ->
-        if current_run_matches?(running_entry, envelope) do
-          ownership_ref = Map.put_new(ownership_ref, :issue_id, issue_id)
+        register_owned_session(running, state, issue_id, envelope, ownership_ref, running_entry)
+    end
+  end
 
-          updated_running_entry = Map.put(running_entry, :owned_session_ref, ownership_ref)
+  defp handle_runtime_info_update(running, state, issue_id, envelope, runtime_info, running_entry) do
+    if current_run_matches?(running_entry, envelope) do
+      updated_running_entry =
+        running_entry
+        |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
+        |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
 
-          case record_process_ownership(updated_running_entry, issue_id) do
-            {:ok, updated_running_entry} ->
-              {:registered, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+      case record_process_ownership(updated_running_entry, issue_id) do
+        {:ok, updated_running_entry} ->
+          updated_running_entry =
+            Map.put(
+              updated_running_entry,
+              :process_ownership_refreshed_at_ms,
+              System.monotonic_time(:millisecond)
+            )
 
-            {:error, _reason} ->
-              {:registration_failed, state}
-          end
-        else
-          _ = AgentRuntime.cleanup_owned_session(ownership_ref)
-          {:missing, state}
-        end
+          notify_dashboard()
+          {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+
+        {:error, _reason} ->
+          {:noreply, state}
+      end
+    else
+      {:noreply, state}
+    end
+  end
+
+  defp register_owned_session(running, state, issue_id, envelope, ownership_ref, running_entry) do
+    if current_run_matches?(running_entry, envelope) do
+      ownership_ref = Map.put_new(ownership_ref, :issue_id, issue_id)
+      updated_running_entry = Map.put(running_entry, :owned_session_ref, ownership_ref)
+
+      case record_process_ownership(updated_running_entry, issue_id) do
+        {:ok, updated_running_entry} ->
+          {:registered, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+
+        {:error, _reason} ->
+          {:registration_failed, state}
+      end
+    else
+      _ = AgentRuntime.cleanup_owned_session(ownership_ref)
+      {:missing, state}
     end
   end
 
