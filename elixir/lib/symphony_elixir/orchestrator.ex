@@ -658,6 +658,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec block_irrecoverable_runtime_failure_for_test(struct(), String.t(), map(), map()) :: struct()
+  def block_irrecoverable_runtime_failure_for_test(%State{} = state, issue_id, running_entry, failure)
+      when is_binary(issue_id) and is_map(running_entry) and is_map(failure) do
+    block_irrecoverable_runtime_failure(state, issue_id, running_entry, failure)
+  end
+
+  @doc false
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
@@ -2902,6 +2909,25 @@ defmodule SymphonyElixir.Orchestrator do
     identifier = Map.get(running_entry, :identifier, issue_id)
     issue = Map.get(running_entry, :issue)
 
+    case implementer_worker_failure_after_handoff(issue_id, issue, failure) do
+      {:routed, routed_issue} ->
+        RunLog.record_non_blocking_runtime_diagnostic(issue_id, running_entry, failure, routed_issue)
+        Logger.warning("Ignoring post-handoff Implementer worker assignment failure for issue_id=#{issue_id} issue_identifier=#{identifier} state=#{routed_issue.state} summary=#{summary}")
+
+        state
+        |> clear_failure_observation(issue_id)
+        |> Map.update!(:running, &Map.delete(&1, issue_id))
+        |> Map.update!(:claimed, &MapSet.delete(&1, issue_id))
+        |> Map.update!(:retry_attempts, &Map.delete(&1, issue_id))
+
+      :active ->
+        block_irrecoverable_runtime_failure_active(state, issue_id, running_entry, failure, summary, identifier)
+    end
+  end
+
+  defp block_irrecoverable_runtime_failure_active(%State{} = state, issue_id, running_entry, failure, summary, identifier) do
+    issue = Map.get(running_entry, :issue)
+
     failure_observation =
       Map.get(state.failure_observations, issue_id) ||
         get_in(running_entry, [:process_ownership, :failure_observation])
@@ -2941,6 +2967,33 @@ defmodule SymphonyElixir.Orchestrator do
             blocked_failure_entry(issue_id, running_entry, failure, blocked_ownership)
           )
     }
+  end
+
+  defp implementer_worker_failure_after_handoff(issue_id, _issue, failure) do
+    with true <- worker_assignment_failure?(failure),
+         {:ok, [%Issue{state: state} = issue]} <- Tracker.fetch_issue_states_by_ids([issue_id]) do
+      cond do
+        active_issue_state?(state, active_state_set()) -> :active
+        supported_implementer_handoff_state?(state) -> {:routed, issue}
+        true -> :active
+      end
+    else
+      _ -> :active
+    end
+  end
+
+  defp worker_assignment_failure?(failure) when is_map(failure) do
+    failure[:subtype] in [
+      "implementer_worker_result_failed",
+      "implementer_worker_result_missing",
+      "implementer_worker_result_mismatch",
+      "implementer_worker_assignment_unrecorded",
+      "implementer_worker_delivery_unrecorded"
+    ]
+  end
+
+  defp supported_implementer_handoff_state?(state_name) when is_binary(state_name) do
+    normalize_issue_state(state_name) == "agent review"
   end
 
   defp update_irrecoverable_blocked_ownership(

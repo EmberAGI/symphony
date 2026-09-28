@@ -39,6 +39,7 @@ defmodule SymphonyElixir.RunLog do
   rescue
     error ->
       Logger.warning("Failed to write run log artifact for issue_id=#{issue_id}: #{Exception.message(error)}")
+
       :ok
   end
 
@@ -70,6 +71,51 @@ defmodule SymphonyElixir.RunLog do
   rescue
     error ->
       Logger.warning("Failed to write irrecoverable run log artifact for issue_id=#{issue_id}: #{Exception.message(error)}")
+
+      :ok
+  end
+
+  @spec record_non_blocking_runtime_diagnostic(String.t(), map(), map(), Issue.t() | nil) :: :ok
+  def record_non_blocking_runtime_diagnostic(
+        issue_id,
+        running_entry,
+        diagnostic,
+        routed_issue \\ nil
+      )
+      when is_binary(issue_id) and is_map(running_entry) and is_map(diagnostic) do
+    case {configured_root(), run_id(running_entry, nil)} do
+      {root, run_id} when is_binary(root) and is_binary(run_id) ->
+        issue_identifier = issue_identifier(issue_id, running_entry, nil)
+        path = Path.join([root, safe_segment(issue_identifier), "#{safe_segment(run_id)}.jsonl"])
+
+        payload = %{
+          event: "non_blocking_runtime_diagnostic",
+          timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
+          issue_id: issue_id,
+          issue_identifier: issue_identifier,
+          issue_state: issue_state(routed_issue || running_entry),
+          role: ProcessOwnership.current_role(),
+          run_id: run_id,
+          session_id: Map.get(running_entry, :session_id),
+          assignment: %{
+            family: atom_or_string(diagnostic[:family]),
+            subtype: diagnostic[:subtype],
+            reason: redact_runtime_text(diagnostic[:retry_reason] || diagnostic[:summary]),
+            evidence: diagnostic[:worker_assignment_evidence]
+          }
+        }
+
+        :ok = File.mkdir_p(Path.dirname(path))
+        :ok = File.write(path, Jason.encode!(payload) <> "\n", [:append])
+        :ok
+
+      _ ->
+        :ok
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to write non-blocking run diagnostic for issue_id=#{issue_id}: #{Exception.message(error)}")
+
       :ok
   end
 
@@ -106,7 +152,15 @@ defmodule SymphonyElixir.RunLog do
 
   defp issue_identifier(issue_id, _retry_context, _process_ownership), do: issue_id
 
-  defp agent_retry_scheduled_payload(issue_id, issue_identifier, run_id, retry_context, process_ownership, metadata, retry) do
+  defp agent_retry_scheduled_payload(
+         issue_id,
+         issue_identifier,
+         run_id,
+         retry_context,
+         process_ownership,
+         metadata,
+         retry
+       ) do
     %{
       event: "agent_retry_scheduled",
       timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
@@ -134,7 +188,14 @@ defmodule SymphonyElixir.RunLog do
     }
   end
 
-  defp irrecoverable_runtime_failure_payload(issue_id, issue_identifier, run_id, running_entry, process_ownership, failure) do
+  defp irrecoverable_runtime_failure_payload(
+         issue_id,
+         issue_identifier,
+         run_id,
+         running_entry,
+         process_ownership,
+         failure
+       ) do
     %{
       event: "irrecoverable_runtime_failure_escalated",
       timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
@@ -160,6 +221,7 @@ defmodule SymphonyElixir.RunLog do
     }
   end
 
+  defp issue_state(%Issue{state: state}), do: state
   defp issue_state(%{issue: %Issue{state: state}}), do: state
   defp issue_state(_retry_context), do: nil
 
@@ -187,7 +249,10 @@ defmodule SymphonyElixir.RunLog do
   defp redact_runtime_text(value) when is_binary(value) do
     value
     |> String.replace(~r/(?i)\b(authorization)\s*[:=]\s*bearer\s+[^\s,\]}]+/, "\\1=[REDACTED]")
-    |> String.replace(~r/(?i)\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,\]}]+/, "\\1=[REDACTED]")
+    |> String.replace(
+      ~r/(?i)\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,\]}]+/,
+      "\\1=[REDACTED]"
+    )
     |> String.replace(~r/(?i)\bbearer\s+[A-Za-z0-9._~+\/-]+=*/, "Bearer #{@redacted}")
   end
 

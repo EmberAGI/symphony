@@ -1140,6 +1140,7 @@ defmodule SymphonyElixir.AgentRuntime do
     decision(family, summary, context,
       provider: provider,
       subtype: subtype,
+      worker_assignment_evidence: worker_assignment_evidence(details),
       retryable?: false,
       recovery_reason: recovery_reason(family)
     )
@@ -1263,6 +1264,7 @@ defmodule SymphonyElixir.AgentRuntime do
       subtype: subtype,
       summary: summary,
       retry_reason: retry_reason,
+      worker_assignment_evidence: Keyword.get(opts, :worker_assignment_evidence),
       recovery_reason: Keyword.get(opts, :recovery_reason),
       retryable?: retryable?,
       irrecoverable?: !retryable?,
@@ -1271,6 +1273,38 @@ defmodule SymphonyElixir.AgentRuntime do
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
   end
+
+  defp worker_assignment_evidence(details) when is_map(details) do
+    evidence = %{
+      assignment_id: Map.get(details, :assignment_id),
+      observed_assignment_id: Map.get(details, :observed_assignment_id),
+      result: bounded_worker_result(Map.get(details, :result)),
+      status: Map.get(details, :status)
+    }
+
+    evidence
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+    |> case do
+      %{} = evidence when map_size(evidence) > 0 -> evidence
+      _ -> nil
+    end
+  end
+
+  defp worker_assignment_evidence(_details), do: nil
+
+  defp bounded_worker_result(result) when is_map(result) do
+    result
+    |> Map.take([:assignment_id, :status, :summary])
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+    |> case do
+      %{} = bounded when map_size(bounded) > 0 -> bounded
+      _ -> nil
+    end
+  end
+
+  defp bounded_worker_result(_result), do: nil
 
   defp failure_fingerprint(family, provider, subtype, summary, context) do
     %{
@@ -1408,10 +1442,17 @@ defmodule SymphonyElixir.AgentRuntime do
   defp recoverable_failure?(_reason), do: false
 
   defp unclassified_failure_details(reason) do
+    details =
+      case reason do
+        {_subtype, details} when is_map(details) -> details
+        _ -> %{}
+      end
+
     %{
       subtype: failure_reason_subtype(reason),
       message: detail_summary(reason)
     }
+    |> Map.merge(worker_assignment_evidence(details) || %{})
   end
 
   defp failure_reason_subtype(reason) when is_atom(reason), do: Atom.to_string(reason)

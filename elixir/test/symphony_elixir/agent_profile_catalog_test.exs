@@ -43,6 +43,19 @@ defmodule SymphonyElixir.AgentProfileCatalogTest do
     assert codex.reasoning_effort == "medium"
   end
 
+  for effort <- ["xhigh", "max"] do
+    test "loads Opus 5.5 at #{effort}", %{root: root} do
+      effort = unquote(effort)
+      path = write_profile!(root, "implementer-orchestrator", "orchestrator", "implementer", "gpt-6-astra", "claude-opus-5-5")
+      File.write!(path, String.replace(File.read!(path), "model = \"claude-opus-5-5\", reasoning_effort = \"xhigh\"", "model = \"claude-opus-5-5\", reasoning_effort = \"#{effort}\""))
+
+      assert {:ok, catalog} = AgentProfileCatalog.load(root)
+      assert {:ok, claude} = AgentProfileCatalog.resolve(catalog, "implementer-orchestrator", "claude_code", "extreme", "default")
+      assert claude.model == "claude-opus-5-5"
+      assert claude.reasoning_effort == effort
+    end
+  end
+
   test "loads Fable 5.1 max while preserving Fable 5 max support", %{root: root} do
     for {name, model} <- [{"new-fable", "claude-fable-5-1"}, {"old-fable", "claude-fable-5"}] do
       path = write_profile!(root, name, "orchestrator", "implementer", "gpt-6-astra", model)
