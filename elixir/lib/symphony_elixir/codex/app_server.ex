@@ -744,7 +744,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     message =
       [value_at_path(error, ["message"]), value_at_path(error, ["details"]), value_at_path(error, ["codexErrorInfo"])]
-      |> Enum.map(&safe_detail_fragment/1)
+      |> Enum.map(&provider_error_text/1)
       |> Enum.reject(&is_nil/1)
       |> Enum.join(" ")
       |> String.downcase()
@@ -756,6 +756,11 @@ defmodule SymphonyElixir.Codex.AppServer do
       true -> :error
     end
   end
+
+  # Classification text only; it is matched locally and never emitted.
+  defp provider_error_text(value) when is_binary(value), do: String.slice(value, 0, 1_000)
+  defp provider_error_text(nil), do: nil
+  defp provider_error_text(value), do: value |> inspect(limit: 20, printable_limit: 1_000) |> String.slice(0, 1_000)
 
   defp handle_turn_failed(port, on_message, payload, payload_string) do
     case codex_provider_auth_failure(payload) do
