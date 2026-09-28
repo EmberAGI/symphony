@@ -76,6 +76,12 @@ defmodule SymphonyElixir.AgentRuntime do
   # way a completed hook can ask to be retried. Every other non-zero exit is
   # read as a verdict on the run.
   @hook_temporary_failure_status 75
+  # Provider throttling is transient backoff, not a no-progress defect. With
+  # the orchestrator's doubling delay this spans roughly five minutes before a
+  # sustained outage ends at the equivalent-redispatch guard.
+  @provider_throttle_reasons [:rate_limited, :capacity_unavailable, :service_unavailable]
+  @provider_throttle_subtypes Enum.map(@provider_throttle_reasons, &Atom.to_string/1)
+  @provider_throttle_redispatch_budget 5
   @host_resource_context_keys ~w(
     role
     execution_generation
@@ -464,10 +470,12 @@ defmodule SymphonyElixir.AgentRuntime do
   @doc """
   Record a failed runtime observation and apply the persistent no-progress rule.
 
-  A second observed identical failure is an irrecoverable safety net. The
-  orchestrator normally blocks the first equivalent redispatch before that
-  second execution. Different fingerprints and changed reset markers restart
-  the observation sequence.
+  An identical failure observed past its equivalent-redispatch budget is an
+  irrecoverable safety net. The budget is zero, except that an identical
+  provider throttle may be redispatched five times with backoff. The
+  orchestrator normally blocks the first redispatch past the budget before
+  that execution. Different fingerprints and changed reset markers restart the
+  observation sequence.
   """
   @spec record_failure_observation(failure_observation() | nil, term(), map()) ::
           {failure_observation(), {:irrecoverable, failure_decision()} | {:retryable, failure_decision()}}
@@ -509,14 +517,16 @@ defmodule SymphonyElixir.AgentRuntime do
 
   A normal task exit cannot erase the durable fact that this top-level run is a
   retry of a failed checkpoint. A verified success after the reset marker
-  changes is a distinct run and may clear the prior observation.
+  changes is a distinct run and may clear the prior observation, as may a
+  provider-throttle retry still within its equivalent-redispatch budget.
   """
   @spec retried_completion_failure(failure_observation() | nil, map()) ::
           :clear | :none | {:block, failure_decision()}
   def retried_completion_failure(observation, context \\ %{}) when is_map(context) do
     cond do
       valid_failure_observation?(observation) and
-          Map.get(observation, :reset_marker) == failure_reset_marker(context) ->
+        Map.get(observation, :reset_marker) == failure_reset_marker(context) and
+          Map.get(observation, :count) > equivalent_redispatch_budget(observation) ->
         {:block, repeated_failure_decision(observation, context)}
 
       valid_failure_observation?(observation) ->
@@ -1158,11 +1168,19 @@ defmodule SymphonyElixir.AgentRuntime do
 
     decision(family, summary, context,
       provider: runtime_provider(context),
-      subtype: subtype_from_details(reason),
+      subtype: provider_throttle_subtype(reason) || subtype_from_details(reason),
       retryable?: true,
       recovery_reason: nil
     )
   end
+
+  defp provider_throttle_subtype(reason) when reason in @provider_throttle_reasons,
+    do: Atom.to_string(reason)
+
+  defp provider_throttle_subtype({reason, _details}) when reason in @provider_throttle_reasons,
+    do: Atom.to_string(reason)
+
+  defp provider_throttle_subtype(_reason), do: nil
 
   defp record_retryable_failure_observation(previous_observation, reason, failure, context) do
     repeated_failure =
@@ -1175,7 +1193,7 @@ defmodule SymphonyElixir.AgentRuntime do
     count = next_observation_count(previous_observation, failure, context)
     observation = observation_for(failure, context, count)
 
-    if count >= 2 do
+    if count >= identical_observation_limit(observation) do
       {observation, {:irrecoverable, repeated_failure}}
     else
       {observation, {:retryable, failure}}
@@ -1220,8 +1238,27 @@ defmodule SymphonyElixir.AgentRuntime do
     |> Map.new()
   end
 
+  # A provider throttle says nothing about the checkpoint, so identical
+  # throttles earn a bounded number of backoff redispatches before the guard
+  # refuses; every other identical failure earns none.
+  defp equivalent_redispatch_budget(observation) do
+    if provider_throttle_observation?(observation),
+      do: @provider_throttle_redispatch_budget,
+      else: 0
+  end
+
+  # The persistent no-progress safety net sits one observation past the
+  # guard, so it only fires when an equivalent redispatch bypassed the guard.
+  defp identical_observation_limit(observation), do: equivalent_redispatch_budget(observation) + 2
+
+  defp provider_throttle_observation?(%{fingerprint: %{family: :transient_runtime_failure, subtype: subtype}}),
+    do: subtype in @provider_throttle_subtypes
+
+  defp provider_throttle_observation?(_observation), do: false
+
   defp equivalent_failure_observation?(queued_observation, durable_observation, context) do
     valid_failure_observation?(queued_observation) and
+      Map.get(queued_observation, :count) > equivalent_redispatch_budget(queued_observation) and
       valid_failure_observation?(durable_observation) and
       Map.get(queued_observation, :fingerprint) == Map.get(durable_observation, :fingerprint) and
       Map.get(queued_observation, :reset_marker) == Map.get(durable_observation, :reset_marker) and

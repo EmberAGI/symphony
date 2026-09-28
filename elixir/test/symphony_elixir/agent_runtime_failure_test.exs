@@ -333,6 +333,42 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     end
   end
 
+  test "identical provider throttles earn five equivalent redispatches, other failures none" do
+    context = Map.merge(@context, %{execution_generation: "generation-a", input_fingerprint: "input-a"})
+
+    for reason <- [:rate_limited, :capacity_unavailable, {:service_unavailable, %{status: 503}}] do
+      observations =
+        Enum.scan(1..7, nil, fn _run, previous ->
+          {observation, _classification} = AgentRuntime.record_failure_observation(previous, reason, context)
+          observation
+        end)
+
+      decisions =
+        Enum.map(observations, fn observation ->
+          AgentRuntime.equivalent_redispatch_failure(observation, observation, context)
+        end)
+
+      assert Enum.take(decisions, 5) == List.duplicate(:allow, 5)
+      assert {:block, %{family: :repeated_identical_no_progress_failure}} = Enum.at(decisions, 5)
+
+      # The persistent safety net fires only past the guard's budget.
+      assert {_observation, {:retryable, _}} =
+               AgentRuntime.record_failure_observation(Enum.at(observations, 4), reason, context)
+
+      assert {_observation, {:irrecoverable, %{family: :repeated_identical_no_progress_failure}}} =
+               AgentRuntime.record_failure_observation(Enum.at(observations, 5), reason, context)
+    end
+
+    {network_observation, {:retryable, _}} =
+      AgentRuntime.record_failure_observation(nil, {:network_error, :econnreset}, context)
+
+    assert {:block, _failure} =
+             AgentRuntime.equivalent_redispatch_failure(network_observation, network_observation, context)
+
+    assert {_observation, {:irrecoverable, _}} =
+             AgentRuntime.record_failure_observation(network_observation, {:network_error, :econnreset}, context)
+  end
+
   test "fails closed for unknown failures and timeout-shaped prose outside the allowlist" do
     for reason <- [
           :unknown_runtime_failure,
@@ -439,7 +475,7 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     {observation, {:retryable, _first}} = AgentRuntime.record_failure_observation(nil, reason, @context)
 
     {observation, {:retryable, transient}} =
-      AgentRuntime.record_failure_observation(observation, {:rate_limited, %{message: "retry later"}}, @context)
+      AgentRuntime.record_failure_observation(observation, {:network_error, %{message: "retry later"}}, @context)
 
     assert observation.count == 1
     assert transient.retryable?
@@ -447,7 +483,7 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
     assert {_observation, {:irrecoverable, repeated_transient}} =
              AgentRuntime.record_failure_observation(
                observation,
-               {:rate_limited, %{message: "retry later"}},
+               {:network_error, %{message: "retry later"}},
                @context
              )
 
@@ -455,7 +491,7 @@ defmodule SymphonyElixir.AgentRuntimeFailureTest do
   end
 
   test "the same durable checkpoint and typed failure cannot authorize an equivalent redispatch for any role" do
-    reason = {:rate_limited, %{message: "provider retry window"}}
+    reason = {:network_error, %{message: "provider retry window"}}
 
     for role <- ["backlog-processor", "implementer", "reviewer", "qa", "landing"] do
       context =
