@@ -737,17 +737,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     response_too_many_failed_attempts =
       value_at_path(error, ["codexErrorInfo", "responseTooManyFailedAttempts"])
 
-    status =
-      value_at_path(response_too_many_failed_attempts || %{}, ["httpStatusCode"]) ||
-        value_at_path(error, ["httpStatusCode"]) ||
-        value_at_path(error, ["status"])
-
-    message =
-      [value_at_path(error, ["message"]), value_at_path(error, ["details"]), value_at_path(error, ["codexErrorInfo"])]
-      |> Enum.map(&provider_error_text/1)
-      |> Enum.reject(&is_nil/1)
-      |> Enum.join(" ")
-      |> String.downcase()
+    status = provider_error_status(error, response_too_many_failed_attempts)
+    message = provider_error_message(error)
 
     cond do
       is_map(response_too_many_failed_attempts) or status == 429 -> {:rate_limited, status}
@@ -755,6 +746,20 @@ defmodule SymphonyElixir.Codex.AppServer do
       status == 503 or String.contains?(message, "overloaded") -> {:service_unavailable, status}
       true -> :error
     end
+  end
+
+  defp provider_error_status(error, response_too_many_failed_attempts) do
+    value_at_path(response_too_many_failed_attempts || %{}, ["httpStatusCode"]) ||
+      value_at_path(error, ["httpStatusCode"]) ||
+      value_at_path(error, ["status"])
+  end
+
+  defp provider_error_message(error) do
+    [value_at_path(error, ["message"]), value_at_path(error, ["details"]), value_at_path(error, ["codexErrorInfo"])]
+    |> Enum.map(&provider_error_text/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" ")
+    |> String.downcase()
   end
 
   # Classification text only; it is matched locally and never emitted.
