@@ -939,7 +939,8 @@ defmodule SymphonyElixir.AppServerTest do
       {%{"status" => "failed", "error" => %{"codexErrorInfo" => %{"responseTooManyFailedAttempts" => %{}}}}, :rate_limited},
       {%{"status" => "failed", "error" => %{"message" => "Selected model is at capacity"}}, :capacity_unavailable},
       {%{"status" => "failed", "error" => %{"message" => "503 Service Unavailable: server_is_overloaded"}}, :service_unavailable},
-      # Recorded Codex rollout TurnError: HTTP 503 carried only in message text, without "overloaded".
+      # Faithful substitute, not a provider recording: operator-observed Codex TurnErrors carry the
+      # HTTP status only in message text with codexErrorInfo "other"; this message text is illustrative.
       {%{
          "status" => "failed",
          "error" => %{
