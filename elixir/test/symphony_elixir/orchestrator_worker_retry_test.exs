@@ -162,7 +162,7 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
 
     assert {:retryable, _failure, observation} =
              Orchestrator.classify_task_exit_for_test(
-               {:network_error, :econnreset},
+               {:empty_turn_completed, %{message: "Codex completed without agent output"}},
                running_entry,
                issue_id,
                state
@@ -196,6 +196,201 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     refute Map.has_key?(blocked.retry_attempts, issue_id)
     assert blocked.blocked_failures[issue_id].family == :repeated_identical_no_progress_failure
     assert ProcessOwnership.status_for_issue(issue).state == "blocked"
+  end
+
+  test "provider throttle retries redispatch with backoff and exhaust after a finite budget" do
+    for reason <- [
+          {:rate_limited, %{"reason" => "rate_limited", "status" => 429}},
+          {:capacity_unavailable, %{"reason" => "capacity_unavailable"}},
+          {:service_unavailable, %{"reason" => "service_unavailable", "status" => 503}}
+        ] do
+      %{issue: issue, retry_metadata: retry_metadata, state: state} = equivalent_retry_fixture(reason)
+
+      # Five throttled runs at one unchanged checkpoint each pass the
+      # equivalent-redispatch guard and are queued with growing backoff.
+      {state, delays} =
+        Enum.reduce(1..5, {state, []}, fn count, {state, delays} ->
+          assert {:retryable, failure, observation} =
+                   Orchestrator.classify_task_exit_for_test(reason, retry_metadata, issue.id, state)
+
+          assert failure.family == :transient_runtime_failure
+          assert observation.count == count
+
+          state = persist_failure_observation!(state, issue, retry_metadata, observation)
+
+          assert {:noreply, retried} =
+                   Orchestrator.handle_retry_issue_for_test(
+                     state,
+                     issue.id,
+                     count,
+                     Map.put(retry_metadata, :failure_observation, observation)
+                   )
+
+          refute Map.has_key?(retried.blocked_failures, issue.id)
+          assert %{attempt: attempt, due_at_ms: due_at_ms} = retried.retry_attempts[issue.id]
+          assert attempt == count + 1
+          refute ProcessOwnership.status_for_issue(issue).state == "blocked"
+
+          {retried, [due_at_ms - System.monotonic_time(:millisecond) | delays]}
+        end)
+
+      assert delays |> Enum.reverse() |> Enum.chunk_every(2, 1, :discard) |> Enum.all?(fn [a, b] -> b > a end)
+
+      # A sustained outage still ends: the sixth identical throttle exhausts the
+      # redispatch budget and the guard blocks instead of queueing again.
+      assert {:retryable, _failure, observation} =
+               Orchestrator.classify_task_exit_for_test(reason, retry_metadata, issue.id, state)
+
+      assert observation.count == 6
+      state = persist_failure_observation!(state, issue, retry_metadata, observation)
+
+      assert {:noreply, exhausted} =
+               Orchestrator.handle_retry_issue_for_test(
+                 state,
+                 issue.id,
+                 6,
+                 Map.put(retry_metadata, :failure_observation, observation)
+               )
+
+      refute Map.has_key?(exhausted.retry_attempts, issue.id)
+      assert exhausted.blocked_failures[issue.id].family == :repeated_identical_no_progress_failure
+      assert ProcessOwnership.status_for_issue(issue).state == "blocked"
+    end
+  end
+
+  test "a throttled run exit is actually redispatched after its backoff timer" do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    unique = System.unique_integer([:positive])
+    issue_id = "issue-throttle-redispatch-#{unique}"
+    workspace_root = Path.join(System.tmp_dir!(), "symphony-throttle-redispatch-#{unique}")
+    orchestrator_name = Module.concat(__MODULE__, :"ThrottleRedispatch#{unique}")
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-THROTTLE-#{unique}",
+      title: "Provider throttle is transient",
+      description: "unchanged input",
+      state: "In Progress"
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      poll_interval_ms: 60_000,
+      hook_before_run: "sleep 30"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    {:ok, pid} =
+      Orchestrator.start_link(
+        name: orchestrator_name,
+        execution_generation: "generation-throttle-redispatch"
+      )
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      stop_orchestrator!(pid)
+      File.rm_rf(workspace_root)
+    end)
+
+    assert {:ok, ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: "run-throttle-redispatch",
+               holder: ProcessOwnership.holder_id()
+             })
+
+    ref = make_ref()
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | running: %{
+            issue_id => %{
+              pid: nil,
+              ref: ref,
+              identifier: issue.identifier,
+              issue: issue,
+              run_id: ownership.run_id,
+              workspace_path: ownership.workspace_path,
+              process_ownership: ownership,
+              retry_attempt: 0,
+              started_at: DateTime.utc_now()
+            }
+          },
+          claimed: MapSet.new([issue_id]),
+          codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+    end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    scheduled_after_ms = System.monotonic_time(:millisecond)
+
+    send(pid, {
+      :DOWN,
+      ref,
+      :process,
+      self(),
+      {:agent_runtime_failed, {:rate_limited, %{"reason" => "rate_limited", "status" => 429}}}
+    })
+
+    queued =
+      wait_for_orchestrator_state(pid, fn state ->
+        Map.has_key?(state.retry_attempts, issue_id) or Map.has_key?(state.blocked_failures, issue_id)
+      end)
+
+    refute Map.has_key?(queued.blocked_failures, issue_id)
+    assert %{attempt: 1, due_at_ms: due_at_ms, retry_token: retry_token} = queued.retry_attempts[issue_id]
+    assert due_at_ms - scheduled_after_ms >= 10_000
+    assert ProcessOwnership.status_for_issue(issue).state == "retrying"
+
+    # Fire the backoff timer's message instead of sleeping through the delay.
+    send(pid, {:retry_issue, issue_id, retry_token})
+
+    redispatched =
+      wait_for_orchestrator_state(pid, fn state ->
+        match?(%{pid: runner_pid} when is_pid(runner_pid), state.running[issue_id]) or
+          Map.has_key?(state.blocked_failures, issue_id)
+      end)
+
+    refute Map.has_key?(redispatched.blocked_failures, issue_id)
+    running_retry = redispatched.running[issue_id]
+    assert running_retry.retry_attempt == 1
+    assert Process.alive?(running_retry.pid)
+    assert ProcessOwnership.status_for_issue(issue).state == "active"
+
+    stop_orchestrator!(pid)
+    assert :ok = Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, running_retry.pid)
+  end
+
+  test "a genuinely empty turn still trips the first equivalent redispatch guard" do
+    %{issue: issue, retry_metadata: retry_metadata, state: state} =
+      equivalent_retry_fixture({:empty_turn_completed, %{}})
+
+    assert {:retryable, _failure, observation} =
+             Orchestrator.classify_task_exit_for_test(
+               {:empty_turn_completed, %{"method" => "turn/completed"}},
+               retry_metadata,
+               issue.id,
+               state
+             )
+
+    state = persist_failure_observation!(state, issue, retry_metadata, observation)
+
+    assert {:noreply, blocked} =
+             Orchestrator.handle_retry_issue_for_test(
+               state,
+               issue.id,
+               1,
+               Map.put(retry_metadata, :failure_observation, observation)
+             )
+
+    refute Map.has_key?(blocked.retry_attempts, issue.id)
+    assert blocked.blocked_failures[issue.id].family == :repeated_identical_no_progress_failure
   end
 
   test "an attempt-zero normal exit after failure preserves the typed failure" do
@@ -282,6 +477,77 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
 
     assert %{state: "blocked", failure_observation: ^durable_observation} =
              ProcessOwnership.status_for_issue(issue)
+  end
+
+  test "a normal exit of a budgeted provider throttle retry completes instead of blocking" do
+    unique = System.unique_integer([:positive])
+    issue_id = "issue-throttle-retry-success-#{unique}"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-THROTTLE-SUCCESS-#{unique}",
+      title: "Throttle retry success is real success",
+      description: "unchanged input",
+      state: "In Progress"
+    }
+
+    assert {:ok, ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: "run-throttle-success",
+               holder: ProcessOwnership.holder_id()
+             })
+
+    failure_entry = %{
+      identifier: issue.identifier,
+      issue: issue,
+      run_id: ownership.run_id,
+      workspace_path: ownership.workspace_path,
+      process_ownership: ownership
+    }
+
+    assert {:retryable, _failure, observation} =
+             Orchestrator.classify_task_exit_for_test(
+               {:capacity_unavailable, %{"reason" => "capacity_unavailable"}},
+               failure_entry,
+               issue_id,
+               %Orchestrator.State{execution_generation: "generation-stable"}
+             )
+
+    assert {:ok, ownership} =
+             ProcessOwnership.verify_and_update(
+               issue,
+               %{holder: ownership.holder, run_id: ownership.run_id, workspace_path: ownership.workspace_path},
+               %{state: "active", failure_observation: observation}
+             )
+
+    ref = make_ref()
+
+    state = %Orchestrator.State{
+      execution_generation: "generation-stable",
+      running: %{
+        issue_id => %{
+          pid: nil,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: issue,
+          run_id: ownership.run_id,
+          process_ownership: ownership,
+          retry_attempt: 1,
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      completed: MapSet.new(),
+      failure_observations: %{issue_id => observation},
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    updated = drive_down_settlement(state, ref, :normal)
+
+    refute Map.has_key?(updated.blocked_failures, issue_id)
+    refute Map.has_key?(updated.failure_observations, issue_id)
+    refute ProcessOwnership.status_for_issue(issue)[:state] == "blocked"
   end
 
   test "restart refuses stale retry takeover before an attempt-zero run can start" do
@@ -1293,6 +1559,78 @@ defmodule SymphonyElixir.OrchestratorWorkerRetryTest do
     after
       0 -> :ok
     end
+  end
+
+  # One unchanged failure checkpoint: a memory-tracked active issue with durable
+  # retrying ownership and no free dispatch slot, so an allowed retry is
+  # observable as a requeue with the next backoff attempt.
+  defp equivalent_retry_fixture({reason, _details}) do
+    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    unique = System.unique_integer([:positive])
+    issue_id = "issue-#{reason}-checkpoint-#{unique}"
+    workspace_root = Path.join(System.tmp_dir!(), "symphony-#{reason}-checkpoint-#{unique}")
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-CHECKPOINT-#{unique}",
+      title: "Unchanged failure checkpoint",
+      description: "unchanged input",
+      state: "In Progress"
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: workspace_root)
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      File.rm_rf(workspace_root)
+    end)
+
+    workspace_path = Path.join(workspace_root, issue.identifier)
+
+    assert {:ok, ownership} =
+             ProcessOwnership.acquire(issue, %{
+               role: "implementer",
+               run_id: "run-#{reason}-checkpoint-#{unique}",
+               holder: ProcessOwnership.holder_id(),
+               workspace_path: workspace_path
+             })
+
+    %{
+      issue: issue,
+      retry_metadata: %{
+        identifier: issue.identifier,
+        issue: issue,
+        workspace_path: workspace_path,
+        run_id: ownership.run_id,
+        process_ownership: ownership
+      },
+      state: %Orchestrator.State{
+        execution_generation: "generation-#{reason}-checkpoint",
+        max_concurrent_agents: 0,
+        claimed: MapSet.new([issue_id]),
+        failure_observations: %{}
+      }
+    }
+  end
+
+  defp persist_failure_observation!(state, issue, retry_metadata, observation) do
+    identity = %{
+      holder: ProcessOwnership.holder_id(),
+      run_id: retry_metadata.run_id,
+      workspace_path: retry_metadata.workspace_path
+    }
+
+    assert {:ok, _durable_ownership} =
+             ProcessOwnership.verify_and_update(issue, identity, %{
+               state: "retrying",
+               failure_observation: observation
+             })
+
+    %{state | failure_observations: Map.put(state.failure_observations, issue.id, observation)}
   end
 
   defp do_wait_for_orchestrator_state(pid, predicate, deadline_ms) do

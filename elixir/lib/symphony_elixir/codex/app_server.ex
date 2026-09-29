@@ -697,16 +697,87 @@ defmodule SymphonyElixir.Codex.AppServer do
       emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
       {:ok, :turn_completed}
     else
-      failure_details = %{
-        "reason" => "empty_agent_response",
-        "message" => "Codex reported turn/completed without any agent message output",
-        "completion" => payload
-      }
+      case failed_provider_turn_reason(payload) do
+        {reason, details} ->
+          emit_turn_event(on_message, :turn_failed, payload, payload_string, port, details)
+          {:error, {reason, details}}
 
-      emit_turn_event(on_message, :turn_failed, payload, payload_string, port, failure_details)
-      {:error, {:empty_turn_completed, payload}}
+        :error ->
+          failure_details = %{
+            "reason" => "empty_agent_response",
+            "message" => "Codex reported turn/completed without any agent message output",
+            "completion" => payload
+          }
+
+          emit_turn_event(on_message, :turn_failed, payload, payload_string, port, failure_details)
+          {:error, {:empty_turn_completed, payload}}
+      end
     end
   end
+
+  defp failed_provider_turn_reason(payload) do
+    turn = value_at_path(payload, ["params", "turn"]) || value_at_path(payload, ["turn"])
+
+    with %{"status" => "failed", "error" => error} <- turn,
+         true <- is_map(error),
+         {reason, status} <- provider_turn_reason(error) do
+      details = %{
+        "reason" => Atom.to_string(reason),
+        "message" => "Codex provider turn failed with #{Atom.to_string(reason)}"
+      }
+
+      details = if is_integer(status), do: Map.put(details, "status", status), else: details
+      {reason, details}
+    else
+      _ -> :error
+    end
+  end
+
+  defp provider_turn_reason(error) do
+    response_too_many_failed_attempts =
+      value_at_path(error, ["codexErrorInfo", "responseTooManyFailedAttempts"])
+
+    message = provider_error_message(error)
+
+    status =
+      provider_error_status(error, response_too_many_failed_attempts) ||
+        provider_error_message_status(message)
+
+    cond do
+      is_map(response_too_many_failed_attempts) or status == 429 -> {:rate_limited, status}
+      String.contains?(message, "at capacity") -> {:capacity_unavailable, status}
+      status == 503 or String.contains?(message, "overloaded") -> {:service_unavailable, status}
+      true -> :error
+    end
+  end
+
+  defp provider_error_status(error, response_too_many_failed_attempts) do
+    value_at_path(response_too_many_failed_attempts || %{}, ["httpStatusCode"]) ||
+      value_at_path(error, ["httpStatusCode"]) ||
+      value_at_path(error, ["status"])
+  end
+
+  # Codex TurnErrors with `codexErrorInfo: "other"` carry the HTTP status only in text,
+  # e.g. "unexpected status 503 ..." or "last status: 429 ...".
+  defp provider_error_message_status(message) do
+    case Regex.run(~r/\bstatus:? (\d{3})\b/, message) do
+      [_, status] -> String.to_integer(status)
+      nil -> nil
+    end
+  end
+
+  defp provider_error_message(error) do
+    [value_at_path(error, ["message"]), value_at_path(error, ["details"]), value_at_path(error, ["codexErrorInfo"])]
+    |> Enum.map(&provider_error_text/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" ")
+    |> String.downcase()
+  end
+
+  # Classification text only; it is matched locally and never emitted.
+  defp provider_error_text(value) when is_binary(value), do: String.slice(value, 0, 1_000)
+  defp provider_error_text(nil), do: nil
+  defp provider_error_text(value), do: value |> inspect(limit: 20, printable_limit: 1_000) |> String.slice(0, 1_000)
 
   defp handle_turn_failed(port, on_message, payload, payload_string) do
     case codex_provider_auth_failure(payload) do
