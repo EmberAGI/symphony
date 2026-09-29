@@ -939,6 +939,17 @@ defmodule SymphonyElixir.AppServerTest do
       {%{"status" => "failed", "error" => %{"codexErrorInfo" => %{"responseTooManyFailedAttempts" => %{}}}}, :rate_limited},
       {%{"status" => "failed", "error" => %{"message" => "Selected model is at capacity"}}, :capacity_unavailable},
       {%{"status" => "failed", "error" => %{"message" => "503 Service Unavailable: server_is_overloaded"}}, :service_unavailable},
+      # Recorded Codex rollout TurnError: HTTP 503 carried only in message text, without "overloaded".
+      {%{
+         "status" => "failed",
+         "error" => %{
+           "message" =>
+             "unexpected status 503 Service Unavailable: auth_unavailable: no auth available (providers=codex, model=gpt-6-astra; last upstream error: server_error: An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists.), url: http://127.0.0.1:8317/v1/responses",
+           "codexErrorInfo" => "other"
+         }
+       }, :service_unavailable},
+      {%{"status" => "failed", "error" => %{"message" => "exceeded retry limit, last status: 429 Too Many Requests", "codexErrorInfo" => "other"}}, :rate_limited},
+      {%{"status" => "failed", "error" => %{"message" => "unexpected status 500 Internal Server Error", "codexErrorInfo" => "other"}}, :empty_turn_completed},
       {%{"status" => "completed", "last_agent_message" => nil}, :empty_turn_completed}
     ]
 

@@ -737,8 +737,11 @@ defmodule SymphonyElixir.Codex.AppServer do
     response_too_many_failed_attempts =
       value_at_path(error, ["codexErrorInfo", "responseTooManyFailedAttempts"])
 
-    status = provider_error_status(error, response_too_many_failed_attempts)
     message = provider_error_message(error)
+
+    status =
+      provider_error_status(error, response_too_many_failed_attempts) ||
+        provider_error_message_status(message)
 
     cond do
       is_map(response_too_many_failed_attempts) or status == 429 -> {:rate_limited, status}
@@ -752,6 +755,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     value_at_path(response_too_many_failed_attempts || %{}, ["httpStatusCode"]) ||
       value_at_path(error, ["httpStatusCode"]) ||
       value_at_path(error, ["status"])
+  end
+
+  # Codex TurnErrors with `codexErrorInfo: "other"` carry the HTTP status only in text,
+  # e.g. "unexpected status 503 ..." or "last status: 429 ...".
+  defp provider_error_message_status(message) do
+    case Regex.run(~r/\bstatus:? (\d{3})\b/, message) do
+      [_, status] -> String.to_integer(status)
+      nil -> nil
+    end
   end
 
   defp provider_error_message(error) do
